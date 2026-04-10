@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	dns "github.com/sagernet/sing-dns"
 )
@@ -110,7 +111,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		EnableNTP: true,
 		DNSOptions: DNSOptions{
 			RemoteDnsAddress:        "1.1.1.1",
-			RemoteDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
+			RemoteDnsDomainStrategy: option.DomainStrategy(C.DomainStrategyAdaptive),
 			DirectDnsAddress:        "1.1.1.1",
 			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
 			IndependentDNSCache:     false,

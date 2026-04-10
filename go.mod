@@ -105,6 +105,7 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mroth/weightedrand v1.0.0 // indirect
 	github.com/net2share/vaydns v0.2.6 // indirect
+	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/openai/openai-go/v3 v3.15.0 // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pion/datachannel v1.5.5 // indirect

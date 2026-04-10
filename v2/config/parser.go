@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/hiddify/ray2sing/ray2sing"
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -108,6 +109,21 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 			return nil, fmt.Errorf("[ClashParser] patching clash config error: %w", err)
 		}
 		return patchConfigStr(ctx, output, "ClashParser", configOpt)
+	}
+
+	// WireGuard / AmneziaWG .ini (clipboard paste): not JSON, not a URI, not Clash YAML.
+	trim := strings.TrimSpace(string(content))
+	trim = strings.TrimPrefix(trim, "\ufeff")
+	low := strings.ToLower(trim)
+	if strings.Contains(low, "[interface]") && strings.Contains(low, "[peer]") {
+		ep, err := ray2sing.AWGSingboxTxt(trim)
+		if err != nil {
+			return nil, fmt.Errorf("[WireGuardINI] %w", err)
+		}
+		opts := &option.Options{
+			Endpoints: []option.Endpoint{*ep},
+		}
+		return patchConfigOptions(ctx, opts, "WireGuardINI", configOpt)
 	}
 
 	return nil, fmt.Errorf("unable to determine config format")

@@ -33,6 +33,7 @@ const (
 	DomainStrategy_prefer_ipv6 DomainStrategy = 2 // Prefer IPv6 addresses.
 	DomainStrategy_ipv4_only   DomainStrategy = 3 // Only use IPv4 addresses.
 	DomainStrategy_ipv6_only   DomainStrategy = 4 // Only use IPv6 addresses.
+	DomainStrategy_auto        DomainStrategy = 5 // Adaptive (see sing-box DNS router).
 )
 
 // Enum value maps for DomainStrategy.
@@ -43,6 +44,7 @@ var (
 		2: "prefer_ipv6",
 		3: "ipv4_only",
 		4: "ipv6_only",
+		5: "auto",
 	}
 	DomainStrategy_value = map[string]int32{
 		"as_is":       0,
@@ -50,6 +52,7 @@ var (
 		"prefer_ipv6": 2,
 		"ipv4_only":   3,
 		"ipv6_only":   4,
+		"auto":        5,
 	}
 )
 

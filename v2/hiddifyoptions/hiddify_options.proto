@@ -41,6 +41,7 @@ enum DomainStrategy {
   prefer_ipv6 = 2; // Prefer IPv6 addresses.
   ipv4_only = 3; // Only use IPv4 addresses.
   ipv6_only = 4; // Only use IPv6 addresses.
+  auto = 5; // Adaptive (core maps via reachability probe to concrete strategy).
 }
 
 /**

@@ -15,6 +15,8 @@ TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,wit
 IOS_ADD_TAGS=with_dhcp,with_low_memory,with_purego
 MACOS_ADD_TAGS=with_dhcp
 WINDOWS_ADD_TAGS=with_purego
+# Override on WSL if default mingw fails Go c-shared link (e.g. MINGW_CC=x86_64-w64-mingw32-gcc-15-posix).
+MINGW_CC ?= x86_64-w64-mingw32-gcc
 LDFLAGS=-w -s -checklinkname=0 -buildid= $${CODE_VERSION}
 GOBUILDLIB=CGO_ENABLED=1 go build -trimpath -ldflags="$(LDFLAGS)" -buildmode=c-shared
 GOBUILDSRV=CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -trimpath -tags $(TAGS)
@@ -66,16 +68,18 @@ webui:
 
 .PHONY: build
 windows-amd64: prepare
+	set -e
 	rm -rf $(BINDIR)/*
-	go run -v "github.com/sagernet/cronet-go/cmd/build-naive@$(CRONET_GO_VERSION)" extract-lib --target windows/amd64 -o $(BINDIR)/
-	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc  $(GOBUILDLIB) -tags $(TAGS),$(WINDOWS_ADD_TAGS)   -o $(BINDIR)/$(LIBNAME).dll ./platform/desktop
+	CRONET_LIB_DIR=$$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64) && \
+	cp "$$CRONET_LIB_DIR/libcronet.dll" $(BINDIR)/libcronet.dll
+	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC)  $(GOBUILDLIB) -tags $(TAGS),$(WINDOWS_ADD_TAGS)   -o $(BINDIR)/$(LIBNAME).dll ./platform/desktop
 	echo "core built, now building cli" 
 	ls -R $(BINDIR)/
-	go install -mod=readonly github.com/akavel/rsrc@latest ||echo "rsrc error in installation"
-	go run ./cli tunnel exit
+	RSRC_BIN=$$(go env GOPATH)/bin/rsrc && \
+	test -x "$$RSRC_BIN"
 	cp $(BINDIR)/$(LIBNAME).dll ./$(LIBNAME).dll
-	$$(go env GOPATH)/bin/rsrc -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso ||echo "rsrc error in syso"
-	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
+	$$RSRC_BIN -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso
+	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC) CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
 	rm ./*.dll
 	if [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(CLINAME).exe ]; then \
 		echo "Error: $(LIBNAME).dll or $(CLINAME).exe not built"; \

@@ -11,7 +11,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 	return &HiddifyOptions{
 		DnsOptions: &DNSOptions{
 			RemoteDnsAddress:        "1.1.1.1",
-			RemoteDnsDomainStrategy: DomainStrategy_as_is,
+			RemoteDnsDomainStrategy: DomainStrategy_auto,
 			DirectDnsAddress:        "1.1.1.1",
 			DirectDnsDomainStrategy: DomainStrategy_as_is,
 			IndependentDnsCache:     false,

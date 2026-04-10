@@ -12,7 +12,7 @@ on:
         type: string
         default: "dev"
 env:
-    REGISTRY_IMAGE: ghcr.io/hiddify/hiddify-core
+    REGISTRY_IMAGE: ghcr.io/ne-tort/hiddify-core
 
 
 jobs:
@@ -69,7 +69,7 @@ jobs:
         with:
             fetch-depth: 0
       - run: |
-          curl -L -o hiddify-core.tar.gz https://codeload.github.com/hiddify/hiddify-core/tar.gz/${{ inputs.tag-name  }}
+          curl -L -o hiddify-core.tar.gz "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ inputs.tag-name }}"
           HIDDIFY_CORE_WRT_HASH=$(sha256sum hiddify-core.tar.gz | cut -d' ' -f1)
           github_ref_name="${{ inputs.tag-name }}"
           IFS="." read -r -a VERSION_ARRAY <<< "${github_ref_name#v}"
