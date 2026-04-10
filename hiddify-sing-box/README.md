@@ -2,6 +2,10 @@
 
 Sing-box with extended features.
 
+## Разработка в форке ne-tort (AWG / sing-box)
+
+Исходники в этом каталоге — **часть репозитория [`ne-tort/hiddify-core`](https://github.com/ne-tort/hiddify-core)** (`replace github.com/sagernet/sing-box => ./hiddify-sing-box` в корневом `go.mod`). Правки **AmneziaWG** (`transport/awg`, `protocol/awg`, `option`, DNS и т.д.) вносятся **здесь**, затем коммит и push в **hiddify-core**. Клиент [`ne-tort/hiddify-app`](https://github.com/ne-tort/hiddify-app) подтягивает ядро **сабмодулем** `hiddify-core` — отдельная папка `sing-box-amnezia` для правок ядра **не нужна** (там при желании только Docker-стенд). Сборка с AWG: теги сборки включают `with_awg` (см. `Makefile` в корне hiddify-core).
+
 ## Features
 
 * Amnezia 1.5

@@ -18,6 +18,10 @@
 
 ---
 
+## ne-tort: где править sing-box и AWG
+
+Исходники **sing-box** лежат в [`hiddify-sing-box/`](./hiddify-sing-box) этого репозитория. Изменения ядра (в т.ч. AmneziaWG) коммитятся **в `ne-tort/hiddify-core`**; [`hiddify-app`](https://github.com/ne-tort/hiddify-app) обновляет только **сабмодуль `hiddify-core`**. Репозиторий `sing-box-amnezia` для правок ядра не требуется. Сборка Windows: `Makefile`, `GOTOOLCHAIN` как в `go.mod`; теги — с `with_awg`.
+
 ## 🚀 Quick Setup
 
 Install `hiddify-core` on any Linux platform (Ubuntu, Debian, CentOS, OpenWrt, and more) with a single command:
