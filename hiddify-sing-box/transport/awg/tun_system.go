@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 
 	awgTun "github.com/amnezia-vpn/amneziawg-go/tun"
 
@@ -21,25 +22,59 @@ import (
 )
 
 type systemTun struct {
-	mtu     uint32
-	singtun tun.Tun
-	events  chan awgTun.Event
-	name    string
-	dialer  network.Dialer
+	mtu       uint32
+	singtun   tun.Tun
+	events    chan awgTun.Event
+	name      string
+	dialer    network.Dialer
+	closeOnce sync.Once
 }
 
 func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger) (tunAdapter, error) {
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
-	name := tun.CalculateInterfaceName("")
+	var (
+		name    string
+		singtun tun.Tun
+		dial    network.Dialer
+		err     error
+	)
+	for _, candidate := range []string{tun.CalculateInterfaceName("awg"), tun.CalculateInterfaceName("")} {
+		name = candidate
+		singtun, dial, err = createSystemTunWithName(ctx, networkManager, candidate, address, allowedIps, excludedIps, mtu, logger)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	events := make(chan awgTun.Event)
+	return &systemTun{
+		mtu:       mtu,
+		events:    events,
+		singtun:   singtun,
+		name:      name,
+		dialer:    dial,
+		closeOnce: sync.Once{},
+	}, nil
+}
 
+func createSystemTunWithName(
+	ctx context.Context,
+	networkManager adapter.NetworkManager,
+	name string,
+	address []netip.Prefix,
+	allowedIps []netip.Prefix,
+	excludedIps []netip.Prefix,
+	mtu uint32,
+	logger logger.Logger,
+) (tun.Tun, network.Dialer, error) {
 	dial, err := dialer.NewDefault(ctx, option.DialerOptions{
 		BindInterface: name,
 	})
 	if err != nil {
-		return nil, exceptions.Cause(err, "get in-tunnel dialer")
+		return nil, nil, exceptions.Cause(err, "get in-tunnel dialer")
 	}
-
 	singtun, err := tun.New(tun.Options{
 		Name: name,
 		GSO:  true,
@@ -67,16 +102,9 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 		Logger: logger,
 	})
 	if err != nil {
-		return nil, exceptions.Cause(err, "create tunnel")
+		return nil, nil, exceptions.Cause(err, "create tunnel")
 	}
-
-	return &systemTun{
-		mtu:     mtu,
-		events:  events,
-		singtun: singtun,
-		name:    name,
-		dialer:  dial,
-	}, nil
+	return singtun, dial, nil
 }
 
 func (t *systemTun) Start() error {
@@ -126,8 +154,12 @@ func (t *systemTun) Events() <-chan awgTun.Event {
 }
 
 func (t *systemTun) Close() error {
-	close(t.events)
-	return nil
+	var closeErr error
+	t.closeOnce.Do(func() {
+		closeErr = t.singtun.Close()
+		close(t.events)
+	})
+	return closeErr
 }
 
 func (t *systemTun) BatchSize() int {
