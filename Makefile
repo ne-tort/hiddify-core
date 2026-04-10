@@ -7,9 +7,8 @@ CLINAME=HiddifyCli
 
 BRANCH=$(shell git branch --show-current)
 VERSION=$(shell git describe --tags || echo "unknown version")
-ifeq ($(OS),Windows_NT)
-Not available for Windows! use bash in WSL
-endif
+# windows-amd64 и прочие цели ниже — POSIX shell + bash-рецепты (.ONESHELL).
+# Запускайте из WSL/Linux, либо из Git Bash / MSYS2 на Windows (MinGW в PATH), не из cmd.exe.
 CRONET_GO_VERSION := $(shell cat hiddify-sing-box/.github/CRONET_GO_VERSION)
 TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack
 IOS_ADD_TAGS=with_dhcp,with_low_memory,with_purego
