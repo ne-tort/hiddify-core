@@ -1,6 +1,6 @@
 [submodule "hiddify-sing-box"]
 	path = hiddify-sing-box
-	url = https://github.com/hiddify/hiddify-sing-box
+	url = https://github.com/ne-tort/hiddify-sing-box.git
 [submodule "ray2sing"]
 	path = ray2sing
-	url = git@github.com:hiddify/ray2sing.git
+	url = https://github.com/ne-tort/ray2sing.git
