@@ -193,7 +193,6 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20231211153847-12269c276173 // indirect
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
-	gvisor.dev/gvisor v0.0.0-20240503213918-b7c924bc64f8 // indirect
 	nhooyr.io/websocket v1.8.7 // indirect
 	tailscale.com v1.58.2 // indirect
 )
@@ -279,6 +278,8 @@ replace github.com/hiddify/ray2sing => ./ray2sing
 replace github.com/sagernet/sing-box => ./hiddify-sing-box
 
 replace github.com/sagernet/wireguard-go => ./hiddify-sing-box/replace/wireguard-go
+
+replace github.com/amnezia-vpn/amneziawg-go => ./hiddify-sing-box/replace/amneziawg-go
 
 replace github.com/sagernet/tailscale => ./hiddify-sing-box/replace/tailscale
 

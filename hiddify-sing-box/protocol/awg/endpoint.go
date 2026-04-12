@@ -11,10 +11,12 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/monitoring"
 	"github.com/sagernet/sing-box/common/urltest"
-	"github.com/sagernet/sing-box/constant"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route/rule"
 	awgtransport "github.com/sagernet/sing-box/transport/awg"
+	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -23,19 +25,21 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
+var _ adapter.OutboundWithPreferredRoutes = (*Endpoint)(nil)
+
 func RegisterEndpoint(registry *endpoint.Registry) {
-	endpoint.Register[option.AwgEndpointOptions](registry, constant.TypeAwg, NewEndpoint)
+	endpoint.Register[option.AwgEndpointOptions](registry, C.TypeAwg, NewEndpoint)
 }
 
 type Endpoint struct {
 	endpoint.Adapter
-	transport *awgtransport.Endpoint
-	address   []netip.Prefix
-	router    adapter.Router
-	logger    log.ContextLogger
-	dnsRouter adapter.DNSRouter
-	started   bool
-	ctx       context.Context
+	ctx            context.Context
+	router         adapter.Router
+	dnsRouter      adapter.DNSRouter
+	logger         log.ContextLogger
+	localAddresses []netip.Prefix
+	transport      *awgtransport.Endpoint
+	started        bool
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.AwgEndpointOptions) (adapter.Endpoint, error) {
@@ -43,7 +47,20 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		options.MTU = 1408
 	}
 
-	options.UDPFragmentDefault = true
+	options.DialerOptions.UDPFragmentDefault = true
+	if options.Detour != "" && options.ListenPort != 0 {
+		return nil, E.New("`listen_port` is conflict with `detour`")
+	}
+
+	ep := &Endpoint{
+		Adapter:        endpoint.NewAdapterWithDialerOptions(C.TypeAwg, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, options.DialerOptions),
+		ctx:            ctx,
+		router:         router,
+		dnsRouter:      service.FromContext[adapter.DNSRouter](ctx),
+		logger:         logger,
+		localAddresses: options.Address,
+	}
+
 	outboundDialer, err := dialer.NewWithOptions(dialer.Options{
 		Context: ctx,
 		Options: options.DialerOptions,
@@ -56,24 +73,30 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, err
 	}
 
-	ep := &Endpoint{
-		Adapter:   endpoint.NewAdapterWithDialerOptions("awg", tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
-		address:   options.Address,
-		router:    router,
-		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
-		logger:    logger,
-		ctx:       ctx,
+	var udpTimeout time.Duration
+	if options.UDPTimeout != 0 {
+		udpTimeout = time.Duration(options.UDPTimeout)
+	} else {
+		udpTimeout = C.UDPTimeout
 	}
 
 	tunEndpoint, err := awgtransport.NewEndpoint(awgtransport.EndpointOptions{
-		Context:          ctx,
-		Logger:           logger,
-		Dialer:           outboundDialer,
-		UseIntegratedTun: options.UseIntegratedTun,
-		MTU:              options.MTU,
-		Address:          options.Address,
-		PrivateKey:       options.PrivateKey,
-		ListenPort:       options.ListenPort,
+		Context:        ctx,
+		Logger:         logger,
+		System:         options.System,
+		Handler:        ep,
+		UDPTimeout:     udpTimeout,
+		Dialer:         outboundDialer,
+		CreateDialer: func(interfaceName string) N.Dialer {
+			return common.Must1(dialer.NewDefault(ctx, option.DialerOptions{
+				BindInterface: interfaceName,
+			}))
+		},
+		Name:       options.Name,
+		MTU:        options.MTU,
+		Address:    options.Address,
+		PrivateKey: options.PrivateKey,
+		ListenPort: options.ListenPort,
 		ResolvePeer: func(domain string) (netip.Addr, error) {
 			endpointAddresses, lookupErr := ep.dnsRouter.Lookup(ctx, domain, outboundDialer.(dialer.ResolveDialer).QueryOptions())
 			if lookupErr != nil {
@@ -85,27 +108,31 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			return awgtransport.PeerOptions{
 				Endpoint:                    M.ParseSocksaddrHostPort(it.Address, it.Port),
 				PublicKey:                   it.PublicKey,
-				PreSharedKey:                it.PresharedKey,
+				PreSharedKey:                it.PreSharedKey,
 				AllowedIPs:                  it.AllowedIPs,
 				PersistentKeepaliveInterval: it.PersistentKeepaliveInterval,
+				Reserved:                    it.Reserved,
 			}
 		}),
-		Jc:   options.Jc,
-		Jmin: options.Jmin,
-		Jmax: options.Jmax,
-		S1:   options.S1,
-		S2:   options.S2,
-		S3:   options.S3,
-		S4:   options.S4,
-		H1:   options.H1,
-		H2:   options.H2,
-		H3:   options.H3,
-		H4:   options.H4,
-		I1:   options.I1,
-		I2:   options.I2,
-		I3:   options.I3,
-		I4:   options.I4,
-		I5:   options.I5,
+		Workers:                    options.Workers,
+		PreallocatedBuffersPerPool: options.PreallocatedBuffersPerPool,
+		DisablePauses:              options.DisablePauses,
+		Jc:            options.Jc,
+		Jmin:          options.Jmin,
+		Jmax:          options.Jmax,
+		S1:            options.S1,
+		S2:            options.S2,
+		S3:            options.S3,
+		S4:            options.S4,
+		H1:            options.H1,
+		H2:            options.H2,
+		H3:            options.H3,
+		H4:            options.H4,
+		I1:            options.I1,
+		I2:            options.I2,
+		I3:            options.I3,
+		I4:            options.I4,
+		I5:            options.I5,
 	})
 	if err != nil {
 		return nil, err
@@ -114,13 +141,81 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	return ep, nil
 }
 
+func (e *Endpoint) Start(stage adapter.StartStage) error {
+	switch stage {
+	case adapter.StartStateStart:
+		return e.transport.Start(false)
+	case adapter.StartStatePostStart:
+		go e.readyChecker()
+		return e.transport.Start(true)
+	default:
+		return nil
+	}
+}
+
+func (e *Endpoint) readyChecker() {
+	for i := 0; i < 30; i++ {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		ctx, cancel := context.WithTimeout(e.ctx, time.Second*5)
+		res, err := urltest.URLTest(ctx, "https://1.1.1.1", e)
+		cancel()
+		if res > 0 && res < 20000 && err == nil {
+			e.started = true
+			monitoring.Get(e.ctx).TestNow(e.Tag())
+			return
+		}
+	}
+}
+
+func (e *Endpoint) IsReady() bool {
+	return e.started
+}
+
+func (e *Endpoint) Close() error {
+	return e.transport.Close()
+}
+
+func (e *Endpoint) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	var ipVersion uint8
+	if !destination.IsIPv6() {
+		ipVersion = 4
+	} else {
+		ipVersion = 6
+	}
+	routeDestination, err := e.router.PreMatch(adapter.InboundContext{
+		Inbound:     e.Tag(),
+		InboundType: e.Type(),
+		IPVersion:   ipVersion,
+		Network:     network,
+		Source:      source,
+		Destination: destination,
+	}, routeContext, timeout, false)
+	if err != nil {
+		switch {
+		case rule.IsBypassed(err):
+			err = nil
+		case rule.IsRejected(err):
+			e.logger.Trace("reject ", network, " connection from ", source.AddrString(), " to ", destination.AddrString())
+		default:
+			if network == N.NetworkICMP {
+				e.logger.Warn(E.Cause(err, "link ", network, " connection from ", source.AddrString(), " to ", destination.AddrString()))
+			}
+		}
+	}
+	return routeDestination, err
+}
+
 func (e *Endpoint) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	var metadata adapter.InboundContext
 	metadata.Inbound = e.Tag()
 	metadata.InboundType = e.Type()
 	metadata.Source = source
 	metadata.Destination = destination
-	for _, addr := range e.address {
+	for _, addr := range e.localAddresses {
 		if addr.Contains(destination.Addr) {
 			metadata.OriginDestination = destination
 			if destination.Addr.Is4() {
@@ -141,7 +236,7 @@ func (w *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.
 	metadata.Inbound = w.Tag()
 	metadata.InboundType = w.Type()
 	metadata.Source = source
-	for _, addr := range w.address {
+	for _, addr := range w.localAddresses {
 		if addr.Contains(destination.Addr) {
 			metadata.OriginDestination = destination
 			if destination.Addr.Is4() {
@@ -158,36 +253,6 @@ func (w *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.
 	w.router.RouteConnectionEx(ctx, conn, metadata, onClose)
 }
 
-func (o *Endpoint) Start(stage adapter.StartStage) error {
-	switch stage {
-	case adapter.StartStateStart:
-		return o.transport.Start(false)
-	case adapter.StartStatePostStart:
-		go o.readyChecker()
-		return o.transport.Start(true)
-	default:
-		return nil
-	}
-}
-
-func (w *Endpoint) readyChecker() {
-	for i := 0; i < 30; i++ {
-		select {
-		case <-w.ctx.Done():
-			return
-		case <-time.After(time.Second):
-		}
-		ctx, cancel := context.WithTimeout(w.ctx, time.Second*5)
-		res, err := urltest.URLTest(ctx, "https://1.1.1.1", w)
-		cancel()
-		if res > 0 && res < 20000 && err == nil {
-			w.started = true
-			monitoring.Get(w.ctx).TestNow(w.Tag())
-			return
-		}
-	}
-}
-
 func (w *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	switch network {
 	case N.NetworkTCP:
@@ -196,9 +261,6 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination 
 		w.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	}
 	if destination.IsFqdn() {
-		if w.dnsRouter == nil {
-			return nil, E.New("dns router not available for fqdn: ", destination.Fqdn)
-		}
 		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, err
@@ -213,9 +275,6 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination 
 func (w *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	w.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	if destination.IsFqdn() {
-		if w.dnsRouter == nil {
-			return nil, E.New("dns router not available for fqdn: ", destination.Fqdn)
-		}
 		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, err
@@ -229,10 +288,22 @@ func (w *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	return w.transport.ListenPacket(ctx, destination)
 }
 
-func (w *Endpoint) IsReady() bool {
-	return w.started
+func (w *Endpoint) PreferredDomain(domain string) bool {
+	return false
 }
 
-func (w *Endpoint) Close() error {
-	return w.transport.Close()
+func (w *Endpoint) PreferredAddress(address netip.Addr) bool {
+	return w.transport.Lookup(address) != nil
+}
+
+func (w *Endpoint) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	return w.transport.NewDirectRouteConnection(metadata, routeContext, timeout)
+}
+
+func (w *Endpoint) DisplayType() string {
+	str := C.ProxyDisplayName(w.Type())
+	if !w.IsReady() {
+		str += " ⚠️ Connecting..."
+	}
+	return str
 }

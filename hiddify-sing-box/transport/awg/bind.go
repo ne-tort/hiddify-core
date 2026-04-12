@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
+	"github.com/sagernet/sing/common"
 	singbufio "github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -18,23 +19,32 @@ import (
 var _ conn.Bind = (*bind_adapter)(nil)
 
 type bind_adapter struct {
-	conn4           net.PacketConn
-	conn6           net.PacketConn
-	dialer          N.Dialer
-	ctx             context.Context
-	connectEndpoint netip.AddrPort
-	mutex           sync.Mutex
+	conn4                 net.PacketConn
+	conn6                 net.PacketConn
+	dialer                N.Dialer
+	ctx                   context.Context
+	connectEndpoint       netip.AddrPort
+	mutex                 sync.Mutex
+	reserved              [3]uint8
+	reservedForEndpoint   map[netip.AddrPort][3]uint8
 }
 
-func newBind(ctx context.Context, dial N.Dialer, connectEndpoint netip.AddrPort) conn.Bind {
+func newBind(ctx context.Context, dial N.Dialer, connectEndpoint netip.AddrPort, reserved [3]uint8) *bind_adapter {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return &bind_adapter{
-		dialer:          dial,
-		ctx:             ctx,
-		connectEndpoint: connectEndpoint,
+		dialer:                dial,
+		ctx:                   ctx,
+		connectEndpoint:       connectEndpoint,
+		reserved:              reserved,
+		reservedForEndpoint:   make(map[netip.AddrPort][3]uint8),
 	}
+}
+
+// SetReservedForEndpoint mirrors transport/wireguard ClientBind: per-peer Warp-style reserved bytes (UDP payload[1:4]).
+func (b *bind_adapter) SetReservedForEndpoint(destination netip.AddrPort, reserved [3]byte) {
+	b.reservedForEndpoint[destination] = reserved
 }
 
 func (b *bind_adapter) connect(addr netip.Addr, port uint16) (net.PacketConn, error) {
@@ -55,6 +65,9 @@ func (b *bind_adapter) receive(c net.PacketConn) conn.ReceiveFunc {
 		n, addr, err := c.ReadFrom(packets[0])
 		if err != nil {
 			return 0, E.Cause(err, "read data")
+		}
+		if n > 3 {
+			common.ClearArray(packets[0][1:4])
 		}
 
 		bindEp, err := b.ParseEndpoint(addr.String())
@@ -135,7 +148,7 @@ func (b *bind_adapter) SetMark(mark uint32) error {
 	return nil
 }
 
-func (b *bind_adapter) Send(bufs [][]byte, ep conn.Endpoint) error {
+func (b *bind_adapter) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
 	var pc net.PacketConn
 	if ep.DstIP().Is6() {
 		pc = b.conn6
@@ -151,18 +164,29 @@ func (b *bind_adapter) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if err != nil {
 		return E.Cause(err, "parse endpoint")
 	}
-	udpAddr := &net.UDPAddr{
-		IP:   ap.Addr().AsSlice(),
-		Port: int(ap.Port()),
-	}
 
 	for _, buf := range bufs {
-		if _, err := pc.WriteTo(buf, udpAddr); err != nil {
+		if len(buf) > offset+3 {
+			reserved, loaded := b.reservedForEndpoint[ap]
+			if !loaded {
+				reserved = b.reserved
+			}
+			copy(buf[offset+1:offset+4], reserved[:])
+		}
+		udpAddr := &net.UDPAddr{
+			IP:   ap.Addr().AsSlice(),
+			Port: int(ap.Port()),
+		}
+		if _, err := pc.WriteTo(buf[offset:], udpAddr); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (b *bind_adapter) SendWithoutModify(bufs [][]byte, ep conn.Endpoint, offset int) error {
+	return b.Send(bufs, ep, offset)
 }
 
 func (b *bind_adapter) ParseEndpoint(s string) (conn.Endpoint, error) {

@@ -1,6 +1,10 @@
 .ONESHELL:
+ifeq ($(OS),Windows_NT)
+  unexport GOOS GOARCH
+endif
 PRODUCT_NAME=hiddify-core
 BASENAME=$(PRODUCT_NAME)
+# Все собираемые бинарники и библиотеки — в $(BINDIR); не кладём их в корень модуля (кроме служебных *.syso рядом с пакетом, см. windows-amd64).
 BINDIR=bin
 LIBNAME=$(PRODUCT_NAME)
 CLINAME=HiddifyCli
@@ -16,6 +20,9 @@ MACOS_ADD_TAGS=with_dhcp
 WINDOWS_ADD_TAGS=with_purego
 # Override on WSL if default mingw fails Go c-shared link (e.g. MINGW_CC=x86_64-w64-mingw32-gcc-15-posix).
 MINGW_CC ?= x86_64-w64-mingw32-gcc
+# Системный Go 1.26+ при сборке c-shared для windows/amd64 из Linux/macOS даёт линковочную ошибку
+# undefined reference to internal/poll.execIO. Совпадаем с версией в go.mod (см. go.dev/doc/toolchain).
+WINDOWS_GOTOOLCHAIN ?= go1.25.6
 LDFLAGS=-w -s -checklinkname=0 -buildid= $${CODE_VERSION}
 GOBUILDLIB=CGO_ENABLED=1 go build -trimpath -ldflags="$(LDFLAGS)" -buildmode=c-shared
 GOBUILDSRV=CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -trimpath -tags $(TAGS)
@@ -68,6 +75,9 @@ webui:
 .PHONY: build
 windows-amd64: prepare
 	set -e
+	export GOTOOLCHAIN="$(WINDOWS_GOTOOLCHAIN)"
+	# Остаток прерванной сборки: DLL в корне совпадает по имени с аргументом линкера и ломает link (in=out).
+	rm -f $(LIBNAME).dll
 	rm -rf $(BINDIR)/*
 	CRONET_LIB_DIR=$$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64) && \
 	cp "$$CRONET_LIB_DIR/libcronet.dll" $(BINDIR)/libcronet.dll
@@ -76,10 +86,10 @@ windows-amd64: prepare
 	ls -R $(BINDIR)/
 	RSRC_BIN=$$(go env GOPATH)/bin/rsrc && \
 	test -x "$$RSRC_BIN"
-	cp $(BINDIR)/$(LIBNAME).dll ./$(LIBNAME).dll
+	# .syso обязан лежать в каталоге пакета — его подхватывает go build (не переносим в bin/).
 	$$RSRC_BIN -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso
-	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC) CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
-	rm ./*.dll
+	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC) CGO_LDFLAGS="$(BINDIR)/$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
+	rm -f $(LIBNAME).dll
 	if [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(CLINAME).exe ]; then \
 		echo "Error: $(LIBNAME).dll or $(CLINAME).exe not built"; \
 		exit 1; \
@@ -140,12 +150,7 @@ build-linux: prepare
 	GOOS=linux GOARCH=$(ARCH) $(GOBUILDLIB) -tags $${FINAL_TAGS} -o $(BINDIR)/lib/$(LIBNAME).so ./platform/desktop ;\
 	
 	echo "Core library built, now building CLI with CGO linking to core library"
-	mkdir lib
-	cp $(BINDIR)/lib/$(LIBNAME).so ./lib/$(LIBNAME).so
-
-	GOOS=linux GOARCH=$(ARCH) CGO_LDFLAGS="./lib/$(LIBNAME).so -Wl,-rpath,\$$ORIGIN/lib -fuse-ld=lld" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME) ./cmd/bydll
-	
-	rm -rf ./lib/*.so
+	GOOS=linux GOARCH=$(ARCH) CGO_LDFLAGS="$(BINDIR)/lib/$(LIBNAME).so -Wl,-rpath,\$$ORIGIN/lib -fuse-ld=lld" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME) ./cmd/bydll
 	chmod +x $(BINDIR)/$(CLINAME)
 	if [ ! -f $(BINDIR)/lib/$(LIBNAME).so -o ! -f $(BINDIR)/$(CLINAME) ]; then \
 		echo "Error: $(LIBNAME).so or $(CLINAME) not built"; \
@@ -171,7 +176,6 @@ macos-arm64:
 macos: prepare macos-amd64 macos-arm64 
 	
 	lipo -create $(BINDIR)/$(LIBNAME)-amd64.dylib $(BINDIR)/$(LIBNAME)-arm64.dylib -output $(BINDIR)/$(LIBNAME).dylib
-	cp $(BINDIR)/$(LIBNAME).dylib ./$(LIBNAME).dylib 
 	mv $(BINDIR)/$(LIBNAME)-arm64.h $(BINDIR)/desktop.h 
 	# env GOOS=darwin GOARCH=amd64 CGO_CFLAGS="-mmacosx-version-min=10.15" CGO_LDFLAGS="-mmacosx-version-min=10.15" CGO_LDFLAGS="bin/$(LIBNAME).dylib"  CGO_ENABLED=1 $(GOBUILDSRV)  -o $(BINDIR)/$(CLINAME) ./cmd/bydll
 	# rm ./$(LIBNAME).dylib
@@ -181,7 +185,8 @@ prepare:
 	go mod tidy
 
 clean:
-	rm $(BINDIR)/*
+	rm -f $(LIBNAME).dll $(LIBNAME).dylib
+	rm -rf $(BINDIR)/*
 
 
 

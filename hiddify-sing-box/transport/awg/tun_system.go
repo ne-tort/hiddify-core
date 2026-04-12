@@ -28,9 +28,11 @@ type systemTun struct {
 	name      string
 	dialer    network.Dialer
 	closeOnce sync.Once
+	inet4     netip.Addr
+	inet6     netip.Addr
 }
 
-func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger) (tunAdapter, error) {
+func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger, customName string) (tunAdapter, error) {
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
 	var (
 		name    string
@@ -38,7 +40,8 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 		dial    network.Dialer
 		err     error
 	)
-	for _, candidate := range []string{tun.CalculateInterfaceName("awg"), tun.CalculateInterfaceName("")} {
+	candidates := candidateInterfaceNames(customName)
+	for _, candidate := range candidates {
 		name = candidate
 		singtun, dial, err = createSystemTunWithName(ctx, networkManager, candidate, address, allowedIps, excludedIps, mtu, logger)
 		if err == nil {
@@ -48,7 +51,8 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 	if err != nil {
 		return nil, err
 	}
-	events := make(chan awgTun.Event)
+	v4, v6 := inet46FromPrefixes(address)
+	events := make(chan awgTun.Event, 1)
 	return &systemTun{
 		mtu:       mtu,
 		events:    events,
@@ -56,7 +60,24 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 		name:      name,
 		dialer:    dial,
 		closeOnce: sync.Once{},
+		inet4:     v4,
+		inet6:     v6,
 	}, nil
+}
+
+func candidateInterfaceNames(customName string) []string {
+	if customName != "" {
+		return []string{tun.CalculateInterfaceName(customName), tun.CalculateInterfaceName("awg"), tun.CalculateInterfaceName("")}
+	}
+	return []string{tun.CalculateInterfaceName("awg"), tun.CalculateInterfaceName("")}
+}
+
+func (t *systemTun) Inet4Address() netip.Addr {
+	return t.inet4
+}
+
+func (t *systemTun) Inet6Address() netip.Addr {
+	return t.inet6
 }
 
 func createSystemTunWithName(

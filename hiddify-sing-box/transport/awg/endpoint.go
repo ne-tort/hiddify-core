@@ -6,9 +6,16 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
+	"time"
+	"unsafe"
 
+	awgconn "github.com/amnezia-vpn/amneziawg-go/conn"
 	awgdevice "github.com/amnezia-vpn/amneziawg-go/device"
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialer"
+	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -22,8 +29,10 @@ import (
 type Endpoint struct {
 	options       EndpointOptions
 	peers         []peerConfig
-	tun           tunAdapter
+	tunDevice     tunAdapter
+	natDevice     NatDevice
 	awgDevice     *awgdevice.Device
+	allowedIPs    *awgdevice.AllowedIPs
 	pause         pause.Manager
 	pauseCallback *list.Element[pause.Callback]
 }
@@ -64,23 +73,32 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		options.MTU = 1408
 	}
 
-	var tunDev tunAdapter
-	if options.UseIntegratedTun {
-		tunDev, err = newSystemTun(options.Context, options.Address, allowedAddresses, excludedPrefixes, options.MTU, options.Logger)
-		if err != nil {
-			return nil, E.Cause(err, "create tunnel")
-		}
-	} else {
-		tunDev, err = newNetworkTun(options.Address, options.MTU)
-		if err != nil {
-			return nil, err
-		}
+	tunDev, err := newTunForEndpoint(tunPickOptions{
+		Context:        options.Context,
+		Logger:         options.Logger,
+		Handler:        options.Handler,
+		UDPTimeout:     options.UDPTimeout,
+		System:         options.System,
+		Address:        options.Address,
+		AllowedPrefix:  allowedAddresses,
+		ExcludedPrefix: excludedPrefixes,
+		MTU:            options.MTU,
+		Name:           options.Name,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "create tunnel")
+	}
+
+	natTun, ok := tunDev.(NatDevice)
+	if !ok {
+		natTun = NewNATDevice(options.Context, options.Logger, tunDev)
 	}
 
 	return &Endpoint{
-		options: options,
-		peers:   peers,
-		tun:     tunDev,
+		options:   options,
+		peers:     peers,
+		tunDevice: tunDev,
+		natDevice: natTun,
 	}, nil
 }
 
@@ -105,13 +123,28 @@ func (e *Endpoint) Start(resolve bool) error {
 		return nil
 	}
 
-	var connectEndpoint netip.AddrPort
-	if len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
-		connectEndpoint = e.peers[0].endpoint
+	var bind awgconn.Bind
+	wgListener, isWgListener := common.Cast[dialer.WireGuardListener](e.options.Dialer)
+	if isWgListener {
+		bind = awgconn.NewStdNetBind(wgListener.WireGuardControl())
+	} else {
+		var connectEndpoint netip.AddrPort
+		var defReserved [3]uint8
+		if len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
+			connectEndpoint = e.peers[0].endpoint
+			defReserved = e.peers[0].reserved
+		}
+		bind = newBind(e.options.Context, e.options.Dialer, connectEndpoint, defReserved)
 	}
-	bind := newBind(e.options.Context, e.options.Dialer, connectEndpoint)
+	if isWgListener || len(e.peers) > 1 {
+		for _, peer := range e.peers {
+			if peer.reserved != [3]uint8{} {
+				bind.SetReservedForEndpoint(peer.endpoint, peer.reserved)
+			}
+		}
+	}
 
-	if err := e.tun.Start(); err != nil {
+	if err := e.tunDevice.Start(); err != nil {
 		return err
 	}
 
@@ -124,7 +157,7 @@ func (e *Endpoint) Start(resolve bool) error {
 		},
 	}
 
-	wgDev := awgdevice.NewDevice(e.tun, bind, logger)
+	wgDev := awgdevice.NewDevice(e.natDevice, bind, logger)
 	ipcConf, err := buildIpcConfig(e.options, e.peers)
 	if err != nil {
 		wgDev.Close()
@@ -134,14 +167,12 @@ func (e *Endpoint) Start(resolve bool) error {
 		wgDev.Close()
 		return E.Cause(err, "setup amneziawg: \n", ipcConf)
 	}
-	if err = wgDev.Up(); err != nil {
-		wgDev.Close()
-		return E.Cause(err, "bring up amneziawg")
-	}
 	e.awgDevice = wgDev
 
+	e.allowedIPs = (*awgdevice.AllowedIPs)(unsafe.Pointer(reflect.Indirect(reflect.ValueOf(wgDev)).FieldByName("allowedips").UnsafeAddr()))
+
 	e.pause = service.FromContext[pause.Manager](e.options.Context)
-	if e.pause != nil {
+	if e.pause != nil && !e.options.DisablePauses {
 		e.pauseCallback = e.pause.RegisterCallback(e.onPauseUpdated)
 	}
 	return nil
@@ -151,14 +182,28 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 	if !destination.Addr.IsValid() {
 		return nil, E.Cause(os.ErrInvalid, "invalid non-IP destination")
 	}
-	return e.tun.DialContext(ctx, network, destination)
+	return e.tunDevice.DialContext(ctx, network, destination)
 }
 
 func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	if !destination.Addr.IsValid() {
 		return nil, E.Cause(os.ErrInvalid, "invalid non-IP destination")
 	}
-	return e.tun.ListenPacket(ctx, destination)
+	return e.tunDevice.ListenPacket(ctx, destination)
+}
+
+func (e *Endpoint) Lookup(address netip.Addr) *awgdevice.Peer {
+	if e.allowedIPs == nil {
+		return nil
+	}
+	return e.allowedIPs.Lookup(address.AsSlice())
+}
+
+func (e *Endpoint) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	if e.natDevice == nil {
+		return nil, os.ErrInvalid
+	}
+	return e.natDevice.CreateDestination(metadata, routeContext, timeout)
 }
 
 func (e *Endpoint) Close() error {

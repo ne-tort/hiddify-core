@@ -34,6 +34,27 @@ func CheckUrlAndJson(url string, expectedJSON string, t *testing.T) {
 	}
 }
 
+// CheckUrlAndJsonEndpoints compares sing-box Options.Endpoints after parsing (WireGuard / AWG use endpoints, not legacy outbounds).
+func CheckUrlAndJsonEndpoints(url string, expectedJSON string, t *testing.T) {
+	ctx := libbox.BaseContext(nil)
+	configJson, err := Ray2Singbox(ctx, url, false)
+	if err != nil {
+		t.Fatalf("Error parsing URL: %v", err)
+	}
+	var got, want T.Options
+	if err := got.UnmarshalJSONContext(ctx, configJson); err != nil {
+		t.Fatalf("unmarshal got: %v\n%s", err, string(configJson))
+	}
+	if err := want.UnmarshalJSONContext(ctx, []byte(expectedJSON)); err != nil {
+		t.Fatalf("unmarshal want: %v\n%s", err, expectedJSON)
+	}
+	if !reflect.DeepEqual(got.Endpoints, want.Endpoints) {
+		gb, _ := json.MarshalIndent(got.Endpoints, "", "  ")
+		wb, _ := json.MarshalIndent(want.Endpoints, "", "  ")
+		t.Errorf("endpoints mismatch\ngot:\n%s\nwant:\n%s", gb, wb)
+	}
+}
+
 func json2map_prettystr(injson string) ([]T.Outbound, string, error) {
 	var conf T.Options
 	if err := conf.UnmarshalJSONContext(context.Background(), []byte(injson)); err != nil {

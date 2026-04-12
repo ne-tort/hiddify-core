@@ -38,6 +38,18 @@ func parseWGPrefix(s string) (netip.Prefix, error) {
 	return netip.Prefix{}, fmt.Errorf("unsupported address: %v", addr)
 }
 
+func wireGuardPeerFromAwgPeer(peer T.AwgPeerOptions) T.WireGuardPeer {
+	return T.WireGuardPeer{
+		Address:                     peer.Address,
+		Port:                        peer.Port,
+		PreSharedKey:                peer.PreSharedKey,
+		PublicKey:                   peer.PublicKey,
+		AllowedIPs:                  peer.AllowedIPs,
+		PersistentKeepaliveInterval: peer.PersistentKeepaliveInterval,
+		Reserved:                    peer.Reserved,
+	}
+}
+
 func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 
 	var (
@@ -47,6 +59,8 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 		jc, jmin, jmax                     int
 		s1, s2, s3, s4                     int
 		h1, h2, h3, h4, i1, i2, i3, i4, i5 string
+		ifaceName string
+		systemVal bool
 
 		peer T.AwgPeerOptions
 	)
@@ -90,6 +104,10 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 				if v, err := strconv.ParseUint(val, 10, 32); err == nil {
 					mtu = uint32(v)
 				}
+			case "Name":
+				ifaceName = val
+			case "System":
+				systemVal = strings.EqualFold(val, "true") || val == "1"
 			case "Jc":
 				jc, _ = strconv.Atoi(val)
 			case "Jmin":
@@ -130,7 +148,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 			case "PublicKey":
 				peer.PublicKey = val
 			case "PresharedKey":
-				peer.PresharedKey = val
+				peer.PreSharedKey = val
 
 			case "AllowedIPs":
 				var allowed []netip.Prefix
@@ -180,16 +198,13 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 			PrivateKey: privateKey,
 			Address:    badoption.Listable[netip.Prefix](addresses),
 			Peers: []T.WireGuardPeer{
-				T.WireGuardPeer{
-					Address:                     peer.Address,
-					Port:                        peer.Port,
-					PreSharedKey:                peer.PresharedKey,
-					PublicKey:                   peer.PublicKey,
-					AllowedIPs:                  peer.AllowedIPs,
-					PersistentKeepaliveInterval: peer.PersistentKeepaliveInterval,
-				},
+				wireGuardPeerFromAwgPeer(peer),
 			},
 		}
+		if ifaceName != "" {
+			wgOpt.Name = ifaceName
+		}
+		wgOpt.System = systemVal
 		if mtu != 0 {
 			wgOpt.MTU = mtu
 		}
@@ -221,6 +236,10 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 		I5:         i5,
 		Peers:      []T.AwgPeerOptions{peer},
 	}
+	if ifaceName != "" {
+		awgOpt.Name = ifaceName
+	}
+	awgOpt.System = systemVal
 	if mtu != 0 {
 		awgOpt.MTU = mtu
 	}
@@ -302,7 +321,7 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 		Address:                     u.Hostname,
 		Port:                        u.Port,
 		PublicKey:                   getOneOfN(u.Params, "", "peerpublickey", "publickey", "pub", "peerpub"),
-		PresharedKey:                getOneOfN(u.Params, "", "presharedkey", "psk"),
+		PreSharedKey:                getOneOfN(u.Params, "", "pre_shared_key", "presharedkey", "psk"),
 		AllowedIPs:                  allowedIPs,
 		PersistentKeepaliveInterval: getUint16("keepalive"),
 	}
@@ -317,7 +336,6 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 		return nil, errors.New("missing peer_public_key")
 	}
 	opts := T.AwgEndpointOptions{
-
 		PrivateKey: pk,
 		Address:    addresses,
 
@@ -342,6 +360,17 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 
 		Peers: []T.AwgPeerOptions{peer},
 	}
+	if n := getOneOfN(u.Params, "", "name", "ifname"); n != "" {
+		opts.Name = n
+	}
+	if s, ok := u.Params["system"]; ok {
+		opts.System = strings.EqualFold(s, "true") || s == "1"
+	}
+	if w, ok := u.Params["workers"]; ok {
+		if i, err := strconv.Atoi(w); err == nil {
+			opts.Workers = i
+		}
+	}
 	if mtuStr, ok := u.Params["mtu"]; ok {
 		if mtu, err := strconv.ParseUint(mtuStr, 10, 32); err == nil {
 			opts.MTU = uint32(mtu)
@@ -355,17 +384,17 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 			PrivateKey: opts.PrivateKey,
 			Address:    opts.Address,
 			Peers: []T.WireGuardPeer{
-				T.WireGuardPeer{
-					Address:                     peer.Address,
-					Port:                        peer.Port,
-					PreSharedKey:                peer.PresharedKey,
-					PublicKey:                   peer.PublicKey,
-					AllowedIPs:                  peer.AllowedIPs,
-					PersistentKeepaliveInterval: peer.PersistentKeepaliveInterval,
-				},
+				wireGuardPeerFromAwgPeer(peer),
 			},
 			MTU:   uint32(toInt(getOneOfN(u.Params, "1280", "mtu"))),
 			Noise: getWireGuardNoise(u.Params, false),
+		}
+		if opts.Name != "" {
+			wgopts.Name = opts.Name
+		}
+		wgopts.System = opts.System
+		if opts.Workers != 0 {
+			wgopts.Workers = opts.Workers
 		}
 		if reservedStr, ok := u.Params["reserved"]; ok {
 			reservedParts := strings.Split(reservedStr, ",")

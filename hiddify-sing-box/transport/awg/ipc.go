@@ -11,6 +11,24 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+// buildIpcConfig turns EndpointOptions + peers into an amneziawg UAPI "set" string.
+// Device keys (private_key, listen_port, jc, jmin, jmax, s1–s4, h1–h4, i1–i5) are emitted
+// before the first public_key so handleDeviceLine receives them (see amneziawg-go IpcSetOperation).
+// Integer fields jc/jmin/jmax are omitted when zero (same as unset); when non-zero they must be
+// positive per amneziawg-go. s1–s4 are omitted when zero — explicit zero padding cannot be expressed
+// with JSON numbers alone (omit vs 0); use upstream defaults if you need sN=0 while other obfs set.
+func validateAwgNumericObfuscation(opts EndpointOptions) error {
+	if opts.Jc < 0 || opts.Jmin < 0 || opts.Jmax < 0 {
+		return E.New("amneziawg: jc, jmin, jmax must be non-negative")
+	}
+	if opts.S1 < 0 || opts.S2 < 0 || opts.S3 < 0 || opts.S4 < 0 {
+		return E.New("amneziawg: s1, s2, s3, s4 must be non-negative")
+	}
+	// When a key is present in UAPI, amneziawg-go requires jc/jmin/jmax > 0 (see handleDeviceLine).
+	// We only emit non-zero values; a lone non-zero jc with jmin/jmax omitted is still a valid IPC pattern.
+	return nil
+}
+
 type peerConfig struct {
 	destination     M.Socksaddr
 	endpoint        netip.AddrPort
@@ -18,6 +36,7 @@ type peerConfig struct {
 	preSharedKeyHex string
 	allowedIPs      []netip.Prefix
 	keepalive       uint16
+	reserved        [3]uint8
 }
 
 func parsePeerConfigs(peers []PeerOptions) ([]peerConfig, error) {
@@ -47,12 +66,21 @@ func parsePeerConfigs(peers []PeerOptions) ([]peerConfig, error) {
 		} else if raw.Endpoint.IsFqdn() {
 			p.destination = raw.Endpoint
 		}
+		if len(raw.Reserved) > 0 {
+			if len(raw.Reserved) != 3 {
+				return nil, E.New("invalid reserved value for peer ", peerIndex, ", required 3 bytes, got ", len(raw.Reserved))
+			}
+			copy(p.reserved[:], raw.Reserved[:])
+		}
 		out = append(out, p)
 	}
 	return out, nil
 }
 
 func buildIpcConfig(opts EndpointOptions, peers []peerConfig) (string, error) {
+	if err := validateAwgNumericObfuscation(opts); err != nil {
+		return "", err
+	}
 	privateKeyBytes, err := base64.StdEncoding.DecodeString(opts.PrivateKey)
 	if err != nil {
 		return "", E.Cause(err, "decode private key")
