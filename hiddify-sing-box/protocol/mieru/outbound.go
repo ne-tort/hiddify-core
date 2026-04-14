@@ -20,6 +20,7 @@ import (
 	mieruclient "github.com/enfein/mieru/v3/apis/client"
 	mierucommon "github.com/enfein/mieru/v3/apis/common"
 	mierumodel "github.com/enfein/mieru/v3/apis/model"
+	mierutp "github.com/enfein/mieru/v3/apis/trafficpattern"
 	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"google.golang.org/protobuf/proto"
 )
@@ -55,7 +56,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	logger.InfoContext(ctx, "mieru client is started")
 
 	return &Outbound{
-		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeMieru, tag, options.Network.Build(), options.DialerOptions),
+		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeMieru, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
 		dialer:  outboundDialer,
 		logger:  logger,
 		client:  c,
@@ -169,14 +170,24 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
 		return nil, fmt.Errorf("failed to validate mieru options: %w", err)
 	}
 
+	var transportProtocol *mierupb.TransportProtocol
+	switch options.Transport {
+	case "TCP":
+		transportProtocol = mierupb.TransportProtocol_TCP.Enum()
+	case "UDP":
+		transportProtocol = mierupb.TransportProtocol_UDP.Enum()
+	}
 	server := &mierupb.ServerEndpoint{}
-	for _, pr := range options.PortBindings {
-		intport := int32(pr.Port)
-
+	if options.ServerPort != 0 {
 		server.PortBindings = append(server.PortBindings, &mierupb.PortBinding{
-			PortRange: proto.String(pr.PortRange),
-			Port:      &intport,
-			Protocol:  getTransportProtocol(pr.Protocol),
+			Port:     proto.Int32(int32(options.ServerPort)),
+			Protocol: transportProtocol,
+		})
+	}
+	for _, pr := range options.ServerPortRanges {
+		server.PortBindings = append(server.PortBindings, &mierupb.PortBinding{
+			PortRange: proto.String(pr),
+			Protocol:  transportProtocol,
 		})
 	}
 	if M.IsDomainName(options.Server) {
@@ -191,11 +202,7 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
 				Name:     proto.String(options.UserName),
 				Password: proto.String(options.Password),
 			},
-			Servers:       []*mierupb.ServerEndpoint{server},
-			HandshakeMode: getHandshakeMode(options.HandshakeMode),
-			Multiplexing: &mierupb.MultiplexingConfig{
-				Level: getMultiplexingLevel(options.Multiplexing),
-			},
+			Servers: []*mierupb.ServerEndpoint{server},
 		},
 		Dialer:       dialer,
 		PacketDialer: dialer,
@@ -208,17 +215,36 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
 			Level: mierupb.MultiplexingLevel(multiplexing).Enum(),
 		}
 	}
+	if options.TrafficPattern != "" {
+		trafficPattern, _ := mierutp.Decode(options.TrafficPattern)
+		config.Profile.TrafficPattern = trafficPattern
+	}
 	return config, nil
 }
 func validateMieruOptions(options option.MieruOutboundOptions) error {
 	if options.Server == "" {
 		return fmt.Errorf("server is empty")
 	}
-	if options.ServerPort == 0 && len(options.PortBindings) == 0 {
-		return fmt.Errorf("either server_port or transport must be set")
+	if options.ServerPort == 0 && len(options.ServerPortRanges) == 0 {
+		return fmt.Errorf("either server_port or server_ports must be set")
 	}
-	if options.ServerPort != 0 && (len(options.PortBindings) != 1 || options.PortBindings[0].Port != options.ServerPort) {
-		return fmt.Errorf("Transport of Server Port is not defined!")
+	for _, pr := range options.ServerPortRanges {
+		begin, end, err := beginAndEndPortFromPortRange(pr)
+		if err != nil {
+			return fmt.Errorf("invalid server_ports format")
+		}
+		if begin < 1 || begin > 65535 {
+			return fmt.Errorf("begin port must be between 1 and 65535")
+		}
+		if end < 1 || end > 65535 {
+			return fmt.Errorf("end port must be between 1 and 65535")
+		}
+		if begin > end {
+			return fmt.Errorf("begin port must be less than or equal to end port")
+		}
+	}
+	if options.Transport != "TCP" && options.Transport != "UDP" {
+		return fmt.Errorf("transport must be TCP or UDP")
 	}
 	if options.UserName == "" {
 		return fmt.Errorf("username is empty")
@@ -226,11 +252,19 @@ func validateMieruOptions(options option.MieruOutboundOptions) error {
 	if options.Password == "" {
 		return fmt.Errorf("password is empty")
 	}
-	if getMultiplexingLevel(options.Multiplexing) == nil {
-		return fmt.Errorf("invalid multiplexing level: %s", options.Multiplexing)
+	if options.Multiplexing != "" {
+		if _, ok := mierupb.MultiplexingLevel_value[options.Multiplexing]; !ok {
+			return fmt.Errorf("invalid multiplexing level: %s", options.Multiplexing)
+		}
 	}
-	if getHandshakeMode(options.HandshakeMode) == nil {
-		return fmt.Errorf("invalid handshake mode: %s", options.HandshakeMode)
+	if options.TrafficPattern != "" {
+		trafficPattern, err := mierutp.Decode(options.TrafficPattern)
+		if err != nil {
+			return fmt.Errorf("failed to decode traffic pattern %q: %w", options.TrafficPattern, err)
+		}
+		if err := mierutp.Validate(trafficPattern); err != nil {
+			return fmt.Errorf("invalid traffic pattern %q: %w", options.TrafficPattern, err)
+		}
 	}
-	return validateMieruTransport(options.PortBindings)
+	return nil
 }

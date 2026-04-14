@@ -25,6 +25,7 @@ import (
 	mieruconstant "github.com/enfein/mieru/v3/apis/constant"
 	mierumodel "github.com/enfein/mieru/v3/apis/model"
 	mieruserver "github.com/enfein/mieru/v3/apis/server"
+	mierutp "github.com/enfein/mieru/v3/apis/trafficpattern"
 	mierupb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"google.golang.org/protobuf/proto"
 )
@@ -67,7 +68,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	inboundInstance.listener = listener.New(listener.Options{
 		Context: ctx,
 		Logger:  logger,
-		Network: options.Network.Build(),
+		Network: []string{N.NetworkTCP, N.NetworkUDP},
 		Listen:  options.ListenOptions,
 	})
 
@@ -138,8 +139,7 @@ func (h *Inbound) handleConnection(conn net.Conn, request *mierumodel.Request) {
 	metadata.InboundType = h.Type()
 	//nolint:staticcheck
 	metadata.InboundDetour = h.listener.ListenOptions().Detour
-	//nolint:staticcheck
-	metadata.InboundOptions = h.listener.ListenOptions().InboundOptions
+	metadata.UDPDisableDomainUnmapping = h.listener.ListenOptions().UDPDisableDomainUnmapping
 
 	// Parse source address.
 	if remoteAddr := conn.RemoteAddr(); remoteAddr != nil {
@@ -267,15 +267,22 @@ func buildMieruServerConfig(_ context.Context, options option.MieruInboundOption
 		return nil, nil, fmt.Errorf("failed to validate mieru options: %w", err)
 	}
 
-	portBindings := []*mierupb.PortBinding{}
+	var transportProtocol *mierupb.TransportProtocol
+	switch options.Transport {
+	case "TCP":
+		transportProtocol = mierupb.TransportProtocol_TCP.Enum()
+	case "UDP":
+		transportProtocol = mierupb.TransportProtocol_UDP.Enum()
+	}
 
-	for _, pr := range options.PortBindings {
-		intport := int32(pr.Port)
-		portBindings = append(portBindings, &mierupb.PortBinding{
-			PortRange: &pr.PortRange,
-			Port:      &intport,
-			Protocol:  getTransportProtocol(pr.Protocol),
-		})
+	if options.ListenOptions.ListenPort == 0 {
+		return nil, nil, E.New("listen_port must be set")
+	}
+	portBindings := []*mierupb.PortBinding{
+		{
+			Port:     proto.Int32(int32(options.ListenOptions.ListenPort)),
+			Protocol: transportProtocol,
+		},
 	}
 
 	var users []*mierupb.User
@@ -288,20 +295,20 @@ func buildMieruServerConfig(_ context.Context, options option.MieruInboundOption
 		userNames = append(userNames, user.Name)
 	}
 
+	var trafficPattern *mierupb.TrafficPattern
+	trafficPattern, _ = mierutp.Decode(options.TrafficPattern)
 	return &mieruserver.ServerConfig{
 		Config: &mierupb.ServerConfig{
-			PortBindings: portBindings,
-			Users:        users,
+			PortBindings:   portBindings,
+			Users:          users,
+			TrafficPattern: trafficPattern,
 		},
 	}, userNames, nil
 }
 
 func validateMieruInboundOptions(options option.MieruInboundOptions) error {
-	if options.ListenPort == 0 && len(options.PortBindings) == 0 {
-		return fmt.Errorf("either server_port or transport must be set")
-	}
-	if options.ListenPort != 0 && (len(options.PortBindings) != 1 || options.PortBindings[0].Port != options.ListenPort) {
-		return fmt.Errorf("Transport of Server Port is not defined!")
+	if options.Transport != "TCP" && options.Transport != "UDP" {
+		return E.New("transport must be TCP or UDP")
 	}
 	if len(options.Users) == 0 {
 		return E.New("users is empty")
@@ -314,6 +321,14 @@ func validateMieruInboundOptions(options option.MieruInboundOptions) error {
 			return E.New("password is empty")
 		}
 	}
-
-	return validateMieruTransport(options.PortBindings)
+	if options.TrafficPattern != "" {
+		trafficPattern, err := mierutp.Decode(options.TrafficPattern)
+		if err != nil {
+			return fmt.Errorf("failed to decode traffic pattern %q: %w", options.TrafficPattern, err)
+		}
+		if err := mierutp.Validate(trafficPattern); err != nil {
+			return fmt.Errorf("invalid traffic pattern %q: %w", options.TrafficPattern, err)
+		}
+	}
+	return nil
 }

@@ -75,7 +75,7 @@ require (
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
 	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
-	github.com/enfein/mieru/v3 v3.27.0 // indirect
+	github.com/enfein/mieru/v3 v3.30.0 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.0.2 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
@@ -275,7 +275,9 @@ replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.
 
 replace github.com/hiddify/ray2sing => ./ray2sing
 
-replace github.com/sagernet/sing-box => ./hiddify-sing-box
+replace github.com/sagernet/sing-box => ../experiments/router/hiddify-sing-box
+
+replace github.com/sagernet/sing-tun => ../experiments/router/hiddify-sing-box/replace/sing-tun
 
 replace github.com/sagernet/wireguard-go => ./hiddify-sing-box/replace/wireguard-go
 

@@ -283,6 +283,10 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		},
 	}
 
+	if opt.BalancerStrategy == "" {
+		opt.BalancerStrategy = "round-robin"
+	}
+
 	balancer := option.Outbound{
 		Type: C.TypeBalancer,
 		Tag:  OutboundRoundRobinTag,
@@ -299,15 +303,18 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			InterruptExistConnections: true,
 		},
 	}
-	defaultSelect := tags[0]
+	defaultSelect := OutboundDirectTag
+	selectorTags := []string{OutboundDirectTag}
+	if len(tags) > 0 {
+		defaultSelect = tags[0]
+		selectorTags = tags
+	}
 
 	for _, tag := range tags {
 		if strings.Contains(tag, "§default§") {
 			defaultSelect = "§default§"
 		}
 	}
-
-	selectorTags := tags
 	if len(tags) > 1 {
 		if OutboundMainDetour == WARPConfigTag {
 			outbounds = append([]option.Outbound{urlTest}, outbounds...)
