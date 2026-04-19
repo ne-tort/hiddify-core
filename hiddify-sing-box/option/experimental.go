@@ -30,6 +30,7 @@ type ClashAPIOptions struct {
 	ExternalUIDownloadURL            string                     `json:"external_ui_download_url,omitempty"`
 	ExternalUIDownloadDetour         string                     `json:"external_ui_download_detour,omitempty"`
 	Secret                           string                     `json:"secret,omitempty"`
+	L3RouterStrictValidation         bool                       `json:"l3router_strict_validation,omitempty"`
 	DefaultMode                      string                     `json:"default_mode,omitempty"`
 	ModeList                         []string                   `json:"-"`
 	AccessControlAllowOrigin         badoption.Listable[string] `json:"access_control_allow_origin,omitempty"`

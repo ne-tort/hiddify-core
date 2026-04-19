@@ -9,9 +9,12 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	rt "github.com/sagernet/sing-box/common/l3router"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
+	l3routerendpoint "github.com/sagernet/sing-box/protocol/l3router"
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json/badjson"
@@ -29,6 +32,10 @@ func proxyRouter(server *Server, router adapter.Router) http.Handler {
 		r.Use(parseProxyName, findProxyByName(server))
 		r.Get("/", getProxy(server))
 		r.Get("/delay", getProxyDelay(server))
+		r.Get("/metrics", getProxyMetrics(server))
+		// Runtime route mutation is an optional ops API; static JSON routes are the primary path.
+		r.Post("/routes", upsertProxyRoute(server))
+		r.Delete("/routes/{id}", removeProxyRoute(server))
 		r.Put("/", updateProxy)
 	})
 	return r
@@ -46,7 +53,7 @@ func findProxyByName(server *Server) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			name := r.Context().Value(CtxKeyProxyName).(string)
-			proxy, exist := server.outbound.Outbound(name)
+			proxy, exist := findProxyOrEndpointByName(server, name)
 			if !exist {
 				render.Status(r, http.StatusNotFound)
 				render.JSON(w, r, ErrNotFound)
@@ -79,6 +86,11 @@ func proxyInfo(server *Server, detour adapter.Outbound) *badjson.JSONObject {
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		info.Put("now", group.Now())
 		info.Put("all", group.All())
+	}
+	if l3, ok := detour.(l3RouterMetricsProvider); ok {
+		info.Put("l3router", map[string]any{
+			"metrics": l3.SnapshotMetrics(),
+		})
 	}
 	return &info
 }
@@ -231,4 +243,127 @@ func getProxyDelay(server *Server) func(w http.ResponseWriter, r *http.Request) 
 			"delay": delay,
 		})
 	}
+}
+
+type l3RouterRouteRequest struct {
+	option.L3RouterPeerOptions
+}
+
+type l3RouterControlResponse struct {
+	Status string `json:"status"`
+	Tag    string `json:"tag"`
+	PeerID uint64 `json:"peer_id,omitempty"`
+}
+
+type l3RouterMetricsProvider interface {
+	SnapshotMetrics() l3routerendpoint.Metrics
+}
+
+type l3RouterRouteController interface {
+	UpsertRoute(rt.Route) error
+	RemoveRoute(rt.RouteID)
+}
+
+func l3routerCapabilities(proxy adapter.Outbound) (l3RouterMetricsProvider, l3RouterRouteController, bool) {
+	metricsProvider, hasMetrics := proxy.(l3RouterMetricsProvider)
+	routeController, hasRoutes := proxy.(l3RouterRouteController)
+	return metricsProvider, routeController, hasMetrics && hasRoutes
+}
+
+func getProxyMetrics(_ *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		l3Metrics, _, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support metrics"))
+			return
+		}
+		metrics := l3Metrics.SnapshotMetrics()
+		render.JSON(w, r, map[string]any{
+			"type":    proxy.Type(),
+			"name":    proxy.Tag(),
+			"metrics": metrics,
+			"totals":  metrics,
+			"endpoints": []l3RouterEndpointMetrics{
+				{
+					Type:    proxy.Type(),
+					Tag:     proxy.Tag(),
+					Metrics: metrics,
+				},
+			},
+		})
+	}
+}
+
+func upsertProxyRoute(server *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		_, routeController, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support routes"))
+			return
+		}
+		var req l3RouterRouteRequest
+		if err := decodeJSONBody(w, r, &req, server.l3RouterStrictValidation); err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		route, err := l3routerendpoint.ParseRouteOptions(req.L3RouterPeerOptions)
+		if err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		if err := routeController.UpsertRoute(route); err != nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError(err.Error()))
+			return
+		}
+		render.JSON(w, r, l3RouterControlResponse{
+			Status: "ok",
+			Tag:    proxy.Tag(),
+			PeerID: req.PeerID,
+		})
+	}
+}
+
+func removeProxyRoute(_ *Server) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		proxy := r.Context().Value(CtxKeyProxy).(adapter.Outbound)
+		_, routeController, ok := l3routerCapabilities(proxy)
+		if !ok {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("proxy does not support routes"))
+			return
+		}
+		idText := chi.URLParam(r, "id")
+		id, err := strconv.ParseUint(idText, 10, 64)
+		if err != nil || id == 0 {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, newError("peer id must be a non-zero unsigned integer"))
+			return
+		}
+		routeController.RemoveRoute(rt.RouteID(id))
+		render.JSON(w, r, l3RouterControlResponse{
+			Status: "ok",
+			Tag:    proxy.Tag(),
+			PeerID: id,
+		})
+	}
+}
+
+func findProxyOrEndpointByName(server *Server, name string) (adapter.Outbound, bool) {
+	if proxy, exist := server.outbound.Outbound(name); exist {
+		return proxy, true
+	}
+	if ep, exist := server.endpoint.Get(name); exist {
+		outboundEp, ok := ep.(adapter.Outbound)
+		if ok {
+			return outboundEp, true
+		}
+	}
+	return nil, false
 }

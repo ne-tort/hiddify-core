@@ -41,6 +41,10 @@ type TunInboundOptions struct {
 	UDPTimeout             UDPTimeoutCompat                 `json:"udp_timeout,omitempty"`
 	Stack                  string                           `json:"stack,omitempty"`
 	Platform               *TunPlatformOptions              `json:"platform,omitempty"`
+	// L3OverlayOutbound + L3OverlayRouteAddress: send full IP packets (TCP/UDP/…) as UDP payload to L3OverlayDestination via this outbound (e.g. hysteria2), bypassing L4 proxy stack.
+	L3OverlayOutbound     string                           `json:"l3_overlay_outbound,omitempty"`
+	L3OverlayDestination  string                           `json:"l3_overlay_destination,omitempty"`
+	L3OverlayRouteAddress badoption.Listable[netip.Prefix] `json:"l3_overlay_route_address,omitempty"`
 	InboundOptions
 
 	// Deprecated: removed

@@ -38,7 +38,7 @@ func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *H
 	if err != nil {
 		return nil, err
 	}
-	return parseConfigContent(ctx, content, debug, nil, false)
+	return parseConfigContent(ctx, content, debug, configOpt, fullConfig)
 }
 
 func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) ([]byte, error) {
@@ -74,6 +74,21 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 					}
 					if tmpJsonObj["endpoints"] != nil {
 						jsonObj["endpoints"] = tmpJsonObj["endpoints"]
+					}
+					if inbounds, ok := tmpJsonObj["inbounds"].([]interface{}); ok {
+						tunInbounds := make([]interface{}, 0, len(inbounds))
+						for _, inbound := range inbounds {
+							inboundMap, ok := inbound.(map[string]interface{})
+							if !ok {
+								continue
+							}
+							if inboundType, _ := inboundMap["type"].(string); inboundType == "tun" {
+								tunInbounds = append(tunInbounds, inboundMap)
+							}
+						}
+						if len(tunInbounds) > 0 {
+							jsonObj["inbounds"] = tunInbounds
+						}
 					}
 				}
 			}

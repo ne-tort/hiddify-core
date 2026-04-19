@@ -144,7 +144,15 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
 	tunMTU := options.MTU
-	enableGSO := C.IsLinux && options.Stack == "gvisor" && platformInterface == nil && tunMTU > 0 && tunMTU < 49152
+	// For gVisor+l3_overlay we forward raw IP packets through an overlay path.
+	// Keep GSO disabled in this mode so overlay egress observes fully-formed
+	// packet wire data instead of offload-oriented buffers.
+	enableGSO := C.IsLinux &&
+		options.Stack == "gvisor" &&
+		options.L3OverlayOutbound == "" &&
+		platformInterface == nil &&
+		tunMTU > 0 &&
+		tunMTU < 49152
 	if tunMTU == 0 {
 		if platformInterface != nil && platformInterface.UnderNetworkExtension() {
 			// In Network Extension, when MTU exceeds 4064 (4096-UTUN_IF_HEADROOM_SIZE), the performance of tun will drop significantly, which may be a system bug.

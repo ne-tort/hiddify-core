@@ -275,9 +275,9 @@ replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.
 
 replace github.com/hiddify/ray2sing => ./ray2sing
 
-replace github.com/sagernet/sing-box => ../experiments/router/hiddify-sing-box
+replace github.com/sagernet/sing-box => ./hiddify-sing-box
 
-replace github.com/sagernet/sing-tun => ../experiments/router/hiddify-sing-box/replace/sing-tun
+replace github.com/sagernet/sing-tun => ./hiddify-sing-box/replace/sing-tun
 
 replace github.com/sagernet/wireguard-go => ./hiddify-sing-box/replace/wireguard-go
 

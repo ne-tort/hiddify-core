@@ -51,6 +51,7 @@ type InboundOptions struct {
 	EnableTun        bool   `json:"enable-tun,omitempty"`
 	EnableTunService bool   `json:"enable-tun-service,omitempty"`
 	SetSystemProxy   bool   `json:"set-system-proxy,omitempty"`
+	ClientToClient   bool   `json:"client-to-client,omitempty"`
 	MixedPort        uint16 `json:"mixed-port,omitempty"`
 	TProxyPort       uint16 `json:"tproxy-port,omitempty"`
 	RedirectPort     uint16 `json:"redirect-port,omitempty"`
@@ -121,6 +122,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		InboundOptions: InboundOptions{
 			EnableTun:      false,
 			SetSystemProxy: false,
+			ClientToClient: false,
 			MixedPort:      12334,
 			TProxyPort:     12335,
 			RedirectPort:   12336,

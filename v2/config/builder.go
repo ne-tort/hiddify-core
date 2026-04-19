@@ -3,6 +3,7 @@ package config
 import (
 	context "context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -78,7 +79,7 @@ func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptio
 	setExperimental(&options, hopts)
 
 	setLog(&options, hopts)
-	setInbound(&options, hopts)
+	setInbound(&options, hopts, input.Inbounds)
 	staticIPs := make(map[string][]string)
 	// staticIPs["api.cloudflareclient.com"] = []string{"104.16.192.82", "2606:4700::6810:1854", getRandomWarpIP()}
 	// setNTP(&options)
@@ -151,7 +152,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		switch out.Type {
 		case C.TypeBlock, C.TypeDNS:
 			continue
-		case C.TypeSelector, C.TypeURLTest:
+		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer:
 			continue
 		case C.TypeCustom:
 			continue
@@ -437,7 +438,31 @@ func isIPv6Supported() bool {
 	_, err := net.ResolveIPAddr("ip6", "::1")
 	return err == nil
 }
-func setInbound(options *option.Options, hopt *HiddifyOptions) {
+func extractTunReference(inbounds []option.Inbound) *option.TunInboundOptions {
+	for _, inbound := range inbounds {
+		if inbound.Type != C.TypeTun {
+			continue
+		}
+		if tun, ok := inbound.Options.(*option.TunInboundOptions); ok {
+			return tun
+		}
+		if tun, ok := inbound.Options.(option.TunInboundOptions); ok {
+			tunCopy := tun
+			return &tunCopy
+		}
+		serialized, err := json.Marshal(inbound.Options)
+		if err != nil {
+			continue
+		}
+		var tun option.TunInboundOptions
+		if err := json.Unmarshal(serialized, &tun); err == nil {
+			return &tun
+		}
+	}
+	return nil
+}
+
+func setInbound(options *option.Options, hopt *HiddifyOptions, inputInbounds []option.Inbound) {
 	// var inboundDomainStrategy option.DomainStrategy
 	// if !opt.ResolveDestination {
 	// 	inboundDomainStrategy = option.DomainStrategy(dns.DomainStrategyAsIS)
@@ -445,6 +470,7 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	// 	inboundDomainStrategy = opt.IPv6Mode
 	// }
 	ipv6Enable := isIPv6Supported()
+	tunRef := extractTunReference(inputInbounds)
 	if hopt.EnableTun {
 
 		opts := option.TunInboundOptions{
@@ -476,8 +502,44 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 
 		// }
 		opts.Address = []netip.Prefix{netip.MustParsePrefix("172.19.0.1/28")}
-		if ipv6Enable {
+		if !hopt.ClientToClient && ipv6Enable {
 			opts.Address = append(opts.Address, netip.MustParsePrefix("fdfe:dcba:9876::1/126"))
+		}
+		if hopt.ClientToClient {
+			opts.L3OverlayOutbound = OutboundSelectTag
+			opts.L3OverlayRouteAddress = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}
+			if tunRef != nil {
+				if tunRef.L3OverlayOutbound != "" {
+					opts.L3OverlayOutbound = tunRef.L3OverlayOutbound
+				}
+				if len(tunRef.L3OverlayRouteAddress) > 0 {
+					opts.L3OverlayRouteAddress = tunRef.L3OverlayRouteAddress
+				}
+				if tunRef.L3OverlayDestination != "" {
+					opts.L3OverlayDestination = tunRef.L3OverlayDestination
+				}
+				refIPv4 := make([]netip.Prefix, 0, len(tunRef.Address))
+				refIPv6 := make([]netip.Prefix, 0, len(tunRef.Address))
+				for _, prefix := range tunRef.Address {
+					if prefix.Addr().Is4() {
+						refIPv4 = append(refIPv4, prefix)
+						continue
+					}
+					if prefix.Addr().Is6() {
+						refIPv6 = append(refIPv6, prefix)
+					}
+				}
+				if len(refIPv4) > 0 {
+					opts.Address = refIPv4
+					if len(refIPv6) > 0 {
+						opts.Address = append(opts.Address, refIPv6...)
+					} else if ipv6Enable {
+						// Keep dual-stack tun behavior for DNS/route compatibility when
+						// imported tun reference provides only IPv4.
+						opts.Address = append(opts.Address, netip.MustParsePrefix("fdfe:dcba:9876::1/126"))
+					}
+				}
+			}
 		}
 
 		options.Inbounds = append(options.Inbounds, tunInbound)

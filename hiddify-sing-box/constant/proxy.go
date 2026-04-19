@@ -29,6 +29,7 @@ const (
 	TypePsiphon      = "psiphon"
 	TypeTunnelClient = "tunnel_client"
 	TypeTunnelServer = "tunnel_server"
+	TypeL3Router     = "l3router"
 	TypeTailscale    = "tailscale"
 	TypeDERP         = "derp"
 	TypeResolved     = "resolved"
@@ -117,6 +118,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Tunnel Client"
 	case TypeTunnelServer:
 		return "Tunnel Server"
+	case TypeL3Router:
+		return "L3 Router"
 	case TypeAwg:
 		return "Awg"
 	case TypeBalancer:

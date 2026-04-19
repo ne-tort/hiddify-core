@@ -256,6 +256,11 @@ func New(options Options) (*Box, error) {
 			return nil, E.Cause(err, "initialize endpoint[", i, "]")
 		}
 	}
+	for _, ep := range endpointManager.Endpoints() {
+		if tracker, isTracker := ep.(adapter.ConnectionTracker); isTracker {
+			router.AppendTracker(tracker)
+		}
+	}
 	for i, inboundOptions := range options.Inbounds {
 		var tag string
 		if inboundOptions.Tag != "" {
