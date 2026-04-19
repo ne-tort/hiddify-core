@@ -61,6 +61,17 @@ var (
 	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag, WARPConfigTag}
 )
 
+type wgCloakEntry struct {
+	Tag        string
+	TunIPv4    netip.Prefix
+	RouteCIDRs []string
+}
+
+type wgCloakPlan struct {
+	Enabled bool
+	Entries []wgCloakEntry
+}
+
 // TODO include selectors
 func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptions) (*option.Options, error) {
 
@@ -75,22 +86,23 @@ func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptio
 		options.DNS = input.DNS
 		options.Route = input.Route
 	}
+	wgPlan := buildWGCloakPlan(input, hopts)
 
 	setExperimental(&options, hopts)
 
 	setLog(&options, hopts)
-	setInbound(&options, hopts, input.Inbounds)
+	setInbound(&options, hopts, input.Inbounds, wgPlan)
 	staticIPs := make(map[string][]string)
 	// staticIPs["api.cloudflareclient.com"] = []string{"104.16.192.82", "2606:4700::6810:1854", getRandomWarpIP()}
 	// setNTP(&options)
-	if err := setOutbounds(&options, input, hopts, &staticIPs); err != nil {
+	if err := setOutbounds(&options, input, hopts, &staticIPs, wgPlan); err != nil {
 		return nil, err
 	}
 	if err := setDns(&options, hopts, &staticIPs); err != nil {
 		return nil, err
 	}
 
-	if err := setRoutingOptions(&options, hopts); err != nil {
+	if err := setRoutingOptions(&options, hopts, wgPlan); err != nil {
 		return nil, err
 	}
 
@@ -128,7 +140,7 @@ func getHostnameIfNotIP(inp string) (string, error) {
 	return "", fmt.Errorf("not a hostname: %s", inp)
 }
 
-func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string) error {
+func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string, wgPlan wgCloakPlan) error {
 	var outbounds []option.Outbound
 	var endpoints []option.Endpoint
 	var tags []string
@@ -240,8 +252,14 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		if err != nil {
 			return err
 		}
+		if wgPlan.Enabled && out.Type == C.TypeWireGuard {
+			if patched := applyWGCloakEndpoint(out); patched != nil {
+				out = patched
+			}
+		}
 
-		if !strings.Contains(out.Tag, "§hide§") {
+		shouldExposeInSelector := !wgPlan.Enabled || !isWGCloakTag(wgPlan, out.Tag)
+		if shouldExposeInSelector && !strings.Contains(out.Tag, "§hide§") {
 			tags = append(tags, out.Tag)
 		}
 
@@ -386,6 +404,116 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+func hasProxyOutbounds(input *option.Options) bool {
+	for _, out := range input.Outbounds {
+		if contains(PredefinedOutboundTags, out.Tag) {
+			continue
+		}
+		switch out.Type {
+		case C.TypeBlock, C.TypeDNS, C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeCustom:
+			continue
+		}
+		if contains([]string{"direct", "bypass", "block"}, out.Tag) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func parseWireGuardEndpointOptions(endpoint option.Endpoint) *option.WireGuardEndpointOptions {
+	if opts, ok := endpoint.Options.(*option.WireGuardEndpointOptions); ok {
+		return opts
+	}
+	if opts, ok := endpoint.Options.(option.WireGuardEndpointOptions); ok {
+		optsCopy := opts
+		return &optsCopy
+	}
+	return nil
+}
+
+func isWGCloakTag(plan wgCloakPlan, tag string) bool {
+	for _, entry := range plan.Entries {
+		if entry.Tag == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func applyWGCloakEndpoint(endpoint *option.Endpoint) *option.Endpoint {
+	if endpoint == nil || endpoint.Type != C.TypeWireGuard {
+		return endpoint
+	}
+	opts := parseWireGuardEndpointOptions(*endpoint)
+	if opts == nil {
+		return endpoint
+	}
+	opts.Detour = OutboundSelectTag
+	opts.System = false
+	if opts.MTU == 0 {
+		opts.MTU = 1280
+	}
+	endpoint.Options = opts
+	return endpoint
+}
+
+func buildWGCloakPlan(input *option.Options, hopt *HiddifyOptions) wgCloakPlan {
+	if input == nil || hopt == nil || !hopt.RouteOptions.WGCloak {
+		return wgCloakPlan{}
+	}
+	if !hasProxyOutbounds(input) {
+		return wgCloakPlan{}
+	}
+	entries := make([]wgCloakEntry, 0)
+	for _, endpoint := range input.Endpoints {
+		if endpoint.Type != C.TypeWireGuard {
+			continue
+		}
+		opts := parseWireGuardEndpointOptions(endpoint)
+		if opts == nil {
+			continue
+		}
+		var tunIPv4 netip.Prefix
+		for _, prefix := range opts.Address {
+			if prefix.Addr().Is4() {
+				tunIPv4 = netip.PrefixFrom(prefix.Addr(), 32)
+				break
+			}
+		}
+		if !tunIPv4.IsValid() {
+			continue
+		}
+		routeCIDRs := make([]string, 0)
+		seen := map[string]bool{}
+		for _, peer := range opts.Peers {
+			for _, allowed := range peer.AllowedIPs {
+				if !allowed.Addr().Is4() || allowed.Bits() == 0 {
+					continue
+				}
+				cidr := allowed.String()
+				if seen[cidr] {
+					continue
+				}
+				seen[cidr] = true
+				routeCIDRs = append(routeCIDRs, cidr)
+			}
+		}
+		if len(routeCIDRs) == 0 {
+			continue
+		}
+		entries = append(entries, wgCloakEntry{
+			Tag:        endpoint.Tag,
+			TunIPv4:    tunIPv4,
+			RouteCIDRs: routeCIDRs,
+		})
+	}
+	if len(entries) == 0 {
+		return wgCloakPlan{}
+	}
+	return wgCloakPlan{Enabled: true, Entries: entries}
+}
+
 func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 	if len(hopt.ConnectionTestUrls) == 0 {
 		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl, "http://captive.apple.com/generate_204", "https://cp.cloudflare.com", "https://google.com/generate_204"}
@@ -462,7 +590,7 @@ func extractTunReference(inbounds []option.Inbound) *option.TunInboundOptions {
 	return nil
 }
 
-func setInbound(options *option.Options, hopt *HiddifyOptions, inputInbounds []option.Inbound) {
+func setInbound(options *option.Options, hopt *HiddifyOptions, inputInbounds []option.Inbound, wgPlan wgCloakPlan) {
 	// var inboundDomainStrategy option.DomainStrategy
 	// if !opt.ResolveDestination {
 	// 	inboundDomainStrategy = option.DomainStrategy(dns.DomainStrategyAsIS)
@@ -540,6 +668,9 @@ func setInbound(options *option.Options, hopt *HiddifyOptions, inputInbounds []o
 					}
 				}
 			}
+		}
+		if wgPlan.Enabled {
+			applyWGCloakTunAddressPatch(&opts, wgPlan)
 		}
 
 		options.Inbounds = append(options.Inbounds, tunInbound)
@@ -631,7 +762,42 @@ func setInbound(options *option.Options, hopt *HiddifyOptions, inputInbounds []o
 	}
 }
 
-func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
+func applyWGCloakTunAddressPatch(tun *option.TunInboundOptions, plan wgCloakPlan) {
+	if tun == nil || !plan.Enabled {
+		return
+	}
+	servicePrefix := netip.MustParsePrefix("172.19.0.1/30")
+	ipv4 := []netip.Prefix{}
+	ipv6 := []netip.Prefix{}
+	seen := map[string]bool{servicePrefix.String(): true}
+	ipv4 = append(ipv4, servicePrefix)
+	for _, prefix := range tun.Address {
+		if prefix.Addr().Is4() {
+			if prefix.String() == servicePrefix.String() {
+				continue
+			}
+			if !seen[prefix.String()] {
+				seen[prefix.String()] = true
+				ipv4 = append(ipv4, prefix)
+			}
+			continue
+		}
+		if prefix.Addr().Is6() {
+			ipv6 = append(ipv6, prefix)
+		}
+	}
+	for _, entry := range plan.Entries {
+		cidr := entry.TunIPv4.String()
+		if seen[cidr] {
+			continue
+		}
+		seen[cidr] = true
+		ipv4 = append(ipv4, entry.TunIPv4)
+	}
+	tun.Address = append(ipv4, ipv6...)
+}
+
+func setRoutingOptions(options *option.Options, hopt *HiddifyOptions, wgPlan wgCloakPlan) error {
 	dnsRules := []option.DefaultDNSRule{}
 	routeRules := []option.Rule{}
 	rulesets := []option.RuleSet{}
@@ -689,6 +855,25 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 			},
 		},
 	})
+	if wgPlan.Enabled {
+		for _, entry := range wgPlan.Entries {
+			routeRules = append(routeRules, option.Rule{
+				Type: C.RuleTypeDefault,
+				DefaultOptions: option.DefaultRule{
+					RawDefaultRule: option.RawDefaultRule{
+						Inbound: []string{InboundTUNTag},
+						IPCIDR:  entry.RouteCIDRs,
+					},
+					RuleAction: option.RuleAction{
+						Action: C.RuleActionTypeRoute,
+						RouteOptions: option.RouteActionOptions{
+							Outbound: entry.Tag,
+						},
+					},
+				},
+			})
+		}
+	}
 	routeRules = append(routeRules, option.Rule{
 		Type: C.RuleTypeDefault,
 		DefaultOptions: option.DefaultRule{

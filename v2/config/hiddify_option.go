@@ -72,6 +72,7 @@ type RouteOptions struct {
 	ResolveDestination     bool                  `json:"resolve-destination,omitempty"`
 	IPv6Mode               option.DomainStrategy `json:"ipv6-mode,omitempty"`
 	BypassLAN              bool                  `json:"bypass-lan,omitempty"`
+	WGCloak                bool                  `json:"wg-cloak,omitempty"`
 	AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
 	BlockQuic              bool                  `json:"block-quic,omitempty"`
 }
@@ -140,6 +141,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			ResolveDestination:     false,
 			IPv6Mode:               option.DomainStrategy(dns.DomainStrategyAsIS),
 			BypassLAN:              false,
+			WGCloak:                false,
 			AllowConnectionFromLAN: false,
 		},
 		LogLevel: "warn",
