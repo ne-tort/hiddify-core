@@ -500,7 +500,7 @@ func buildWGCloakPlan(input *option.Options, hopt *HiddifyOptions) wgCloakPlan {
 			}
 		}
 		if len(routeCIDRs) == 0 {
-			continue
+			routeCIDRs = []string{"0.0.0.0/1", "128.0.0.0/1"}
 		}
 		entries = append(entries, wgCloakEntry{
 			Tag:        endpoint.Tag,
@@ -766,16 +766,11 @@ func applyWGCloakTunAddressPatch(tun *option.TunInboundOptions, plan wgCloakPlan
 	if tun == nil || !plan.Enabled {
 		return
 	}
-	servicePrefix := netip.MustParsePrefix("172.19.0.1/30")
 	ipv4 := []netip.Prefix{}
 	ipv6 := []netip.Prefix{}
-	seen := map[string]bool{servicePrefix.String(): true}
-	ipv4 = append(ipv4, servicePrefix)
+	seen := map[string]bool{}
 	for _, prefix := range tun.Address {
 		if prefix.Addr().Is4() {
-			if prefix.String() == servicePrefix.String() {
-				continue
-			}
 			if !seen[prefix.String()] {
 				seen[prefix.String()] = true
 				ipv4 = append(ipv4, prefix)

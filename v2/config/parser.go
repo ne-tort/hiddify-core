@@ -155,6 +155,7 @@ func patchConfigStr(ctx context.Context, content []byte, name string, configOpt 
 	return patchConfigOptions(ctx, &options, name, configOpt)
 }
 func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *HiddifyOptions) (*option.Options, error) {
+	convertWireGuardOutboundsToEndpoints(options)
 	b, _ := batch.New(ctx, batch.WithConcurrencyNum[*option.Endpoint](2))
 	for _, base := range options.Endpoints {
 		out := base

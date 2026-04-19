@@ -15,6 +15,7 @@ type ReadOptions struct {
 
 func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, error) {
 	if opt.Options != nil {
+		convertWireGuardOutboundsToEndpoints(opt.Options)
 		return opt.Options, nil
 	}
 	content, err := ReadContent(ctx, opt)
@@ -23,7 +24,11 @@ func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, er
 	}
 	var options option.Options
 	err = options.UnmarshalJSONContext(ctx, content)
-	return &options, err
+	if err != nil {
+		return nil, err
+	}
+	convertWireGuardOutboundsToEndpoints(&options)
+	return &options, nil
 }
 func BuildConfigJson(ctx context.Context, configOpt *HiddifyOptions, input *ReadOptions) ([]byte, error) {
 	options, err := BuildConfig(ctx, configOpt, input)
