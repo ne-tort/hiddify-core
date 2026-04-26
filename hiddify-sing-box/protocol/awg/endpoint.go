@@ -79,11 +79,21 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
+	gsoEnabled := true
+	if options.GSOEnabled != nil {
+		gsoEnabled = *options.GSOEnabled
+	}
+	kernelPathEnabled := false
+	if options.KernelPathEnabled != nil {
+		kernelPathEnabled = *options.KernelPathEnabled
+	}
 
 	tunEndpoint, err := awgtransport.NewEndpoint(awgtransport.EndpointOptions{
 		Context:        ctx,
 		Logger:         logger,
 		System:         options.System,
+		GSOEnabled:     gsoEnabled,
+		KernelPathEnabled: kernelPathEnabled,
 		Handler:        ep,
 		UDPTimeout:     udpTimeout,
 		Dialer:         outboundDialer,

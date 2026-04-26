@@ -14,6 +14,8 @@ import (
 type AwgEndpointOptions struct {
 	// System is the same semantic as WireGuardEndpointOptions.System: sing-tun/kernel-integrated path vs userspace netstack.
 	System                     bool                             `json:"system,omitempty"`
+	GSOEnabled                 *bool                            `json:"gso_enabled,omitempty"`
+	KernelPathEnabled          *bool                            `json:"kernel_path_enabled,omitempty"`
 	Name                       string                           `json:"name,omitempty"`
 	PrivateKey                 string                           `json:"private_key"`
 	Address                    badoption.Listable[netip.Prefix] `json:"address"`

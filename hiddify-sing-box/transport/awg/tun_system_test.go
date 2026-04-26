@@ -3,6 +3,8 @@ package awg
 import (
 	"errors"
 	"net/netip"
+	"os"
+	"runtime"
 	"testing"
 
 	awgTun "github.com/amnezia-vpn/amneziawg-go/tun"
@@ -66,6 +68,7 @@ func TestSystemTun_UsesLinuxBatchPath(t *testing.T) {
 	tunAdapter := &systemTun{
 		singtun:  fakeBatch,
 		batchTun: fakeBatch,
+		gso:      true,
 	}
 	offset := tun.PacketOffset + 8
 	bufs := [][]byte{make([]byte, offset+32), make([]byte, offset+32)}
@@ -125,5 +128,29 @@ func TestSystemTun_FallbackReadMapsTooManySegments(t *testing.T) {
 	}
 	if !errors.Is(err, awgTun.ErrTooManySegments) {
 		t.Fatalf("expected awg ErrTooManySegments, got %v", err)
+	}
+}
+
+func TestAwgSystemGSOEnabled_WithEndpointFlagAndEnvOverride(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		if awgSystemGSOEnabled(true) {
+			t.Fatal("expected gso disabled on non-linux")
+		}
+		return
+	}
+	old := os.Getenv("SBOX_AWG_DISABLE_GSO")
+	defer func() {
+		_ = os.Setenv("SBOX_AWG_DISABLE_GSO", old)
+	}()
+	_ = os.Unsetenv("SBOX_AWG_DISABLE_GSO")
+	if !awgSystemGSOEnabled(true) {
+		t.Fatal("expected gso enabled when endpoint flag is true")
+	}
+	if awgSystemGSOEnabled(false) {
+		t.Fatal("expected gso disabled when endpoint flag is false")
+	}
+	_ = os.Setenv("SBOX_AWG_DISABLE_GSO", "1")
+	if awgSystemGSOEnabled(true) {
+		t.Fatal("expected env override to force-disable gso")
 	}
 }

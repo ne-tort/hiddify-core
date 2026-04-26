@@ -15,6 +15,8 @@ type EndpointOptions struct {
 	Context        context.Context
 	Logger         logger.ContextLogger
 	System         bool
+	GSOEnabled     bool
+	KernelPathEnabled bool
 	Handler        tun.Handler
 	UDPTimeout     time.Duration
 	Dialer         N.Dialer

@@ -79,6 +79,8 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		Handler:        options.Handler,
 		UDPTimeout:     options.UDPTimeout,
 		System:         options.System,
+		GSOEnabled:     options.GSOEnabled,
+		KernelPathEnabled: options.KernelPathEnabled,
 		Address:        options.Address,
 		AllowedPrefix:  allowedAddresses,
 		ExcludedPrefix: excludedPrefixes,
@@ -158,6 +160,9 @@ func (e *Endpoint) Start(resolve bool) error {
 	}
 
 	wgDev := awgdevice.NewDevice(e.natDevice, bind, logger)
+	if tunWithDevice, ok := any(e.tunDevice).(interface{ SetDevice(*awgdevice.Device) }); ok {
+		tunWithDevice.SetDevice(wgDev)
+	}
 	ipcConf, err := buildIpcConfig(e.options, e.peers)
 	if err != nil {
 		wgDev.Close()

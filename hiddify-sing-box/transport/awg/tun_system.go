@@ -27,6 +27,7 @@ type systemTun struct {
 	mtu       uint32
 	singtun   tun.Tun
 	batchTun  tun.LinuxTUN
+	gso       bool
 	events    chan awgTun.Event
 	name      string
 	dialer    network.Dialer
@@ -35,8 +36,9 @@ type systemTun struct {
 	inet6     netip.Addr
 }
 
-func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger, customName string) (tunAdapter, error) {
+func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []netip.Prefix, excludedIps []netip.Prefix, mtu uint32, logger logger.Logger, customName string, endpointGSOEnabled bool) (tunAdapter, error) {
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
+	gsoEnabled := awgSystemGSOEnabled(endpointGSOEnabled)
 	var (
 		name    string
 		singtun tun.Tun
@@ -46,7 +48,7 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 	candidates := candidateInterfaceNames(customName)
 	for _, candidate := range candidates {
 		name = candidate
-		singtun, dial, err = createSystemTunWithName(ctx, networkManager, candidate, address, allowedIps, excludedIps, mtu, logger)
+		singtun, dial, err = createSystemTunWithName(ctx, networkManager, candidate, address, allowedIps, excludedIps, mtu, gsoEnabled, logger)
 		if err == nil {
 			break
 		}
@@ -56,12 +58,16 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 	}
 	v4, v6 := inet46FromPrefixes(address)
 	events := make(chan awgTun.Event, 1)
-	batchTun, _ := singtun.(tun.LinuxTUN)
+	var batchTun tun.LinuxTUN
+	if gsoEnabled {
+		batchTun, _ = singtun.(tun.LinuxTUN)
+	}
 	return &systemTun{
 		mtu:       mtu,
 		events:    events,
 		singtun:   singtun,
 		batchTun:  batchTun,
+		gso:       gsoEnabled,
 		name:      name,
 		dialer:    dial,
 		closeOnce: sync.Once{},
@@ -93,6 +99,7 @@ func createSystemTunWithName(
 	allowedIps []netip.Prefix,
 	excludedIps []netip.Prefix,
 	mtu uint32,
+	gsoEnabled bool,
 	logger logger.Logger,
 ) (tun.Tun, network.Dialer, error) {
 	dial, err := dialer.NewDefault(ctx, option.DialerOptions{
@@ -105,7 +112,7 @@ func createSystemTunWithName(
 	// LinuxTUN batch path to consume multi-segment reads without packet drops.
 	singtun, err := tun.New(tun.Options{
 		Name: name,
-		GSO:  runtime.GOOS == "linux",
+		GSO:  gsoEnabled,
 		MTU:  uint32(mtu),
 		Inet4Address: common.Filter(address, func(it netip.Prefix) bool {
 			return it.Addr().Is4()
@@ -135,6 +142,18 @@ func createSystemTunWithName(
 	return singtun, dial, nil
 }
 
+func awgSystemGSOEnabled(endpointEnabled bool) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	// Runtime switch for safe rollout:
+	// set SBOX_AWG_DISABLE_GSO=1 to force-disable AWG system TUN GSO.
+	if os.Getenv("SBOX_AWG_DISABLE_GSO") == "1" {
+		return false
+	}
+	return endpointEnabled
+}
+
 func (t *systemTun) Start() error {
 	if err := t.singtun.Start(); err != nil {
 		return exceptions.Cause(err, "start tunnel")
@@ -149,7 +168,7 @@ func (t *systemTun) File() *os.File {
 }
 
 func (t *systemTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	if t.batchTun != nil {
+	if t.gso && t.batchTun != nil {
 		n, err := t.batchTun.BatchRead(bufs, offset-tun.PacketOffset, sizes)
 		if err != nil && errors.Is(err, tun.ErrTooManySegments) {
 			return 0, awgTun.ErrTooManySegments
@@ -168,7 +187,7 @@ func (t *systemTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (t *systemTun) Write(bufs [][]byte, offset int) (int, error) {
-	if t.batchTun != nil {
+	if t.gso && t.batchTun != nil {
 		return t.batchTun.BatchWrite(bufs, offset)
 	}
 	for _, buf := range bufs {
@@ -204,7 +223,7 @@ func (t *systemTun) Close() error {
 }
 
 func (t *systemTun) BatchSize() int {
-	if t.batchTun != nil {
+	if t.gso && t.batchTun != nil {
 		return t.batchTun.BatchSize()
 	}
 	return 1
