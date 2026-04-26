@@ -27,6 +27,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/wireguard-go/conn"
 	"github.com/sagernet/wireguard-go/device"
 	wgTun "github.com/sagernet/wireguard-go/tun"
 )
@@ -180,28 +181,49 @@ func (w *stackDevice) File() *os.File {
 }
 
 func (w *stackDevice) Read(bufs [][]byte, sizes []int, offset int) (count int, err error) {
+	readPacket := func(packet *stack.PacketBuffer, out []byte) int {
+		defer packet.DecRef()
+		var copyN int
+		for _, view := range packet.AsSlices() {
+			copyN += copy(out[offset+copyN:], view)
+		}
+		return copyN
+	}
+	readBuffer := func(packet *buf.Buffer, out []byte) int {
+		defer packet.Release()
+		return copy(out[offset:], packet.Bytes())
+	}
+
 	select {
 	case packet, ok := <-w.outbound:
 		if !ok {
 			return 0, os.ErrClosed
 		}
-		defer packet.DecRef()
-		var copyN int
-		/*rangeIterate(packet.Data().AsRange(), func(view *buffer.View) {
-			copyN += copy(bufs[0][offset+copyN:], view.AsSlice())
-		})*/
-		for _, view := range packet.AsSlices() {
-			copyN += copy(bufs[0][offset+copyN:], view)
-		}
-		sizes[0] = copyN
-		return 1, nil
+		sizes[0] = readPacket(packet, bufs[0])
+		count = 1
 	case packet := <-w.packetOutbound:
-		defer packet.Release()
-		sizes[0] = copy(bufs[0][offset:], packet.Bytes())
-		return 1, nil
+		sizes[0] = readBuffer(packet, bufs[0])
+		count = 1
 	case <-w.done:
 		return 0, os.ErrClosed
 	}
+
+	for count < len(bufs) {
+		select {
+		case packet, ok := <-w.outbound:
+			if !ok {
+				return count, os.ErrClosed
+			}
+			sizes[count] = readPacket(packet, bufs[count])
+			count++
+		case packet := <-w.packetOutbound:
+			sizes[count] = readBuffer(packet, bufs[count])
+			count++
+		default:
+			return count, nil
+		}
+	}
+	return count, nil
 }
 
 func (w *stackDevice) Write(bufs [][]byte, offset int) (count int, err error) {
@@ -255,7 +277,7 @@ func (w *stackDevice) Close() error {
 }
 
 func (w *stackDevice) BatchSize() int {
-	return 1
+	return conn.IdealBatchSize
 }
 
 func (w *stackDevice) CreateDestination(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {

@@ -364,10 +364,16 @@ func (m *OutboundMonitoring) SignalChange(outboundTag string) error {
 
 }
 func (m *OutboundMonitoring) TestNow(outboundTag string) error {
+	if m == nil {
+		return nil
+	}
 	m.testParents(outboundTag, true)
 	return m.testNow(outboundTag, true)
 }
 func (m *OutboundMonitoring) testNow(outboundTag string, priority bool) error {
+	if m == nil {
+		return nil
+	}
 	m.logger.Info("testing outbound ", outboundTag, " with priority: ", priority)
 	if grp, ok := m.groups[outboundTag]; ok {
 		for tag := range grp.outbounds {
@@ -393,6 +399,9 @@ func (m *OutboundMonitoring) testNow(outboundTag string, priority bool) error {
 }
 
 func (m *OutboundMonitoring) testParents(outboundTag string, first bool) {
+	if m == nil {
+		return
+	}
 	state := m.getState(outboundTag)
 	if state == nil {
 		return
@@ -953,6 +962,9 @@ func (m *OutboundMonitoring) groupNotifierLoop(grp *groupState) {
 }
 
 func (m *OutboundMonitoring) getState(tag string) *outboundState {
+	if m == nil {
+		return nil
+	}
 	return m.outbounds[tag]
 }
 

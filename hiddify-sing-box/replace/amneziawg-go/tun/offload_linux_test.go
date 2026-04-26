@@ -273,6 +273,14 @@ func flipUDP4Checksum(b []byte) []byte {
 	return b
 }
 
+func groFromCanUDPGRO(canUDPGRO bool) groDisablementFlags {
+	var gro groDisablementFlags
+	if !canUDPGRO {
+		gro.disableUDPGRO()
+	}
+	return gro
+}
+
 func Fuzz_handleGRO(f *testing.F) {
 	pkt0 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1)
 	pkt1 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101)
@@ -290,7 +298,7 @@ func Fuzz_handleGRO(f *testing.F) {
 	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, canUDPGRO bool, offset int) {
 		pkts := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
 		toWrite := make([]int, 0, len(pkts))
-		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), canUDPGRO, &toWrite)
+		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groFromCanUDPGRO(canUDPGRO), &toWrite)
 		if len(toWrite) > len(pkts) {
 			t.Errorf("len(toWrite): %d > len(pkts): %d", len(toWrite), len(pkts))
 		}
@@ -507,7 +515,7 @@ func Test_handleGRO(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			toWrite := make([]int, 0, len(tt.pktsIn))
-			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.canUDPGRO, &toWrite)
+			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), groFromCanUDPGRO(tt.canUDPGRO), &toWrite)
 			if err != nil {
 				if tt.wantErr {
 					return
@@ -644,7 +652,7 @@ func Test_packetIsGROCandidate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := packetIsGROCandidate(tt.b, tt.canUDPGRO); got != tt.want {
+			if got := packetIsGROCandidate(tt.b, groFromCanUDPGRO(tt.canUDPGRO)); got != tt.want {
 				t.Errorf("packetIsGROCandidate() = %v, want %v", got, tt.want)
 			}
 		})

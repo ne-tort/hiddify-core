@@ -215,6 +215,10 @@ func buildMieruClientConfig(options option.MieruOutboundOptions, dialer mieruDia
 			Level: mierupb.MultiplexingLevel(multiplexing).Enum(),
 		}
 	}
+	if options.HandshakeMode != "" {
+		handshakeMode := mierupb.HandshakeMode(mierupb.HandshakeMode_value[options.HandshakeMode])
+		config.Profile.HandshakeMode = handshakeMode.Enum()
+	}
 	if options.TrafficPattern != "" {
 		trafficPattern, _ := mierutp.Decode(options.TrafficPattern)
 		config.Profile.TrafficPattern = trafficPattern
@@ -255,6 +259,11 @@ func validateMieruOptions(options option.MieruOutboundOptions) error {
 	if options.Multiplexing != "" {
 		if _, ok := mierupb.MultiplexingLevel_value[options.Multiplexing]; !ok {
 			return fmt.Errorf("invalid multiplexing level: %s", options.Multiplexing)
+		}
+	}
+	if options.HandshakeMode != "" {
+		if _, ok := mierupb.HandshakeMode_value[options.HandshakeMode]; !ok {
+			return fmt.Errorf("invalid handshake mode: %s", options.HandshakeMode)
 		}
 	}
 	if options.TrafficPattern != "" {

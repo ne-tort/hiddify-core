@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/amnezia-vpn/amneziawg-go/conn"
+	awgTun "github.com/amnezia-vpn/amneziawg-go/tun"
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/adapters/gonet"
@@ -27,23 +29,22 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	awgTun "github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 var _ NatDevice = (*awgStackDevice)(nil)
 
 type awgStackDevice struct {
-	ctx              context.Context
-	logger           log.ContextLogger
-	stack            *stack.Stack
-	mtu              uint32
-	events           chan awgTun.Event
-	outbound         chan *stack.PacketBuffer
-	packetOutbound   chan *buf.Buffer
-	done             chan struct{}
-	dispatcher       stack.NetworkDispatcher
-	inet4Address     netip.Addr
-	inet6Address     netip.Addr
+	ctx            context.Context
+	logger         log.ContextLogger
+	stack          *stack.Stack
+	mtu            uint32
+	events         chan awgTun.Event
+	outbound       chan *stack.PacketBuffer
+	packetOutbound chan *buf.Buffer
+	done           chan struct{}
+	dispatcher     stack.NetworkDispatcher
+	inet4Address   netip.Addr
+	inet6Address   netip.Addr
 }
 
 func newAwgStackDevice(opt tunPickOptions) (*awgStackDevice, error) {
@@ -199,25 +200,49 @@ func (w *awgStackDevice) File() *os.File {
 }
 
 func (w *awgStackDevice) Read(bufs [][]byte, sizes []int, offset int) (count int, err error) {
+	readPacket := func(packet *stack.PacketBuffer, out []byte) int {
+		defer packet.DecRef()
+		var copyN int
+		for _, view := range packet.AsSlices() {
+			copyN += copy(out[offset+copyN:], view)
+		}
+		return copyN
+	}
+	readBuffer := func(packet *buf.Buffer, out []byte) int {
+		defer packet.Release()
+		return copy(out[offset:], packet.Bytes())
+	}
+
 	select {
 	case packet, ok := <-w.outbound:
 		if !ok {
 			return 0, os.ErrClosed
 		}
-		defer packet.DecRef()
-		var copyN int
-		for _, view := range packet.AsSlices() {
-			copyN += copy(bufs[0][offset+copyN:], view)
-		}
-		sizes[0] = copyN
-		return 1, nil
+		sizes[0] = readPacket(packet, bufs[0])
+		count = 1
 	case packet := <-w.packetOutbound:
-		defer packet.Release()
-		sizes[0] = copy(bufs[0][offset:], packet.Bytes())
-		return 1, nil
+		sizes[0] = readBuffer(packet, bufs[0])
+		count = 1
 	case <-w.done:
 		return 0, os.ErrClosed
 	}
+
+	for count < len(bufs) {
+		select {
+		case packet, ok := <-w.outbound:
+			if !ok {
+				return count, os.ErrClosed
+			}
+			sizes[count] = readPacket(packet, bufs[count])
+			count++
+		case packet := <-w.packetOutbound:
+			sizes[count] = readBuffer(packet, bufs[count])
+			count++
+		default:
+			return count, nil
+		}
+	}
+	return count, nil
 }
 
 func (w *awgStackDevice) Write(bufs [][]byte, offset int) (count int, err error) {
@@ -271,7 +296,7 @@ func (w *awgStackDevice) Close() error {
 }
 
 func (w *awgStackDevice) BatchSize() int {
-	return 1
+	return conn.IdealBatchSize
 }
 
 func (w *awgStackDevice) CreateDestination(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {

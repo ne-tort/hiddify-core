@@ -186,7 +186,33 @@ func (b *bind_adapter) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
 }
 
 func (b *bind_adapter) SendWithoutModify(bufs [][]byte, ep conn.Endpoint, offset int) error {
-	return b.Send(bufs, ep, offset)
+	var pc net.PacketConn
+	if ep.DstIP().Is6() {
+		pc = b.conn6
+	} else {
+		pc = b.conn4
+	}
+
+	if pc == nil {
+		return errors.ErrUnsupported
+	}
+
+	ap, err := netip.ParseAddrPort(ep.DstToString())
+	if err != nil {
+		return E.Cause(err, "parse endpoint")
+	}
+
+	udpAddr := &net.UDPAddr{
+		IP:   ap.Addr().AsSlice(),
+		Port: int(ap.Port()),
+	}
+	for _, buf := range bufs {
+		if _, err := pc.WriteTo(buf[offset:], udpAddr); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (b *bind_adapter) ParseEndpoint(s string) (conn.Endpoint, error) {

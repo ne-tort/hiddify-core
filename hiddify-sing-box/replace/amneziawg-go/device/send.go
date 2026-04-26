@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -172,7 +173,11 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	err = peer.sendBuffersPlain(sendBuffer)
 	if err != nil {
-		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
+		if strings.Contains(err.Error(), "no known endpoint for peer") {
+			peer.device.log.Verbosef("%v - Failed to send handshake initiation: %v", peer, err)
+		} else {
+			peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
+		}
 	}
 	peer.timersHandshakeInitiated()
 

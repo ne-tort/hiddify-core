@@ -54,6 +54,7 @@ func MieruSingbox(uri string) (*T.Outbound, error) {
 			UserName:         u.Username,
 			Password:         u.Password,
 			Multiplexing:     getOneOfN(decoded, "", "multiplexing"),
+			HandshakeMode:    getOneOfN(decoded, "", "handshakemode", "handshake-mode", "handshake_mode", "handshakeMode"),
 			TrafficPattern:   getOneOfN(decoded, "", "trafficpattern", "traffic-pattern", "traffic_pattern"),
 		},
 	}

@@ -32,5 +32,26 @@
 //     device constructor in this fork—only Workers go to device.NewDevice.
 //
 //   - Close: awgdevice.Device.Close closes the tun device; do not close the tun adapter again from outside.
+//
+// Symmetry audit matrix (WG reference vs AWG):
+//
+//   - Linux, system TUN (P0):
+//     WG: batch-aware path (LinuxTUN BatchRead/BatchWrite + dynamic BatchSize) with GSO enabled.
+//     AWG: now mirrors this behavior in transport layer to avoid ErrTooManySegments drops under GSO.
+//
+//   - Linux, userspace stack (P1):
+//     WG and AWG both use sing-tun gvisor stack with equivalent lifecycle/dial/listen semantics.
+//
+//   - with_gvisor + system=true hybrid (P1, accepted asymmetry):
+//     WG supports kernel TUN + gvisor overlay via device.InputPacket; AWG keeps kernel-only system TUN
+//     because upstream amneziawg-go does not expose equivalent InputPacket API.
+//
+//   - Windows/Android low-level tun in replace/*wg-go (P1):
+//     Implementations are largely mirrored; transport layer must preserve BatchSize-aware behavior where
+//     supported and keep single-packet fallback elsewhere.
+//
+//   - Android queue constants (P2):
+//     AWG follows WG MaxSegmentSize constraints to avoid larger-than-necessary segment buffering pressure
+//     on memory-constrained devices.
 
 package awg

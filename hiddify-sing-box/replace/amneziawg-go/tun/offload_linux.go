@@ -9,19 +9,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"unsafe"
 
 	"github.com/amnezia-vpn/amneziawg-go/conn"
 	"golang.org/x/sys/unix"
-)
-
-const tcpFlagsOffset = 13
-
-const (
-	tcpFlagFIN uint8 = 0x01
-	tcpFlagPSH uint8 = 0x08
-	tcpFlagACK uint8 = 0x10
 )
 
 // virtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h. The
@@ -33,6 +26,30 @@ type virtioNetHdr struct {
 	gsoSize    uint16
 	csumStart  uint16
 	csumOffset uint16
+}
+
+func (v *virtioNetHdr) toGSOOptions() (GSOOptions, error) {
+	var gsoType GSOType
+	switch v.gsoType {
+	case unix.VIRTIO_NET_HDR_GSO_NONE:
+		gsoType = GSONone
+	case unix.VIRTIO_NET_HDR_GSO_TCPV4:
+		gsoType = GSOTCPv4
+	case unix.VIRTIO_NET_HDR_GSO_TCPV6:
+		gsoType = GSOTCPv6
+	case unix.VIRTIO_NET_HDR_GSO_UDP_L4:
+		gsoType = GSOUDPL4
+	default:
+		return GSOOptions{}, fmt.Errorf("unsupported virtio gsoType: %d", v.gsoType)
+	}
+	return GSOOptions{
+		GSOType:    gsoType,
+		HdrLen:     v.hdrLen,
+		CsumStart:  v.csumStart,
+		CsumOffset: v.csumOffset,
+		GSOSize:    v.gsoSize,
+		NeedsCsum:  v.flags&unix.VIRTIO_NET_HDR_F_NEEDS_CSUM != 0,
+	}, nil
 }
 
 func (v *virtioNetHdr) decode(b []byte) error {
@@ -509,11 +526,7 @@ const (
 	ipv4FlagMoreFragments uint8 = 0x20
 )
 
-const (
-	ipv4SrcAddrOffset = 12
-	ipv6SrcAddrOffset = 8
-	maxUint16         = 1<<16 - 1
-)
+const maxUint16 = 1<<16 - 1
 
 type groResult int
 
@@ -748,7 +761,7 @@ const (
 	udp6GROCandidate
 )
 
-func packetIsGROCandidate(b []byte, canUDPGRO bool) groCandidateType {
+func packetIsGROCandidate(b []byte, gro groDisablementFlags) groCandidateType {
 	if len(b) < 28 {
 		return notGROCandidate
 	}
@@ -757,17 +770,17 @@ func packetIsGROCandidate(b []byte, canUDPGRO bool) groCandidateType {
 			// IPv4 packets w/IP options do not coalesce
 			return notGROCandidate
 		}
-		if b[9] == unix.IPPROTO_TCP && len(b) >= 40 {
+		if b[9] == unix.IPPROTO_TCP && len(b) >= 40 && gro.canTCPGRO() {
 			return tcp4GROCandidate
 		}
-		if b[9] == unix.IPPROTO_UDP && canUDPGRO {
+		if b[9] == unix.IPPROTO_UDP && gro.canUDPGRO() {
 			return udp4GROCandidate
 		}
 	} else if b[0]>>4 == 6 {
-		if b[6] == unix.IPPROTO_TCP && len(b) >= 60 {
+		if b[6] == unix.IPPROTO_TCP && len(b) >= 60 && gro.canTCPGRO() {
 			return tcp6GROCandidate
 		}
-		if b[6] == unix.IPPROTO_UDP && len(b) >= 48 && canUDPGRO {
+		if b[6] == unix.IPPROTO_UDP && len(b) >= 48 && gro.canUDPGRO() {
 			return udp6GROCandidate
 		}
 	}
@@ -860,15 +873,15 @@ func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6 bool) 
 // handleGRO evaluates bufs for GRO, and writes the indices of the resulting
 // packets into toWrite. toWrite, tcpTable, and udpTable should initially be
 // empty (but non-nil), and are passed in to save allocs as the caller may reset
-// and recycle them across vectors of packets. canUDPGRO indicates if UDP GRO is
-// supported.
-func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, canUDPGRO bool, toWrite *[]int) error {
+// and recycle them across vectors of packets. gro indicates if TCP and UDP GRO
+// are supported/enabled.
+func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, gro groDisablementFlags, toWrite *[]int) error {
 	for i := range bufs {
 		if offset < virtioNetHdrLen || offset > len(bufs[i])-1 {
 			return errors.New("invalid offset")
 		}
 		var result groResult
-		switch packetIsGROCandidate(bufs[i][offset:], canUDPGRO) {
+		switch packetIsGROCandidate(bufs[i][offset:], gro) {
 		case tcp4GROCandidate:
 			result = tcpGRO(bufs, offset, i, tcpTable, false)
 		case tcp6GROCandidate:

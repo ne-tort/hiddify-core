@@ -38,3 +38,28 @@ func TestBindAdapter_Send_appliesReserved(t *testing.T) {
 		t.Fatalf("expected default reserved for unknown endpoint, got %d %d %d", buf2[1], buf2[2], buf2[3])
 	}
 }
+
+func TestBindAdapter_SendWithoutModify_keepsPayload(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	b := &bind_adapter{
+		conn4:               pc,
+		ctx:                 context.Background(),
+		reserved:            [3]uint8{1, 2, 3},
+		reservedForEndpoint: make(map[netip.AddrPort][3]uint8),
+	}
+	dst := netip.MustParseAddrPort("127.0.0.1:12345")
+	b.SetReservedForEndpoint(dst, [3]uint8{9, 8, 7})
+
+	buf := make([]byte, 16)
+	buf[1], buf[2], buf[3] = 55, 66, 77
+	ep := &bind_endpoint{AddrPort: dst}
+	_ = b.SendWithoutModify([][]byte{buf}, ep, 0)
+	if buf[1] != 55 || buf[2] != 66 || buf[3] != 77 {
+		t.Fatalf("expected payload unchanged, got %d %d %d", buf[1], buf[2], buf[3])
+	}
+}

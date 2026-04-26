@@ -209,7 +209,7 @@ again:
 	var fns []ReceiveFunc
 	if v4conn != nil {
 		s.ipv4TxOffload, s.ipv4RxOffload = supportsUDPOffload(v4conn)
-		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		if runtime.GOOS == "linux" {
 			v4pc = ipv4.NewPacketConn(v4conn)
 			s.ipv4PC = v4pc
 		}
@@ -218,7 +218,7 @@ again:
 	}
 	if v6conn != nil {
 		s.ipv6TxOffload, s.ipv6RxOffload = supportsUDPOffload(v6conn)
-		if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		if runtime.GOOS == "linux" {
 			v6pc = ipv6.NewPacketConn(v6conn)
 			s.ipv6PC = v6pc
 		}
@@ -417,6 +417,7 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
 		err     error
 	)
 	for _, buf := range bufs {
+		// AWG may prepend transport-level bytes; apply reserved relative to offset.
 		if len(buf) > offset+3 {
 			reserved, loaded := s.reservedForEndpoint[endpoint.(*StdNetEndpoint).AddrPort]
 			if loaded {
@@ -464,7 +465,7 @@ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message
 		err   error
 		start int
 	)
-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+	if runtime.GOOS == "linux" {
 		for {
 			n, err = pc.WriteBatch(msgs[start:], 0)
 			if err != nil || n == len(msgs[start:]) {

@@ -449,7 +449,10 @@ func applyWGCloakEndpoint(endpoint *option.Endpoint) *option.Endpoint {
 	if opts == nil {
 		return endpoint
 	}
-	opts.Detour = OutboundSelectTag
+	// Preserve detour from subscription if provided; fallback to select only when empty.
+	if strings.TrimSpace(opts.Detour) == "" {
+		opts.Detour = OutboundSelectTag
+	}
 	opts.System = false
 	if opts.MTU == 0 {
 		opts.MTU = 1280
@@ -851,6 +854,23 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions, wgPlan wgC
 		},
 	})
 	if wgPlan.Enabled {
+		routeRules = append(routeRules, option.Rule{
+			Type: C.RuleTypeDefault,
+			DefaultOptions: option.DefaultRule{
+				RawDefaultRule: option.RawDefaultRule{
+					IPCIDR: []string{
+						"127.0.0.0/8",
+						"::1/128",
+					},
+				},
+				RuleAction: option.RuleAction{
+					Action: C.RuleActionTypeRoute,
+					RouteOptions: option.RouteActionOptions{
+						Outbound: OutboundDirectTag,
+					},
+				},
+			},
+		})
 		for _, entry := range wgPlan.Entries {
 			routeRules = append(routeRules, option.Rule{
 				Type: C.RuleTypeDefault,

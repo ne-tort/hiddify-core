@@ -11,10 +11,10 @@ func TestEffectiveAdaptiveStrategy(t *testing.T) {
 		v4, v6   bool
 		want     C.DomainStrategy
 	}{
-		{true, true, C.DomainStrategyAsIS},
+		{true, true, C.DomainStrategyPreferIPv4},
 		{true, false, C.DomainStrategyIPv4Only},
 		{false, true, C.DomainStrategyIPv6Only},
-		{false, false, C.DomainStrategyAsIS},
+		{false, false, C.DomainStrategyIPv4Only},
 	}
 	for _, tt := range tests {
 		if g := EffectiveAdaptiveStrategy(tt.v4, tt.v6); g != tt.want {

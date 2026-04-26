@@ -2,9 +2,11 @@ package awg
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 
 	awgTun "github.com/amnezia-vpn/amneziawg-go/tun"
@@ -24,6 +26,7 @@ import (
 type systemTun struct {
 	mtu       uint32
 	singtun   tun.Tun
+	batchTun  tun.LinuxTUN
 	events    chan awgTun.Event
 	name      string
 	dialer    network.Dialer
@@ -53,10 +56,12 @@ func newSystemTun(ctx context.Context, address []netip.Prefix, allowedIps []neti
 	}
 	v4, v6 := inet46FromPrefixes(address)
 	events := make(chan awgTun.Event, 1)
+	batchTun, _ := singtun.(tun.LinuxTUN)
 	return &systemTun{
 		mtu:       mtu,
 		events:    events,
 		singtun:   singtun,
+		batchTun:  batchTun,
 		name:      name,
 		dialer:    dial,
 		closeOnce: sync.Once{},
@@ -96,9 +101,11 @@ func createSystemTunWithName(
 	if err != nil {
 		return nil, nil, exceptions.Cause(err, "get in-tunnel dialer")
 	}
+	// Match wireguard system endpoint semantics: enable GSO on Linux and rely on
+	// LinuxTUN batch path to consume multi-segment reads without packet drops.
 	singtun, err := tun.New(tun.Options{
 		Name: name,
-		GSO:  true,
+		GSO:  runtime.GOOS == "linux",
 		MTU:  uint32(mtu),
 		Inet4Address: common.Filter(address, func(it netip.Prefix) bool {
 			return it.Addr().Is4()
@@ -142,8 +149,18 @@ func (t *systemTun) File() *os.File {
 }
 
 func (t *systemTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	if t.batchTun != nil {
+		n, err := t.batchTun.BatchRead(bufs, offset-tun.PacketOffset, sizes)
+		if err != nil && errors.Is(err, tun.ErrTooManySegments) {
+			return 0, awgTun.ErrTooManySegments
+		}
+		return n, err
+	}
 	n, err := t.singtun.Read(bufs[0][offset-tun.PacketOffset:])
 	if err != nil {
+		if errors.Is(err, tun.ErrTooManySegments) {
+			return 0, awgTun.ErrTooManySegments
+		}
 		return 0, err
 	}
 	sizes[0] = n
@@ -151,6 +168,9 @@ func (t *systemTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 }
 
 func (t *systemTun) Write(bufs [][]byte, offset int) (int, error) {
+	if t.batchTun != nil {
+		return t.batchTun.BatchWrite(bufs, offset)
+	}
 	for _, buf := range bufs {
 		common.ClearArray(buf[offset-tun.PacketOffset : offset])
 		tun.PacketFillHeader(buf[offset-tun.PacketOffset:], tun.PacketIPVersion(buf[offset:]))
@@ -184,6 +204,9 @@ func (t *systemTun) Close() error {
 }
 
 func (t *systemTun) BatchSize() int {
+	if t.batchTun != nil {
+		return t.batchTun.BatchSize()
+	}
 	return 1
 }
 
