@@ -125,6 +125,7 @@ func EndpointRegistry() *endpoint.Registry {
 	registerL3RouterEndpoint(registry)
 
 	registerWireGuardEndpoint(registry)
+	registerMasqueEndpoint(registry)
 	registerTailscaleEndpoint(registry)
 	registerAwgEndpoint(registry)
 

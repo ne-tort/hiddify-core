@@ -1,4 +1,4 @@
 @echo off
-set TAGS=with_gvisor,with_quic,with_wireguard,with_awg,with_ech,with_utls,with_clash_api,with_grpc
-@REM set  TAGS=with_dhcp,with_low_memory,with_conntrack
-go run --tags %TAGS% ./cli %*
+for /f "delims=" %%T in ('go run ./cmd/print_core_build_tags -windows') do set "TAGS=%%T"
+@REM tags: see cmd/internal/build_shared/core_build_tags.go
+go run --tags "%TAGS%" ./cli %*

@@ -159,13 +159,13 @@ func control(s service.Service, goArg string) (int, string) {
 	if err == nil {
 		out := fmt.Sprintf("Tunnel Service %sed Successfully.", goArg)
 		if dolog {
-			fmt.Printf(out)
+			fmt.Print(out)
 		}
 		return 0, out
 	} else {
 		out := fmt.Sprintf("Error: %v", err)
 		if dolog {
-			log.Printf(out)
+			log.Print(out)
 		}
 		return 2, out
 	}

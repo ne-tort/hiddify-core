@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sagernet/cronet-go"
@@ -126,11 +127,21 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	dnsRouter := service.FromContext[adapter.DNSRouter](ctx)
 	var dnsResolver cronet.DNSResolverFunc
 	if dnsRouter != nil {
+		queryOptions := outboundDialer.(dialer.ResolveDialer).QueryOptions()
+		if options.ForceIPv4DNS {
+			queryOptions.Strategy = C.DomainStrategyIPv4Only
+		}
 		dnsResolver = func(dnsContext context.Context, request *mDNS.Msg) *mDNS.Msg {
-			response, err := dnsRouter.Exchange(dnsContext, request, outboundDialer.(dialer.ResolveDialer).QueryOptions())
+			if queryOptions.Strategy == C.DomainStrategyIPv4Only && len(request.Question) > 0 && request.Question[0].Qtype == mDNS.TypeAAAA {
+				return dns.FixedResponseStatus(request, mDNS.RcodeSuccess)
+			}
+			response, err := dnsRouter.Exchange(dnsContext, request, queryOptions)
 			if err != nil {
 				logger.Error("DNS exchange failed: ", err)
 				return dns.FixedResponseStatus(request, mDNS.RcodeServerFailure)
+			}
+			if queryOptions.Strategy == C.DomainStrategyIPv4Only {
+				stripIPv6Hints(response)
 			}
 			return response
 		}
@@ -199,9 +210,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	var uotClient *uot.Client
 	uotOptions := common.PtrValueOrDefault(options.UDPOverTCP)
 	if uotOptions.Enabled {
+		uotVersion := uotOptions.Version
+		if uotVersion == 0 {
+			uotVersion = uot.Version
+		}
 		uotClient = &uot.Client{
 			Dialer:  &naiveDialer{client},
-			Version: uotOptions.Version,
+			Version: uotVersion,
 		}
 	}
 	var networks []string
@@ -217,6 +232,40 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		client:    client,
 		uotClient: uotClient,
 	}, nil
+}
+
+func stripIPv6Hints(message *mDNS.Msg) {
+	if message == nil {
+		return
+	}
+	message.Answer = filterIPv6Records(message.Answer)
+	message.Ns = filterIPv6Records(message.Ns)
+	message.Extra = filterIPv6Records(message.Extra)
+}
+
+func filterIPv6Records(records []mDNS.RR) []mDNS.RR {
+	if len(records) == 0 {
+		return records
+	}
+	filtered := make([]mDNS.RR, 0, len(records))
+	for _, record := range records {
+		switch value := record.(type) {
+		case *mDNS.AAAA:
+			continue
+		case *mDNS.HTTPS:
+			value.Value = slices.DeleteFunc(value.Value, func(option mDNS.SVCBKeyValue) bool {
+				_, isIPv6Hint := option.(*mDNS.SVCBIPv6Hint)
+				return isIPv6Hint
+			})
+		case *mDNS.SVCB:
+			value.Value = slices.DeleteFunc(value.Value, func(option mDNS.SVCBKeyValue) bool {
+				_, isIPv6Hint := option.(*mDNS.SVCBIPv6Hint)
+				return isIPv6Hint
+			})
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
 }
 
 func (h *Outbound) Start(stage adapter.StartStage) error {

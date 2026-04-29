@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/hiddify/hiddify-core/cmd/internal/build_shared"
 	_ "github.com/sagernet/gomobile"
@@ -38,7 +37,6 @@ func main() {
 
 var (
 	sharedFlags []string
-	sharedTags  []string
 	iosTags     []string
 )
 
@@ -46,8 +44,7 @@ const libName = "hiddify-core"
 
 func init() {
 	sharedFlags = append(sharedFlags, "-trimpath")
-	sharedFlags = append(sharedFlags, "-ldflags", "-s -w")
-	sharedTags = append(sharedTags, "with_gvisor", "with_quic", "with_wireguard", "with_awg", "with_ech", "with_utls", "with_clash_api", "with_grpc")
+	sharedFlags = append(sharedFlags, "-ldflags", "-s -w -checklinkname=0")
 	iosTags = append(iosTags, "with_dhcp", "with_low_memory", "with_conntrack")
 }
 
@@ -65,7 +62,7 @@ func buildWindows() {
 	args := []string{"build"}
 	args = append(args, sharedFlags...)
 	args = append(args, "-tags")
-	args = append(args, strings.Join(sharedTags, ","))
+	args = append(args, build_shared.JoinBuildTags(build_shared.CoreSingBoxTagsWindows()))
 
 	output := filepath.Join("bin", libName+".dll")
 	args = append(args, "-o", output, "./custom")
@@ -88,7 +85,7 @@ func buildLinux() {
 	args := []string{"build"}
 	args = append(args, sharedFlags...)
 	args = append(args, "-tags")
-	args = append(args, strings.Join(sharedTags, ","))
+	args = append(args, build_shared.JoinBuildTags(build_shared.CoreSingBoxBaseTags()))
 
 	output := filepath.Join("bin", libName+".so")
 	args = append(args, "-o", output, "./custom")
@@ -137,9 +134,9 @@ func buildMacOSArch(arch string) (string, error) {
 
 	args := []string{"build"}
 	args = append(args, sharedFlags...)
-	tags := append(sharedTags, iosTags...)
+	tags := append(build_shared.CoreSingBoxBaseTags(), iosTags...)
 	args = append(args, "-tags")
-	args = append(args, strings.Join(tags, ","))
+	args = append(args, build_shared.JoinBuildTags(tags))
 
 	filename := libName + "-" + arch + ".dylib"
 	output := filepath.Join("bin", filename)
@@ -171,7 +168,7 @@ func buildAndroid() {
 
 	args = append(args, sharedFlags...)
 	args = append(args, "-tags")
-	args = append(args, strings.Join(sharedTags, ","))
+	args = append(args, build_shared.JoinBuildTags(build_shared.CoreSingBoxBaseTags()))
 
 	output := filepath.Join("bin", libName+".aar")
 	args = append(args, "-o", output, "github.com/sagernet/sing-box/experimental/libbox", "./mobile")
@@ -197,9 +194,9 @@ func buildIOS() {
 	}
 
 	args = append(args, sharedFlags...)
-	tags := append(sharedTags, iosTags...)
+	tags := append(build_shared.CoreSingBoxBaseTags(), iosTags...)
 	args = append(args, "-tags")
-	args = append(args, strings.Join(tags, ","))
+	args = append(args, build_shared.JoinBuildTags(tags))
 
 	output := filepath.Join("bin", "Libhcore.xcframework")
 	args = append(args, "-o", output, "github.com/sagernet/sing-box/experimental/libbox", "./mobile")

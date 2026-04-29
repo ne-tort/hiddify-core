@@ -31,7 +31,8 @@ type NaiveOutboundOptions struct {
 	InsecureConcurrency   int                  `json:"insecure_concurrency,omitempty"`
 	ExtraHeaders          badoption.HTTPHeader `json:"extra_headers,omitempty"`
 	UDPOverTCP            *UDPOverTCPOptions   `json:"udp_over_tcp,omitempty"`
-	QUIC                  bool                 `json:"quic,omitempty"`
+	QUIC                  bool                 `json:"quic"`
 	QUICCongestionControl string               `json:"quic_congestion_control,omitempty"`
+	ForceIPv4DNS          bool                 `json:"force_ipv4_dns,omitempty"`
 	OutboundTLSOptionsContainer
 }

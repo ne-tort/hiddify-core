@@ -265,6 +265,9 @@ replace github.com/Psiphon-Labs/quic-go => ./replace/psiphon-quic-go
 
 replace github.com/Psiphon-Labs/psiphon-tls => ./replace/psiphon-tls
 
+replace github.com/sagernet/cronet-go => ./replace/cronet-go
+replace github.com/sagernet/cronet-go/all => ./replace/cronet-go-all
+
 replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401180616-890dc987a6a9
 
 replace github.com/sagernet/sing-tun => ./replace/sing-tun

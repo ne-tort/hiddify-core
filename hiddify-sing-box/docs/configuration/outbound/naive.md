@@ -20,6 +20,7 @@ icon: material/new-box
   "udp_over_tcp": false | {},
   "quic": false,
   "quic_congestion_control": "",
+  "force_ipv4_dns": false,
   "tls": {},
 
   ... // Dial Fields
@@ -98,6 +99,12 @@ QUIC congestion control algorithm.
 | `reno` | New Reno |
 
 `bbr` is used by default (the default of QUICHE, used by Chromium which NaiveProxy is based on).
+
+#### force_ipv4_dns
+
+Force Naive DNS resolver integration to use `ipv4_only` strategy and suppress AAAA lookups in the Cronet DNS hook.
+
+Use this when upstream resolver behavior still triggers undesired IPv6 DNS attempts under dual-stack or `prefer_ipv4` deployments.
 
 #### tls
 

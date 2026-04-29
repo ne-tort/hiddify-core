@@ -14,7 +14,9 @@ VERSION=$(shell git describe --tags || echo "unknown version")
 # windows-amd64 и прочие цели ниже — POSIX shell + bash-рецепты (.ONESHELL).
 # Запускайте из WSL/Linux, либо из Git Bash / MSYS2 на Windows (MinGW в PATH), не из cmd.exe.
 CRONET_GO_VERSION := $(shell cat hiddify-sing-box/.github/CRONET_GO_VERSION)
-TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_clash_api,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack
+# Единый список с s-ui / build_libbox: cmd/internal/build_shared/core_build_tags.go
+HIDDIFY_CORE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+TAGS := $(shell cd "$(HIDDIFY_CORE_ROOT)" && go run ./cmd/print_core_build_tags)
 IOS_ADD_TAGS=with_dhcp,with_low_memory,with_purego
 MACOS_ADD_TAGS=with_dhcp
 WINDOWS_ADD_TAGS=with_purego
@@ -26,6 +28,8 @@ WINDOWS_GOTOOLCHAIN ?= go1.25.6
 LDFLAGS=-w -s -checklinkname=0 -buildid= $${CODE_VERSION}
 GOBUILDLIB=CGO_ENABLED=1 go build -trimpath -ldflags="$(LDFLAGS)" -buildmode=c-shared
 GOBUILDSRV=CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -trimpath -tags $(TAGS)
+# Windows: тот же набор, что и у DLL (TAGS + purego), иначе bydll и libcronet расходятся.
+GOBUILDSRV_WIN=CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -trimpath -tags $(TAGS),$(WINDOWS_ADD_TAGS)
 
 CRONET_DIR=./cronet
 .PHONY: protos
@@ -88,7 +92,7 @@ windows-amd64: prepare
 	test -x "$$RSRC_BIN"
 	# .syso обязан лежать в каталоге пакета — его подхватывает go build (не переносим в bin/).
 	$$RSRC_BIN -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso
-	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC) CGO_LDFLAGS="$(BINDIR)/$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
+	env GOOS=windows GOARCH=amd64 CC=$(MINGW_CC) CGO_LDFLAGS="$(BINDIR)/$(LIBNAME).dll" $(GOBUILDSRV_WIN) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
 	rm -f $(LIBNAME).dll
 	if [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(CLINAME).exe ]; then \
 		echo "Error: $(LIBNAME).dll or $(CLINAME).exe not built"; \

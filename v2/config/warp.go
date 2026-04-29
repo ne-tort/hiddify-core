@@ -208,7 +208,6 @@ func patchWarp(base *option.Endpoint, configOpt *HiddifyOptions, final bool, sta
 			opts.ServerOptions.Server = ""
 			opts.ServerOptions.ServerPort = 0
 			opts.Profile.Detour = OutboundWARPConfigDetour
-			return nil
 			is_saved_key := len(opts.UniqueIdentifier) > 1 && opts.UniqueIdentifier[0] == 'p'
 
 			if (configOpt == nil || !final) && is_saved_key {
@@ -260,7 +259,8 @@ func patchWarp(base *option.Endpoint, configOpt *HiddifyOptions, final bool, sta
 				host = opts.Peers[0].Address
 			}
 
-			if host == "default" || host == "random" || host == "auto" || host == "auto4" || host == "auto6" || isBlockedDomain(host) {
+			autoWarpHost := host == "default" || host == "random" || host == "auto" || host == "auto4" || host == "auto6"
+			if autoWarpHost {
 				// if base.WireGuardOptions.Detour != "" {
 				// 	base.WireGuardOptions.Server = "162.159.192.1"
 				// } else {
@@ -281,7 +281,7 @@ func patchWarp(base *option.Endpoint, configOpt *HiddifyOptions, final bool, sta
 				opts.Peers[0].Address = host
 				// }
 			}
-			if opts.Peers[0].Port == 0 {
+			if autoWarpHost && opts.Peers[0].Port == 0 {
 				port := warp.RandomWarpPort()
 				opts.Peers[0].Port = port
 			}

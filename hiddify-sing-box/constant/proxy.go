@@ -16,6 +16,8 @@ const (
 	TypeNaive        = "naive"
 	TypeWireGuard    = "wireguard"
 	TypeWARP         = "warp"
+	TypeMasque       = "masque"
+	TypeWarpMasque   = "warp_masque"
 	TypeHysteria     = "hysteria"
 	TypeTor          = "tor"
 	TypeSSH          = "ssh"
@@ -82,6 +84,10 @@ func ProxyDisplayName(proxyType string) string {
 		return "WireGuard"
 	case TypeWARP:
 		return "WARP"
+	case TypeMasque:
+		return "MASQUE"
+	case TypeWarpMasque:
+		return "WARP MASQUE"
 	case TypeHysteria:
 		return "Hysteria"
 	case TypeTor:

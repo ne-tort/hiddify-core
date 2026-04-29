@@ -146,11 +146,12 @@ func (n *Inbound) Close() error {
 
 func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	ctx := log.ContextWithNewID(request.Context())
+	paddingHeader := request.Header.Get("Padding")
 	if request.Method != "CONNECT" {
 		rejectHTTP(writer, http.StatusBadRequest)
 		n.badRequest(ctx, request, E.New("not CONNECT request"))
 		return
-	} else if request.Header.Get("Padding") == "" {
+	} else if paddingHeader == "" {
 		rejectHTTP(writer, http.StatusBadRequest)
 		n.badRequest(ctx, request, E.New("missing naive padding"))
 		return
@@ -177,6 +178,14 @@ func (n *Inbound) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	source := sHttp.SourceAddress(request)
 	destination := M.ParseSocksaddr(hostPort).Unwrap()
+	n.logger.DebugContext(
+		ctx,
+		"naive CONNECT accepted from ", source,
+		" to ", destination,
+		", user=", userName,
+		", authority=", request.Header.Get("-connect-authority"),
+		", padding_len=", len(paddingHeader),
+	)
 
 	if hijacker, isHijacker := writer.(http.Hijacker); isHijacker {
 		conn, _, err := hijacker.Hijack()
@@ -228,7 +237,17 @@ func (n *Inbound) newConnection(ctx context.Context, waitForClose bool, conn net
 }
 
 func (n *Inbound) badRequest(ctx context.Context, request *http.Request, err error) {
-	n.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", request.RemoteAddr))
+	n.logger.ErrorContext(
+		ctx,
+		E.Cause(
+			err,
+			"process connection from ", request.RemoteAddr,
+			", method=", request.Method,
+			", host=", request.Host,
+			", authority=", request.Header.Get("-connect-authority"),
+			", has_padding=", request.Header.Get("Padding") != "",
+		),
+	)
 }
 
 func rejectHTTP(writer http.ResponseWriter, statusCode int) {

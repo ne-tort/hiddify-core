@@ -250,7 +250,7 @@ func (m *ConnectionManager) preConnectionCopy(ctx context.Context, source net.Co
 			break
 		}
 		if err != nil {
-			if done.Swap(true) {
+			if !done.Swap(true) {
 				onClose(err)
 			}
 			common.Close(source, destination)
@@ -314,10 +314,10 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	} else {
 		destination.Close()
 	}
-	if done.Swap(true) {
+	if !done.Swap(true) {
 		onClose(err)
-		common.Close(source, destination)
 	}
+	common.Close(source, destination)
 	if !direction {
 		if err == nil {
 			m.logger.DebugContext(ctx, "connection upload finished")

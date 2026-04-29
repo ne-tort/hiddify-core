@@ -20,6 +20,7 @@ icon: material/new-box
   "udp_over_tcp": false | {},
   "quic": false,
   "quic_congestion_control": "",
+  "force_ipv4_dns": false,
   "tls": {},
 
   ... // 拨号字段
@@ -98,6 +99,12 @@ QUIC 拥塞控制算法。
 | `reno` | New Reno |
 
 默认使用 `bbr`（NaiveProxy 基于的 Chromium 使用的 QUICHE 的默认值）。
+
+#### force_ipv4_dns
+
+强制 Naive 出站与 sing-box DNS 路由集成时使用 `ipv4_only` 策略，并在 Cronet DNS 回调中抑制 AAAA 查询。
+
+当双栈或 `prefer_ipv4` 环境下上游解析器仍会触发不期望的 IPv6 DNS 请求时可启用。
 
 #### tls
 
