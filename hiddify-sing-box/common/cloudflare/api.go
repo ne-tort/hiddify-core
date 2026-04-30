@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -19,6 +20,13 @@ import (
 type CloudflareApi struct {
 	client http.Client
 }
+
+var (
+	ErrCloudflareUnauthorized   = errors.New("cloudflare api unauthorized")
+	ErrCloudflareRateLimited    = errors.New("cloudflare api rate limited")
+	ErrCloudflareServerError    = errors.New("cloudflare api server error")
+	ErrCloudflareUnexpectedCode = errors.New("cloudflare api unexpected status code")
+)
 
 const baseUrl = "https://api.cloudflareclient.com/v0i1909051800/"
 
@@ -55,8 +63,8 @@ func (api *CloudflareApi) CreateProfile(ctx context.Context, publicKey string) (
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("status code is not 200")
+	if response.StatusCode != http.StatusOK {
+		return nil, classifyCloudflareStatus(response.StatusCode)
 	}
 	content, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -77,8 +85,8 @@ func (api *CloudflareApi) GetProfile(ctx context.Context, authToken string, id s
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("status code is not 200")
+	if response.StatusCode != http.StatusOK {
+		return nil, classifyCloudflareStatus(response.StatusCode)
 	}
 	content, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -103,8 +111,8 @@ func (api *CloudflareApi) UpdateAccount(ctx context.Context, profile *Cloudflare
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("status code is not 200")
+	if response.StatusCode != http.StatusOK {
+		return nil, classifyCloudflareStatus(response.StatusCode)
 	}
 	content, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -157,8 +165,21 @@ func (api *CloudflareApi) DeleteProfile(ctx context.Context, profile *Cloudflare
 		return err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return fmt.Errorf("status code is not 200")
+	if response.StatusCode != http.StatusOK {
+		return classifyCloudflareStatus(response.StatusCode)
 	}
 	return nil
+}
+
+func classifyCloudflareStatus(code int) error {
+	switch {
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return fmt.Errorf("%w: %d", ErrCloudflareUnauthorized, code)
+	case code == http.StatusTooManyRequests:
+		return fmt.Errorf("%w: %d", ErrCloudflareRateLimited, code)
+	case code >= 500:
+		return fmt.Errorf("%w: %d", ErrCloudflareServerError, code)
+	default:
+		return fmt.Errorf("%w: %d", ErrCloudflareUnexpectedCode, code)
+	}
 }

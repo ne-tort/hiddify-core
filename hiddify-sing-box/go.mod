@@ -1,6 +1,6 @@
 module github.com/sagernet/sing-box
 
-go 1.24.7
+go 1.25
 
 require github.com/amnezia-vpn/amneziawg-go v0.2.16
 
@@ -30,6 +30,9 @@ require (
 	github.com/openai/openai-go/v3 v3.15.0
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/oschwald/maxminddb-golang v1.13.1
+	github.com/quic-go/connect-ip-go v0.2.0
+	github.com/quic-go/masque-go v0.3.0
+	github.com/quic-go/quic-go v0.59.0
 	github.com/sagernet/asc-go v0.0.0-20241217030726-d563060fe4e1
 	github.com/sagernet/bbolt v0.0.0-20231014093535-ea5cb2fe9f0a
 	github.com/sagernet/cors v1.2.1
@@ -55,6 +58,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/gjson v1.18.0
 	github.com/vishvananda/netns v0.0.5
+	github.com/yosida95/uritemplate/v3 v3.0.2
 	go.uber.org/zap v1.27.1
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
 	golang.org/x/crypto v0.47.0
@@ -119,6 +123,7 @@ require (
 	github.com/dgrijalva/jwt-go/v4 v4.0.0-preview1 // indirect
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
+	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.0.2 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
@@ -266,8 +271,13 @@ replace github.com/Psiphon-Labs/quic-go => ./replace/psiphon-quic-go
 replace github.com/Psiphon-Labs/psiphon-tls => ./replace/psiphon-tls
 
 replace github.com/sagernet/cronet-go => ./replace/cronet-go
+
 replace github.com/sagernet/cronet-go/all => ./replace/cronet-go-all
 
 replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401180616-890dc987a6a9
 
 replace github.com/sagernet/sing-tun => ./replace/sing-tun
+
+replace github.com/quic-go/masque-go => ./third_party/masque-go
+
+replace github.com/quic-go/connect-ip-go => ./third_party/connect-ip-go

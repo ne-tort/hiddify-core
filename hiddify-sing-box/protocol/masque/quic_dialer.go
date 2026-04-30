@@ -1,0 +1,108 @@
+package masque
+
+import (
+	"context"
+	"crypto/tls"
+	"io"
+	"net"
+	"reflect"
+	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/option"
+	TM "github.com/sagernet/sing-box/transport/masque"
+	E "github.com/sagernet/sing/common/exceptions"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+)
+
+func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remoteIsDomain bool) (TM.QUICDialFunc, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var (
+		outboundDialer N.Dialer
+		err            error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				outboundDialer = nil
+				err = E.New("dialer.New panic: ", r)
+			}
+		}()
+		outboundDialer, err = dialer.New(ctx, options, remoteIsDomain)
+	}()
+	if err != nil {
+		if reflect.DeepEqual(options, option.DialerOptions{}) {
+			return nil, nil
+		}
+		return nil, E.Cause(err, "initialize MASQUE QUIC dialer")
+	}
+	if outboundDialer == nil {
+		return nil, E.New("initialize MASQUE QUIC dialer: got nil dialer")
+	}
+	return func(ctx context.Context, address string, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error) {
+		destination := M.ParseSocksaddr(address)
+		if !destination.IsValid() {
+			return nil, E.New("invalid MASQUE server address: ", address)
+		}
+		conn, err := outboundDialer.DialContext(ctx, N.NetworkUDP, destination)
+		if err != nil {
+			return nil, err
+		}
+		packetConn := &connectedPacketConn{Conn: conn, remoteAddr: conn.RemoteAddr()}
+		transport := &quic.Transport{Conn: packetConn}
+		earlyConn, err := transport.Dial(ctx, conn.RemoteAddr(), tlsConf, quicConf)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return earlyConn, nil
+	}, nil
+}
+
+type connectedPacketConn struct {
+	net.Conn
+	remoteAddr net.Addr
+}
+
+func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, err = c.Conn.Read(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, c.remoteAddr, nil
+}
+
+func (c *connectedPacketConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
+	return c.Conn.Write(p)
+}
+
+func (c *connectedPacketConn) LocalAddr() net.Addr {
+	return c.Conn.LocalAddr()
+}
+
+func (c *connectedPacketConn) SetDeadline(t time.Time) error {
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *connectedPacketConn) SetReadDeadline(t time.Time) error {
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *connectedPacketConn) SetWriteDeadline(t time.Time) error {
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func (c *connectedPacketConn) Close() error {
+	if c.Conn == nil {
+		return nil
+	}
+	err := c.Conn.Close()
+	if err != nil && err != io.EOF {
+		return err
+	}
+	return nil
+}

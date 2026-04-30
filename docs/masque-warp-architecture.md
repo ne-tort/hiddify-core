@@ -190,9 +190,12 @@ Result: **embedded registration is required** for `warp_masque` in core, because
   - `server`
   - `server_port`
   - `transport_mode`: `connect_udp | connect_ip | auto`
+  - `tcp_mode`: `strict_masque | masque_or_direct`
+  - `tcp_transport`: `connect_ip | connect_stream | auto`
+  - `template_tcp`
   - `chain`: optional hop list and selection policy
   - `detour`
-  - `mtu` / `udp_timeout` / workers (where applicable)
+  - `mtu` / `udp_timeout` / workers (supported only when wired to runtime; fail-fast otherwise)
 
 ## Endpoint `warp_masque`
 - WARP-focused fields:
@@ -223,18 +226,64 @@ Result: **embedded registration is required** for `warp_masque` in core, because
 - No aliasing or hidden migration from `warp` to `warp_masque`.
 - Feature gates for new endpoint types allowed, but default behavior of legacy path must not change.
 
-## Implementation Status (M2 hardening)
+## Implementation Status (Production Closure Track)
 - Added endpoint types, registry wiring and build-tag stubs:
   - `masque`
   - `warp_masque`
 - Added runtime stateful core (`common/masque`) with readiness derived from session start result.
-- Added transport contract hardening (`transport/masque`) with mode-aware `M2ClientFactory` and stable `ClientFactory/ClientSession` boundary.
+- Added local transport-core vendor baseline and bridge integration:
+  - `third_party/masque-go` for CONNECT-UDP
+  - `third_party/connect-ip-go` for CONNECT-IP
+- Refactored `transport/masque` contracts to expose explicit capability model and separate CONNECT-IP session semantics.
+- Added strict fallback policy (`strict` by default, explicit direct fallback opt-in).
 - Added dedicated Cloudflare control adapter for `warp_masque` bootstrap parity, isolating provider-specific logic from protocol endpoint lifecycle.
 - Added chain graph validation in runtime preparation (`via` references, duplicate tags, cycle guard) for deterministic single-hop/multi-hop execution order.
+- Added endpoint shape `mode=client|server` for `masque`; server mode starts an HTTP/3 MASQUE endpoint lifecycle with CONNECT-UDP and CONNECT-IP handlers.
+- Server-mode now bridges CONNECT-IP sessions into sing-box packet routing path via endpoint metadata and router dispatch.
 
-Current M2 limits:
-- Backend still uses a conservative foundation session implementation; full RFC-level CONNECT-UDP/CONNECT-IP wire behavior remains an incremental transport task.
-- Chain execution currently focuses on deterministic graph validation and ordering; advanced failover scheduling remains follow-up work.
+## Release Contract Matrix
+
+| Area | Scope | Status |
+|---|---|---|
+| RFC 9298 | CONNECT-UDP client path via `masque-go` | Implemented |
+| RFC 9484 | CONNECT-IP client/server path via `connect-ip-go` | Implemented |
+| Fallback contract | fail-closed default, `direct_explicit` opt-in only | Implemented |
+| TCP policy contract | `tcp_mode=strict_masque|masque_or_direct` with policy fallback only when explicitly enabled | Implemented |
+| TCP transport selection | `tcp_transport=connect_stream|connect_ip|auto` production path with explicit policy behavior | Implemented |
+| Capability contract | backend capabilities reflect real implementation | Implemented |
+| Config effect | `transport_mode`, `template_udp`, `template_ip`, `fallback_policy`, `tls_server_name`, `insecure` affect runtime behavior | Implemented |
+| Data-plane detour | runtime supports route-aware QUIC dial hook from endpoint dialer options when dialer context is available | Implemented (fail-fast for custom dialer options; direct default for zero dialer options) |
+| Chain graph | validation (`via`, duplicates, cycles) and deterministic entry-hop selection | Implemented (runtime orchestration limited) |
+| `warp_masque` parity | bootstrap through dedicated Cloudflare adapter; deterministic server/port resolution; versioned cache-based reuse path | Implemented |
+| Legacy `warp` | no code-path modification | Preserved |
+| Warp lifecycle diagnostics | startup errors are observable by endpoint callers and readiness remains false on startup failure | Implemented |
+
+Current production-track limits:
+- `tcp_transport=connect_ip` is production-enabled with dedicated smoke/perf and anti-bypass CI coverage.
+- `tcp_transport=connect_stream` is available for H3 CONNECT stream path via `template_tcp` and advertises `ConnectTCP` capability.
+- Chain runtime now supports ordered hop failover progression, while advanced per-hop forwarding policies remain follow-up work.
+- Security defaults are production-safe (no insecure TLS by default), while custom trust/pinning extensions remain follow-up work.
+- Route-aware QUIC dial hook is strict for non-default dialer options and surfaces typed initialization errors instead of silent degrade.
+- Server mode now supports optional `server_token` auth guard and `allow_private_targets` toggle to reduce open-relay/SSRF risk for TCP CONNECT target dialing.
+- Client mode can pass `server_token` as bearer authorization for TCP CONNECT stream contract compatibility with server auth guard.
+- `warp_masque` uses async startup semantics (parity with legacy endpoint style), so control-plane errors surface on first operational calls when startup fails.
+
+## RC Gate Commands
+
+- `go test ./protocol/masque ./transport/masque ./common/masque ./include -tags with_masque`
+- `go test -race ./protocol/masque -tags with_masque`
+- `go mod verify`
+
+## Operator TCP Matrix
+
+| `tcp_transport` | `tcp_mode` | `fallback_policy` | Behavior |
+|---|---|---|---|
+| `connect_stream` | `strict_masque` | `strict` | MASQUE TCP only, fail-closed |
+| `connect_stream` | `masque_or_direct` | `direct_explicit` | MASQUE TCP first, typed-error fallback to direct |
+| `connect_ip` | `strict_masque` | `strict` | CONNECT-IP TCP path only, fail-closed |
+| `connect_ip` | `masque_or_direct` | `direct_explicit` | CONNECT-IP TCP first, typed fallback to direct |
+| `auto` | `strict_masque` | `strict` | No direct fallback, typed not-implemented failure for TCP |
+| `auto` | `masque_or_direct` | `direct_explicit` | Typed fallback to direct |
 
 ## Testing Strategy
 

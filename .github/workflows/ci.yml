@@ -1,5 +1,7 @@
 name: CI
 on:
+  schedule:
+    - cron: '0 3 * * *'
   pull_request:
     paths-ignore:
       - '**.md'
@@ -23,6 +25,128 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  masque-gates:
+    name: MASQUE Gates
+    runs-on: ubuntu-latest
+    if: "${{!contains(github.event.head_commit.message, 'release: version')}}"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.25.6
+      - name: MASQUE unit and race gates
+        run: |
+          cd hiddify-sing-box
+          go test ./protocol/masque ./transport/masque ./common/masque ./include -tags with_masque
+          go test -race ./protocol/masque ./transport/masque -tags with_masque
+      - name: MASQUE connect_ip production validation gate
+        run: |
+          cd hiddify-sing-box
+          go test ./protocol/masque -tags with_masque -run TestEndpointAllowsConnectIPTCPTransport
+          MASQUE_EXPERIMENTAL_QUIC=1 go test ./protocol/masque ./transport/masque -tags with_masque -run 'TestEndpointRejectsQUICExperimentalWithoutEnv|TestApplyQUICExperimentalOptions'
+          go test ./transport/masque -tags with_masque -run TestTCPOverIPDialerReturnsTypedStackInitError
+      - name: Build Linux sing-box for e2e stand
+        run: |
+          cd hiddify-sing-box
+          mkdir -p ../../experiments/router/stand/l3router/artifacts
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags with_masque -o ../../experiments/router/stand/l3router/artifacts/sing-box-linux-amd64 ./cmd/sing-box
+      - name: Run MASQUE 3-container smoke gate
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml up -d --build
+          for svc in masque-server-core masque-client-core; do
+            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
+          done
+          chmod +x scripts/masque_smoke_10kb_gate.sh scripts/masque_tcp_smoke_10kb_gate.sh
+          bash scripts/masque_smoke_10kb_gate.sh
+      - name: Run MASQUE TCP connect_stream smoke gate
+        run: |
+          cd experiments/router/stand/l3router
+          chmod +x scripts/masque_tcp_smoke_10kb_gate.sh
+          bash scripts/masque_tcp_smoke_10kb_gate.sh
+      - name: Run MASQUE TCP connect_ip smoke gate
+        run: |
+          cd experiments/router/stand/l3router
+          chmod +x scripts/masque_connect_ip_runner.sh
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
+          for svc in masque-server-core masque-client-core; do
+            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
+          done
+          bash scripts/masque_connect_ip_runner.sh --mode smoke
+      - name: Validate MASQUE smoke artifact contract
+        run: |
+          cd experiments/router/stand/l3router
+          python - <<'PY'
+          import json, pathlib, sys
+          files = {
+            "runtime/smoke_10kb_latest.json": ("connect_udp", 10240, 5000),
+            "runtime/smoke_tcp_connect_stream_latest.json": ("connect_stream", 10240, 5000),
+            "runtime/smoke_tcp_connect_ip_latest.json": ("connect_ip", 10240, 5000),
+          }
+          failures = []
+          for rel, (mode, min_bytes, max_ms) in files.items():
+            p = pathlib.Path(rel)
+            if not p.exists():
+              failures.append(f"{rel}: missing")
+              continue
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("mode") != mode:
+              failures.append(f"{rel}: mode={data.get('mode')} expected={mode}")
+            if str(data.get("result", "false")).lower() != "true":
+              failures.append(f"{rel}: result={data.get('result')}, error_class={data.get('error_class')}")
+            metrics = data.get("metrics", {})
+            thresholds = data.get("thresholds", {})
+            if int(thresholds.get("min_bytes", -1)) != min_bytes:
+              failures.append(f"{rel}: thresholds.min_bytes={thresholds.get('min_bytes')} expected={min_bytes}")
+            if int(thresholds.get("max_elapsed_ms", -1)) != max_ms:
+              failures.append(f"{rel}: thresholds.max_elapsed_ms={thresholds.get('max_elapsed_ms')} expected={max_ms}")
+            if int(metrics.get("bytes_received", 0)) < min_bytes:
+              failures.append(f"{rel}: bytes_received={metrics.get('bytes_received')} expected>={min_bytes}")
+            if int(metrics.get("elapsed_ms", max_ms + 1)) > max_ms:
+              failures.append(f"{rel}: elapsed_ms={metrics.get('elapsed_ms')} expected<={max_ms}")
+          if failures:
+            print("MASQUE smoke contract failures:")
+            for failure in failures:
+              print(" -", failure)
+            sys.exit(1)
+          print("MASQUE smoke contract passed.")
+          PY
+      - name: TCP anti-bypass negative control
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
+          if bash scripts/masque_tcp_smoke_10kb_gate.sh; then
+            echo "TCP smoke unexpectedly passed with MASQUE server down"
+            exit 1
+          fi
+          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
+      - name: UDP anti-bypass negative control
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
+          if bash scripts/masque_smoke_10kb_gate.sh; then
+            echo "UDP smoke unexpectedly passed with MASQUE server down"
+            exit 1
+          fi
+          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
+      - name: Collect MASQUE gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: masque-gates-runtime
+          path: experiments/router/stand/l3router/runtime/*.json
+      - name: Stop MASQUE stand
+        if: always()
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
+
   run:
     uses: ./.github/workflows/build.yml
     secrets: inherit
@@ -30,4 +154,241 @@ jobs:
     if: "${{!contains(github.event.head_commit.message, 'release: version')}}"
     with:
       upload-artifact: ${{ github.event_name == 'push' }}
+
+  masque-nightly-perf:
+    name: MASQUE Nightly Perf
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.25.6
+      - name: Build Linux sing-box for MASQUE stand
+        run: |
+          cd hiddify-sing-box
+          mkdir -p ../../experiments/router/stand/l3router/artifacts
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags with_masque -o ../../experiments/router/stand/l3router/artifacts/sing-box-linux-amd64 ./cmd/sing-box
+      - name: Run MASQUE perf matrix
+        run: |
+          cd experiments/router/stand/l3router
+          chmod +x scripts/masque_iperf_500mb.sh scripts/masque_tcp_stream_perf_500mb.sh scripts/masque_connect_ip_runner.sh scripts/masque_tcp_connect_ip_negative_control.sh
+          docker compose -f docker-compose.masque-e2e.yml up -d --build
+          for svc in masque-server-core masque-client-core; do
+            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
+          done
+          chmod +x scripts/masque_smoke_10kb_gate.sh scripts/masque_tcp_smoke_10kb_gate.sh
+          bash scripts/masque_smoke_10kb_gate.sh
+          bash scripts/masque_tcp_smoke_10kb_gate.sh
+          bash scripts/masque_iperf_500mb.sh
+          bash scripts/masque_tcp_stream_perf_500mb.sh
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
+          for svc in masque-server-core masque-client-core; do
+            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
+          done
+          bash scripts/masque_connect_ip_runner.sh --mode smoke
+          TCP_CONNECT_IP_PERF_SHAPED_RATES_MBIT=50,75,100 bash scripts/masque_connect_ip_runner.sh --mode perf
+      - name: Nightly anti-bypass controls
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
+          if bash scripts/masque_smoke_10kb_gate.sh; then
+            echo "Nightly anti-bypass failed: UDP smoke unexpectedly passed with MASQUE server down"
+            exit 1
+          fi
+          if bash scripts/masque_tcp_smoke_10kb_gate.sh; then
+            echo "Nightly anti-bypass failed: TCP smoke unexpectedly passed with MASQUE server down"
+            exit 1
+          fi
+          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
+          docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
+          if ! bash scripts/masque_tcp_connect_ip_negative_control.sh; then
+            echo "Nightly anti-bypass failed: TCP connect_ip negative control failed"
+            exit 1
+          fi
+      - name: Evaluate MASQUE perf thresholds
+        run: |
+          cd experiments/router/stand/l3router
+          python - <<'PY'
+          import json, pathlib, sys
+
+          files = {
+            "runtime/smoke_10kb_latest.json": {
+              "mode": "connect_udp",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_received", "elapsed_ms"],
+              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
+              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
+            },
+            "runtime/smoke_tcp_connect_stream_latest.json": {
+              "mode": "connect_stream",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_received", "elapsed_ms"],
+              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
+              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
+            },
+            "runtime/smoke_tcp_connect_ip_latest.json": {
+              "mode": "connect_ip",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_received", "elapsed_ms"],
+              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
+              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
+            },
+            "runtime/udp_perf_500mb_latest.json": {
+              "mode": "connect_udp",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps", "loss_pct"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps", "max_loss_pct"],
+              "expected_thresholds": {"min_throughput_mbps": 5, "max_loss_pct": 5.00},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/udp_perf_500mb_shaped_50mbps_latest.json": {
+              "mode": "connect_udp",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps", "loss_pct", "shape_kbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps", "max_loss_pct"],
+              "expected_thresholds": {"min_throughput_mbps": 20, "max_loss_pct": 5.00},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_stream_perf_500mb_latest.json": {
+              "mode": "connect_stream",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 5},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_stream_perf_500mb_shaped_50mbps_latest.json": {
+              "mode": "connect_stream",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 20},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_connect_ip_perf_500mb_latest.json": {
+              "mode": "connect_ip",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 5},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_connect_ip_perf_500mb_shaped_50mbps_latest.json": {
+              "mode": "connect_ip",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 20},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_connect_ip_perf_500mb_shaped_75mbps_latest.json": {
+              "mode": "connect_ip",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 20},
+              "expected_bytes_target": 524288000,
+            },
+            "runtime/tcp_connect_ip_perf_500mb_shaped_100mbps_latest.json": {
+              "mode": "connect_ip",
+              "result_must_be_true": True,
+              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
+              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
+              "expected_thresholds": {"min_throughput_mbps": 20},
+              "expected_bytes_target": 524288000,
+            },
+          }
+
+          failures = []
+          for rel, rules in files.items():
+            p = pathlib.Path(rel)
+            if not p.exists():
+              failures.append(f"{rel}: missing")
+              continue
+
+            try:
+              data = json.loads(p.read_text(encoding="utf-8"))
+            except Exception as exc:
+              failures.append(f"{rel}: invalid_json={exc}")
+              continue
+
+            for key in ("test_id", "mode", "metrics", "thresholds", "error_class", "result"):
+              if key not in data:
+                failures.append(f"{rel}: missing_key={key}")
+
+            if data.get("mode") != rules["mode"]:
+              failures.append(f"{rel}: mode={data.get('mode')} expected={rules['mode']}")
+
+            metrics = data.get("metrics", {})
+            thresholds = data.get("thresholds", {})
+            if not isinstance(metrics, dict):
+              failures.append(f"{rel}: metrics is not object")
+              metrics = {}
+            if not isinstance(thresholds, dict):
+              failures.append(f"{rel}: thresholds is not object")
+              thresholds = {}
+
+            for key in rules.get("required_metrics", []):
+              if key not in metrics:
+                failures.append(f"{rel}: missing_metrics.{key}")
+            for key in rules.get("required_thresholds", []):
+              if key not in thresholds:
+                failures.append(f"{rel}: missing_thresholds.{key}")
+
+            if "expected_bytes_target" in rules and metrics.get("bytes_target") != rules["expected_bytes_target"]:
+              failures.append(
+                f"{rel}: bytes_target={metrics.get('bytes_target')} expected={rules['expected_bytes_target']}"
+              )
+
+            for thr_key, expected in rules.get("expected_thresholds", {}).items():
+              got = thresholds.get(thr_key)
+              if got is None:
+                continue
+              if not isinstance(got, (int, float)):
+                failures.append(f"{rel}: threshold {thr_key} type={type(got).__name__} expected_number")
+                continue
+              if float(got) != float(expected):
+                failures.append(f"{rel}: threshold {thr_key}={got} expected={expected}")
+
+            if float(metrics.get("elapsed_ms", 0) or 0) < 0:
+              failures.append(f"{rel}: negative elapsed_ms={metrics.get('elapsed_ms')}")
+
+            for non_negative in ("bytes_received", "bytes_target", "throughput_mbps", "loss_pct"):
+              if non_negative in metrics and float(metrics.get(non_negative, 0) or 0) < 0:
+                failures.append(f"{rel}: negative metric {non_negative}={metrics.get(non_negative)}")
+
+            result_value = str(data.get("result", "false")).lower()
+            if result_value not in ("true", "false"):
+              failures.append(f"{rel}: invalid result={data.get('result')}")
+            if rules.get("result_must_be_true") and result_value != "true":
+              failures.append(f"{rel}: result={data.get('result')}, error_class={data.get('error_class')}")
+
+          if failures:
+            print("MASQUE perf threshold failures:")
+            for f in failures:
+              print(" -", f)
+            sys.exit(1)
+          print("MASQUE perf thresholds passed.")
+          PY
+      - name: Upload MASQUE perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: masque-nightly-perf-runtime
+          path: experiments/router/stand/l3router/runtime/*.json
+      - name: Stop MASQUE stand
+        if: always()
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
       
