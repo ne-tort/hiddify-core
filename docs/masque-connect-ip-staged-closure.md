@@ -1,7 +1,7 @@
 # MASQUE CONNECT-IP Production Closure
 
 ## Current State
-- `tcp_transport=connect_ip` is enabled for production profiles.
+- `tcp_transport=connect_ip` is **not** allowed in TUN-only client profiles; production TCP-over-CONNECT-IP means `transport_mode=connect_ip` + netstack packet-plane.
 - Default `TCPNetstackFactory` is now lifecycle-safe and provides a working TCP path.
 - `MASQUE_EXPERIMENTAL_TCP_CONNECT_IP` is no longer required for standard CONNECT-IP validation.
 
@@ -13,9 +13,9 @@
    - close-race safety and idempotent shutdown,
    - fallback-policy invariants (`strict_masque` fail-closed).
 3. Keep dedicated e2e stand scenarios for CONNECT-IP TCP dataplane in CI/nightly:
-   - smoke/negative gate via unified runner `scripts/masque_connect_ip_runner.sh --mode smoke` with deterministic JSON verdict,
+   - smoke/negative gate via unified Python runner `python experiments/router/stand/l3router/masque_stand_runner.py --scenario tcp_ip` with deterministic JSON verdict,
    - anti-bypass negative control with MASQUE server down,
-   - 500MB max/shaped perf pair via `scripts/masque_connect_ip_runner.sh --mode perf` with threshold contract checks.
+   - perf pair (max/shaped) through the same stand entrypoint or CI wrapper scripts when those scripts are present in the tree.
 
 ## Required Acceptance Signals
 - deterministic JSON verdict artifacts for CONNECT-IP e2e runs.

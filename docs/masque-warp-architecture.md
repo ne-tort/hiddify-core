@@ -220,6 +220,37 @@ Result: **embedded registration is required** for `warp_masque` in core, because
 - Tun overlay path uses endpoint `ListenPacket` behavior; MASQUE endpoint must provide robust packet mode.
 - PreMatch-driven policy remains unchanged from router perspective.
 
+## TUN → rules → `masque` endpoint (tracing hook points)
+
+The sing-box core **router** (`adapter.Router` / route table) resolves traffic after TUN/sniff/metadata assembly. The full router implementation ships with upstream **sing-box**; this fork patches MASQUE endpoints and transport only. Contractually, when routing selects an **endpoint** tag (`detour` / default endpoint for a route), the process invokes that endpoint’s **`Outbound`** surface (`DialContext`, `ListenPacket`, etc.), same as for a classical outbound.
+
+**Stable hook points for debugging packet vs stream paths (client `masque`):**
+
+| Hop | Location | Responsibility |
+|-----|----------|----------------|
+| 1 | [`protocol/masque/endpoint.go`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go) `DialContext`, `ListenPacket` | Thin adapter → `Runtime` |
+| 2 | [`common/masque/runtime.go`](hiddify-core/hiddify-sing-box/common/masque/runtime.go) `DialContext`, `ListenPacket`, `OpenIPSession` | Session + chain; eagerly opens IP plane when `transport_mode=connect_ip` |
+| 3 | [`transport/masque/transport.go`](hiddify-core/hiddify-sing-box/transport/masque/transport.go) `coreSession.DialContext`, `ListenPacket`, `openIPSessionLocked` | CONNECT-UDP vs CONNECT-IP bridge vs `dialTCPStream` |
+
+Server-side CONNECT-IP ingress dispatches immediately into packet routing via `RoutePacketConnectionEx` in [`protocol/masque/endpoint_server.go`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint_server.go) (`routePacketConnectionExBypassTunnelWrapper`).
+
+## Dataplane mode ↔ layer matrix (client `type: masque`)
+
+| Config / mode | `protocol/masque` | `common/masque` | `transport/masque` | Wire primitive |
+|---------------|-------------------|-----------------|--------------------|----------------|
+| `transport_mode=connect_udp` | delegates `ListenPacket` | session | `qmasque` + UDP template | RFC 9298 CONNECT-UDP |
+| `transport_mode=connect_ip` (`ListenPacket` UDP façade) | same | opens `OpenIPSession` at runtime start | IPv4 UDP ↔ IP tunnel `newConnectIPUDPPacketConn` | RFC 9484 + UDP-in-tunnel bridging |
+| `transport_mode=connect_ip` (TCP via userspace stack) | `DialContext` | reuses cached IP plane | netstack TCP over `IPPacketSession` | CONNECT-IP packet plane + stack dial |
+| `tcp_transport=connect_stream` | `DialContext` | session | `dialTCPStream` (HTTP/3 CONNECT) | Stream relay to template target |
+| `tcp_transport=connect_ip` (client) | **rejected at** `validateMasqueOptions` | — | — | Use `connect_stream` for TCP; IP-plane TCP uses stack |
+
+`fallback_policy=direct_explicit` affects **`DialContext`** via runtime/transport policy contract (`protocol/masque/endpoint.go` + `transport/masque/transport.go`); it does **not** build parallel CONNECT-UDP / CONNECT-IP sessions for `ListenPacket`.
+
+## Cloudflare / WARP isolation (baseline audit)
+
+- **Generic MASQUE** (`transport/masque`, `protocol/masque/endpoint.go`, `endpoint_server.go`) carries **no** Cloudflare bootstrap, `cf-connect-*` protocol strings, or WARP cache paths.
+- **Provider-specific** code is limited to [`protocol/masque/endpoint_warp_masque.go`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint_warp_masque.go) and [`protocol/masque/warp_control_adapter.go`](hiddify-core/hiddify-sing-box/protocol/masque/warp_control_adapter.go) (`CloudflareWarpControlAdapter`).
+
 ## Compatibility and Rollout
 - Legacy `warp` untouched.
 - New endpoints added side-by-side.
@@ -249,7 +280,7 @@ Result: **embedded registration is required** for `warp_masque` in core, because
 | RFC 9484 | CONNECT-IP client/server path via `connect-ip-go` | Implemented |
 | Fallback contract | fail-closed default, `direct_explicit` opt-in only | Implemented |
 | TCP policy contract | `tcp_mode=strict_masque|masque_or_direct` with policy fallback only when explicitly enabled | Implemented |
-| TCP transport selection | `tcp_transport=connect_stream|connect_ip|auto` production path with explicit policy behavior | Implemented |
+| TCP transport selection | Client: `connect_stream` only; `connect_ip`/`auto` TCP modes rejected (`validateMasqueOptions`); IP-plane TCP uses netstack under `transport_mode=connect_ip` | Implemented |
 | Capability contract | backend capabilities reflect real implementation | Implemented |
 | Config effect | `transport_mode`, `template_udp`, `template_ip`, `fallback_policy`, `tls_server_name`, `insecure` affect runtime behavior | Implemented |
 | Data-plane detour | runtime supports route-aware QUIC dial hook from endpoint dialer options when dialer context is available | Implemented (fail-fast for custom dialer options; direct default for zero dialer options) |
@@ -259,8 +290,8 @@ Result: **embedded registration is required** for `warp_masque` in core, because
 | Warp lifecycle diagnostics | startup errors are observable by endpoint callers and readiness remains false on startup failure | Implemented |
 
 Current production-track limits:
-- `tcp_transport=connect_ip` is production-enabled with dedicated smoke/perf and anti-bypass CI coverage.
-- `tcp_transport=connect_stream` is available for H3 CONNECT stream path via `template_tcp` and advertises `ConnectTCP` capability.
+- **TUN-only client**: `tcp_transport=connect_ip` is **rejected** at endpoint validation; production TCP relay uses **`connect_stream`** + `template_tcp`. TCP over **`transport_mode=connect_ip`** goes through the **packet plane + netstack** (`OpenIPSession` / adapter), not a separate CONNECT-IP “TCP mux” dial.
+- `tcp_transport=connect_stream` is available for the H3 CONNECT stream path via `template_tcp` and advertises `ConnectTCP` capability when normalized.
 - Chain runtime now supports ordered hop failover progression, while advanced per-hop forwarding policies remain follow-up work.
 - Security defaults are production-safe (no insecure TLS by default), while custom trust/pinning extensions remain follow-up work.
 - Route-aware QUIC dial hook is strict for non-default dialer options and surfaces typed initialization errors instead of silent degrade.
@@ -276,14 +307,14 @@ Current production-track limits:
 
 ## Operator TCP Matrix
 
+Applies when **`tcp_transport=connect_stream`** (only value accepted for MASQUE **stream** TCP in TUN-only **client** mode). Rows using `tcp_transport=connect_ip` or `auto` as **explicit TCP mux** are invalid for clients—see [`protocol/masque/endpoint.go`](hiddify-core/hiddify-sing-box/protocol/masque/endpoint.go) validation and the matrix above.
+
 | `tcp_transport` | `tcp_mode` | `fallback_policy` | Behavior |
 |---|---|---|---|
-| `connect_stream` | `strict_masque` | `strict` | MASQUE TCP only, fail-closed |
-| `connect_stream` | `masque_or_direct` | `direct_explicit` | MASQUE TCP first, typed-error fallback to direct |
-| `connect_ip` | `strict_masque` | `strict` | CONNECT-IP TCP path only, fail-closed |
-| `connect_ip` | `masque_or_direct` | `direct_explicit` | CONNECT-IP TCP first, typed fallback to direct |
-| `auto` | `strict_masque` | `strict` | No direct fallback, typed not-implemented failure for TCP |
-| `auto` | `masque_or_direct` | `direct_explicit` | Typed fallback to direct |
+| `connect_stream` | `strict_masque` | `strict` | MASQUE TCP only (`dialTCPStream`), fail-closed |
+| `connect_stream` | `masque_or_direct` | `direct_explicit` | MASQUE TCP first; on typed fallback path → direct TCP |
+| ~~`connect_ip` (client TCP mux)~~ | — | — | **Rejected**: use `transport_mode=connect_ip` + netstack for TCP, or `connect_stream` |
+| ~~`auto`~~ | — | — | **Rejected** in production client profiles |
 
 ## Testing Strategy
 

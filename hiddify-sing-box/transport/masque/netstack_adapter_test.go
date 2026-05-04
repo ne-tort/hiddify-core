@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,23 @@ type packetPipeSession struct {
 	closeCh chan struct{}
 	once    sync.Once
 }
+
+type failingReadSession struct {
+	readCount atomic.Int32
+}
+
+func (s *failingReadSession) ReadPacket(_ []byte) (int, error) {
+	if s.readCount.Add(1) == 1 {
+		return 0, errors.New("packet plane closed")
+	}
+	return 0, net.ErrClosed
+}
+
+func (s *failingReadSession) WritePacket(buffer []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (s *failingReadSession) Close() error { return nil }
 
 func newPacketPipePair() (*packetPipeSession, *packetPipeSession) {
 	aToB := make(chan []byte, 256)
@@ -46,13 +64,13 @@ func (s *packetPipeSession) ReadPacket(buffer []byte) (int, error) {
 	}
 }
 
-func (s *packetPipeSession) WritePacket(buffer []byte) error {
+func (s *packetPipeSession) WritePacket(buffer []byte) ([]byte, error) {
 	packet := append([]byte(nil), buffer...)
 	select {
 	case <-s.closeCh:
-		return net.ErrClosed
+		return nil, net.ErrClosed
 	case s.sendCh <- packet:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -168,8 +186,8 @@ func TestConnectIPTCPNetstackLifecycle(t *testing.T) {
 		t.Fatalf("close stack: %v", err)
 	}
 	_, err = clientStack.DialContext(context.Background(), socksaddrFromAddrPort(netip.MustParseAddrPort("198.18.0.1:443")))
-	if !errors.Is(err, ErrLifecycleClosed) {
-		t.Fatalf("expected lifecycle closed error, got: %v", err)
+	if !errors.Is(err, ErrLifecycleClosed) && !errors.Is(err, ErrTransportInit) {
+		t.Fatalf("expected lifecycle or transport-init closure error, got: %v", err)
 	}
 }
 
@@ -191,6 +209,42 @@ func TestConnectIPTCPNetstackRejectsNonIPDestination(t *testing.T) {
 	if !errors.Is(err, ErrTCPOverConnectIP) {
 		t.Fatalf("expected ErrTCPOverConnectIP, got: %v", err)
 	}
+}
+
+func TestPrefixPreferredAddressRejectsUnspecified(t *testing.T) {
+	if got := prefixPreferredAddress(netip.MustParsePrefix("0.0.0.0/0")); got.IsValid() {
+		t.Fatalf("expected invalid preferred address for IPv4 default route, got %s", got)
+	}
+	if got := prefixPreferredAddress(netip.MustParsePrefix("::/0")); got.IsValid() {
+		t.Fatalf("expected invalid preferred address for IPv6 default route, got %s", got)
+	}
+	if got := prefixPreferredAddress(netip.MustParsePrefix("198.18.0.2/32")); !got.IsValid() || got.String() != "198.18.0.2" {
+		t.Fatalf("expected host prefix address, got %v", got)
+	}
+}
+
+func TestConnectIPTCPNetstackDialFailsAfterReadLoopError(t *testing.T) {
+	stack, err := newConnectIPTCPNetstack(context.Background(), &failingReadSession{}, connectIPTCPNetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_, dialErr := stack.DialContext(context.Background(), socksaddrFromAddrPort(netip.MustParseAddrPort("198.18.0.1:443")))
+		if dialErr != nil {
+			if !errors.Is(dialErr, ErrTCPDial) {
+				t.Fatalf("expected typed tcp dial error, got: %v", dialErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected dial to fail after packet-plane read error")
 }
 
 func socksaddrFromAddrPort(addr netip.AddrPort) M.Socksaddr {

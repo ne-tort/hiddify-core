@@ -12,8 +12,10 @@ import (
 type testIPSession struct{}
 
 func (s *testIPSession) ReadPacket(buffer []byte) (int, error) { return 0, nil }
-func (s *testIPSession) WritePacket(buffer []byte) error       { return nil }
-func (s *testIPSession) Close() error                          { return nil }
+func (s *testIPSession) WritePacket(buffer []byte) ([]byte, error) {
+	return nil, nil
+}
+func (s *testIPSession) Close() error { return nil }
 
 type testSession struct {
 	ip T.IPPacketSession

@@ -215,7 +215,7 @@ func (e *WarpEndpoint) startRuntime() {
 		e.startErr.Store(err)
 		return
 	}
-	runtime := CM.NewRuntime(TM.M2ClientFactory{}, CM.RuntimeOptions{
+	runtime := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 		Tag:            e.Tag(),
 		Server:         server,
 		ServerPort:     port,

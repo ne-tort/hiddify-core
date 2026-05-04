@@ -255,14 +255,14 @@ func TestEndpointTCPModeValidation(t *testing.T) {
 	}
 }
 
-func TestEndpointRejectsUnsupportedTunables(t *testing.T) {
+func TestEndpointRejectsInvalidMTU(t *testing.T) {
 	_, err := NewEndpoint(nil, nil, nil, "unsupported-tunables", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		MTU:           1400,
+		MTU:           1200,
 	})
 	if err == nil {
-		t.Fatal("expected validation error for unsupported tunables")
+		t.Fatal("expected validation error for invalid mtu range")
 	}
 }
 
@@ -336,14 +336,14 @@ func TestEndpointRejectsClientTemplateTCPWithoutPlaceholders(t *testing.T) {
 	}
 }
 
-func TestEndpointAllowsConnectIPTCPTransport(t *testing.T) {
+func TestEndpointRejectsConnectIPTCPTransportInTunOnlyMode(t *testing.T) {
 	_, err := NewEndpoint(nil, nil, nil, "connect-ip-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		TCPTransport:  option.MasqueTCPTransportConnectIP,
 	})
-	if err != nil {
-		t.Fatalf("expected connect_ip to be allowed, got: %v", err)
+	if err == nil {
+		t.Fatal("expected connect_ip tcp transport to be rejected in TUN-only mode")
 	}
 }
 

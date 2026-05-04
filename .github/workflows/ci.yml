@@ -4,8 +4,6 @@ on:
     - cron: '0 3 * * *'
   pull_request:
     paths-ignore:
-      - '**.md'
-      - 'docs/**'
       - '.vscode/'
       - 'appcast.xml'
   push:
@@ -15,8 +13,6 @@ on:
        - v3
        - v4
     paths-ignore:
-      - '**.md'
-      - 'docs/**'
       - '.vscode/'
       - 'appcast.xml'
 
@@ -47,38 +43,31 @@ jobs:
       - name: MASQUE connect_ip production validation gate
         run: |
           cd hiddify-sing-box
-          go test ./protocol/masque -tags with_masque -run TestEndpointAllowsConnectIPTCPTransport
+          go test ./protocol/masque -tags with_masque -run TestEndpointRejectsConnectIPTCPTransportInTunOnlyMode
           MASQUE_EXPERIMENTAL_QUIC=1 go test ./protocol/masque ./transport/masque -tags with_masque -run 'TestEndpointRejectsQUICExperimentalWithoutEnv|TestApplyQUICExperimentalOptions'
-          go test ./transport/masque -tags with_masque -run TestTCPOverIPDialerReturnsTypedStackInitError
+          go test ./transport/masque -tags with_masque -run 'TestCoreClientFactoryConnectTCPCapabilityByTransport|TestConnectIPPacketSessionDatagramCeiling'
       - name: Build Linux sing-box for e2e stand
         run: |
           cd hiddify-sing-box
           mkdir -p ../../experiments/router/stand/l3router/artifacts
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags with_masque -o ../../experiments/router/stand/l3router/artifacts/sing-box-linux-amd64 ./cmd/sing-box
-      - name: Run MASQUE 3-container smoke gate
+      - name: MASQUE gate preflight
         run: |
           cd experiments/router/stand/l3router
-          docker compose -f docker-compose.masque-e2e.yml up -d --build
-          for svc in masque-server-core masque-client-core; do
-            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
-          done
-          chmod +x scripts/masque_smoke_10kb_gate.sh scripts/masque_tcp_smoke_10kb_gate.sh
-          bash scripts/masque_smoke_10kb_gate.sh
-      - name: Run MASQUE TCP connect_stream smoke gate
+          test -f masque_stand_runner.py
+          test -f docker-compose.masque-e2e.yml
+          test -f configs/masque-client.json
+          test -f configs/masque-client-connect-ip.json
+      - name: Run MASQUE smoke gate via stand runner
         run: |
           cd experiments/router/stand/l3router
-          chmod +x scripts/masque_tcp_smoke_10kb_gate.sh
-          bash scripts/masque_tcp_smoke_10kb_gate.sh
-      - name: Run MASQUE TCP connect_ip smoke gate
+          python masque_stand_runner.py --scenario all
+      - name: Run MASQUE strict bulk gate (connect_ip 10/20/50 MiB)
         run: |
           cd experiments/router/stand/l3router
-          chmod +x scripts/masque_connect_ip_runner.sh
-          docker compose -f docker-compose.masque-e2e.yml down -v
-          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
-          for svc in masque-server-core masque-client-core; do
-            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
-          done
-          bash scripts/masque_connect_ip_runner.sh --mode smoke
+          python masque_stand_runner.py --scenario tcp_ip --megabytes 10
+          python masque_stand_runner.py --scenario tcp_ip --megabytes 20
+          python masque_stand_runner.py --scenario tcp_ip --megabytes 50
       - name: Validate MASQUE smoke artifact contract
         run: |
           cd experiments/router/stand/l3router
@@ -90,6 +79,15 @@ jobs:
             "runtime/smoke_tcp_connect_ip_latest.json": ("connect_ip", 10240, 5000),
           }
           failures = []
+          summary = pathlib.Path("runtime/masque_python_runner_summary.json")
+          if not summary.exists():
+            failures.append("runtime/masque_python_runner_summary.json: missing")
+          else:
+            summary_data = json.loads(summary.read_text(encoding="utf-8"))
+            if str(summary_data.get("ok", "false")).lower() != "true":
+              failures.append(f"summary: ok={summary_data.get('ok')}")
+            if not summary_data.get("results"):
+              failures.append("summary: results missing/empty")
           for rel, (mode, min_bytes, max_ms) in files.items():
             p = pathlib.Path(rel)
             if not p.exists():
@@ -120,21 +118,33 @@ jobs:
       - name: TCP anti-bypass negative control
         run: |
           cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          docker compose -f docker-compose.masque-e2e.yml up -d --build
           docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
-          if bash scripts/masque_tcp_smoke_10kb_gate.sh; then
-            echo "TCP smoke unexpectedly passed with MASQUE server down"
+          if python masque_stand_runner.py --scenario tcp_stream; then
+            echo "TCP connect_stream unexpectedly passed with MASQUE server down"
             exit 1
           fi
-          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
+      - name: CONNECT-IP anti-bypass negative control
+        run: |
+          cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
+          docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
+          if python masque_stand_runner.py --scenario tcp_ip; then
+            echo "TCP connect_ip unexpectedly passed with MASQUE server down"
+            exit 1
+          fi
       - name: UDP anti-bypass negative control
         run: |
           cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          docker compose -f docker-compose.masque-e2e.yml up -d --build
           docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
-          if bash scripts/masque_smoke_10kb_gate.sh; then
+          if python masque_stand_runner.py --scenario udp; then
             echo "UDP smoke unexpectedly passed with MASQUE server down"
             exit 1
           fi
-          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
       - name: Collect MASQUE gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -178,40 +188,26 @@ jobs:
       - name: Run MASQUE perf matrix
         run: |
           cd experiments/router/stand/l3router
-          chmod +x scripts/masque_iperf_500mb.sh scripts/masque_tcp_stream_perf_500mb.sh scripts/masque_connect_ip_runner.sh scripts/masque_tcp_connect_ip_negative_control.sh
-          docker compose -f docker-compose.masque-e2e.yml up -d --build
-          for svc in masque-server-core masque-client-core; do
-            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
-          done
-          chmod +x scripts/masque_smoke_10kb_gate.sh scripts/masque_tcp_smoke_10kb_gate.sh
-          bash scripts/masque_smoke_10kb_gate.sh
-          bash scripts/masque_tcp_smoke_10kb_gate.sh
-          bash scripts/masque_iperf_500mb.sh
-          bash scripts/masque_tcp_stream_perf_500mb.sh
-          docker compose -f docker-compose.masque-e2e.yml down -v
-          MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
-          for svc in masque-server-core masque-client-core; do
-            timeout 10s sh -lc "until docker compose -f docker-compose.masque-e2e.yml exec -T ${svc} sh -lc 'true' >/dev/null 2>&1; do sleep 0.5; done"
-          done
-          bash scripts/masque_connect_ip_runner.sh --mode smoke
-          TCP_CONNECT_IP_PERF_SHAPED_RATES_MBIT=50,75,100 bash scripts/masque_connect_ip_runner.sh --mode perf
+          python masque_stand_runner.py --scenario all
+          python masque_stand_runner.py --scenario tcp_ip --stress
       - name: Nightly anti-bypass controls
         run: |
           cd experiments/router/stand/l3router
+          docker compose -f docker-compose.masque-e2e.yml down -v
+          docker compose -f docker-compose.masque-e2e.yml up -d --build
           docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
-          if bash scripts/masque_smoke_10kb_gate.sh; then
+          if python masque_stand_runner.py --scenario udp; then
             echo "Nightly anti-bypass failed: UDP smoke unexpectedly passed with MASQUE server down"
             exit 1
           fi
-          if bash scripts/masque_tcp_smoke_10kb_gate.sh; then
+          if python masque_stand_runner.py --scenario tcp_stream; then
             echo "Nightly anti-bypass failed: TCP smoke unexpectedly passed with MASQUE server down"
             exit 1
           fi
-          docker compose -f docker-compose.masque-e2e.yml start masque-server-core
           docker compose -f docker-compose.masque-e2e.yml down -v
           MASQUE_CLIENT_CONFIG=./configs/masque-client-connect-ip.json docker compose -f docker-compose.masque-e2e.yml up -d --build
           docker compose -f docker-compose.masque-e2e.yml stop masque-server-core
-          if ! bash scripts/masque_tcp_connect_ip_negative_control.sh; then
+          if python masque_stand_runner.py --scenario tcp_ip; then
             echo "Nightly anti-bypass failed: TCP connect_ip negative control failed"
             exit 1
           fi

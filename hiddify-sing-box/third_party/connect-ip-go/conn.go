@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -51,10 +52,41 @@ var (
 	_ http3Stream = &http3.RequestStream{}
 )
 
+var (
+	unknownCapsuleTotal         atomic.Uint64
+	unknownContextDatagramTotal atomic.Uint64
+	malformedDatagramTotal      atomic.Uint64
+	policyDropICMPTotal         atomic.Uint64
+)
+
+func UnknownCapsuleTotal() uint64 {
+	return unknownCapsuleTotal.Load()
+}
+
+func UnknownContextDatagramTotal() uint64 {
+	return unknownContextDatagramTotal.Load()
+}
+
+func MalformedDatagramTotal() uint64 {
+	return malformedDatagramTotal.Load()
+}
+
+func PolicyDropICMPTotal() uint64 {
+	return policyDropICMPTotal.Load()
+}
+
 // If a packet is too large to fit into a QUIC datagram,
 // we send an ICMP Packet Too Big packet.
 // On IPv6, the minimum MTU of a link is 1280 bytes.
 const minMTU = 1280
+
+// Pool for datagram buffers with required offset.
+var datagramPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 1500+8) // typical packet + context varint
+		return &buf
+	},
+}
 
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
@@ -72,6 +104,19 @@ type Conn struct {
 
 	closeChan chan struct{}
 	closeErr  error
+}
+
+func (c *Conn) failClosed(err error) error {
+	if err == nil {
+		err = &CloseError{Remote: true}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closeErr == nil {
+		c.closeErr = err
+		close(c.closeChan)
+	}
+	return c.closeErr
 }
 
 func newProxiedConn(str http3Stream) *Conn {
@@ -231,7 +276,10 @@ func (c *Conn) readFromStream() error {
 			default:
 			}
 		default:
-			return fmt.Errorf("unknown capsule type: %d", t)
+			unknownCapsuleTotal.Add(1)
+			_, _ = io.Copy(io.Discard, cr)
+			log.Printf("connect-ip: ignoring unknown capsule type=%d", t)
+			continue
 		}
 	}
 }
@@ -257,30 +305,32 @@ func (c *Conn) writeToStream() error {
 }
 
 func (c *Conn) ReadPacket(b []byte) (n int, err error) {
-start:
-	data, err := c.str.ReceiveDatagram(context.Background())
-	if err != nil {
-		select {
-		case <-c.closeChan:
-			return 0, c.closeErr
-		default:
-			return 0, err
+	for {
+		data, err := c.str.ReceiveDatagram(context.Background())
+		if err != nil {
+			select {
+			case <-c.closeChan:
+				return 0, c.closeErr
+			default:
+				return 0, err
+			}
 		}
+		contextID, n, err := quicvarint.Parse(data)
+		if err != nil {
+			malformedDatagramTotal.Add(1)
+			return 0, c.failClosed(fmt.Errorf("connect-ip: malformed datagram: %w", err))
+		}
+		if contextID != 0 {
+			// RFC 9484 allows silently dropping unknown context IDs.
+			unknownContextDatagramTotal.Add(1)
+			continue
+		}
+		if err := c.handleIncomingProxiedPacket(data[n:]); err != nil {
+			log.Printf("dropping proxied packet: %s", err)
+			continue
+		}
+		return copy(b, data[n:]), nil
 	}
-	contextID, n, err := quicvarint.Parse(data)
-	if err != nil {
-		// TODO: close connection
-		return 0, fmt.Errorf("connect-ip: malformed datagram: %w", err)
-	}
-	if contextID != 0 {
-		// Drop this datagram. We currently only support proxying of IP payloads.
-		goto start
-	}
-	if err := c.handleIncomingProxiedPacket(data[n:]); err != nil {
-		log.Printf("dropping proxied packet: %s", err)
-		goto start
-	}
-	return copy(b, data[n:]), nil
 }
 
 func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
@@ -289,6 +339,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	}
 	var src, dst netip.Addr
 	var ipProto uint8
+	var err error
 	switch v := ipVersion(data); v {
 	default:
 		return fmt.Errorf("connect-ip: unknown IP versions: %d", v)
@@ -305,7 +356,10 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 		}
 		src = netip.AddrFrom16([16]byte(data[8:24]))
 		dst = netip.AddrFrom16([16]byte(data[24:40]))
-		ipProto = data[6]
+		ipProto, err = ipv6UpperLayerProtocol(data)
+		if err != nil {
+			return err
+		}
 	}
 
 	c.mu.Lock()
@@ -319,7 +373,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	// the client accepts incoming traffic from all IPs.
 	if peerAddresses != nil {
 		if !slices.ContainsFunc(peerAddresses, func(p netip.Prefix) bool { return p.Contains(src) }) {
-			// TODO: send ICMP
+			c.emitPolicyDropICMP(data)
 			return fmt.Errorf("connect-ip: datagram source address not allowed: %s", src)
 		}
 	}
@@ -340,33 +394,52 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 			if (ipVersion(data) == 4 && ipProto == ipProtoICMP) || (ipVersion(data) == 6 && ipProto == ipProtoICMPv6) {
 				return true
 			}
-			// TODO: walk the chain of IPv6 extensions
-			// See section 4.8 of RFC 9484 for details.
 			return r.IPProtocol == 0 || r.IPProtocol == ipProto
 		})
 	}
 	if !isAllowedDst {
-		// TODO: send ICMP
+		c.emitPolicyDropICMP(data)
 		return fmt.Errorf("connect-ip: datagram destination address / protocol not allowed: %s (protocol: %d)", dst, ipProto)
 	}
 	return nil
+}
+
+func (c *Conn) emitPolicyDropICMP(original []byte) {
+	icmpPacket, err := composeICMPPolicyDropPacket(original)
+	if err != nil {
+		log.Printf("connect-ip: failed to compose policy-drop ICMP: %v", err)
+		return
+	}
+	if _, err := c.WritePacket(icmpPacket); err != nil {
+		log.Printf("connect-ip: failed to send policy-drop ICMP: %v", err)
+		return
+	}
+	policyDropICMPTotal.Add(1)
 }
 
 // WritePacket writes an IP packet to the stream.
 // If sending the packet fails, it might return an ICMP packet.
 // It is the caller's responsibility to send the ICMP packet to the sender.
 func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
-	data, err := c.composeDatagram(b)
-	if err != nil {
-		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
-		return nil, nil
+	if len(b) == 0 {
+		return nil, fmt.Errorf("connect-ip: empty packet")
 	}
-	if err := c.str.SendDatagram(data); err != nil {
+	buf := datagramPool.Get().(*[]byte)
+	defer datagramPool.Put(buf)
+	if err := c.composeDatagram(buf, b); err != nil {
+		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
+		return nil, fmt.Errorf("connect-ip: compose datagram: %w", err)
+	}
+	if err := c.str.SendDatagram(*buf); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			icmpPacket, err := composeICMPTooLargePacket(b, minMTU)
-			if err != nil {
-				log.Printf("failed to compose ICMP too large packet: %s", err)
+			icmpPacket, icmpErr := composeICMPTooLargePacket(b, minMTU)
+			if icmpErr != nil {
+				log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
+				return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
+			}
+			if icmpPacket == nil {
+				return nil, fmt.Errorf("connect-ip: compose ICMP PTB produced nil packet")
 			}
 			return icmpPacket, nil
 		}
@@ -380,39 +453,45 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	return nil, nil
 }
 
-func (c *Conn) composeDatagram(b []byte) ([]byte, error) {
+func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 	// TODO: implement src, dst and ipproto checks
-	if len(b) == 0 {
-		return nil, nil
+	if len(src) == 0 {
+		return errors.New("connect-ip: empty packet")
 	}
-	switch v := ipVersion(b); v {
+	contextIDLen := len(contextIDZero)
+	if len(*dst) < len(src)+contextIDLen {
+		*dst = make([]byte, len(src)+contextIDLen)
+	} else {
+		*dst = (*dst)[:len(src)+contextIDLen]
+	}
+	copy(*dst, contextIDZero)
+	copy((*dst)[contextIDLen:], src)
+	packet := (*dst)[contextIDLen:]
+	switch v := ipVersion(packet); v {
 	default:
-		return nil, fmt.Errorf("connect-ip: unknown IP versions: %d", v)
+		return fmt.Errorf("connect-ip: unknown IP versions: %d", v)
 	case 4:
-		if len(b) < ipv4.HeaderLen {
-			return nil, fmt.Errorf("connect-ip: IPv4 packet too short")
+		if len(packet) < ipv4.HeaderLen {
+			return fmt.Errorf("connect-ip: IPv4 packet too short")
 		}
-		ttl := b[8]
+		ttl := packet[8]
 		if ttl <= 1 {
-			return nil, fmt.Errorf("connect-ip: datagram TTL too small: %d", ttl)
+			return fmt.Errorf("connect-ip: datagram TTL too small: %d", ttl)
 		}
-		b[8]-- // decrement TTL
+		packet[8]-- // decrement TTL
 		// recalculate the checksum
-		binary.BigEndian.PutUint16(b[10:12], calculateIPv4Checksum(([ipv4.HeaderLen]byte)(b[:ipv4.HeaderLen])))
+		binary.BigEndian.PutUint16(packet[10:12], calculateIPv4Checksum(([ipv4.HeaderLen]byte)(packet[:ipv4.HeaderLen])))
 	case 6:
-		if len(b) < ipv6.HeaderLen {
-			return nil, fmt.Errorf("connect-ip: IPv6 packet too short")
+		if len(packet) < ipv6.HeaderLen {
+			return fmt.Errorf("connect-ip: IPv6 packet too short")
 		}
-		hopLimit := b[7]
+		hopLimit := packet[7]
 		if hopLimit <= 1 {
-			return nil, fmt.Errorf("connect-ip: datagram Hop Limit too small: %d", hopLimit)
+			return fmt.Errorf("connect-ip: datagram Hop Limit too small: %d", hopLimit)
 		}
-		b[7]-- // Decrement Hop Limit
+		packet[7]-- // Decrement Hop Limit
 	}
-	data := make([]byte, 0, len(contextIDZero)+len(b))
-	data = append(data, contextIDZero...)
-	data = append(data, b...)
-	return data, nil
+	return nil
 }
 
 func (c *Conn) Close() error {
@@ -428,3 +507,35 @@ func (c *Conn) Close() error {
 }
 
 func ipVersion(b []byte) uint8 { return b[0] >> 4 }
+
+func ipv6UpperLayerProtocol(packet []byte) (uint8, error) {
+	if len(packet) < ipv6.HeaderLen {
+		return 0, fmt.Errorf("connect-ip: malformed IPv6 datagram: too short")
+	}
+	nextHeader := packet[6]
+	offset := ipv6.HeaderLen
+	for {
+		switch nextHeader {
+		// RFC 8200 extension headers with length in 8-byte units (except fragment).
+		case 0, 43, 60, 135, 139, 140, 253, 254:
+			if len(packet) < offset+2 {
+				return 0, fmt.Errorf("connect-ip: malformed IPv6 extension header")
+			}
+			hdrLen := int(packet[offset+1]+1) * 8
+			if hdrLen <= 0 || len(packet) < offset+hdrLen {
+				return 0, fmt.Errorf("connect-ip: malformed IPv6 extension header length")
+			}
+			nextHeader = packet[offset]
+			offset += hdrLen
+		case 44:
+			// Fragment Header has fixed 8-byte length.
+			if len(packet) < offset+8 {
+				return 0, fmt.Errorf("connect-ip: malformed IPv6 fragment header")
+			}
+			nextHeader = packet[offset]
+			offset += 8
+		default:
+			return nextHeader, nil
+		}
+	}
+}

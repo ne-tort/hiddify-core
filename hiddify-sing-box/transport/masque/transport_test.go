@@ -1,15 +1,15 @@
 package masque
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
-
-	"github.com/sagernet/sing-box/option"
-	M "github.com/sagernet/sing/common/metadata"
 )
 
 func TestResolveEntryHopSingleEntry(t *testing.T) {
@@ -101,8 +101,8 @@ func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new connect_ip session: %v", err)
 	}
-	if !ipSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_ip session to advertise ConnectTCP")
+	if ipSession.Capabilities().ConnectTCP {
+		t.Fatal("expected connect_ip session to disable ConnectTCP in TUN-only mode")
 	}
 }
 
@@ -115,29 +115,6 @@ func TestClassifyError(t *testing.T) {
 	}
 	if ClassifyError(ErrAuthFailed) != ErrorClassAuth {
 		t.Fatal("expected auth error class")
-	}
-}
-
-func TestSelectTCPPath(t *testing.T) {
-	if selectTCPPath(ClientOptions{TCPTransport: option.MasqueTCPTransportConnectStream}) != TCPPathConnectStream {
-		t.Fatal("expected connect_stream path")
-	}
-	if selectTCPPath(ClientOptions{TCPTransport: option.MasqueTCPTransportConnectIP}) != TCPPathConnectIP {
-		t.Fatal("expected connect_ip path")
-	}
-	if selectTCPPath(ClientOptions{TCPTransport: option.MasqueTCPTransportAuto}) != TCPPathAuto {
-		t.Fatal("expected auto path")
-	}
-}
-
-func TestTCPOverIPDialerReturnsTypedStackInitError(t *testing.T) {
-	dialer := newTCPOverIPDialer(unavailableTCPNetstackFactory{}, fakeIPPacketSession{})
-	_, err := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if err == nil {
-		t.Fatal("expected typed stack init error")
-	}
-	if !errors.Is(err, ErrTCPStackInit) {
-		t.Fatalf("expected tcp stack init error, got: %v", err)
 	}
 }
 
@@ -194,175 +171,102 @@ func TestWaitContextBackoffCancelled(t *testing.T) {
 	}
 }
 
-func TestTCPOverIPDialerRetryBoundaryThreeAttempts(t *testing.T) {
-	stack := &fakeTCPNetstack{
-		dialFn: func(_ context.Context, _ M.Socksaddr, _ int) (net.Conn, error) {
-			return nil, errors.New("temporary failure")
-		},
+func TestIsRetryableConnectIPError(t *testing.T) {
+	if !isRetryableConnectIPError(errors.New("timeout: no recent network activity")) {
+		t.Fatal("expected timeout/no recent network activity to be retryable")
 	}
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{stack: stack}, fakeIPPacketSession{})
-	_, err := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
+	if !isRetryableConnectIPError(errors.New("write failed: use of closed network connection")) {
+		t.Fatal("expected closed network connection to be retryable")
+	}
+	if isRetryableConnectIPError(errors.New("authorization failed")) {
+		t.Fatal("expected auth failures to be non-retryable")
+	}
+}
+
+func TestConnectIPPacketSessionDatagramCeiling(t *testing.T) {
+	session := &connectIPPacketSession{datagramCeiling: 1280}
+	_, err := session.WritePacket(make([]byte, 1400))
 	if err == nil {
-		t.Fatal("expected tcp-over-ip dial to fail after retries")
-	}
-	if !errors.Is(err, ErrTCPDial) {
-		t.Fatalf("expected typed tcp dial error, got: %v", err)
-	}
-	if stack.attempts != 3 {
-		t.Fatalf("expected exactly 3 dial attempts, got: %d", stack.attempts)
+		t.Fatal("expected datagram ceiling error")
 	}
 }
 
-func TestTCPOverIPDialerCancelledContextStopsRetryLoop(t *testing.T) {
-	stack := &fakeTCPNetstack{
-		dialFn: func(ctx context.Context, _ M.Socksaddr, _ int) (net.Conn, error) {
-			return nil, context.Cause(ctx)
-		},
+func TestBuildAndParseIPv4UDPPacket(t *testing.T) {
+	src := netip.MustParseAddr("198.18.0.2")
+	dst := netip.MustParseAddr("10.200.0.2")
+	payload := []byte("hello-masque")
+	packet, err := buildIPv4UDPPacket(src, 53000, dst, 5601, payload)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
 	}
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{stack: stack}, fakeIPPacketSession{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := dialer.DialContext(ctx, M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if err == nil {
-		t.Fatal("expected error for cancelled context")
+	gotPayload, gotSrc, gotSrcPort, err := parseIPv4UDPPacket(packet)
+	if err != nil {
+		t.Fatalf("parse packet: %v", err)
 	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected cancelled context in error chain, got: %v", err)
+	if gotSrc != src {
+		t.Fatalf("unexpected src: %s", gotSrc)
 	}
-	if stack.attempts != 1 {
-		t.Fatalf("expected single attempt when context already cancelled, got: %d", stack.attempts)
+	if gotSrcPort != 53000 {
+		t.Fatalf("unexpected src port: %d", gotSrcPort)
 	}
-}
-
-func TestTCPOverIPDialerLifecycleCloseThenDial(t *testing.T) {
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{
-		stack: &fakeTCPNetstack{},
-	}, fakeIPPacketSession{})
-	if err := dialer.Close(); err != nil {
-		t.Fatalf("close dialer: %v", err)
-	}
-	_, err := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if !errors.Is(err, ErrLifecycleClosed) {
-		t.Fatalf("expected lifecycle closed error, got: %v", err)
+	if !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("unexpected payload: %q", gotPayload)
 	}
 }
 
-func TestConnectIPClassifiesAsCapabilityError(t *testing.T) {
-	err := classifyTCPNotImplemented(TCPPathConnectIP)
-	if !errors.Is(err, ErrTCPOverConnectIP) {
-		t.Fatalf("expected connect_ip path marker, got: %v", err)
+func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
+	rec := &recordingIPPacketSession{}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	n, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
+	if err != nil {
+		t.Fatalf("write to: %v", err)
 	}
-	if ClassifyError(err) != ErrorClassCapability {
-		t.Fatalf("expected capability class, got: %s", ClassifyError(err))
+	if n != 3 {
+		t.Fatalf("unexpected write n: %d", n)
 	}
-}
-
-func TestCapabilityContractFallbackByTCPModeForConnectIP(t *testing.T) {
-	allowed := fallbackAllowedForError(ClientOptions{
-		FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-		TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-	}, "tcp", ErrTCPOverConnectIP)
-	if !allowed {
-		t.Fatal("expected masque_or_direct to allow fallback on connect_ip capability error")
+	if len(rec.lastWrite) == 0 {
+		t.Fatal("expected packet write")
 	}
-
-	denied := fallbackAllowedForError(ClientOptions{
-		FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-		TCPMode:        option.MasqueTCPModeStrictMasque,
-	}, "tcp", ErrTCPOverConnectIP)
-	if denied {
-		t.Fatal("expected strict_masque to deny fallback on connect_ip capability error")
+	dst := net.IP(rec.lastWrite[16:20]).String()
+	if dst != "10.200.0.2" {
+		t.Fatalf("unexpected destination ip: %s", dst)
+	}
+	dstPort := binary.BigEndian.Uint16(rec.lastWrite[22:24])
+	if dstPort != 5601 {
+		t.Fatalf("unexpected destination port: %d", dstPort)
 	}
 }
 
-func TestFallbackAllowedForErrorClassificationMatrix(t *testing.T) {
-	testCases := []struct {
-		name    string
-		options ClientOptions
-		network string
-		err     error
-		want    bool
-	}{
-		{
-			name: "masque_or_direct tcp capability",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "tcp",
-			err:     ErrTCPOverConnectIP,
-			want:    true,
-		},
-		{
-			name: "masque_or_direct tcp dial",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "tcp6",
-			err:     ErrTCPDial,
-			want:    true,
-		},
-		{
-			name: "masque_or_direct tcp stack init",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "tcp4",
-			err:     ErrTCPStackInit,
-			want:    true,
-		},
-		{
-			name: "strict mode denies capability fallback",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeStrictMasque,
-			},
-			network: "tcp",
-			err:     ErrTCPOverConnectIP,
-			want:    false,
-		},
-		{
-			name: "non explicit policy denies fallback",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyStrict,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "tcp",
-			err:     ErrTCPOverConnectIP,
-			want:    false,
-		},
-		{
-			name: "udp network denies tcp fallback",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "udp",
-			err:     ErrTCPDial,
-			want:    false,
-		},
-		{
-			name: "auth class does not fallback",
-			options: ClientOptions{
-				FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
-				TCPMode:        option.MasqueTCPModeMasqueOrDirect,
-			},
-			network: "tcp",
-			err:     ErrAuthFailed,
-			want:    false,
-		},
+func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
+	packet, err := buildIPv4UDPPacket(
+		netip.MustParseAddr("10.200.0.2"),
+		5601,
+		netip.MustParseAddr("198.18.0.2"),
+		53000,
+		[]byte("pong"),
+	)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
 	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := fallbackAllowedForError(tc.options, tc.network, tc.err)
-			if got != tc.want {
-				t.Fatalf("fallbackAllowedForError=%v want=%v", got, tc.want)
-			}
-		})
+	rec := &recordingIPPacketSession{readPacket: packet}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	buf := make([]byte, 16)
+	n, addr, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read from: %v", err)
+	}
+	if n != 4 || string(buf[:n]) != "pong" {
+		t.Fatalf("unexpected payload: %q", buf[:n])
+	}
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("unexpected addr type: %T", addr)
+	}
+	if udpAddr.Port != 5601 || udpAddr.IP.String() != "10.200.0.2" {
+		t.Fatalf("unexpected source addr: %v", udpAddr)
 	}
 }
+
 
 func TestStreamConnHalfCloseIsolation(t *testing.T) {
 	reader := &trackedReadCloser{}
@@ -399,90 +303,6 @@ func TestBuildTemplatesRejectsInvalidTCPTemplateURL(t *testing.T) {
 	}
 }
 
-func TestTCPOverIPDialerCancelDuringBackoffStopsRetries(t *testing.T) {
-	stack := &fakeTCPNetstack{
-		dialFn: func(ctx context.Context, _ M.Socksaddr, attempt int) (net.Conn, error) {
-			if attempt == 1 {
-				cancel, ok := ctx.Value(testCancelKey{}).(context.CancelFunc)
-				if ok && cancel != nil {
-					cancel()
-				}
-			}
-			return nil, errors.New("temporary failure")
-		},
-	}
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{stack: stack}, fakeIPPacketSession{})
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = context.WithValue(ctx, testCancelKey{}, context.CancelFunc(cancel))
-	_, err := dialer.DialContext(ctx, M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if err == nil {
-		t.Fatal("expected context cancellation during retry backoff")
-	}
-	if !errors.Is(err, ErrTCPDial) {
-		t.Fatalf("expected retry loop to return typed dial failure, got: %v", err)
-	}
-	if stack.attempts != 1 {
-		t.Fatalf("expected retry loop to stop after first attempt, got: %d", stack.attempts)
-	}
-}
-
-func TestTCPOverIPDialerStackInitFailureCanRecoverOnNextDial(t *testing.T) {
-	factory := &flakyTCPNetstackFactory{}
-	dialer := newTCPOverIPDialer(factory, fakeIPPacketSession{})
-	_, firstErr := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if firstErr == nil || !errors.Is(firstErr, ErrTCPStackInit) {
-		t.Fatalf("expected first call to fail with stack init error, got: %v", firstErr)
-	}
-	conn, secondErr := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
-	if secondErr != nil {
-		t.Fatalf("expected second call to recover, got: %v", secondErr)
-	}
-	if conn == nil {
-		t.Fatal("expected non-nil connection on recovery dial")
-	}
-	_ = conn.Close()
-	if factory.calls != 2 {
-		t.Fatalf("expected factory to be called twice, got: %d", factory.calls)
-	}
-}
-
-func TestTCPOverIPDialerCloseIsIdempotent(t *testing.T) {
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{stack: &fakeTCPNetstack{}}, fakeIPPacketSession{})
-	if err := dialer.Close(); err != nil {
-		t.Fatalf("first close failed: %v", err)
-	}
-	if err := dialer.Close(); err != nil {
-		t.Fatalf("second close failed: %v", err)
-	}
-}
-
-func TestTCPOverIPDialerAppliesDefaultTimeoutWithoutDeadline(t *testing.T) {
-	prev := defaultTCPOverIPDialTimeout
-	defaultTCPOverIPDialTimeout = 120 * time.Millisecond
-	defer func() {
-		defaultTCPOverIPDialTimeout = prev
-	}()
-
-	stack := &fakeTCPNetstack{
-		dialFn: func(ctx context.Context, _ M.Socksaddr, _ int) (net.Conn, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
-	dialer := newTCPOverIPDialer(fakeTCPNetstackFactory{stack: stack}, fakeIPPacketSession{})
-	start := time.Now()
-	_, err := dialer.DialContext(context.Background(), M.Socksaddr{Fqdn: "example.com", Port: 443})
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("expected timeout error")
-	}
-	if elapsed > time.Second {
-		t.Fatalf("default timeout budget was not applied, elapsed=%s", elapsed)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected timeout/cancel cause in chain, got: %v", err)
-	}
-}
 
 func TestSnapshotMetricsIncludesErrorClassCounters(t *testing.T) {
 	before := SnapshotMetrics()
@@ -513,8 +333,31 @@ func TestSnapshotMetricsIncludesErrorClassCounters(t *testing.T) {
 type fakeIPPacketSession struct{}
 
 func (f fakeIPPacketSession) ReadPacket(buffer []byte) (int, error) { return 0, nil }
-func (f fakeIPPacketSession) WritePacket(buffer []byte) error       { return nil }
-func (f fakeIPPacketSession) Close() error                          { return nil }
+func (f fakeIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
+	return nil, nil
+}
+func (f fakeIPPacketSession) Close() error { return nil }
+
+type recordingIPPacketSession struct {
+	lastWrite  []byte
+	readPacket []byte
+}
+
+func (s *recordingIPPacketSession) ReadPacket(buffer []byte) (int, error) {
+	if len(s.readPacket) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(buffer, s.readPacket)
+	s.readPacket = nil
+	return n, nil
+}
+
+func (s *recordingIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
+	s.lastWrite = append([]byte(nil), buffer...)
+	return nil, nil
+}
+
+func (s *recordingIPPacketSession) Close() error { return nil }
 
 type fakeDeadlineReader struct{}
 
@@ -524,52 +367,6 @@ type fakeWriter struct{}
 
 func (f *fakeWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (f *fakeWriter) Close() error                { return nil }
-
-type fakeTCPNetstackFactory struct {
-	stack TCPNetstack
-}
-
-func (f fakeTCPNetstackFactory) New(_ context.Context, _ IPPacketSession) (TCPNetstack, error) {
-	if f.stack == nil {
-		return nil, errors.New("stack is nil")
-	}
-	return f.stack, nil
-}
-
-type fakeTCPNetstack struct {
-	attempts int
-	dialFn   func(ctx context.Context, destination M.Socksaddr, attempt int) (net.Conn, error)
-}
-
-func (s *fakeTCPNetstack) DialContext(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	s.attempts++
-	if s.dialFn != nil {
-		return s.dialFn(ctx, destination, s.attempts)
-	}
-	return nil, errors.New("dial failed")
-}
-
-func (s *fakeTCPNetstack) Close() error { return nil }
-
-type flakyTCPNetstackFactory struct {
-	calls int
-}
-
-func (f *flakyTCPNetstackFactory) New(_ context.Context, _ IPPacketSession) (TCPNetstack, error) {
-	f.calls++
-	if f.calls == 1 {
-		return nil, errors.New("stack bootstrap failed")
-	}
-	return &fakeTCPNetstack{
-		dialFn: func(_ context.Context, _ M.Socksaddr, _ int) (net.Conn, error) {
-			c1, c2 := net.Pipe()
-			_ = c2.Close()
-			return c1, nil
-		},
-	}, nil
-}
-
-type testCancelKey struct{}
 
 type trackedReadCloser struct {
 	closed int

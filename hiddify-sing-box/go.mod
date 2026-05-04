@@ -281,3 +281,5 @@ replace github.com/sagernet/sing-tun => ./replace/sing-tun
 replace github.com/quic-go/masque-go => ./third_party/masque-go
 
 replace github.com/quic-go/connect-ip-go => ./third_party/connect-ip-go
+
+replace github.com/quic-go/quic-go => ./replace/quic-go-patched

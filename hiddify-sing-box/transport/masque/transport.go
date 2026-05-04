@@ -3,17 +3,21 @@ package masque
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
@@ -26,6 +30,31 @@ import (
 )
 
 const defaultUDPInitialPacketSize uint16 = 1350
+
+// masquePacketPlaneQUICConfig applies defaults for CONNECT-IP / CONNECT-UDP over HTTP/3.
+// quic-go's default MaxIdleTimeout (30s) can close a session during long bulk datagram
+// transfers when pacing and receiver-side drain stretch wall-clock beyond the idle window.
+func masquePacketPlaneQUICConfig(base *quic.Config) *quic.Config {
+	if base == nil {
+		base = &quic.Config{}
+	} else {
+		base = base.Clone()
+	}
+	if base.MaxIdleTimeout == 0 {
+		base.MaxIdleTimeout = 24 * time.Hour
+	}
+	if base.KeepAlivePeriod == 0 {
+		base.KeepAlivePeriod = 15 * time.Second
+	}
+	return base
+}
+
+func newMasqueQUICConfig() *quic.Config {
+	return masquePacketPlaneQUICConfig(&quic.Config{
+		EnableDatagrams:   true,
+		InitialPacketSize: defaultUDPInitialPacketSize,
+	})
+}
 
 type ClientSession interface {
 	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
@@ -55,6 +84,49 @@ var (
 	ErrTCPConnectStreamFailed = errors.New("masque tcp connect-stream failed")
 )
 
+type connectIPObservabilityCounters struct {
+	ptbRxTotal           atomic.Uint64
+	packetWriteFailTotal atomic.Uint64
+	packetReadExitTotal  atomic.Uint64
+	packetTxTotal        atomic.Uint64
+	packetRxTotal        atomic.Uint64
+	bytesTxTotal         atomic.Uint64
+	bytesRxTotal         atomic.Uint64
+	netstackReadInjectTotal   atomic.Uint64
+	netstackReadDropInvalidTotal atomic.Uint64
+	netstackWriteDequeuedTotal atomic.Uint64
+	netstackWriteAttemptTotal  atomic.Uint64
+	netstackWriteSuccessTotal  atomic.Uint64
+	bypassListenPacketTotal atomic.Uint64
+	openSessionTotal atomic.Uint64
+	engineIngressTotal atomic.Uint64
+	engineClassifiedTotal atomic.Uint64
+	engineDropTotal atomic.Uint64
+	engineICMPFeedbackTotal atomic.Uint64
+	enginePMTUUpdateTotal atomic.Uint64
+	engineEffectiveUDPPayload atomic.Uint64
+	firstTxMarkerEmitted atomic.Uint32
+	firstRxMarkerEmitted atomic.Uint32
+	emitSeq atomic.Uint64
+	sessionSeq atomic.Uint64
+	lastActiveEmitUnixMilli atomic.Int64
+	mu                   sync.Mutex
+	sessionResetByReason map[string]uint64
+	packetWriteFailByReason map[string]uint64
+	packetReadDropByReason  map[string]uint64
+	engineDropByReason map[string]uint64
+	enginePMTUUpdateByReason map[string]uint64
+	currentSessionID string
+}
+
+var connectIPCounters = connectIPObservabilityCounters{
+	sessionResetByReason: make(map[string]uint64),
+	packetWriteFailByReason: make(map[string]uint64),
+	packetReadDropByReason:  make(map[string]uint64),
+	engineDropByReason:      make(map[string]uint64),
+	enginePMTUUpdateByReason: make(map[string]uint64),
+}
+
 type ClientOptions struct {
 	Tag              string
 	Server           string
@@ -70,6 +142,7 @@ type ClientOptions struct {
 	TLSServerName    string
 	Insecure         bool
 	QUICExperimental QUICExperimentalOptions
+	ConnectIPDatagramCeiling uint32
 	Hops             []HopOptions
 	QUICDial         QUICDialFunc
 }
@@ -97,7 +170,7 @@ type HopOptions struct {
 
 type IPPacketSession interface {
 	ReadPacket(buffer []byte) (int, error)
-	WritePacket(buffer []byte) error
+	WritePacket(buffer []byte) (icmp []byte, err error)
 	Close() error
 }
 
@@ -158,7 +231,21 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		return nil, err
 	}
 	tcpTransport := normalizeTCPTransport(options.TCPTransport)
-	tcpCapable := tcpTransport == "connect_stream" || tcpTransport == "connect_ip"
+	tcpCapable := tcpTransport == "connect_stream"
+	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
+	if effectiveCeiling <= 0 {
+		effectiveCeiling = 1280
+	}
+	if effectiveCeiling < 1280 {
+		effectiveCeiling = 1280
+	}
+	if effectiveCeiling > 1500 {
+		effectiveCeiling = 1500
+	}
+	initialPayload := effectiveCeiling - 28
+	if initialPayload < 512 {
+		initialPayload = 512
+	}
 	return &coreSession{
 		options:      options,
 		templateUDP:  templateUDP,
@@ -166,7 +253,12 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		templateTCP:  templateTCP,
 		capabilities: CapabilitySet{ExtendedConnect: true, Datagrams: true, CapsuleProtocol: true, ConnectUDP: true, ConnectIP: true, ConnectTCP: tcpCapable},
 		hopOrder:     resolveHopOrder(options.Hops),
-		tcpFactory:   DefaultTCPNetstackFactory,
+		connectIPDatagramCeiling: effectiveCeiling,
+		connectIPPMTUState: &connectIPPMTUState{
+			currentPayload: initialPayload,
+			minPayload:     512,
+			maxPayload:     initialPayload,
+		},
 	}, nil
 }
 
@@ -176,6 +268,7 @@ type coreSession struct {
 	udpClient    *qmasque.Client
 	ipConn       *connectip.Conn
 	ipHTTPConn   *http3.ClientConn
+	ipHTTP       *http3.Transport
 	tcpHTTP      *http3.Transport
 	templateUDP  *uritemplate.Template
 	templateIP   *uritemplate.Template
@@ -183,8 +276,30 @@ type coreSession struct {
 	capabilities CapabilitySet
 	hopOrder     []HopOptions
 	hopIndex     int
-	tcpOverIP    *tcpOverIPDialer
-	tcpFactory   TCPNetstackFactory
+	connectIPDatagramCeiling int
+	connectIPPMTUState *connectIPPMTUState
+}
+
+type connectIPUDPPacketConn struct {
+	session   IPPacketSession
+	localV4   netip.Addr
+	pmtuState *connectIPPMTUState
+	deadlines connDeadlines
+	closed    atomic.Bool
+}
+
+type connectIPPMTUState struct {
+	mu sync.Mutex
+	currentPayload int
+	minPayload int
+	maxPayload int
+	successSinceDecrease int
+}
+
+type connDeadlines struct {
+	mu    sync.RWMutex
+	read  time.Time
+	write time.Time
 }
 
 func (s *coreSession) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -195,7 +310,7 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 	case "connect_stream":
 		return s.dialTCPStream(ctx, destination)
 	case "connect_ip":
-		return s.dialTCPOverIP(ctx, destination)
+		return nil, errors.Join(ErrTCPOverConnectIP, errors.New("connect_ip is TUN packet-plane only"))
 	default:
 		return nil, ErrTCPPathNotImplemented
 	}
@@ -204,6 +319,13 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.EqualFold(strings.TrimSpace(s.options.TransportMode), "connect_ip") {
+		ipSession, err := s.openIPSessionLocked(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return newConnectIPUDPPacketConn(ctx, ipSession), nil
+	}
 	if !s.capabilities.ConnectUDP {
 		return nil, E.New("masque backend does not support CONNECT-UDP")
 	}
@@ -237,6 +359,312 @@ func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	return conn, nil
 }
 
+func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net.PacketConn {
+	localV4 := netip.MustParseAddr("198.18.0.2")
+	maxDatagram := 1200
+	pmtuState := &connectIPPMTUState{
+		currentPayload: 1172,
+		minPayload:     512,
+		maxPayload:     1172,
+	}
+	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
+		if connectIPSession.datagramCeiling > 0 {
+			maxDatagram = connectIPSession.datagramCeiling
+		}
+		if connectIPSession.pmtuState != nil {
+			pmtuState = connectIPSession.pmtuState
+		}
+		prefixCtx, cancel := context.WithTimeout(ctx, time.Second)
+		prefixes, err := connectIPSession.conn.LocalPrefixes(prefixCtx)
+		cancel()
+		if err == nil {
+			for _, prefix := range prefixes {
+				addr := prefixPreferredAddress(prefix)
+				if addr.Is4() {
+					localV4 = addr
+					break
+				}
+			}
+		}
+	}
+	maxUDPPayload := maxDatagram - 28
+	if maxUDPPayload <= 0 {
+		maxUDPPayload = 512
+	}
+	pmtuState.mu.Lock()
+	pmtuState.maxPayload = maxUDPPayload
+	if pmtuState.currentPayload <= 0 || pmtuState.currentPayload > maxUDPPayload {
+		pmtuState.currentPayload = maxUDPPayload
+	}
+	if pmtuState.minPayload <= 0 || pmtuState.minPayload > pmtuState.currentPayload {
+		pmtuState.minPayload = 512
+	}
+	currentPayload := pmtuState.currentPayload
+	pmtuState.mu.Unlock()
+	setConnectIPEngineEffectiveUDPPayload(currentPayload, "session_init")
+	return &connectIPUDPPacketConn{
+		session:   session,
+		localV4:   localV4,
+		pmtuState: pmtuState,
+	}
+}
+
+func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	if c.closed.Load() {
+		return 0, nil, net.ErrClosed
+	}
+	if c.deadlines.readTimeoutExceeded() {
+		return 0, nil, os.ErrDeadlineExceeded
+	}
+	packet := make([]byte, 64*1024)
+	for {
+		n, err = c.session.ReadPacket(packet)
+		if err != nil {
+			return 0, nil, err
+		}
+		connectIPCounters.engineIngressTotal.Add(1)
+		payload, src, srcPort, parseErr := parseIPv4UDPPacket(packet[:n])
+		if parseErr != nil {
+			incConnectIPEngineDropReason("read_parse")
+			continue
+		}
+		connectIPCounters.engineClassifiedTotal.Add(1)
+		copyLen := copy(p, payload)
+		return copyLen, &net.UDPAddr{IP: net.IP(src.AsSlice()), Port: int(srcPort)}, nil
+	}
+}
+
+func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	if c.deadlines.writeTimeoutExceeded() {
+		return 0, os.ErrDeadlineExceeded
+	}
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok || udpAddr == nil || udpAddr.Port <= 0 {
+		return 0, errors.New("connect-ip udp bridge requires UDP destination")
+	}
+	dstAddr, ok := netip.AddrFromSlice(udpAddr.IP)
+	if !ok {
+		return 0, errors.New("connect-ip udp bridge requires valid destination ip")
+	}
+	dstAddr = dstAddr.Unmap()
+	if !dstAddr.Is4() {
+		return 0, errors.New("connect-ip udp bridge currently supports IPv4 destination only")
+	}
+	for offset := 0; offset < len(p); {
+		maxPayload := c.currentPayloadCeiling()
+		end := offset + maxPayload
+		if end > len(p) {
+			end = len(p)
+		}
+		packet, buildErr := buildIPv4UDPPacket(c.localV4, uint16(53000), dstAddr, uint16(udpAddr.Port), p[offset:end])
+		if buildErr != nil {
+			return 0, buildErr
+		}
+		icmp, writeErr := c.session.WritePacket(packet)
+		err = writeErr
+		if err != nil {
+			return 0, err
+		}
+		connectIPCounters.engineClassifiedTotal.Add(1)
+		if len(icmp) > 0 {
+			connectIPCounters.engineICMPFeedbackTotal.Add(1)
+			incConnectIPEngineDropReason("pmtu_feedback")
+			c.decreasePayloadCeiling("ptb_feedback")
+		} else {
+			c.maybeRecoverPayloadCeiling()
+		}
+		offset = end
+	}
+	return len(p), nil
+}
+
+func (c *connectIPUDPPacketConn) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func (c *connectIPUDPPacketConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IP(c.localV4.AsSlice()), Port: 53000}
+}
+
+func (c *connectIPUDPPacketConn) SetDeadline(t time.Time) error {
+	c.deadlines.setDeadline(t)
+	return nil
+}
+
+func (c *connectIPUDPPacketConn) SetReadDeadline(t time.Time) error {
+	c.deadlines.setReadDeadline(t)
+	return nil
+}
+
+func (c *connectIPUDPPacketConn) SetWriteDeadline(t time.Time) error {
+	c.deadlines.setWriteDeadline(t)
+	return nil
+}
+
+func (c *connectIPUDPPacketConn) currentPayloadCeiling() int {
+	if c.pmtuState == nil {
+		return 1172
+	}
+	c.pmtuState.mu.Lock()
+	defer c.pmtuState.mu.Unlock()
+	if c.pmtuState.currentPayload <= 0 {
+		c.pmtuState.currentPayload = 1172
+	}
+	return c.pmtuState.currentPayload
+}
+
+func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) {
+	if c.pmtuState == nil {
+		return
+	}
+	c.pmtuState.mu.Lock()
+	next := c.pmtuState.currentPayload - 64
+	if next < c.pmtuState.minPayload {
+		next = c.pmtuState.minPayload
+	}
+	if next < c.pmtuState.currentPayload {
+		c.pmtuState.currentPayload = next
+		c.pmtuState.successSinceDecrease = 0
+	}
+	current := c.pmtuState.currentPayload
+	c.pmtuState.mu.Unlock()
+	setConnectIPEngineEffectiveUDPPayload(current, reason)
+}
+
+func (c *connectIPUDPPacketConn) maybeRecoverPayloadCeiling() {
+	if c.pmtuState == nil {
+		return
+	}
+	const recoverySuccessWindow = 256
+	c.pmtuState.mu.Lock()
+	c.pmtuState.successSinceDecrease++
+	if c.pmtuState.currentPayload >= c.pmtuState.maxPayload || c.pmtuState.successSinceDecrease < recoverySuccessWindow {
+		c.pmtuState.mu.Unlock()
+		return
+	}
+	next := c.pmtuState.currentPayload + 16
+	if next > c.pmtuState.maxPayload {
+		next = c.pmtuState.maxPayload
+	}
+	c.pmtuState.currentPayload = next
+	c.pmtuState.successSinceDecrease = 0
+	current := c.pmtuState.currentPayload
+	c.pmtuState.mu.Unlock()
+	setConnectIPEngineEffectiveUDPPayload(current, "recovery_increase")
+}
+
+func (d *connDeadlines) setDeadline(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.read = t
+	d.write = t
+}
+
+func (d *connDeadlines) setReadDeadline(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.read = t
+}
+
+func (d *connDeadlines) setWriteDeadline(t time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.write = t
+}
+
+func (d *connDeadlines) readTimeoutExceeded() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return !d.read.IsZero() && time.Now().After(d.read)
+}
+
+func (d *connDeadlines) writeTimeoutExceeded() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return !d.write.IsZero() && time.Now().After(d.write)
+}
+
+func buildIPv4UDPPacket(src netip.Addr, srcPort uint16, dst netip.Addr, dstPort uint16, payload []byte) ([]byte, error) {
+	if !src.Is4() || !dst.Is4() {
+		return nil, errors.New("ipv4 udp packet builder requires ipv4 addresses")
+	}
+	const ipv4HeaderLen = 20
+	const udpHeaderLen = 8
+	totalLen := ipv4HeaderLen + udpHeaderLen + len(payload)
+	packet := make([]byte, totalLen)
+	packet[0] = 0x45
+	packet[1] = 0x00
+	binary.BigEndian.PutUint16(packet[2:4], uint16(totalLen))
+	binary.BigEndian.PutUint16(packet[4:6], 0)
+	binary.BigEndian.PutUint16(packet[6:8], 0)
+	packet[8] = 64
+	packet[9] = 17
+	copy(packet[12:16], src.AsSlice())
+	copy(packet[16:20], dst.AsSlice())
+	binary.BigEndian.PutUint16(packet[10:12], ipv4HeaderChecksum(packet[:ipv4HeaderLen]))
+	binary.BigEndian.PutUint16(packet[20:22], srcPort)
+	binary.BigEndian.PutUint16(packet[22:24], dstPort)
+	binary.BigEndian.PutUint16(packet[24:26], uint16(udpHeaderLen+len(payload)))
+	binary.BigEndian.PutUint16(packet[26:28], 0)
+	copy(packet[28:], payload)
+	return packet, nil
+}
+
+func parseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort uint16, err error) {
+	if len(packet) < 28 {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge packet too short")
+	}
+	version := packet[0] >> 4
+	if version != 4 {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects ipv4 packet")
+	}
+	ihl := int(packet[0]&0x0f) * 4
+	if ihl < 20 || len(packet) < ihl+8 {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid ipv4 header length")
+	}
+	if packet[9] != 17 {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects udp protocol")
+	}
+	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
+	if totalLen <= 0 || totalLen > len(packet) {
+		totalLen = len(packet)
+	}
+	udpStart := ihl
+	srcAddr, ok := netip.AddrFromSlice(packet[12:16])
+	if !ok {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid source ip")
+	}
+	srcPort = binary.BigEndian.Uint16(packet[udpStart : udpStart+2])
+	udpLen := int(binary.BigEndian.Uint16(packet[udpStart+4 : udpStart+6]))
+	udpPayloadStart := udpStart + 8
+	if udpLen < 8 || udpPayloadStart > totalLen {
+		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid udp length")
+	}
+	payloadEnd := udpStart + udpLen
+	if payloadEnd > totalLen {
+		payloadEnd = totalLen
+	}
+	return packet[udpPayloadStart:payloadEnd], srcAddr, srcPort, nil
+}
+
+func ipv4HeaderChecksum(header []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(header); i += 2 {
+		if i == 10 {
+			continue
+		}
+		sum += uint32(binary.BigEndian.Uint16(header[i : i+2]))
+	}
+	for (sum >> 16) != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+	return ^uint16(sum)
+}
+
 func (s *coreSession) newUDPClient() *qmasque.Client {
 	return &qmasque.Client{
 		TLSClientConfig: &tls.Config{
@@ -244,10 +672,7 @@ func (s *coreSession) newUDPClient() *qmasque.Client {
 			InsecureSkipVerify: s.options.Insecure,
 			ServerName:         resolveTLSServerName(s.options),
 		},
-		QUICConfig: applyQUICExperimentalOptions(&quic.Config{
-			EnableDatagrams:   true,
-			InitialPacketSize: defaultUDPInitialPacketSize,
-		}, s.options.QUICExperimental),
+		QUICConfig: applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental),
 		QUICDial: s.options.QUICDial,
 	}
 }
@@ -260,14 +685,24 @@ func (s *coreSession) OpenIPSession(ctx context.Context) (IPPacketSession, error
 
 func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession, error) {
 	// caller must hold s.mu when calling directly.
+	emitConnectIPObservabilityEvent("open_ip_session_begin")
 	if !s.capabilities.ConnectIP {
+		incConnectIPWriteFailReason("open_not_supported")
+		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, E.New("masque backend does not support CONNECT-IP")
 	}
 	if s.ipConn != nil {
-		return &connectIPPacketSession{conn: s.ipConn}, nil
+		emitConnectIPObservabilityEvent("open_ip_session_success_reuse")
+		return &connectIPPacketSession{
+			conn:            s.ipConn,
+			datagramCeiling: s.connectIPDatagramCeiling,
+			pmtuState:       s.connectIPPMTUState,
+		}, nil
 	}
 	clientConn, err := s.openHTTP3ClientConn(ctx)
 	if err != nil {
+		incConnectIPWriteFailReason("open_http3_client_conn")
+		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, err
 	}
 	conn, _, err := connectip.Dial(ctx, clientConn, s.templateIP)
@@ -283,13 +718,29 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 			conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP)
 			if err == nil {
 				s.ipConn = conn
-				return &connectIPPacketSession{conn: conn}, nil
+				connectIPCounters.openSessionTotal.Add(1)
+				setConnectIPSessionID()
+				emitConnectIPObservabilityEvent("open_ip_session_success")
+				return &connectIPPacketSession{
+					conn:            conn,
+					datagramCeiling: s.connectIPDatagramCeiling,
+					pmtuState:       s.connectIPPMTUState,
+				}, nil
 			}
 		}
+		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
+		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, err
 	}
 	s.ipConn = conn
-	return &connectIPPacketSession{conn: conn}, nil
+	connectIPCounters.openSessionTotal.Add(1)
+	setConnectIPSessionID()
+	emitConnectIPObservabilityEvent("open_ip_session_success")
+	return &connectIPPacketSession{
+		conn:            conn,
+		datagramCeiling: s.connectIPDatagramCeiling,
+		pmtuState:       s.connectIPPMTUState,
+	}, nil
 }
 
 func (s *coreSession) Capabilities() CapabilitySet {
@@ -300,19 +751,25 @@ func (s *coreSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var errs []error
+	emitConnectIPObservabilityEvent("session_close_begin")
 	if s.ipConn != nil {
 		errs = append(errs, s.ipConn.Close())
+		s.ipConn = nil
+	}
+	if s.ipHTTP != nil {
+		s.ipHTTP.Close()
+		s.ipHTTP = nil
+		s.ipHTTPConn = nil
 	}
 	if s.udpClient != nil {
 		errs = append(errs, s.udpClient.Close())
+		s.udpClient = nil
 	}
 	if s.tcpHTTP != nil {
 		s.tcpHTTP.Close()
+		s.tcpHTTP = nil
 	}
-	if s.tcpOverIP != nil {
-		errs = append(errs, s.tcpOverIP.Close())
-		s.tcpOverIP = nil
-	}
+	emitConnectIPObservabilityEvent("session_close_end")
 	return errors.Join(errs...)
 }
 
@@ -339,16 +796,19 @@ func (s *coreSession) openHTTP3ClientConn(ctx context.Context) (*http3.ClientCon
 	transport := &http3.Transport{
 		EnableDatagrams: true,
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			cfg = masquePacketPlaneQUICConfig(cfg)
+			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
 			if s.options.QUICDial != nil {
 				return s.options.QUICDial(ctx, addr, tlsCfg, cfg)
 			}
 			return quic.DialAddr(ctx, addr, tlsCfg, cfg)
 		},
 	}
-	conn, err := transport.Dial(ctx, target, tlsConf, applyQUICExperimentalOptions(&quic.Config{EnableDatagrams: true}, s.options.QUICExperimental))
+	conn, err := transport.Dial(ctx, target, tlsConf, applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental))
 	if err != nil {
 		return nil, err
 	}
+	s.ipHTTP = transport
 	s.ipHTTPConn = transport.NewClientConn(conn)
 	return s.ipHTTPConn, nil
 }
@@ -463,6 +923,7 @@ func (s *coreSession) resetHopTemplates() error {
 	if len(s.hopOrder) == 0 {
 		return nil
 	}
+	incConnectIPSessionReset("hop_advance")
 	hop := s.hopOrder[s.hopIndex]
 	s.options.Server = hop.Server
 	s.options.ServerPort = hop.Port
@@ -477,39 +938,16 @@ func (s *coreSession) resetHopTemplates() error {
 		_ = s.udpClient.Close()
 		s.udpClient = nil
 	}
-	s.ipConn = nil
+	if s.ipConn != nil {
+		_ = s.ipConn.Close()
+		s.ipConn = nil
+	}
+	if s.ipHTTP != nil {
+		s.ipHTTP.Close()
+		s.ipHTTP = nil
+	}
 	s.ipHTTPConn = nil
-	if s.tcpOverIP != nil {
-		_ = s.tcpOverIP.Close()
-		s.tcpOverIP = nil
-	}
 	return nil
-}
-
-func (s *coreSession) dialTCPOverIP(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	targetHost := s.resolveDestinationHost(destination)
-	targetPort := destination.Port
-	tcpTracef("masque tcp connect_ip dial start host=%s port=%d", targetHost, targetPort)
-	s.mu.Lock()
-	ipSession, err := s.openIPSessionLocked(ctx)
-	if err != nil {
-		s.mu.Unlock()
-		wrapped := errors.Join(ErrTransportInit, err)
-		tcpTracef("masque tcp connect_ip dial failed host=%s port=%d error_class=%s err=%v", targetHost, targetPort, ClassifyError(wrapped), wrapped)
-		return nil, wrapped
-	}
-	if s.tcpOverIP == nil {
-		s.tcpOverIP = newTCPOverIPDialer(s.tcpFactory, ipSession)
-	}
-	dialer := s.tcpOverIP
-	s.mu.Unlock()
-	conn, err := dialer.DialContext(ctx, destination)
-	if err != nil {
-		tcpTracef("masque tcp connect_ip dial failed host=%s port=%d error_class=%s err=%v", targetHost, targetPort, ClassifyError(err), err)
-		return nil, err
-	}
-	tcpTracef("masque tcp connect_ip dial success host=%s port=%d status=200", targetHost, targetPort)
-	return conn, nil
 }
 
 func resolveTLSServerName(options ClientOptions) string {
@@ -555,6 +993,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 				ServerName:         resolveTLSServerName(options),
 			},
 			Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+				cfg = masquePacketPlaneQUICConfig(cfg)
 				cfg = applyQUICExperimentalOptions(cfg, options.QUICExperimental)
 				if options.QUICDial != nil {
 					return options.QUICDial(ctx, addr, tlsCfg, cfg)
@@ -663,6 +1102,7 @@ func (s *coreSession) resetTCPHTTPTransport() {
 			ServerName:         resolveTLSServerName(s.options),
 		},
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			cfg = masquePacketPlaneQUICConfig(cfg)
 			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
 			if s.options.QUICDial != nil {
 				return s.options.QUICDial(ctx, addr, tlsCfg, cfg)
@@ -681,6 +1121,19 @@ func isRetryableTCPStreamError(err error) bool {
 		strings.Contains(s, "no recent network activity") ||
 		strings.Contains(s, "idle timeout") ||
 		strings.Contains(s, "application error")
+}
+
+// Kept for test-level compatibility while CONNECT-IP TCP dial path is disabled in runtime.
+func isRetryableConnectIPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "timeout") ||
+		strings.Contains(s, "no recent network activity") ||
+		strings.Contains(s, "idle timeout") ||
+		strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "connection reset by peer")
 }
 
 func waitContextBackoff(ctx context.Context, d time.Duration) error {
@@ -776,19 +1229,241 @@ func (c *streamConn) SetWriteDeadline(t time.Time) error {
 	return ErrDeadlineUnsupported
 }
 
+func isTCPNetwork(network string) bool {
+	switch strings.ToLower(strings.TrimSpace(network)) {
+	case "tcp", "tcp4", "tcp6":
+		return true
+	default:
+		return false
+	}
+}
+
 type connectIPPacketSession struct {
-	conn *connectip.Conn
+	conn             *connectip.Conn
+	datagramCeiling int
+	pmtuState       *connectIPPMTUState
 }
 
 func (s *connectIPPacketSession) ReadPacket(buffer []byte) (int, error) {
-	return s.conn.ReadPacket(buffer)
+	n, err := s.conn.ReadPacket(buffer)
+	if err != nil {
+		connectIPCounters.packetReadExitTotal.Add(1)
+		incConnectIPReadDropReason(classifyConnectIPErrorReason(err))
+		emitConnectIPObservabilityEvent("packet_read_exit")
+		return n, err
+	}
+	if n > 0 {
+		connectIPCounters.packetRxTotal.Add(1)
+		connectIPCounters.bytesRxTotal.Add(uint64(n))
+		if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
+			emitConnectIPObservabilityEvent("first_packet_rx")
+		}
+		maybeEmitConnectIPActiveSnapshot()
+	}
+	return n, err
 }
 
-func (s *connectIPPacketSession) WritePacket(buffer []byte) error {
-	_, err := s.conn.WritePacket(buffer)
-	return err
+func (s *connectIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
+	if s.datagramCeiling > 0 && len(buffer) > s.datagramCeiling {
+		connectIPCounters.packetWriteFailTotal.Add(1)
+		incConnectIPWriteFailReason("ceiling_reject")
+		emitConnectIPObservabilityEvent("packet_write_fail_ceiling")
+		return nil, errors.Join(ErrTransportInit, errors.New("connect-ip packet exceeds configured datagram ceiling"))
+	}
+	icmp, err := s.conn.WritePacket(buffer)
+	if err != nil {
+		connectIPCounters.packetWriteFailTotal.Add(1)
+		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
+		emitConnectIPObservabilityEvent("packet_write_fail")
+		return icmp, err
+	}
+	connectIPCounters.packetTxTotal.Add(1)
+	connectIPCounters.bytesTxTotal.Add(uint64(len(buffer)))
+	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
+		emitConnectIPObservabilityEvent("first_packet_tx")
+	}
+	maybeEmitConnectIPActiveSnapshot()
+	if len(icmp) > 0 {
+		connectIPCounters.ptbRxTotal.Add(1)
+		emitConnectIPObservabilityEvent("packet_ptb_rx")
+	}
+	return icmp, err
 }
 
 func (s *connectIPPacketSession) Close() error {
-	return s.conn.Close()
+	// The core session owns CONNECT-IP lifecycle. Closing this wrapper must not
+	// tear down the shared underlying conn used by runtime packet-plane.
+	return nil
+}
+
+func incConnectIPSessionReset(reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	connectIPCounters.mu.Lock()
+	connectIPCounters.sessionResetByReason[reason]++
+	connectIPCounters.mu.Unlock()
+	emitConnectIPObservabilityEvent("session_reset_" + reason)
+}
+
+func classifyConnectIPErrorReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return "closed"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "timeout"), strings.Contains(text, "deadline"):
+		return "timeout"
+	case strings.Contains(text, "temporar"):
+		return "temporary"
+	case strings.Contains(text, "too large"), strings.Contains(text, "mtu"):
+		return "mtu"
+	case strings.Contains(text, "closed"):
+		return "closed"
+	default:
+		return "other"
+	}
+}
+
+func incConnectIPWriteFailReason(reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	connectIPCounters.mu.Lock()
+	connectIPCounters.packetWriteFailByReason[reason]++
+	connectIPCounters.mu.Unlock()
+}
+
+func incConnectIPReadDropReason(reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	connectIPCounters.mu.Lock()
+	connectIPCounters.packetReadDropByReason[reason]++
+	connectIPCounters.mu.Unlock()
+}
+
+func incConnectIPEngineDropReason(reason string) {
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	connectIPCounters.engineDropTotal.Add(1)
+	connectIPCounters.mu.Lock()
+	connectIPCounters.engineDropByReason[reason]++
+	connectIPCounters.mu.Unlock()
+}
+
+func setConnectIPEngineEffectiveUDPPayload(payload int, reason string) {
+	if payload < 0 {
+		payload = 0
+	}
+	connectIPCounters.engineEffectiveUDPPayload.Store(uint64(payload))
+	if strings.TrimSpace(reason) == "" {
+		reason = "unknown"
+	}
+	connectIPCounters.enginePMTUUpdateTotal.Add(1)
+	connectIPCounters.mu.Lock()
+	connectIPCounters.enginePMTUUpdateByReason[reason]++
+	connectIPCounters.mu.Unlock()
+}
+
+func setConnectIPSessionID() {
+	seq := connectIPCounters.sessionSeq.Add(1)
+	id := fmt.Sprintf("connect-ip-session-%d-%d", time.Now().UnixNano(), seq)
+	connectIPCounters.mu.Lock()
+	connectIPCounters.currentSessionID = id
+	connectIPCounters.mu.Unlock()
+	connectIPCounters.lastActiveEmitUnixMilli.Store(0)
+	connectIPCounters.firstTxMarkerEmitted.Store(0)
+	connectIPCounters.firstRxMarkerEmitted.Store(0)
+}
+
+func maybeEmitConnectIPActiveSnapshot() {
+	now := time.Now().UnixMilli()
+	last := connectIPCounters.lastActiveEmitUnixMilli.Load()
+	if last != 0 && now-last < 1000 {
+		return
+	}
+	if !connectIPCounters.lastActiveEmitUnixMilli.CompareAndSwap(last, now) {
+		return
+	}
+	emitConnectIPObservabilityEvent("periodic_active")
+}
+
+func ConnectIPObservabilitySnapshot() map[string]any {
+	connectIPCounters.mu.Lock()
+	reasons := make(map[string]uint64, len(connectIPCounters.sessionResetByReason))
+	for k, v := range connectIPCounters.sessionResetByReason {
+		reasons[k] = v
+	}
+	writeReasons := make(map[string]uint64, len(connectIPCounters.packetWriteFailByReason))
+	for k, v := range connectIPCounters.packetWriteFailByReason {
+		writeReasons[k] = v
+	}
+	readReasons := make(map[string]uint64, len(connectIPCounters.packetReadDropByReason))
+	for k, v := range connectIPCounters.packetReadDropByReason {
+		readReasons[k] = v
+	}
+	engineDropReasons := make(map[string]uint64, len(connectIPCounters.engineDropByReason))
+	for k, v := range connectIPCounters.engineDropByReason {
+		engineDropReasons[k] = v
+	}
+	pmtuUpdateReasons := make(map[string]uint64, len(connectIPCounters.enginePMTUUpdateByReason))
+	for k, v := range connectIPCounters.enginePMTUUpdateByReason {
+		pmtuUpdateReasons[k] = v
+	}
+	sessionID := connectIPCounters.currentSessionID
+	connectIPCounters.mu.Unlock()
+	return map[string]any{
+		"connect_ip_obs_contract_version":      "v1",
+		"connect_ip_session_id":                sessionID,
+		"connect_ip_emit_seq":                  connectIPCounters.emitSeq.Load(),
+		"connect_ip_ptb_rx_total":             connectIPCounters.ptbRxTotal.Load(),
+		"connect_ip_packet_write_fail_total":  connectIPCounters.packetWriteFailTotal.Load(),
+		"connect_ip_packet_write_fail_reason_total": writeReasons,
+		"connect_ip_packet_read_exit_total":   connectIPCounters.packetReadExitTotal.Load(),
+		"connect_ip_packet_read_drop_reason_total": readReasons,
+		"connect_ip_packet_tx_total":          connectIPCounters.packetTxTotal.Load(),
+		"connect_ip_packet_rx_total":          connectIPCounters.packetRxTotal.Load(),
+		"connect_ip_bytes_tx_total":           connectIPCounters.bytesTxTotal.Load(),
+		"connect_ip_bytes_rx_total":           connectIPCounters.bytesRxTotal.Load(),
+		"connect_ip_netstack_read_inject_total":   connectIPCounters.netstackReadInjectTotal.Load(),
+		"connect_ip_netstack_read_drop_invalid_total": connectIPCounters.netstackReadDropInvalidTotal.Load(),
+		"connect_ip_netstack_write_dequeued_total": connectIPCounters.netstackWriteDequeuedTotal.Load(),
+		"connect_ip_netstack_write_attempt_total":  connectIPCounters.netstackWriteAttemptTotal.Load(),
+		"connect_ip_netstack_write_success_total":  connectIPCounters.netstackWriteSuccessTotal.Load(),
+		"connect_ip_bypass_listenpacket_total":    connectIPCounters.bypassListenPacketTotal.Load(),
+		"connect_ip_open_session_total":           connectIPCounters.openSessionTotal.Load(),
+		"connect_ip_engine_ingress_total":         connectIPCounters.engineIngressTotal.Load(),
+		"connect_ip_engine_classified_total":      connectIPCounters.engineClassifiedTotal.Load(),
+		"connect_ip_engine_drop_total":            connectIPCounters.engineDropTotal.Load(),
+		"connect_ip_engine_drop_reason_total":     engineDropReasons,
+		"connect_ip_engine_icmp_feedback_total":   connectIPCounters.engineICMPFeedbackTotal.Load(),
+		"connect_ip_engine_pmtu_update_total":     connectIPCounters.enginePMTUUpdateTotal.Load(),
+		"connect_ip_engine_pmtu_update_reason_total": pmtuUpdateReasons,
+		"connect_ip_engine_effective_udp_payload": connectIPCounters.engineEffectiveUDPPayload.Load(),
+		"connect_ip_session_reset_total":      reasons,
+		"connect_ip_capsule_unknown_total":    connectip.UnknownCapsuleTotal(),
+		"connect_ip_datagram_context_unknown_total": connectip.UnknownContextDatagramTotal(),
+		"connect_ip_datagram_malformed_total": connectip.MalformedDatagramTotal(),
+		"connect_ip_policy_drop_icmp_total": connectip.PolicyDropICMPTotal(),
+	}
+}
+
+func emitConnectIPObservabilityEvent(reason string) {
+	snapshot := ConnectIPObservabilitySnapshot()
+	snapshot["connect_ip_emit_seq"] = connectIPCounters.emitSeq.Add(1)
+	snapshot["event_reason"] = reason
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		log.Printf("CONNECT_IP_OBS marshal_error=%v", err)
+		return
+	}
+	log.Printf("CONNECT_IP_OBS %s", encoded)
 }

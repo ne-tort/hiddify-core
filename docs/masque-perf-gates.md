@@ -10,7 +10,7 @@ This document defines practical performance and stability gates for `masque` and
 - Commands:
   - `go test ./protocol/masque ./transport/masque ./common/masque ./include -tags with_masque`
   - `go test -race ./protocol/masque ./transport/masque -tags with_masque`
-  - unified CONNECT-IP runner: `bash experiments/router/stand/l3router/scripts/masque_connect_ip_runner.sh --mode smoke`
+  - unified CONNECT-IP runner (canonical): `python experiments/router/stand/l3router/masque_stand_runner.py --scenario tcp_ip`
   - CI inline UDP smoke `10KB <= 5s` (`runtime/smoke_10kb_latest.json`)
   - CI inline TCP `connect_stream` smoke `10KB <= 5s` (`runtime/smoke_tcp_connect_stream_latest.json`)
 - Expected runtime: under 10 minutes.
@@ -94,7 +94,7 @@ This document defines practical performance and stability gates for `masque` and
 ## CI Integration
 - PR/Push blocking gate:
   - workflow job `masque-gates` in `hiddify-core/.github/workflows/ci.yml`
-  - CONNECT-IP checks run through `scripts/masque_connect_ip_runner.sh`
+  - CONNECT-IP checks run via stand runner flow (Python entrypoint); workflows may wrap it with local shell scripts when those scripts are present.
   - uploads `experiments/router/stand/l3router/runtime/smoke_10kb_latest.json`.
 - Nightly non-blocking stress track:
   - workflow job `masque-nightly-perf` in `hiddify-core/.github/workflows/ci.yml`

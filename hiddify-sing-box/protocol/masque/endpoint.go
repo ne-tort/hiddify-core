@@ -42,7 +42,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	return &Endpoint{
 		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
-		runtime: CM.NewRuntime(TM.M2ClientFactory{}, CM.RuntimeOptions{
+		runtime: CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 			Tag:              tag,
 			Server:           options.Server,
 			ServerPort:       options.ServerPort,
@@ -57,6 +57,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 			TLSServerName:    options.TLSServerName,
 			Insecure:         options.Insecure,
 			QUICExperimental: toTransportQUICExperimental(options.QUICExperimental),
+			ConnectIPDatagramCeiling: options.MTU,
 			Chain:            chain,
 			QUICDial:         quicDial,
 		}),
@@ -168,14 +169,22 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 	if tcpTransportRaw != "" && tcpTransportRaw != option.MasqueTCPTransportAuto && tcpTransportRaw != option.MasqueTCPTransportConnectIP && tcpTransportRaw != option.MasqueTCPTransportConnectStream {
 		return E.New("invalid tcp_transport")
 	}
+	if normalizeTCPTransport(options.TCPTransport) == option.MasqueTCPTransportConnectIP {
+		return E.New("tcp_transport=connect_ip is removed in TUN-only mode; use connect_stream for TCP")
+	}
 	if options.QUICExperimental != nil && options.QUICExperimental.Enabled && strings.TrimSpace(os.Getenv("MASQUE_EXPERIMENTAL_QUIC")) != "1" {
 		return E.New("quic_experimental.enabled requires MASQUE_EXPERIMENTAL_QUIC=1")
 	}
 	if tcpMode == option.MasqueTCPModeMasqueOrDirect && fallbackPolicy != option.MasqueFallbackPolicyDirectExplicit {
 		return E.New("tcp_mode=masque_or_direct requires fallback_policy=direct_explicit")
 	}
-	if options.UDPTimeout > 0 || options.MTU > 0 || options.Workers > 0 {
-		return E.New("udp_timeout, mtu and workers are not supported yet; remove these fields")
+	if options.UDPTimeout > 0 || options.Workers > 0 {
+		return E.New("udp_timeout and workers are not supported yet; remove these fields")
+	}
+	if options.MTU > 0 {
+		if options.MTU < 1280 || options.MTU > 65535 {
+			return E.New("mtu must be in [1280, 65535] for connect_ip datagram ceiling")
+		}
 	}
 	hopPolicy := strings.ToLower(strings.TrimSpace(options.HopPolicy))
 	if hopPolicy == "" {
@@ -263,7 +272,7 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 			return E.New("template_udp is not applicable when transport_mode=connect_ip")
 		}
 		if tcpTransportRaw == option.MasqueTCPTransportAuto {
-			return E.New("tcp_transport=auto is not allowed for production client profiles; use connect_stream or connect_ip explicitly")
+			return E.New("tcp_transport=auto is not allowed for production client profiles; use connect_stream explicitly (TUN-only client rejects tcp_transport=connect_ip)")
 		}
 		if rawTCPTemplate := strings.TrimSpace(options.TemplateTCP); rawTCPTemplate != "" {
 			if !strings.Contains(rawTCPTemplate, "{target_host}") || !strings.Contains(rawTCPTemplate, "{target_port}") {

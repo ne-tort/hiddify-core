@@ -238,7 +238,8 @@ func TestSendingDatagrams(t *testing.T) {
 		conn := newProxiedConn(&mockStream{})
 		data := make([]byte, 20)
 		data[0] = 5 << 4 // IPv5
-		_, err := conn.composeDatagram(data)
+		var datagram []byte
+		err := conn.composeDatagram(&datagram, data)
 		require.ErrorContains(t, err, "connect-ip: unknown IP versions: 5")
 	})
 
@@ -251,14 +252,57 @@ func TestSendingDatagrams(t *testing.T) {
 			Checksum: 89,
 		}).Marshal()
 		require.NoError(t, err)
-		_, err = conn.composeDatagram(data[:ipv4.HeaderLen-1])
+		var datagram []byte
+		err = conn.composeDatagram(&datagram, data[:ipv4.HeaderLen-1])
 		require.ErrorContains(t, err, "connect-ip: IPv4 packet too short")
 	})
 
 	t.Run("IPv6 packet too short", func(t *testing.T) {
 		conn := newProxiedConn(&mockStream{})
-		_, err := conn.composeDatagram(ipv6Header[:ipv6.HeaderLen-1])
+		var datagram []byte
+		err := conn.composeDatagram(&datagram, ipv6Header[:ipv6.HeaderLen-1])
 		require.ErrorContains(t, err, "connect-ip: IPv6 packet too short")
+	})
+
+	t.Run("composeDatagram rejects empty packet", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		var datagram []byte
+		err := conn.composeDatagram(&datagram, []byte{})
+		require.ErrorContains(t, err, "empty packet")
+	})
+}
+
+func TestWritePacketFailures(t *testing.T) {
+	t.Run("empty payload returns error", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		icmp, err := conn.WritePacket([]byte{})
+		require.ErrorContains(t, err, "empty packet")
+		require.Nil(t, icmp)
+	})
+
+	t.Run("invalid IP version returns error", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		data := make([]byte, 20)
+		data[0] = 5 << 4 // IPv5
+		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "compose datagram")
+		require.Nil(t, icmp)
+	})
+
+	t.Run("TTL too small returns error", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      1,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "compose datagram")
+		require.Nil(t, icmp)
 	})
 }
 

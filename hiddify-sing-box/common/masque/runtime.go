@@ -2,7 +2,6 @@ package masque
 
 import (
 	"context"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -40,6 +39,7 @@ type RuntimeOptions struct {
 	TLSServerName  string
 	Insecure       bool
 	QUICExperimental T.QUICExperimentalOptions
+	ConnectIPDatagramCeiling uint32
 	Chain          []ChainHop
 	QUICDial       T.QUICDialFunc
 }
@@ -64,7 +64,6 @@ type runtimeImpl struct {
 	factory T.ClientFactory
 	session T.ClientSession
 	ipPlane T.IPPacketSession
-	tcpOverIPStack io.Closer
 
 	mu    sync.RWMutex
 	state atomic.Uint32
@@ -87,10 +86,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 	}
 	r.state.Store(uint32(StateConnecting))
 	if r.session != nil {
-		if r.tcpOverIPStack != nil {
-			_ = r.tcpOverIPStack.Close()
-			r.tcpOverIPStack = nil
-		}
 		if r.ipPlane != nil {
 			_ = r.ipPlane.Close()
 			r.ipPlane = nil
@@ -127,6 +122,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			TLSServerName:    r.options.TLSServerName,
 			Insecure:         r.options.Insecure,
 			QUICExperimental: r.options.QUICExperimental,
+			ConnectIPDatagramCeiling: r.options.ConnectIPDatagramCeiling,
 			Hops:             toTransportHops(r.options.Chain),
 			QUICDial:         r.options.QUICDial,
 		})
@@ -224,10 +220,6 @@ func (r *runtimeImpl) Close() error {
 	defer r.mu.Unlock()
 	r.state.Store(uint32(StateClosed))
 	if r.session != nil {
-		if r.tcpOverIPStack != nil {
-			_ = r.tcpOverIPStack.Close()
-			r.tcpOverIPStack = nil
-		}
 		if r.ipPlane != nil {
 			_ = r.ipPlane.Close()
 			r.ipPlane = nil

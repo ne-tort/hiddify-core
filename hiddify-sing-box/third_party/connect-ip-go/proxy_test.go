@@ -149,8 +149,7 @@ func TestTTLs(t *testing.T) {
 			{StartIP: netip.MustParseAddr("0.0.0.0"), EndIP: netip.MustParseAddr("255.255.255.255")},
 		}))
 
-		// First send a packet with TTL 1.
-		// We expect the packet to be dropped silently.
+		// First send a packet with TTL 1: compose rejects before send (fail-closed).
 		hdrTTL1 := &ipv4.Header{
 			Len: 20,
 			TTL: 1,
@@ -160,8 +159,9 @@ func TestTTLs(t *testing.T) {
 		packetTTL1, err := hdrTTL1.Marshal()
 		require.NoError(t, err)
 		icmp, err := client.WritePacket(packetTTL1)
-		require.NoError(t, err)
-		require.Empty(t, icmp)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "compose datagram")
+		require.Nil(t, icmp)
 
 		// now send a packet with TTL 42
 		hdr := &ipv4.Header{
@@ -197,8 +197,7 @@ func TestTTLs(t *testing.T) {
 			{StartIP: netip.MustParseAddr("::"), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")},
 		}))
 
-		// First send a packet with Hop Limit 1.
-		// We expect the packet to be dropped silently.
+		// Hop Limit 1 rejected at compose stage (fail-closed).
 		packetHopLimit1 := []byte{
 			0x60, 0x00, 0x00, 0x00, // Version, Traffic Class, Flow Label
 			0x00, 0x00, // Payload Length
@@ -207,8 +206,9 @@ func TestTTLs(t *testing.T) {
 			0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88, // Destination IP
 		}
 		icmp, err := client.WritePacket(packetHopLimit1)
-		require.NoError(t, err)
-		require.Empty(t, icmp)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "compose datagram")
+		require.Nil(t, icmp)
 
 		// now send a packet with Hop Limit 42
 		packet := []byte{

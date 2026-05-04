@@ -20,6 +20,7 @@ import (
 
 	connectip "github.com/quic-go/connect-ip-go"
 	qmasque "github.com/quic-go/masque-go"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -144,6 +145,17 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 			return
 		}
 		routeCtx, cancelRoute := context.WithTimeout(r.Context(), 2*time.Second)
+		assignErr := conn.AssignAddresses(routeCtx, []netip.Prefix{
+			netip.MustParsePrefix("198.18.0.1/32"),
+			netip.MustParsePrefix("fd00::1/128"),
+		})
+		if assignErr != nil {
+			cancelRoute()
+			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip address assign failed status=502 err=%v", assignErr))
+			_ = conn.Close()
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
 		routeErr := conn.AdvertiseRoute(routeCtx, []connectip.IPRoute{
 			{StartIP: netip.IPv4Unspecified(), EndIP: netip.MustParseAddr("255.255.255.255"), IPProtocol: 0},
 			{StartIP: netip.IPv6Unspecified(), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"), IPProtocol: 0},
@@ -161,8 +173,15 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		metadata.Inbound = e.Tag()
 		metadata.InboundType = e.Type()
 		metadata.Source = M.ParseSocksaddr(r.RemoteAddr)
-		metadata.Destination = M.Socksaddr{Addr: netip.IPv4Unspecified(), Port: 0}
-		go e.router.RoutePacketConnectionEx(r.Context(), packetConn, metadata, func(err error) {
+		metadata.Destination = M.Socksaddr{}
+		metadata.User = strings.TrimSpace(r.RemoteAddr)
+		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route dispatch router_type=%T destination=dynamic", e.router))
+		// TUN-only hard switch: CONNECT-IP runs as packet-plane forwarding only.
+		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
+		routePacketConnectionExBypassTunnelWrapper(e.router, r.Context(), packetConn, metadata, func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route closed err=%v", err))
+			}
 			_ = packetConn.Close()
 		})
 	})
@@ -225,6 +244,11 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		Handler:         mux,
 		TLSConfig:       http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{tlsCert}}),
 		EnableDatagrams: true,
+		QUICConfig: &quic.Config{
+			EnableDatagrams: true,
+			MaxIdleTimeout:  24 * time.Hour,
+			KeepAlivePeriod: 15 * time.Second,
+		},
 	}
 	packetConn, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -241,6 +265,10 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	}()
 	e.ready.Store(true)
 	return nil
+}
+
+func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
+	router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
 
 func pathFromTemplate(raw string) string {
@@ -451,43 +479,75 @@ type connectIPNetPacketConn struct {
 var _ N.PacketConn = (*connectIPNetPacketConn)(nil)
 
 func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
-	n, err := c.conn.ReadPacket(buffer.FreeBytes())
-	if err != nil {
-		return M.Socksaddr{}, err
+	for {
+		n, err := c.conn.ReadPacket(buffer.FreeBytes())
+		if err != nil {
+			return M.Socksaddr{}, err
+		}
+		buffer.Truncate(n)
+		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(buffer.Bytes())
+		if parseErr != nil {
+			buffer.Reset()
+			continue
+		}
+		if payloadStart > 0 || payloadEnd < n {
+			payloadLen := payloadEnd - payloadStart
+			copy(buffer.Bytes()[:payloadLen], buffer.Bytes()[payloadStart:payloadEnd])
+			buffer.Truncate(payloadLen)
+		}
+		return destination, nil
 	}
-	buffer.Truncate(n)
-	destination, parseErr := parseIPDestination(buffer.Bytes())
-	if parseErr != nil {
-		return M.Socksaddr{}, parseErr
-	}
-	return destination, nil
 }
 
 func (c *connectIPNetPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	_, err := c.conn.WritePacket(buffer.Bytes())
-	return err
+	return c.writeOutgoingWithICMPRelay(buffer.Bytes())
+}
+
+// Relay PTB/control feedback returned by connect-ip-go (ICMP payload as a full IP packet).
+const connectIPMaxICMPRelay = 8
+
+func (c *connectIPNetPacketConn) writeOutgoingWithICMPRelay(packet []byte) error {
+	payload := packet
+	for i := 0; i < connectIPMaxICMPRelay; i++ {
+		icmp, err := c.conn.WritePacket(payload)
+		if err != nil {
+			return err
+		}
+		if len(icmp) == 0 {
+			return nil
+		}
+		payload = icmp
+	}
+	return E.New("connect-ip: ICMP feedback relay exceeded")
 }
 
 func (c *connectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	if c.deadlines.readTimeoutExceeded() {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
-	n, err = c.conn.ReadPacket(p)
-	if err != nil {
-		return 0, nil, err
+	for {
+		n, err = c.conn.ReadPacket(p)
+		if err != nil {
+			return 0, nil, err
+		}
+		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(p[:n])
+		if parseErr != nil {
+			continue
+		}
+		if payloadStart > 0 || payloadEnd < n {
+			payloadLen := payloadEnd - payloadStart
+			copy(p[:payloadLen], p[payloadStart:payloadEnd])
+			n = payloadLen
+		}
+		return n, &net.IPAddr{IP: net.IP(destination.Addr.AsSlice())}, nil
 	}
-	destination, parseErr := parseIPDestination(p[:n])
-	if parseErr != nil {
-		return 0, nil, parseErr
-	}
-	return n, &net.IPAddr{IP: net.IP(destination.Addr.AsSlice())}, nil
 }
 
 func (c *connectIPNetPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if c.deadlines.writeTimeoutExceeded() {
 		return 0, os.ErrDeadlineExceeded
 	}
-	_, err = c.conn.WritePacket(p)
+	err = c.writeOutgoingWithICMPRelay(p)
 	if err != nil {
 		return 0, err
 	}
@@ -599,33 +659,75 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) 
 }
 
 func parseIPDestination(packet []byte) (M.Socksaddr, error) {
+	destination, _, _, err := parseIPDestinationAndPayload(packet)
+	return destination, err
+}
+
+func parseIPDestinationAndPayload(packet []byte) (M.Socksaddr, int, int, error) {
 	if len(packet) < 1 {
-		return M.Socksaddr{}, E.New("invalid empty ip packet")
+		return M.Socksaddr{}, 0, 0, E.New("invalid empty ip packet")
 	}
 	switch packet[0] >> 4 {
 	case 4:
 		if len(packet) < 20 {
-			return M.Socksaddr{}, E.New("invalid ipv4 packet")
+			return M.Socksaddr{}, 0, 0, E.New("invalid ipv4 packet")
 		}
 		ihl := int(packet[0]&0x0f) * 4
 		if ihl < 20 || len(packet) < ihl {
-			return M.Socksaddr{}, E.New("invalid ipv4 header length")
+			return M.Socksaddr{}, 0, 0, E.New("invalid ipv4 header length")
 		}
 		destination := M.Socksaddr{Addr: netip.AddrFrom4([4]byte(packet[16:20]))}
+		protocol := packet[9]
 		if (packet[9] == 6 || packet[9] == 17) && len(packet) >= ihl+4 {
 			destination.Port = uint16(packet[ihl+2])<<8 | uint16(packet[ihl+3])
 		}
-		return destination, nil
+		payloadStart, payloadEnd := 0, len(packet)
+		if protocol == 17 && len(packet) >= ihl+8 {
+			totalLen := int(uint16(packet[2])<<8 | uint16(packet[3]))
+			if totalLen <= 0 || totalLen > len(packet) {
+				totalLen = len(packet)
+			}
+			udpLen := int(uint16(packet[ihl+4])<<8 | uint16(packet[ihl+5]))
+			payloadStart = ihl + 8
+			payloadEnd = totalLen
+			if udpLen >= 8 {
+				payloadEnd = intMin(payloadEnd, ihl+udpLen)
+			}
+			if payloadStart > payloadEnd || payloadEnd > len(packet) {
+				return M.Socksaddr{}, 0, 0, E.New("invalid ipv4 udp payload")
+			}
+		}
+		return destination, payloadStart, payloadEnd, nil
 	case 6:
 		if len(packet) < 40 {
-			return M.Socksaddr{}, E.New("invalid ipv6 packet")
+			return M.Socksaddr{}, 0, 0, E.New("invalid ipv6 packet")
 		}
 		destination := M.Socksaddr{Addr: netip.AddrFrom16([16]byte(packet[24:40]))}
-		if (packet[6] == 6 || packet[6] == 17) && len(packet) >= 44 {
+		nextHeader := packet[6]
+		if (nextHeader == 6 || nextHeader == 17) && len(packet) >= 44 {
 			destination.Port = uint16(packet[42])<<8 | uint16(packet[43])
 		}
-		return destination, nil
+		payloadStart, payloadEnd := 0, len(packet)
+		if nextHeader == 17 && len(packet) >= 48 {
+			payloadStart = 48
+			payloadEnd = len(packet)
+			udpLen := int(uint16(packet[44])<<8 | uint16(packet[45]))
+			if udpLen >= 8 {
+				payloadEnd = intMin(payloadEnd, 40+udpLen)
+			}
+			if payloadStart > payloadEnd || payloadEnd > len(packet) {
+				return M.Socksaddr{}, 0, 0, E.New("invalid ipv6 udp payload")
+			}
+		}
+		return destination, payloadStart, payloadEnd, nil
 	default:
-		return M.Socksaddr{}, E.New("unsupported ip packet version")
+		return M.Socksaddr{}, 0, 0, E.New("unsupported ip packet version")
 	}
+}
+
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
