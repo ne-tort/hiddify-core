@@ -52,30 +52,32 @@ type MasqueEndpointOptions struct {
 	ServerOptions
 	DialerOptions
 
-	TransportMode       string                  `json:"transport_mode,omitempty"`
-	Mode                string                  `json:"mode,omitempty"`
-	TemplateUDP         string                  `json:"template_udp,omitempty"`
-	TemplateIP          string                  `json:"template_ip,omitempty"`
-	TemplateTCP         string                  `json:"template_tcp,omitempty"`
-	FallbackPolicy      string                  `json:"fallback_policy,omitempty"`
-	TCPMode             string                  `json:"tcp_mode,omitempty"`
-	TCPTransport        string                  `json:"tcp_transport,omitempty"`
-	TLSServerName       string                  `json:"tls_server_name,omitempty"`
-	Insecure            bool                    `json:"insecure,omitempty"`
-	Listen              string                  `json:"listen,omitempty"`
-	ListenPort          uint16                  `json:"listen_port,omitempty"`
-	Certificate         string                  `json:"certificate,omitempty"`
-	Key                 string                  `json:"key,omitempty"`
-	ServerToken         string                  `json:"server_token,omitempty"`
-	AllowPrivateTargets bool                    `json:"allow_private_targets,omitempty"`
-	AllowedTargetPorts  []uint16                `json:"allowed_target_ports,omitempty"`
-	BlockedTargetPorts  []uint16                `json:"blocked_target_ports,omitempty"`
-	HopPolicy           string                  `json:"hop_policy,omitempty"`
-	Hops                []MasqueChainHopOptions `json:"hops,omitempty"`
+	TransportMode         string                  `json:"transport_mode,omitempty"`
+	Mode                  string                  `json:"mode,omitempty"`
+	TemplateUDP           string                  `json:"template_udp,omitempty"`
+	TemplateIP            string                  `json:"template_ip,omitempty"`
+	ConnectIPScopeTarget  string                  `json:"connect_ip_scope_target,omitempty"`
+	ConnectIPScopeIPProto uint8                   `json:"connect_ip_scope_ipproto,omitempty"`
+	TemplateTCP           string                  `json:"template_tcp,omitempty"`
+	FallbackPolicy        string                  `json:"fallback_policy,omitempty"`
+	TCPMode               string                  `json:"tcp_mode,omitempty"`
+	TCPTransport          string                  `json:"tcp_transport,omitempty"`
+	TLSServerName         string                  `json:"tls_server_name,omitempty"`
+	Insecure              bool                    `json:"insecure,omitempty"`
+	Listen                string                  `json:"listen,omitempty"`
+	ListenPort            uint16                  `json:"listen_port,omitempty"`
+	Certificate           string                  `json:"certificate,omitempty"`
+	Key                   string                  `json:"key,omitempty"`
+	ServerToken           string                  `json:"server_token,omitempty"`
+	AllowPrivateTargets   bool                    `json:"allow_private_targets,omitempty"`
+	AllowedTargetPorts    []uint16                `json:"allowed_target_ports,omitempty"`
+	BlockedTargetPorts    []uint16                `json:"blocked_target_ports,omitempty"`
+	HopPolicy             string                  `json:"hop_policy,omitempty"`
+	Hops                  []MasqueChainHopOptions `json:"hops,omitempty"`
 
-	UDPTimeout badoption.Duration `json:"udp_timeout,omitempty"`
-	MTU        uint32             `json:"mtu,omitempty"`
-	Workers    int                `json:"workers,omitempty"`
+	UDPTimeout       badoption.Duration             `json:"udp_timeout,omitempty"`
+	MTU              uint32                         `json:"mtu,omitempty"`
+	Workers          int                            `json:"workers,omitempty"`
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
 }
 

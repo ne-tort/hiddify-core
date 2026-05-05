@@ -1,9 +1,12 @@
 package connectip
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,17 +15,143 @@ import (
 	"golang.org/x/net/ipv6"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 
 	"github.com/stretchr/testify/require"
 )
+
+type bytesStream struct {
+	reader *bytes.Reader
+}
+
+func (b *bytesStream) Read(p []byte) (int, error)                      { return b.reader.Read(p) }
+func (b *bytesStream) Write(p []byte) (int, error)                     { return len(p), nil }
+func (b *bytesStream) Close() error                                    { return nil }
+func (b *bytesStream) ReceiveDatagram(context.Context) ([]byte, error) { return nil, context.Canceled }
+func (b *bytesStream) SendDatagram([]byte) error                       { return nil }
+func (b *bytesStream) CancelRead(quic.StreamErrorCode)                 {}
+
+func unknownCapsuleFrame(t http3.CapsuleType, payload []byte) []byte {
+	frame := quicvarint.Append(nil, uint64(t))
+	frame = quicvarint.Append(frame, uint64(len(payload)))
+	frame = append(frame, payload...)
+	return frame
+}
 
 func TestEmitPolicyDropICMPIncrementsAttemptOnComposeFailure(t *testing.T) {
 	var c Conn
 	beforeA := PolicyDropICMPAttemptTotal()
 	beforeS := PolicyDropICMPTotal()
-	c.emitPolicyDropICMP(nil)
+	c.emitPolicyDropICMP(nil, "compose_failure_test")
 	require.Equal(t, beforeA+1, PolicyDropICMPAttemptTotal())
 	require.Equal(t, beforeS, PolicyDropICMPTotal())
+	require.GreaterOrEqual(t, PolicyDropICMPReasonBreakdown()["compose_failure_test"], uint64(1))
+}
+
+func TestPolicyDropICMPReasonBreakdownSrcDstProto(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	conn := newProxiedConn(&mockStream{})
+	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
+	require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.1.2.3"), IPProtocol: 42},
+	}))
+
+	before := PolicyDropICMPReasonBreakdown()
+	beforeSrc := before["src_not_allowed"]
+	beforeDst := before["dst_not_allowed"]
+	beforeProto := before["proto_not_allowed"]
+
+	srcHdr := &ipv4.Header{
+		Src:      net.IPv4(192, 168, 0, 11),
+		Dst:      net.IPv4(10, 1, 2, 3),
+		Len:      20,
+		Checksum: 89,
+		Protocol: 42,
+	}
+	srcData, err := srcHdr.Marshal()
+	require.NoError(t, err)
+	require.ErrorContains(t, conn.handleIncomingProxiedPacket(srcData), "source address not allowed")
+
+	dstHdr := &ipv4.Header{
+		Src:      net.IPv4(192, 168, 0, 10),
+		Dst:      net.IPv4(10, 1, 2, 4),
+		Len:      20,
+		Checksum: 89,
+		Protocol: 42,
+	}
+	dstData, err := dstHdr.Marshal()
+	require.NoError(t, err)
+	require.ErrorContains(t, conn.handleIncomingProxiedPacket(dstData), "destination address / protocol not allowed")
+
+	protoHdr := &ipv4.Header{
+		Src:      net.IPv4(192, 168, 0, 10),
+		Dst:      net.IPv4(10, 1, 2, 3),
+		Len:      20,
+		Checksum: 89,
+		Protocol: 41,
+	}
+	protoData, err := protoHdr.Marshal()
+	require.NoError(t, err)
+	require.ErrorContains(t, conn.handleIncomingProxiedPacket(protoData), "destination address / protocol not allowed")
+
+	after := PolicyDropICMPReasonBreakdown()
+	require.Equal(t, beforeSrc+1, after["src_not_allowed"])
+	require.Equal(t, beforeDst+1, after["dst_not_allowed"])
+	require.Equal(t, beforeProto+1, after["proto_not_allowed"])
+}
+
+func TestAdvertiseRouteRejectsUnorderedOrOverlappingRanges(t *testing.T) {
+	conn := newProxiedConn(&mockStream{})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := conn.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.10"), EndIP: netip.MustParseAddr("10.0.0.20"), IPProtocol: 0},
+		{StartIP: netip.MustParseAddr("10.0.0.1"), EndIP: netip.MustParseAddr("10.0.0.5"), IPProtocol: 0},
+	})
+	require.ErrorIs(t, err, ErrInvalidRouteAdvertisement)
+	require.ErrorContains(t, err, "ordered by start address")
+
+	err = conn.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.1"), EndIP: netip.MustParseAddr("10.0.0.10"), IPProtocol: 0},
+		{StartIP: netip.MustParseAddr("10.0.0.10"), EndIP: netip.MustParseAddr("10.0.0.20"), IPProtocol: 0},
+	})
+	require.ErrorIs(t, err, ErrInvalidRouteAdvertisement)
+	require.ErrorContains(t, err, "must not overlap")
+}
+
+func TestReadFromStreamUnknownCapsuleSilentSkipWithBreakdown(t *testing.T) {
+	unknownType := http3.CapsuleType(0xface)
+	beforeTotal := UnknownCapsuleTotal()
+	beforeType := UnknownCapsuleTypeBreakdown()[uint64(unknownType)]
+	unknownCapsuleByType.Store(uint64(unknownType), &atomic.Uint64{})
+	defer unknownCapsuleByType.Delete(uint64(unknownType))
+
+	assign := (&addressAssignCapsule{
+		AssignedAddresses: []AssignedAddress{{IPPrefix: netip.MustParsePrefix("192.168.0.10/32")}},
+	}).append(nil)
+	streamBytes := append(unknownCapsuleFrame(unknownType, []byte{0xde, 0xad, 0xbe, 0xef}), assign...)
+	conn := &Conn{
+		str:                   &bytesStream{reader: bytes.NewReader(streamBytes)},
+		assignedAddressNotify: make(chan struct{}, 1),
+		availableRoutesNotify: make(chan struct{}, 1),
+		closeChan:             make(chan struct{}),
+	}
+
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, io.EOF)
+
+	select {
+	case <-conn.assignedAddressNotify:
+	default:
+		t.Fatal("expected assigned address notify after known capsule")
+	}
+	require.Equal(t, beforeTotal+1, UnknownCapsuleTotal())
+	breakdown := UnknownCapsuleTypeBreakdown()
+	require.Equal(t, beforeType+1, breakdown[uint64(unknownType)])
 }
 
 var ipv6Header = []byte{
@@ -390,4 +519,52 @@ func TestSendLargeDatagramsICMPMTUReflectsQuicHint(t *testing.T) {
 	require.Equal(t, ipv4.ICMPTypeDestinationUnreachable, msg.Type)
 	require.Equal(t, 4, msg.Code)
 	require.NotNil(t, msg.Body)
+}
+
+func TestIPv6UpperLayerProtocolFromExtensionChain(t *testing.T) {
+	packet := make([]byte, ipv6.HeaderLen+8+8)
+	packet[0] = 0x60
+	packet[6] = 0  // Hop-by-Hop Options
+	packet[7] = 64 // Hop Limit
+	copy(packet[8:24], net.ParseIP("2001:db8::1").To16())
+	copy(packet[24:40], net.ParseIP("2001:db8::2").To16())
+	packet[40] = 17 // final upper-layer protocol: UDP
+	packet[41] = 0  // hdr ext len => 8 bytes total
+
+	proto, err := ipv6UpperLayerProtocol(packet)
+	require.NoError(t, err)
+	require.Equal(t, uint8(17), proto)
+}
+
+func TestPacketTupleUsesFinalIPv6ProtocolAfterFragmentHeader(t *testing.T) {
+	packet := make([]byte, ipv6.HeaderLen+8+20)
+	packet[0] = 0x60
+	packet[6] = 44 // Fragment Header
+	packet[7] = 64
+	copy(packet[8:24], net.ParseIP("2001:db8::10").To16())
+	copy(packet[24:40], net.ParseIP("2001:db8::20").To16())
+	packet[40] = 6 // final upper-layer protocol: TCP
+
+	src, dst, proto, version, err := packetTuple(packet)
+	require.NoError(t, err)
+	require.Equal(t, netip.MustParseAddr("2001:db8::10"), src)
+	require.Equal(t, netip.MustParseAddr("2001:db8::20"), dst)
+	require.Equal(t, uint8(6), proto)
+	require.Equal(t, uint8(6), version)
+}
+
+func TestPacketTupleRejectsAmbiguousIPv6ExtensionChain(t *testing.T) {
+	packet := make([]byte, ipv6.HeaderLen+2)
+	packet[0] = 0x60
+	packet[6] = 0 // Hop-by-Hop Options, but header body is intentionally truncated.
+	packet[7] = 64
+	copy(packet[8:24], net.ParseIP("2001:db8::10").To16())
+	copy(packet[24:40], net.ParseIP("2001:db8::20").To16())
+	packet[40] = 17
+	packet[41] = 0
+
+	_, _, _, _, err := packetTuple(packet)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIPv6ExtensionChainAmbiguous)
+	require.ErrorContains(t, err, "malformed IPv6 extension header")
 }

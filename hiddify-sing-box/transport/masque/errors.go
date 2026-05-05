@@ -1,6 +1,9 @@
 package masque
 
-import "errors"
+import (
+	"errors"
+	"net"
+)
 
 type ErrorClass string
 
@@ -9,6 +12,7 @@ const (
 	ErrorClassMisconfig    ErrorClass = "misconfig"
 	ErrorClassCapability   ErrorClass = "capability"
 	ErrorClassAuth         ErrorClass = "auth"
+	ErrorClassLifecycle    ErrorClass = "lifecycle"
 	ErrorClassTransport    ErrorClass = "transport_init"
 	ErrorClassTCPStackInit ErrorClass = "tcp_stack_init"
 	ErrorClassDial         ErrorClass = "tcp_dial"
@@ -37,6 +41,8 @@ func ClassifyError(err error) ErrorClass {
 		return ErrorClassCapability
 	case errors.Is(err, ErrAuthFailed):
 		return ErrorClassAuth
+	case errors.Is(err, ErrLifecycleClosed), errors.Is(err, net.ErrClosed):
+		return ErrorClassLifecycle
 	case errors.Is(err, ErrTransportInit):
 		return ErrorClassTransport
 	case errors.Is(err, ErrTCPStackInit):

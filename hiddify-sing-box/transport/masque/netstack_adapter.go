@@ -208,8 +208,20 @@ func (s *connectIPTCPNetstack) DialContext(ctx context.Context, destination M.So
 		return nil, errors.Join(ErrTCPDial, ErrTCPOverConnectIP, errors.New("connect-ip tcp dial requires IP destination"))
 	}
 	fa, pn := convertToFullAddr(netip.AddrPortFrom(destination.Addr, destination.Port))
-	conn, err := gonet.DialContextTCP(ctx, s.gStack, fa, pn)
+	dialCtx, dialCancel := context.WithCancel(ctx)
+	defer dialCancel()
+	go func() {
+		select {
+		case <-s.done:
+			dialCancel()
+		case <-dialCtx.Done():
+		}
+	}()
+	conn, err := gonet.DialContextTCP(dialCtx, s.gStack, fa, pn)
 	if err != nil {
+		if err2, ok := s.terminalErr.Load().(error); ok && err2 != nil {
+			return nil, errors.Join(ErrTCPDial, err2)
+		}
 		return nil, errors.Join(ErrTCPDial, err)
 	}
 	return conn, nil

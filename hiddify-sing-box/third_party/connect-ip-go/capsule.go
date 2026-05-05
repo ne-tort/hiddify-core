@@ -195,6 +195,9 @@ func parseRouteAdvertisementCapsule(r io.Reader) (*routeAdvertisementCapsule, er
 		}
 		ranges = append(ranges, ipRange)
 	}
+	if err := validateRouteAdvertisementRanges(ranges); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRouteAdvertisement, err)
+	}
 	return &routeAdvertisementCapsule{IPAddressRanges: ranges}, nil
 }
 
@@ -252,10 +255,6 @@ func parseIPAddressRange(r io.Reader) (IPRoute, error) {
 		return IPRoute{}, fmt.Errorf("invalid IP version: %d", ipVersion)
 	}
 
-	if startIP.Compare(endIP) > 0 {
-		return IPRoute{}, errors.New("start IP is greater than end IP")
-	}
-
 	var ipProtocol uint8
 	if err := binary.Read(r, binary.LittleEndian, &ipProtocol); err != nil {
 		return IPRoute{}, err
@@ -265,4 +264,29 @@ func parseIPAddressRange(r io.Reader) (IPRoute, error) {
 		EndIP:      endIP,
 		IPProtocol: ipProtocol,
 	}, nil
+}
+
+func validateRouteAdvertisementRanges(ranges []IPRoute) error {
+	for i, route := range ranges {
+		if route.StartIP.BitLen() != route.EndIP.BitLen() {
+			return fmt.Errorf("route range %d uses mixed IP families", i)
+		}
+		if route.StartIP.Compare(route.EndIP) > 0 {
+			return fmt.Errorf("route range %d start IP is greater than end IP", i)
+		}
+		if i == 0 {
+			continue
+		}
+		prev := ranges[i-1]
+		if prev.StartIP.BitLen() != route.StartIP.BitLen() {
+			continue
+		}
+		if prev.StartIP.Compare(route.StartIP) > 0 {
+			return fmt.Errorf("route ranges must be ordered by start address: range %d starts before previous range", i)
+		}
+		if prev.EndIP.Compare(route.StartIP) >= 0 {
+			return fmt.Errorf("route ranges must not overlap: range %d intersects previous range", i)
+		}
+	}
+	return nil
 }

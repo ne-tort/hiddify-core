@@ -44,6 +44,36 @@ func ConnectIPServerParseDropTotal() uint64 {
 	return connectIPServerParseDropTotal.Load()
 }
 
+func connectIPRequestErrorHTTPStatus(err error) int {
+	var perr *connectip.RequestParseError
+	if errors.As(err, &perr) {
+		return perr.HTTPStatus
+	}
+	return http.StatusBadRequest
+}
+
+func connectIPRequestErrorClass(status int) TM.ErrorClass {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotImplemented:
+		return TM.ErrorClassCapability
+	default:
+		return TM.ErrorClassUnknown
+	}
+}
+
+func connectIPRouteAdvertiseErrorClass(err error) TM.ErrorClass {
+	if err == nil {
+		return TM.ErrorClassUnknown
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return TM.ErrorClassLifecycle
+	}
+	if errors.Is(err, connectip.ErrInvalidRouteAdvertisement) {
+		return TM.ErrorClassCapability
+	}
+	return TM.ErrorClassTransport
+}
+
 type ServerEndpoint struct {
 	endpoint.Adapter
 	options    option.MasqueEndpointOptions
@@ -53,8 +83,13 @@ type ServerEndpoint struct {
 	packetConn net.PacketConn
 	udpProxy   *qmasque.Proxy
 	ready      atomic.Bool
+	closing    atomic.Bool
 	startErr   atomic.Value
 	dialer     net.Dialer
+}
+
+type startErrorState struct {
+	err error
 }
 
 func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
@@ -73,6 +108,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	if e.server != nil {
 		return nil
 	}
+	// Fresh listen/Serve cycle: clear shutdown marker from a previous Close().
+	// Do not reset closing in Close()'s defer — Serve may still be unwinding after Close returns.
+	e.closing.Store(false)
 	tlsCert, err := tls.LoadX509KeyPair(e.options.Certificate, e.options.Key)
 	if err != nil {
 		return E.Cause(err, "load server certificate")
@@ -137,14 +175,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		}
 		req, err := connectip.ParseRequest(r, ipTemplate)
 		if err != nil {
-			var perr *connectip.RequestParseError
-			if errors.As(err, &perr) {
-				e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip parse denied status=%d err=%v", perr.HTTPStatus, err))
-				w.WriteHeader(perr.HTTPStatus)
-				return
-			}
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip parse denied status=400 err=%v", err))
-			w.WriteHeader(http.StatusBadRequest)
+			status := connectIPRequestErrorHTTPStatus(err)
+			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip parse denied status=%d error_class=%s err=%v", status, connectIPRequestErrorClass(status), err))
+			w.WriteHeader(status)
 			return
 		}
 		conn, err := ipProxy.Proxy(w, req)
@@ -171,7 +204,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		})
 		cancelRoute()
 		if routeErr != nil {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route advertise failed status=502 err=%v", routeErr))
+			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route advertise failed status=502 error_class=%s err=%v", connectIPRouteAdvertiseErrorClass(routeErr), routeErr))
 			_ = conn.Close()
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -195,53 +228,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		})
 	})
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect request method=%s remote=%s uri=%s", r.Method, r.RemoteAddr, r.URL.String()))
-		if !e.authorizeRequest(r) {
-			e.logger.DebugContext(r.Context(), "masque tcp connect auth denied status=401")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		targetHost, targetPort, parseErr := parseTCPTargetFromRequest(r, tcpTemplate)
-		if parseErr != nil {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect parse denied status=400 error_class=misconfig err=%v", parseErr))
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		resolvedHost, allowErr := resolveTCPTargetForDial(r.Context(), targetHost, e.options.AllowPrivateTargets)
-		if allowErr != nil {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr))
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		if !allowTCPPort(targetPort, e.options.AllowedTargetPorts, e.options.BlockedTargetPorts) {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=port_policy_denied", targetHost, targetPort))
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect dial start host=%s resolved_host=%s port=%s", targetHost, resolvedHost, targetPort))
-		targetConn, dialErr := e.dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedHost, targetPort))
-		if dialErr != nil {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, TM.ClassifyError(errors.Join(TM.ErrTCPDial, dialErr)), dialErr))
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		defer targetConn.Close()
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		if flusher != nil {
-			flusher.Flush()
-		}
-		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort))
-		relayErr := relayTCPBidirectional(r.Context(), targetConn, r.Body, w)
-		if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
-			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr))
-			return
-		}
-		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque tcp relay finished host=%s resolved_host=%s port=%s status=ok", targetHost, resolvedHost, targetPort))
+		e.handleTCPConnectRequest(w, r, tcpTemplate)
 	})
 	listenHost := strings.TrimSpace(e.options.Listen)
 	if listenHost == "" {
@@ -264,14 +251,18 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		return E.Cause(err, "listen udp for masque server")
 	}
 	e.packetConn = packetConn
+	server := e.server
 	go func() {
-		err := e.server.Serve(packetConn)
-		if err != nil {
-			e.startErr.Store(err)
-			e.logger.Error("masque server stopped: ", err)
+		err := server.Serve(packetConn)
+		if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
+			e.startErr.Store(startErrorState{err: err})
+			if e.logger != nil {
+				e.logger.Error("masque server stopped: ", err)
+			}
 		}
 		e.ready.Store(false)
 	}()
+	e.startErr.Store(startErrorState{})
 	e.ready.Store(true)
 	return nil
 }
@@ -303,6 +294,7 @@ func (e *ServerEndpoint) IsReady() bool {
 }
 
 func (e *ServerEndpoint) Close() error {
+	e.closing.Store(true)
 	e.ready.Store(false)
 	if e.udpProxy != nil {
 		e.udpProxy.Close()
@@ -366,8 +358,79 @@ func (e *ServerEndpoint) lastStartError() error {
 	if value == nil {
 		return nil
 	}
-	err, _ := value.(error)
-	return err
+	state, ok := value.(startErrorState)
+	if !ok {
+		return nil
+	}
+	return state.err
+}
+
+func isExpectedServerShutdownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed) || errors.Is(err, quic.ErrServerClosed) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(text, "use of closed network connection") ||
+		strings.Contains(text, "server closed")
+}
+
+func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template) {
+	debugf := func(format string, args ...any) {
+		if e.logger == nil {
+			return
+		}
+		e.logger.DebugContext(r.Context(), fmt.Sprintf(format, args...))
+	}
+	if r.Method != http.MethodConnect {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	debugf("masque tcp connect request method=%s remote=%s uri=%s", r.Method, r.RemoteAddr, r.URL.String())
+	if !e.authorizeRequest(r) {
+		debugf("masque tcp connect auth denied status=401")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	targetHost, targetPort, parseErr := parseTCPTargetFromRequest(r, tcpTemplate)
+	if parseErr != nil {
+		debugf("masque tcp connect parse denied status=400 error_class=misconfig err=%v", parseErr)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	resolvedHost, allowErr := resolveTCPTargetForDial(r.Context(), targetHost, e.options.AllowPrivateTargets)
+	if allowErr != nil {
+		debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if !allowTCPPort(targetPort, e.options.AllowedTargetPorts, e.options.BlockedTargetPorts) {
+		debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=port_policy_denied", targetHost, targetPort)
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	debugf("masque tcp connect dial start host=%s resolved_host=%s port=%s", targetHost, resolvedHost, targetPort)
+	targetConn, dialErr := e.dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedHost, targetPort))
+	if dialErr != nil {
+		debugf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, TM.ClassifyError(errors.Join(TM.ErrTCPDial, dialErr)), dialErr)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer targetConn.Close()
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	debugf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort)
+	relayErr := relayTCPBidirectional(r.Context(), targetConn, r.Body, w)
+	if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
+		debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr)
+		return
+	}
+	debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=ok", targetHost, resolvedHost, targetPort)
 }
 
 func resolveTCPTargetForDial(ctx context.Context, host string, allowPrivateTargets bool) (string, error) {

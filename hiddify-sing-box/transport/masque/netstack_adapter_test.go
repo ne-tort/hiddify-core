@@ -42,6 +42,27 @@ func (s *failingReadSession) WritePacket(buffer []byte) ([]byte, error) {
 
 func (s *failingReadSession) Close() error { return nil }
 
+// fatalWriteSession blocks ReadPacket until Close; the first WritePacket returns a non-retryable error.
+// This exercises the outbound path where WriteNotify calls failWithError and must still unblock readLoop + in-flight DialContext.
+type fatalWriteSession struct {
+	closeCh chan struct{}
+	once    sync.Once
+}
+
+func (s *fatalWriteSession) ReadPacket(_ []byte) (int, error) {
+	<-s.closeCh
+	return 0, net.ErrClosed
+}
+
+func (s *fatalWriteSession) WritePacket(_ []byte) ([]byte, error) {
+	return nil, errors.New("fatal simulated write plane error")
+}
+
+func (s *fatalWriteSession) Close() error {
+	s.once.Do(func() { close(s.closeCh) })
+	return nil
+}
+
 func newPacketPipePair() (*packetPipeSession, *packetPipeSession) {
 	aToB := make(chan []byte, 256)
 	bToA := make(chan []byte, 256)
@@ -245,6 +266,35 @@ func TestConnectIPTCPNetstackDialFailsAfterReadLoopError(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expected dial to fail after packet-plane read error")
+}
+
+func TestConnectIPTCPNetstackDialFailsAfterWriteNotifyFatalError(t *testing.T) {
+	stack, err := newConnectIPTCPNetstack(context.Background(), &fatalWriteSession{
+		closeCh: make(chan struct{}),
+	}, connectIPTCPNetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_, dialErr := stack.DialContext(context.Background(), socksaddrFromAddrPort(netip.MustParseAddrPort("198.18.0.1:443")))
+		if dialErr != nil {
+			if !errors.Is(dialErr, ErrTCPDial) {
+				t.Fatalf("expected typed tcp dial error, got: %v", dialErr)
+			}
+			if !errors.Is(dialErr, ErrTransportInit) {
+				t.Fatalf("expected transport-init cause after fatal write, got: %v", dialErr)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected dial to fail after fatal write-notify error")
 }
 
 func socksaddrFromAddrPort(addr netip.AddrPort) M.Socksaddr {

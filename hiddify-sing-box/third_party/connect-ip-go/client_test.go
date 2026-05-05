@@ -17,9 +17,15 @@ func TestClientInvalidTemplate(t *testing.T) {
 	_, _, err := Dial(
 		context.Background(),
 		nil,
-		uritemplate.MustNew("https://example.org/.well-known/masque/ip/{target}/{ipproto}/"),
+		uritemplate.MustNew("https://example.org/.well-known/masque/ip/{unknown}/"),
 	)
-	require.ErrorContains(t, err, "connect-ip: IP flow forwarding not supported")
+	require.ErrorIs(t, err, ErrFlowForwardingUnsupported)
+}
+
+func TestBuildConnectIPRequestURLScopedDefaults(t *testing.T) {
+	raw, err := buildConnectIPRequestURL(uritemplate.MustNew("https://example.org/.well-known/masque/ip/{target}/{ipproto}/"))
+	require.NoError(t, err)
+	require.Equal(t, "https://example.org/.well-known/masque/ip/0.0.0.0%2F0/0/", raw)
 }
 
 func TestClientWaitForSettings(t *testing.T) {

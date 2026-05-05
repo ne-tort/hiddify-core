@@ -15,6 +15,19 @@ import (
 
 const transportModeConnectIP = "connect_ip"
 
+// wrapStartRouterCancel marks context.Canceled on the Runtime.Start path as lifecycle-classified for
+// transport/masque.ClassifyError, without treating every context.Canceled as lifecycle (e.g. TCP dial
+// may join cancel with ErrTCPConnectStreamFailed and must stay dial-classified).
+func wrapStartRouterCancel(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return errors.Join(T.ErrLifecycleClosed, err)
+	}
+	return err
+}
+
 type Runtime interface {
 	Start(ctx context.Context) error
 	IsReady() bool
@@ -28,23 +41,25 @@ type Runtime interface {
 }
 
 type RuntimeOptions struct {
-	Tag            string
-	Server         string
-	ServerPort     uint16
-	TransportMode  string
-	TemplateUDP    string
-	TemplateIP     string
-	TemplateTCP    string
-	FallbackPolicy string
-	TCPMode        string
-	TCPTransport   string
-	ServerToken    string
-	TLSServerName  string
-	Insecure       bool
-	QUICExperimental T.QUICExperimentalOptions
+	Tag                      string
+	Server                   string
+	ServerPort               uint16
+	TransportMode            string
+	TemplateUDP              string
+	TemplateIP               string
+	ConnectIPScopeTarget     string
+	ConnectIPScopeIPProto    uint8
+	TemplateTCP              string
+	FallbackPolicy           string
+	TCPMode                  string
+	TCPTransport             string
+	ServerToken              string
+	TLSServerName            string
+	Insecure                 bool
+	QUICExperimental         T.QUICExperimentalOptions
 	ConnectIPDatagramCeiling uint32
-	Chain          []ChainHop
-	QUICDial       T.QUICDialFunc
+	Chain                    []ChainHop
+	QUICDial                 T.QUICDialFunc
 }
 
 type RuntimeFactory interface {
@@ -109,29 +124,32 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				r.state.Store(uint32(StateDegraded))
-				r.setLastErrLocked(ctx.Err())
-				return ctx.Err()
+				cancelErr := wrapStartRouterCancel(ctx.Err())
+				r.setLastErrLocked(cancelErr)
+				return cancelErr
 			case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
 			}
 		}
 		session, err = r.factory.NewSession(ctx, T.ClientOptions{
-			Tag:              r.options.Tag,
-			Server:           r.options.Server,
-			ServerPort:       r.options.ServerPort,
-			TransportMode:    r.options.TransportMode,
-			TemplateUDP:      r.options.TemplateUDP,
-			TemplateIP:       r.options.TemplateIP,
-			TemplateTCP:      r.options.TemplateTCP,
-			FallbackPolicy:   r.options.FallbackPolicy,
-			TCPMode:          r.options.TCPMode,
-			TCPTransport:     r.options.TCPTransport,
-			ServerToken:      r.options.ServerToken,
-			TLSServerName:    r.options.TLSServerName,
-			Insecure:         r.options.Insecure,
-			QUICExperimental: r.options.QUICExperimental,
+			Tag:                      r.options.Tag,
+			Server:                   r.options.Server,
+			ServerPort:               r.options.ServerPort,
+			TransportMode:            r.options.TransportMode,
+			TemplateUDP:              r.options.TemplateUDP,
+			TemplateIP:               r.options.TemplateIP,
+			ConnectIPScopeTarget:     r.options.ConnectIPScopeTarget,
+			ConnectIPScopeIPProto:    r.options.ConnectIPScopeIPProto,
+			TemplateTCP:              r.options.TemplateTCP,
+			FallbackPolicy:           r.options.FallbackPolicy,
+			TCPMode:                  r.options.TCPMode,
+			TCPTransport:             r.options.TCPTransport,
+			ServerToken:              r.options.ServerToken,
+			TLSServerName:            r.options.TLSServerName,
+			Insecure:                 r.options.Insecure,
+			QUICExperimental:         r.options.QUICExperimental,
 			ConnectIPDatagramCeiling: r.options.ConnectIPDatagramCeiling,
-			Hops:             toTransportHops(r.options.Chain),
-			QUICDial:         r.options.QUICDial,
+			Hops:                     toTransportHops(r.options.Chain),
+			QUICDial:                 r.options.QUICDial,
 		})
 		if err == nil {
 			break
@@ -139,6 +157,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 	}
 	if err != nil {
 		r.state.Store(uint32(StateDegraded))
+		err = wrapStartRouterCancel(err)
 		r.setLastErrLocked(err)
 		return err
 	}
@@ -149,6 +168,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			_ = session.Close()
 			r.session = nil
 			r.state.Store(uint32(StateDegraded))
+			err = wrapStartRouterCancel(err)
 			r.setLastErrLocked(err)
 			return err
 		}
@@ -221,6 +241,8 @@ func (r *runtimeImpl) notReadyDialErr() error {
 	return base
 }
 
+// DialContext, ListenPacket and OpenIPSession forward to the active coreSession built in Start;
+// they do not reinterpret FallbackPolicy/tcp_mode or change the UDP vs CONNECT-IP plane.
 func (r *runtimeImpl) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	r.mu.RLock()
 	session := r.session

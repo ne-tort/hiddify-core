@@ -195,7 +195,8 @@ Result: **embedded registration is required** for `warp_masque` in core, because
   - `template_tcp`
   - `chain`: optional hop list and selection policy
   - `detour`
-  - `mtu` / `udp_timeout` / workers (supported only when wired to runtime; fail-fast otherwise)
+  - `mtu` (`connect_ip` datagram ceiling, validated in `[1280, 65535]`)
+  - `udp_timeout` / `workers` (not supported; fail-fast)
 
 ## Endpoint `warp_masque`
 - WARP-focused fields:

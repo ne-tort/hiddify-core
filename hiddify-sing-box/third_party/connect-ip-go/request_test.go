@@ -3,6 +3,7 @@ package connectip
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 
 	"github.com/dunglas/httpsfv"
@@ -27,11 +28,47 @@ func TestConnectIPRequestParsing(t *testing.T) {
 		require.Equal(t, &Request{}, r)
 	})
 
-	t.Run("reject templates with variables", func(t *testing.T) {
+	t.Run("parse scoped flow forwarding variables", func(t *testing.T) {
 		template := uritemplate.MustNew("https://localhost:1234/masque/ip?t={target}&i={ipproto}")
 		req := newRequest("https://localhost:1234/masque/ip?t=foobar&i=42")
 		_, err := ParseRequest(req, template)
-		require.EqualError(t, err, "connect-ip-go currently does not support IP flow forwarding")
+		require.EqualError(t, err, "connect-ip: invalid flow forwarding target: foobar")
+		require.Equal(t, http.StatusBadRequest, err.(*RequestParseError).HTTPStatus)
+	})
+
+	t.Run("parse scoped flow forwarding variables (path form)", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{target}/{ipproto}")
+		req := newRequest("https://localhost:1234/masque/ip/198.18.0.0%2F15/17")
+		r, err := ParseRequest(req, template)
+		require.NoError(t, err)
+		require.True(t, r.HasTarget)
+		require.Equal(t, netip.MustParsePrefix("198.18.0.0/15"), r.Target)
+		require.True(t, r.HasIPProto)
+		require.Equal(t, uint8(17), r.IPProto)
+	})
+
+	t.Run("reject unknown flow forwarding variable", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{foo}")
+		req := newRequest("https://localhost:1234/masque/ip/bar")
+		_, err := ParseRequest(req, template)
+		require.EqualError(t, err, ErrFlowForwardingUnsupported.Error())
+		require.Equal(t, http.StatusNotImplemented, err.(*RequestParseError).HTTPStatus)
+	})
+
+	t.Run("reject invalid flow forwarding target", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{target}/{ipproto}")
+		req := newRequest("https://localhost:1234/masque/ip/not-a-prefix/17")
+		_, err := ParseRequest(req, template)
+		require.EqualError(t, err, "connect-ip: invalid flow forwarding target: not-a-prefix")
+		require.Equal(t, http.StatusBadRequest, err.(*RequestParseError).HTTPStatus)
+	})
+
+	t.Run("reject invalid flow forwarding ipproto", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{target}/{ipproto}")
+		req := newRequest("https://localhost:1234/masque/ip/198.18.0.0%2F15/999")
+		_, err := ParseRequest(req, template)
+		require.EqualError(t, err, "connect-ip: invalid flow forwarding ipproto: 999")
+		require.Equal(t, http.StatusBadRequest, err.(*RequestParseError).HTTPStatus)
 	})
 
 	template := uritemplate.MustNew("https://localhost:1234/masque/")

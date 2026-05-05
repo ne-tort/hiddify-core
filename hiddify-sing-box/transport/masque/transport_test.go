@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
+
+	connectip "github.com/quic-go/connect-ip-go"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 func TestResolveEntryHopSingleEntry(t *testing.T) {
@@ -80,6 +86,114 @@ func TestBuildTemplatesIncludesTCPTemplate(t *testing.T) {
 	}
 }
 
+func TestBuildTemplatesApplyConnectIPFlowScope(t *testing.T) {
+	_, ip, _, err := buildTemplates(ClientOptions{
+		Server:                "example.com",
+		ServerPort:            443,
+		TemplateIP:            "https://example.com/masque/ip/{target}/{ipproto}",
+		ConnectIPScopeTarget:  "10.0.0.0/8",
+		ConnectIPScopeIPProto: 6,
+	})
+	if err != nil {
+		t.Fatalf("buildTemplates with scope failed: %v", err)
+	}
+	if got := ip.Raw(); got != "https://example.com/masque/ip/10.0.0.0%2F8/6" {
+		t.Fatalf("unexpected expanded IP template: %s", got)
+	}
+}
+
+func TestBuildTemplatesRejectScopeWithoutTemplateVars(t *testing.T) {
+	_, _, _, err := buildTemplates(ClientOptions{
+		Server:               "example.com",
+		ServerPort:           443,
+		TemplateIP:           "https://example.com/masque/ip",
+		ConnectIPScopeTarget: "10.0.0.0/8",
+	})
+	if err == nil {
+		t.Fatal("expected scope without flow-forwarding template variables to fail fast")
+	}
+}
+
+func TestBuildTemplatesRejectInvalidScopeTarget(t *testing.T) {
+	_, _, _, err := buildTemplates(ClientOptions{
+		Server:               "example.com",
+		ServerPort:           443,
+		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
+		ConnectIPScopeTarget: "not-a-prefix",
+	})
+	if err == nil {
+		t.Fatal("expected invalid connect_ip_scope_target to fail")
+	}
+}
+
+func TestTransportMalformedScopedFlowBoundaryParity(t *testing.T) {
+	actualClass, resultClass, err := ClassifyMalformedScopedTargetClassPair("not-a-prefix")
+	if err == nil {
+		t.Fatal("expected malformed scoped classification helper to fail for invalid target")
+	}
+	if actualClass != ErrorClassCapability {
+		t.Fatalf("expected transport malformed scope classification capability, got: %s (err=%v)", actualClass, err)
+	}
+	if resultClass != ErrorClassCapability {
+		t.Fatalf("expected wrapped malformed scope classification capability, got: %s (err=%v)", resultClass, err)
+	}
+	writeMalformedScopedTransportArtifactIfRequested(t, actualClass, resultClass)
+}
+
+func TestBuildScopedErrorArtifactNormalizesErrorSource(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name:   "runtime",
+			source: ErrorSourceRuntime,
+			want:   ErrorSourceRuntime,
+		},
+		{
+			name:   "compose_up",
+			source: ErrorSourceComposeUp,
+			want:   ErrorSourceComposeUp,
+		},
+		{
+			name:   "empty_fallback_runtime",
+			source: "",
+			want:   ErrorSourceRuntime,
+		},
+		{
+			name:   "unknown_fallback_runtime",
+			source: "docker_boot",
+			want:   ErrorSourceRuntime,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			artifact := BuildScopedErrorArtifact(ErrorClassCapability, ErrorClassCapability, tc.source)
+			if artifact.ErrorSource != tc.want {
+				t.Fatalf("unexpected artifact source: got=%s want=%s", artifact.ErrorSource, tc.want)
+			}
+		})
+	}
+}
+
+func writeMalformedScopedTransportArtifactIfRequested(t *testing.T, actualClass, resultClass ErrorClass) {
+	t.Helper()
+
+	artifactPath := os.Getenv("MASQUE_MALFORMED_SCOPED_TRANSPORT_ARTIFACT_PATH")
+	if artifactPath == "" {
+		return
+	}
+	artifact := BuildScopedErrorArtifact(actualClass, resultClass, "runtime")
+	raw, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal malformed-scoped transport artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, raw, 0o644); err != nil {
+		t.Fatalf("write malformed-scoped transport artifact: %v", err)
+	}
+}
+
 func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	streamSession, err := (CoreClientFactory{}).NewSession(nil, ClientOptions{
 		Server:       "example.com",
@@ -115,6 +229,12 @@ func TestClassifyError(t *testing.T) {
 	}
 	if ClassifyError(ErrAuthFailed) != ErrorClassAuth {
 		t.Fatal("expected auth error class")
+	}
+	if ClassifyError(net.ErrClosed) != ErrorClassLifecycle {
+		t.Fatal("expected lifecycle error class for net.ErrClosed")
+	}
+	if ClassifyError(&connectip.CloseError{Remote: true}) != ErrorClassLifecycle {
+		t.Fatal("expected lifecycle error class for remote CloseError")
 	}
 }
 
@@ -276,7 +396,6 @@ func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
 	}
 }
 
-
 func TestStreamConnHalfCloseIsolation(t *testing.T) {
 	reader := &trackedReadCloser{}
 	writer := &trackedWriteCloser{}
@@ -312,6 +431,281 @@ func TestBuildTemplatesRejectsInvalidTCPTemplateURL(t *testing.T) {
 	}
 }
 
+func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			session := &coreSession{
+				options: ClientOptions{
+					Server:      "masque.local",
+					ServerPort:  443,
+					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+				},
+				tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodConnect {
+						t.Fatalf("unexpected method: %s", req.Method)
+					}
+					return &http.Response{
+						StatusCode: statusCode,
+						Body:       io.NopCloser(bytes.NewReader(nil)),
+					}, nil
+				}),
+			}
+			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
+			if !errors.Is(err, ErrAuthFailed) {
+				t.Fatalf("expected ErrAuthFailed for status=%d, got: %v", statusCode, err)
+			}
+			if got := ClassifyError(err); got != ErrorClassAuth {
+				t.Fatalf("expected auth class for status=%d, got: %s", statusCode, got)
+			}
+		})
+	}
+}
+
+func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadGateway,
+				Body:       io.NopCloser(bytes.NewReader(nil)),
+			}, nil
+		}),
+	}
+	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed for non-auth non-2xx status, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class for non-auth non-2xx status, got: %s", got)
+	}
+}
+
+func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.T) {
+	retryableErrors := []string{
+		"timeout while connecting",
+		"no recent network activity",
+		"idle timeout reached",
+		"application error 0x100",
+	}
+	for _, errorText := range retryableErrors {
+		t.Run(errorText, func(t *testing.T) {
+			attempts := 0
+			session := &coreSession{
+				options: ClientOptions{
+					Server:      "masque.local",
+					ServerPort:  443,
+					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+				},
+				tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					attempts++
+					return nil, errors.New(errorText)
+				}),
+			}
+			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
+			if !errors.Is(err, ErrTCPConnectStreamFailed) {
+				t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+			}
+			if got := ClassifyError(err); got != ErrorClassDial {
+				t.Fatalf("expected dial class for retryable roundtrip error, got: %s", got)
+			}
+			if attempts != 3 {
+				t.Fatalf("expected deterministic retry budget attempts=3, got: %d", attempts)
+			}
+		})
+	}
+}
+
+func TestDialTCPStreamNonRetryableRoundTripErrorDoesNotRetryAndKeepsDialClass(t *testing.T) {
+	attempts := 0
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("tls: bad certificate")
+		}),
+	}
+	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class for non-retryable roundtrip error, got: %s", got)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected no retries for non-retryable roundtrip error (attempts=1), got: %d", attempts)
+	}
+}
+
+func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	firstAttempt := make(chan struct{}, 1)
+	go func() {
+		<-firstAttempt
+		time.Sleep(5 * time.Millisecond)
+		cancel()
+	}()
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				firstAttempt <- struct{}{}
+			}
+			return nil, errors.New("timeout while connecting")
+		}),
+	}
+	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation cause to be preserved, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class when retry loop is cancelled during backoff, got: %s", got)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected cancellation during backoff to stop retries (attempts=1), got: %d", attempts)
+	}
+}
+
+func TestDialTCPStreamContextCanceledBeforeFirstRoundTripStopsWithoutAttempt(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("timeout while connecting")
+		}),
+	}
+	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation cause to be preserved, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class for cancel-before-roundtrip path, got: %s", got)
+	}
+	if attempts != 0 {
+		t.Fatalf("expected no RoundTrip attempt when context is canceled before dial loop, got attempts=%d", attempts)
+	}
+}
+
+func TestDialTCPStreamContextDeadlineExceededBeforeFirstRoundTripStopsWithoutAttempt(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("timeout while connecting")
+		}),
+	}
+	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded cause to be preserved, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class for deadline-before-roundtrip path, got: %s", got)
+	}
+	if attempts != 0 {
+		t.Fatalf("expected no RoundTrip attempt when deadline is exceeded before dial loop, got attempts=%d", attempts)
+	}
+}
+
+func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttempts(t *testing.T) {
+	attempts := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, errors.New("timeout while connecting")
+		}),
+	}
+	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded cause to be preserved, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected dial class when retry loop is stopped by deadline during backoff, got: %s", got)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected deadline during backoff to stop retries after first attempt (attempts=1), got: %d", attempts)
+	}
+}
+
+func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &contextBoundReadCloser{ctx: req.Context()},
+			}, nil
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if err != nil {
+		t.Fatalf("dial should succeed before relay-phase deadline, got: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	time.Sleep(25 * time.Millisecond)
+	buf := make([]byte, 8)
+	_, err = conn.Read(buf)
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected relay-phase read error to preserve context deadline cause, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected relay-phase deadline to classify as dial, got: %s", got)
+	}
+}
 
 func TestSnapshotMetricsIncludesErrorClassCounters(t *testing.T) {
 	before := SnapshotMetrics()
@@ -336,6 +730,27 @@ func TestSnapshotMetricsIncludesErrorClassCounters(t *testing.T) {
 	}
 	if after.TCPErrorClassOtherTotal < before.TCPErrorClassOtherTotal+1 {
 		t.Fatalf("expected other class counter increment, before=%d after=%d", before.TCPErrorClassOtherTotal, after.TCPErrorClassOtherTotal)
+	}
+}
+
+func TestConnectIPObservabilitySnapshotPolicyReasonContract(t *testing.T) {
+	snapshot := ConnectIPObservabilitySnapshot()
+	reasonMapRaw, ok := snapshot["connect_ip_policy_drop_icmp_reason_total"]
+	if !ok {
+		t.Fatal("expected connect_ip_policy_drop_icmp_reason_total key in observability snapshot")
+	}
+	reasonMap, ok := reasonMapRaw.(map[string]uint64)
+	if !ok {
+		t.Fatalf("unexpected policy-drop reason map type: %T", reasonMapRaw)
+	}
+	for _, reason := range []string{"src_not_allowed", "dst_not_allowed", "proto_not_allowed"} {
+		_, exists := reasonMap[reason]
+		if !exists {
+			t.Fatalf("expected mandatory policy-drop reason key %q", reason)
+		}
+	}
+	if ClassifyError(ErrPolicyFallbackDenied) != ErrorClassPolicy {
+		t.Fatal("expected ErrPolicyFallbackDenied to stay classified as policy")
 	}
 }
 
@@ -422,5 +837,24 @@ type trackedWriteCloser struct {
 func (w *trackedWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (w *trackedWriteCloser) Close() error {
 	w.closed++
+	return nil
+}
+
+type roundTripperFunc func(req *http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type contextBoundReadCloser struct {
+	ctx context.Context
+}
+
+func (r *contextBoundReadCloser) Read(_ []byte) (int, error) {
+	<-r.ctx.Done()
+	return 0, context.Cause(r.ctx)
+}
+
+func (r *contextBoundReadCloser) Close() error {
 	return nil
 }

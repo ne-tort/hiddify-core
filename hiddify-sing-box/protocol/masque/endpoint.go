@@ -45,23 +45,25 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
 		baseCtx: ctx,
 		runtime: CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
-			Tag:              tag,
-			Server:           options.Server,
-			ServerPort:       options.ServerPort,
-			TransportMode:    normalizeTransportMode(options.TransportMode),
-			TemplateUDP:      options.TemplateUDP,
-			TemplateIP:       options.TemplateIP,
-			TemplateTCP:      options.TemplateTCP,
-			FallbackPolicy:   normalizeFallbackPolicy(options.FallbackPolicy),
-			TCPMode:          normalizeTCPMode(options.TCPMode),
-			TCPTransport:     normalizeTCPTransport(options.TCPTransport),
-			ServerToken:      options.ServerToken,
-			TLSServerName:    options.TLSServerName,
-			Insecure:         options.Insecure,
-			QUICExperimental: toTransportQUICExperimental(options.QUICExperimental),
+			Tag:                      tag,
+			Server:                   options.Server,
+			ServerPort:               options.ServerPort,
+			TransportMode:            normalizeTransportMode(options.TransportMode),
+			TemplateUDP:              options.TemplateUDP,
+			TemplateIP:               options.TemplateIP,
+			ConnectIPScopeTarget:     options.ConnectIPScopeTarget,
+			ConnectIPScopeIPProto:    options.ConnectIPScopeIPProto,
+			TemplateTCP:              options.TemplateTCP,
+			FallbackPolicy:           normalizeFallbackPolicy(options.FallbackPolicy),
+			TCPMode:                  normalizeTCPMode(options.TCPMode),
+			TCPTransport:             normalizeTCPTransport(options.TCPTransport),
+			ServerToken:              options.ServerToken,
+			TLSServerName:            options.TLSServerName,
+			Insecure:                 options.Insecure,
+			QUICExperimental:         toTransportQUICExperimental(options.QUICExperimental),
 			ConnectIPDatagramCeiling: options.MTU,
-			Chain:            chain,
-			QUICDial:         quicDial,
+			Chain:                    chain,
+			QUICDial:                 quicDial,
 		}),
 	}, nil
 }
@@ -144,6 +146,11 @@ func normalizeTCPTransport(mode string) string {
 	}
 }
 
+// validateMasqueOptions enforces coupling between transport_mode, fallback_policy,
+// tcp_mode and templates. Behavioural routing (including masque_or_direct) is resolved
+// by the Router / dial planner and the TransportMode/TCP fields passed into RuntimeOptions;
+// common/masque.Runtime does not implicitly switch connect_udp ↔ connect_ip.
+// See hiddify-core/docs/masque-warp-architecture.md (monorepo layout).
 func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 	modeRaw := strings.ToLower(strings.TrimSpace(options.TransportMode))
 	mode := normalizeTransportMode(options.TransportMode)
@@ -214,6 +221,9 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		if modeRaw != "" || fallbackRaw != "" || tcpModeRaw != "" || tcpTransportRaw != "" {
 			return E.New("server mode does not accept client transport/tcp policy fields")
 		}
+		if strings.TrimSpace(options.ConnectIPScopeTarget) != "" || options.ConnectIPScopeIPProto != 0 {
+			return E.New("server mode does not accept connect_ip_scope_* client fields")
+		}
 	}
 	if hopPolicy == option.MasqueHopPolicyChain {
 		seenTags := make(map[string]struct{}, len(options.Hops))
@@ -276,6 +286,9 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		}
 		if mode == option.MasqueTransportModeConnectIP && strings.TrimSpace(options.TemplateUDP) != "" {
 			return E.New("template_udp is not applicable when transport_mode=connect_ip")
+		}
+		if mode != option.MasqueTransportModeConnectIP && (strings.TrimSpace(options.ConnectIPScopeTarget) != "" || options.ConnectIPScopeIPProto != 0) {
+			return E.New("connect_ip_scope_* requires transport_mode=connect_ip")
 		}
 		if tcpTransportRaw == option.MasqueTCPTransportAuto {
 			return E.New("tcp_transport=auto is not allowed for production client profiles; use connect_stream explicitly (TUN-only client rejects tcp_transport=connect_ip)")

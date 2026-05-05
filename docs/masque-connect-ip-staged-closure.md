@@ -3,7 +3,8 @@
 ## Current State
 - `tcp_transport=connect_ip` is **not** allowed in TUN-only client profiles; production TCP-over-CONNECT-IP means `transport_mode=connect_ip` + netstack packet-plane.
 - Default `TCPNetstackFactory` is now lifecycle-safe and provides a working TCP path.
-- `MASQUE_EXPERIMENTAL_TCP_CONNECT_IP` is no longer required for standard CONNECT-IP validation.
+- Legacy staged env toggles for CONNECT-IP TCP path are removed from the production contract.
+- `connectIPUDPPacketConn` bridge contract is explicitly **IPv4-only** for now; IPv6 destination bridging is rejected fail-fast and tracked as a separate follow-up implementation path.
 
 ## Production Hardening Gates
 1. Keep lifecycle-safe teardown for stack/session reuse across retries and close races.

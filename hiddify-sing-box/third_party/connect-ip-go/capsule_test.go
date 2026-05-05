@@ -283,7 +283,49 @@ func TestParseRouteAdvertisementCapsuleInvalid(t *testing.T) {
 		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
 		require.NoError(t, err)
 		_, err = parseRouteAdvertisementCapsule(cr)
-		require.ErrorContains(t, err, "start IP is greater than end IP")
+		require.ErrorContains(t, err, "route range 0 start IP is greater than end IP")
+	})
+
+	t.Run("route ranges must be ordered by start address", func(t *testing.T) {
+		iprange1 := []byte{4}
+		iprange1 = append(iprange1, netip.AddrFrom4([4]byte{10, 0, 0, 10}).AsSlice()...)
+		iprange1 = append(iprange1, netip.AddrFrom4([4]byte{10, 0, 0, 20}).AsSlice()...)
+		iprange1 = append(iprange1, 0)
+		iprange2 := []byte{4}
+		iprange2 = append(iprange2, netip.AddrFrom4([4]byte{10, 0, 0, 1}).AsSlice()...)
+		iprange2 = append(iprange2, netip.AddrFrom4([4]byte{10, 0, 0, 5}).AsSlice()...)
+		iprange2 = append(iprange2, 0)
+
+		data := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+		data = quicvarint.Append(data, uint64(len(iprange1)+len(iprange2)))
+		data = append(data, iprange1...)
+		data = append(data, iprange2...)
+
+		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
+		require.NoError(t, err)
+		_, err = parseRouteAdvertisementCapsule(cr)
+		require.ErrorContains(t, err, "route ranges must be ordered by start address")
+	})
+
+	t.Run("route ranges must not overlap", func(t *testing.T) {
+		iprange1 := []byte{4}
+		iprange1 = append(iprange1, netip.AddrFrom4([4]byte{10, 0, 0, 1}).AsSlice()...)
+		iprange1 = append(iprange1, netip.AddrFrom4([4]byte{10, 0, 0, 10}).AsSlice()...)
+		iprange1 = append(iprange1, 0)
+		iprange2 := []byte{4}
+		iprange2 = append(iprange2, netip.AddrFrom4([4]byte{10, 0, 0, 10}).AsSlice()...)
+		iprange2 = append(iprange2, netip.AddrFrom4([4]byte{10, 0, 0, 20}).AsSlice()...)
+		iprange2 = append(iprange2, 0)
+
+		data := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+		data = quicvarint.Append(data, uint64(len(iprange1)+len(iprange2)))
+		data = append(data, iprange1...)
+		data = append(data, iprange2...)
+
+		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
+		require.NoError(t, err)
+		_, err = parseRouteAdvertisementCapsule(cr)
+		require.ErrorContains(t, err, "route ranges must not overlap")
 	})
 
 	t.Run("incomplete capsule", func(t *testing.T) {

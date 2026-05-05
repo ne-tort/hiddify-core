@@ -10,8 +10,8 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/netip"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -130,67 +130,83 @@ var (
 )
 
 type connectIPObservabilityCounters struct {
-	ptbRxTotal           atomic.Uint64
-	packetWriteFailTotal atomic.Uint64
-	packetReadExitTotal  atomic.Uint64
-	packetTxTotal        atomic.Uint64
-	packetRxTotal        atomic.Uint64
-	bytesTxTotal         atomic.Uint64
-	bytesRxTotal         atomic.Uint64
-	netstackReadInjectTotal   atomic.Uint64
+	ptbRxTotal                   atomic.Uint64
+	packetWriteFailTotal         atomic.Uint64
+	packetReadExitTotal          atomic.Uint64
+	packetTxTotal                atomic.Uint64
+	packetRxTotal                atomic.Uint64
+	bytesTxTotal                 atomic.Uint64
+	bytesRxTotal                 atomic.Uint64
+	netstackReadInjectTotal      atomic.Uint64
 	netstackReadDropInvalidTotal atomic.Uint64
-	netstackWriteDequeuedTotal atomic.Uint64
-	netstackWriteAttemptTotal  atomic.Uint64
-	netstackWriteSuccessTotal  atomic.Uint64
-	bypassListenPacketTotal atomic.Uint64
-	openSessionTotal atomic.Uint64
-	engineIngressTotal atomic.Uint64
-	engineClassifiedTotal atomic.Uint64
-	engineDropTotal atomic.Uint64
-	engineICMPFeedbackTotal atomic.Uint64
-	enginePMTUUpdateTotal atomic.Uint64
-	engineEffectiveUDPPayload atomic.Uint64
-	firstTxMarkerEmitted atomic.Uint32
-	firstRxMarkerEmitted atomic.Uint32
-	emitSeq atomic.Uint64
-	sessionSeq atomic.Uint64
-	lastActiveEmitUnixMilli atomic.Int64
-	mu                   sync.Mutex
-	sessionResetByReason map[string]uint64
-	packetWriteFailByReason map[string]uint64
-	packetReadDropByReason  map[string]uint64
-	engineDropByReason map[string]uint64
-	enginePMTUUpdateByReason map[string]uint64
-	currentSessionID string
-	lastPTBObsEmitUnixMilli atomic.Int64
+	netstackWriteDequeuedTotal   atomic.Uint64
+	netstackWriteAttemptTotal    atomic.Uint64
+	netstackWriteSuccessTotal    atomic.Uint64
+	bypassListenPacketTotal      atomic.Uint64
+	openSessionTotal             atomic.Uint64
+	engineIngressTotal           atomic.Uint64
+	engineClassifiedTotal        atomic.Uint64
+	engineDropTotal              atomic.Uint64
+	engineICMPFeedbackTotal      atomic.Uint64
+	enginePMTUUpdateTotal        atomic.Uint64
+	engineEffectiveUDPPayload    atomic.Uint64
+	firstTxMarkerEmitted         atomic.Uint32
+	firstRxMarkerEmitted         atomic.Uint32
+	emitSeq                      atomic.Uint64
+	sessionSeq                   atomic.Uint64
+	lastActiveEmitUnixMilli      atomic.Int64
+	mu                           sync.Mutex
+	sessionResetByReason         map[string]uint64
+	packetWriteFailByReason      map[string]uint64
+	packetReadDropByReason       map[string]uint64
+	engineDropByReason           map[string]uint64
+	enginePMTUUpdateByReason     map[string]uint64
+	currentSessionID             string
+	currentScopeTarget           string
+	currentScopeIPProto          uint8
+	lastPTBObsEmitUnixMilli      atomic.Int64
 }
 
 var connectIPCounters = connectIPObservabilityCounters{
-	sessionResetByReason: make(map[string]uint64),
-	packetWriteFailByReason: make(map[string]uint64),
-	packetReadDropByReason:  make(map[string]uint64),
-	engineDropByReason:      make(map[string]uint64),
+	sessionResetByReason:     make(map[string]uint64),
+	packetWriteFailByReason:  make(map[string]uint64),
+	packetReadDropByReason:   make(map[string]uint64),
+	engineDropByReason:       make(map[string]uint64),
 	enginePMTUUpdateByReason: make(map[string]uint64),
 }
 
+func policyDropICMPReasonSnapshot() map[string]uint64 {
+	breakdown := connectip.PolicyDropICMPReasonBreakdown()
+	// Keep a stable reason-key contract for runtime artifacts even when
+	// a given reject path wasn't triggered in this run.
+	for _, reason := range []string{"src_not_allowed", "dst_not_allowed", "proto_not_allowed"} {
+		if _, ok := breakdown[reason]; !ok {
+			breakdown[reason] = 0
+		}
+	}
+	return breakdown
+}
+
 type ClientOptions struct {
-	Tag              string
-	Server           string
-	ServerPort       uint16
-	TransportMode    string
-	TemplateUDP      string
-	TemplateIP       string
-	TemplateTCP      string
-	FallbackPolicy   string
-	TCPMode          string
-	TCPTransport     string
-	ServerToken      string
-	TLSServerName    string
-	Insecure         bool
-	QUICExperimental QUICExperimentalOptions
+	Tag                      string
+	Server                   string
+	ServerPort               uint16
+	TransportMode            string
+	TemplateUDP              string
+	TemplateIP               string
+	ConnectIPScopeTarget     string
+	ConnectIPScopeIPProto    uint8
+	TemplateTCP              string
+	FallbackPolicy           string
+	TCPMode                  string
+	TCPTransport             string
+	ServerToken              string
+	TLSServerName            string
+	Insecure                 bool
+	QUICExperimental         QUICExperimentalOptions
 	ConnectIPDatagramCeiling uint32
-	Hops             []HopOptions
-	QUICDial         QUICDialFunc
+	Hops                     []HopOptions
+	QUICDial                 QUICDialFunc
 }
 
 type QUICExperimentalOptions struct {
@@ -302,12 +318,12 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		masqueUDPWriteMax = masqueUDPWriteHardCap
 	}
 	return &coreSession{
-		options:      options,
-		templateUDP:  templateUDP,
-		templateIP:   templateIP,
-		templateTCP:  templateTCP,
-		capabilities: CapabilitySet{ExtendedConnect: true, Datagrams: true, CapsuleProtocol: true, ConnectUDP: true, ConnectIP: true, ConnectTCP: tcpCapable},
-		hopOrder:     resolveHopOrder(options.Hops),
+		options:                  options,
+		templateUDP:              templateUDP,
+		templateIP:               templateIP,
+		templateTCP:              templateTCP,
+		capabilities:             CapabilitySet{ExtendedConnect: true, Datagrams: true, CapsuleProtocol: true, ConnectUDP: true, ConnectIP: true, ConnectTCP: tcpCapable},
+		hopOrder:                 resolveHopOrder(options.Hops),
 		connectIPDatagramCeiling: effectiveCeiling,
 		masqueUDPWriteMax:        masqueUDPWriteMax,
 		connectIPPMTUState: &connectIPPMTUState{
@@ -319,40 +335,41 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 }
 
 type coreSession struct {
-	mu           sync.Mutex
-	options      ClientOptions
-	udpClient    *qmasque.Client
-	ipConn       *connectip.Conn
-	ipHTTPConn   *http3.ClientConn
-	ipHTTP       *http3.Transport
-	tcpHTTP      *http3.Transport
-	templateUDP  *uritemplate.Template
-	templateIP   *uritemplate.Template
-	templateTCP  *uritemplate.Template
-	capabilities CapabilitySet
-	hopOrder     []HopOptions
-	hopIndex     int
+	mu                       sync.Mutex
+	options                  ClientOptions
+	udpClient                *qmasque.Client
+	ipConn                   *connectip.Conn
+	ipHTTPConn               *http3.ClientConn
+	ipHTTP                   *http3.Transport
+	tcpHTTP                  *http3.Transport
+	templateUDP              *uritemplate.Template
+	templateIP               *uritemplate.Template
+	templateTCP              *uritemplate.Template
+	capabilities             CapabilitySet
+	hopOrder                 []HopOptions
+	hopIndex                 int
 	connectIPDatagramCeiling int
 	masqueUDPWriteMax        int
-	connectIPPMTUState *connectIPPMTUState
+	connectIPPMTUState       *connectIPPMTUState
+	tcpRoundTripper          http.RoundTripper
 }
 
 type connectIPUDPPacketConn struct {
-	session   IPPacketSession
-	localV4   netip.Addr
-	pmtuState *connectIPPMTUState
-	deadlines connDeadlines
-	readMu    sync.Mutex
-	readBuffer []byte
+	session         IPPacketSession
+	localV4         netip.Addr
+	pmtuState       *connectIPPMTUState
+	deadlines       connDeadlines
+	readMu          sync.Mutex
+	readBuffer      []byte
 	readScratchAddr net.UDPAddr
-	closed    atomic.Bool
+	closed          atomic.Bool
 }
 
 type connectIPPMTUState struct {
-	mu sync.Mutex
-	currentPayload int
-	minPayload int
-	maxPayload int
+	mu                   sync.Mutex
+	currentPayload       int
+	minPayload           int
+	maxPayload           int
 	successSinceDecrease int
 	lastMinus64UnixMilli int64
 }
@@ -509,10 +526,10 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 	pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(currentPayload, "session_init")
 	return &connectIPUDPPacketConn{
-		session:   session,
-		localV4:   localV4,
-		pmtuState: pmtuState,
-		readBuffer: make([]byte, 64*1024),
+		session:         session,
+		localV4:         localV4,
+		pmtuState:       pmtuState,
+		readBuffer:      make([]byte, 64*1024),
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
 }
@@ -821,7 +838,7 @@ func (s *coreSession) newUDPClient() *qmasque.Client {
 			ServerName:         resolveTLSServerName(s.options),
 		},
 		QUICConfig: applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental),
-		QUICDial: s.options.QUICDial,
+		QUICDial:   s.options.QUICDial,
 	}
 }
 
@@ -834,6 +851,10 @@ func (s *coreSession) OpenIPSession(ctx context.Context) (IPPacketSession, error
 func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession, error) {
 	// caller must hold s.mu when calling directly.
 	emitConnectIPObservabilityEvent("open_ip_session_begin")
+	connectIPCounters.mu.Lock()
+	connectIPCounters.currentScopeTarget = strings.TrimSpace(s.options.ConnectIPScopeTarget)
+	connectIPCounters.currentScopeIPProto = s.options.ConnectIPScopeIPProto
+	connectIPCounters.mu.Unlock()
 	if !s.capabilities.ConnectIP {
 		incConnectIPWriteFailReason("open_not_supported")
 		emitConnectIPObservabilityEvent("open_ip_session_fail")
@@ -983,6 +1004,10 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 	if ipRaw == "" {
 		ipRaw = fmt.Sprintf("https://%s:%d/masque/ip", options.Server, options.ServerPort)
 	}
+	ipRaw, err := applyConnectIPFlowScope(ipRaw, options.ConnectIPScopeTarget, options.ConnectIPScopeIPProto)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	tcpRaw := strings.TrimSpace(options.TemplateTCP)
 	if tcpRaw == "" {
 		tcpRaw = fmt.Sprintf("https://%s:%d/masque/tcp/{target_host}/{target_port}", options.Server, options.ServerPort)
@@ -1009,6 +1034,49 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 		return nil, nil, nil, E.Cause(err, "invalid TCP MASQUE URL")
 	}
 	return udpTemplate, ipTemplate, tcpTemplate, nil
+}
+
+func applyConnectIPFlowScope(ipTemplateRaw string, scopeTarget string, scopeIPProto uint8) (string, error) {
+	template, err := uritemplate.New(ipTemplateRaw)
+	if err != nil {
+		return "", E.Cause(err, "invalid IP MASQUE template")
+	}
+	varNames := template.Varnames()
+	if len(varNames) == 0 {
+		if strings.TrimSpace(scopeTarget) != "" || scopeIPProto != 0 {
+			return "", errors.Join(
+				ErrCapability,
+				E.New("connect_ip_scope_* requires template_ip with flow forwarding variables {target}/{ipproto}"),
+			)
+		}
+		return ipTemplateRaw, nil
+	}
+	values := uritemplate.Values{}
+	for _, variable := range varNames {
+		switch variable {
+		case "target":
+			target := strings.TrimSpace(scopeTarget)
+			if target == "" {
+				target = "0.0.0.0/0"
+			}
+			if _, parseErr := netip.ParsePrefix(target); parseErr != nil {
+				return "", errors.Join(ErrCapability, E.New("invalid connect_ip_scope_target"))
+			}
+			values["target"] = uritemplate.String(target)
+		case "ipproto":
+			values["ipproto"] = uritemplate.String(strconv.Itoa(int(scopeIPProto)))
+		default:
+			return "", errors.Join(ErrCapability, E.New("template_ip contains unsupported flow forwarding variable"))
+		}
+	}
+	expanded, err := template.Expand(values)
+	if err != nil {
+		return "", E.Cause(err, "expand IP MASQUE flow forwarding template")
+	}
+	if strings.TrimSpace(expanded) == "" {
+		return "", E.New("empty IP MASQUE URL after flow forwarding expansion")
+	}
+	return expanded, nil
 }
 
 func resolveEntryHop(hops []HopOptions) (string, uint16, error) {
@@ -1172,6 +1240,9 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 	}
 	const maxAttempts = 3
 	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			return nil, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
+		}
 		tcpTracef("masque tcp connect_stream request host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodConnect, tcpURL.String(), nil)
 		if reqErr != nil {
@@ -1188,7 +1259,8 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		pr, pw := io.Pipe()
 		req.Body = pr
 		req.ContentLength = -1
-		resp, roundTripErr := tcpHTTP.RoundTrip(req)
+		roundTripper := s.getTCPRoundTripper(tcpHTTP)
+		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
 			_ = pr.Close()
 			_ = pw.Close()
@@ -1199,7 +1271,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 				tcpHTTP = s.tcpHTTP
 				s.mu.Unlock()
 				if backoffErr := waitContextBackoff(ctx, time.Duration(attempt+1)*50*time.Millisecond); backoffErr != nil {
-					return nil, backoffErr
+					return nil, errors.Join(ErrTCPConnectStreamFailed, backoffErr)
 				}
 				continue
 			}
@@ -1227,6 +1299,15 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		}, nil
 	}
 	return nil, fmt.Errorf("%w: exhausted retries", ErrTCPConnectStreamFailed)
+}
+
+func (s *coreSession) getTCPRoundTripper(defaultTransport *http3.Transport) http.RoundTripper {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tcpRoundTripper != nil {
+		return s.tcpRoundTripper
+	}
+	return defaultTransport
 }
 
 func tcpTracef(format string, args ...any) {
@@ -1348,8 +1429,26 @@ func (c *streamConn) CloseWrite() error {
 	return c.writer.Close()
 }
 
-func (c *streamConn) Read(p []byte) (int, error)  { return c.reader.Read(p) }
-func (c *streamConn) Write(p []byte) (int, error) { return c.writer.Write(p) }
+func (c *streamConn) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	if err == nil {
+		return n, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return n, errors.Join(ErrTCPConnectStreamFailed, err)
+	}
+	return n, err
+}
+func (c *streamConn) Write(p []byte) (int, error) {
+	n, err := c.writer.Write(p)
+	if err == nil {
+		return n, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return n, errors.Join(ErrTCPConnectStreamFailed, err)
+	}
+	return n, err
+}
 func (c *streamConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1387,7 +1486,7 @@ func isTCPNetwork(network string) bool {
 }
 
 type connectIPPacketSession struct {
-	conn             *connectip.Conn
+	conn            *connectip.Conn
 	datagramCeiling int
 	pmtuState       *connectIPPMTUState
 }
@@ -1457,6 +1556,9 @@ func incConnectIPSessionReset(reason string) {
 func classifyConnectIPErrorReason(err error) string {
 	if err == nil {
 		return "unknown"
+	}
+	if errors.Is(err, connectip.ErrFlowForwardingUnsupported) {
+		return "capability_flow_forwarding_unsupported"
 	}
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 		return "closed"
@@ -1580,41 +1682,46 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		pmtuUpdateReasons[k] = v
 	}
 	sessionID := connectIPCounters.currentSessionID
+	scopeTarget := connectIPCounters.currentScopeTarget
+	scopeIPProto := connectIPCounters.currentScopeIPProto
 	connectIPCounters.mu.Unlock()
 	return map[string]any{
-		"connect_ip_obs_contract_version":      "v1",
-		"connect_ip_session_id":                sessionID,
-		"connect_ip_emit_seq":                  connectIPCounters.emitSeq.Load(),
-		"connect_ip_ptb_rx_total":             connectIPCounters.ptbRxTotal.Load(),
-		"connect_ip_packet_write_fail_total":  connectIPCounters.packetWriteFailTotal.Load(),
-		"connect_ip_packet_write_fail_reason_total": writeReasons,
-		"connect_ip_packet_read_exit_total":   connectIPCounters.packetReadExitTotal.Load(),
-		"connect_ip_packet_read_drop_reason_total": readReasons,
-		"connect_ip_packet_tx_total":          connectIPCounters.packetTxTotal.Load(),
-		"connect_ip_packet_rx_total":          connectIPCounters.packetRxTotal.Load(),
-		"connect_ip_bytes_tx_total":           connectIPCounters.bytesTxTotal.Load(),
-		"connect_ip_bytes_rx_total":           connectIPCounters.bytesRxTotal.Load(),
-		"connect_ip_netstack_read_inject_total":   connectIPCounters.netstackReadInjectTotal.Load(),
+		"connect_ip_obs_contract_version":             "v1",
+		"connect_ip_session_id":                       sessionID,
+		"connect_ip_scope_target":                     scopeTarget,
+		"connect_ip_scope_ipproto":                    scopeIPProto,
+		"connect_ip_emit_seq":                         connectIPCounters.emitSeq.Load(),
+		"connect_ip_ptb_rx_total":                     connectIPCounters.ptbRxTotal.Load(),
+		"connect_ip_packet_write_fail_total":          connectIPCounters.packetWriteFailTotal.Load(),
+		"connect_ip_packet_write_fail_reason_total":   writeReasons,
+		"connect_ip_packet_read_exit_total":           connectIPCounters.packetReadExitTotal.Load(),
+		"connect_ip_packet_read_drop_reason_total":    readReasons,
+		"connect_ip_packet_tx_total":                  connectIPCounters.packetTxTotal.Load(),
+		"connect_ip_packet_rx_total":                  connectIPCounters.packetRxTotal.Load(),
+		"connect_ip_bytes_tx_total":                   connectIPCounters.bytesTxTotal.Load(),
+		"connect_ip_bytes_rx_total":                   connectIPCounters.bytesRxTotal.Load(),
+		"connect_ip_netstack_read_inject_total":       connectIPCounters.netstackReadInjectTotal.Load(),
 		"connect_ip_netstack_read_drop_invalid_total": connectIPCounters.netstackReadDropInvalidTotal.Load(),
-		"connect_ip_netstack_write_dequeued_total": connectIPCounters.netstackWriteDequeuedTotal.Load(),
-		"connect_ip_netstack_write_attempt_total":  connectIPCounters.netstackWriteAttemptTotal.Load(),
-		"connect_ip_netstack_write_success_total":  connectIPCounters.netstackWriteSuccessTotal.Load(),
-		"connect_ip_bypass_listenpacket_total":    connectIPCounters.bypassListenPacketTotal.Load(),
-		"connect_ip_open_session_total":           connectIPCounters.openSessionTotal.Load(),
-		"connect_ip_engine_ingress_total":         connectIPCounters.engineIngressTotal.Load(),
-		"connect_ip_engine_classified_total":      connectIPCounters.engineClassifiedTotal.Load(),
-		"connect_ip_engine_drop_total":            connectIPCounters.engineDropTotal.Load(),
-		"connect_ip_engine_drop_reason_total":     engineDropReasons,
-		"connect_ip_engine_icmp_feedback_total":   connectIPCounters.engineICMPFeedbackTotal.Load(),
-		"connect_ip_engine_pmtu_update_total":     connectIPCounters.enginePMTUUpdateTotal.Load(),
-		"connect_ip_engine_pmtu_update_reason_total": pmtuUpdateReasons,
-		"connect_ip_engine_effective_udp_payload": connectIPCounters.engineEffectiveUDPPayload.Load(),
-		"connect_ip_session_reset_total":      reasons,
-		"connect_ip_capsule_unknown_total":    connectip.UnknownCapsuleTotal(),
-		"connect_ip_datagram_context_unknown_total": connectip.UnknownContextDatagramTotal(),
-		"connect_ip_datagram_malformed_total": connectip.MalformedDatagramTotal(),
-		"connect_ip_policy_drop_icmp_total": connectip.PolicyDropICMPTotal(),
-		"connect_ip_policy_drop_icmp_attempt_total": connectip.PolicyDropICMPAttemptTotal(),
+		"connect_ip_netstack_write_dequeued_total":    connectIPCounters.netstackWriteDequeuedTotal.Load(),
+		"connect_ip_netstack_write_attempt_total":     connectIPCounters.netstackWriteAttemptTotal.Load(),
+		"connect_ip_netstack_write_success_total":     connectIPCounters.netstackWriteSuccessTotal.Load(),
+		"connect_ip_bypass_listenpacket_total":        connectIPCounters.bypassListenPacketTotal.Load(),
+		"connect_ip_open_session_total":               connectIPCounters.openSessionTotal.Load(),
+		"connect_ip_engine_ingress_total":             connectIPCounters.engineIngressTotal.Load(),
+		"connect_ip_engine_classified_total":          connectIPCounters.engineClassifiedTotal.Load(),
+		"connect_ip_engine_drop_total":                connectIPCounters.engineDropTotal.Load(),
+		"connect_ip_engine_drop_reason_total":         engineDropReasons,
+		"connect_ip_engine_icmp_feedback_total":       connectIPCounters.engineICMPFeedbackTotal.Load(),
+		"connect_ip_engine_pmtu_update_total":         connectIPCounters.enginePMTUUpdateTotal.Load(),
+		"connect_ip_engine_pmtu_update_reason_total":  pmtuUpdateReasons,
+		"connect_ip_engine_effective_udp_payload":     connectIPCounters.engineEffectiveUDPPayload.Load(),
+		"connect_ip_session_reset_total":              reasons,
+		"connect_ip_capsule_unknown_total":            connectip.UnknownCapsuleTotal(),
+		"connect_ip_datagram_context_unknown_total":   connectip.UnknownContextDatagramTotal(),
+		"connect_ip_datagram_malformed_total":         connectip.MalformedDatagramTotal(),
+		"connect_ip_policy_drop_icmp_total":           connectip.PolicyDropICMPTotal(),
+		"connect_ip_policy_drop_icmp_attempt_total":   connectip.PolicyDropICMPAttemptTotal(),
+		"connect_ip_policy_drop_icmp_reason_total":    policyDropICMPReasonSnapshot(),
 	}
 }
 

@@ -54,14 +54,46 @@ var (
 
 var (
 	unknownCapsuleTotal         atomic.Uint64
+	unknownCapsuleByType        sync.Map // map[uint64]*atomic.Uint64
 	unknownContextDatagramTotal atomic.Uint64
 	malformedDatagramTotal      atomic.Uint64
-	policyDropICMPTotal        atomic.Uint64
-	policyDropICMPAttemptTotal atomic.Uint64
+	policyDropICMPTotal         atomic.Uint64
+	policyDropICMPAttemptTotal  atomic.Uint64
+	policyDropICMPByReason      sync.Map // map[string]*atomic.Uint64
 )
+
+var ErrIPv6ExtensionChainAmbiguous = errors.New("connect-ip: IPv6 extension chain parse ambiguity")
+var ErrInvalidRouteAdvertisement = errors.New("connect-ip: invalid route advertisement")
 
 func UnknownCapsuleTotal() uint64 {
 	return unknownCapsuleTotal.Load()
+}
+
+func UnknownCapsuleTypeBreakdown() map[uint64]uint64 {
+	breakdown := make(map[uint64]uint64)
+	unknownCapsuleByType.Range(func(key, value any) bool {
+		typeID, ok := key.(uint64)
+		if !ok {
+			return true
+		}
+		counter, ok := value.(*atomic.Uint64)
+		if !ok {
+			return true
+		}
+		breakdown[typeID] = counter.Load()
+		return true
+	})
+	return breakdown
+}
+
+func incrementUnknownCapsuleType(t http3.CapsuleType) {
+	typeID := uint64(t)
+	counterAny, _ := unknownCapsuleByType.LoadOrStore(typeID, &atomic.Uint64{})
+	counter, ok := counterAny.(*atomic.Uint64)
+	if !ok {
+		return
+	}
+	counter.Add(1)
 }
 
 func UnknownContextDatagramTotal() uint64 {
@@ -78,6 +110,35 @@ func PolicyDropICMPTotal() uint64 {
 
 func PolicyDropICMPAttemptTotal() uint64 {
 	return policyDropICMPAttemptTotal.Load()
+}
+
+func PolicyDropICMPReasonBreakdown() map[string]uint64 {
+	breakdown := make(map[string]uint64)
+	policyDropICMPByReason.Range(func(key, value any) bool {
+		reason, ok := key.(string)
+		if !ok {
+			return true
+		}
+		counter, ok := value.(*atomic.Uint64)
+		if !ok {
+			return true
+		}
+		breakdown[reason] = counter.Load()
+		return true
+	})
+	return breakdown
+}
+
+func incrementPolicyDropICMPReason(reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	counterAny, _ := policyDropICMPByReason.LoadOrStore(reason, &atomic.Uint64{})
+	counter, ok := counterAny.(*atomic.Uint64)
+	if !ok {
+		return
+	}
+	counter.Add(1)
 }
 
 // If a packet is too large to fit into a QUIC datagram,
@@ -178,10 +239,8 @@ func newProxiedConn(str http3Stream) *Conn {
 // This function can be called multiple times, but only the routes from the most recent call will be active.
 // Previous route advertisements are overwritten by each new call to this function.
 func (c *Conn) AdvertiseRoute(ctx context.Context, routes []IPRoute) error {
-	for _, route := range routes {
-		if route.StartIP.Compare(route.EndIP) == 1 {
-			return fmt.Errorf("invalid route advertising start_ip: %s larger than %s", route.StartIP, route.EndIP)
-		}
+	if err := validateRouteAdvertisementRanges(routes); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidRouteAdvertisement, err)
 	}
 	c.mu.Lock()
 	c.localRoutes = slices.Clone(routes)
@@ -299,6 +358,7 @@ func (c *Conn) readFromStream() error {
 			}
 		default:
 			unknownCapsuleTotal.Add(1)
+			incrementUnknownCapsuleType(t)
 			_, _ = io.Copy(io.Discard, cr)
 			log.Printf("connect-ip: ignoring unknown capsule type=%d", t)
 			continue
@@ -375,7 +435,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	// the client accepts incoming traffic from all IPs.
 	if peerAddresses != nil {
 		if !slices.ContainsFunc(peerAddresses, func(p netip.Prefix) bool { return p.Contains(src) }) {
-			c.emitPolicyDropICMP(data)
+			c.emitPolicyDropICMP(data, "src_not_allowed")
 			return fmt.Errorf("connect-ip: datagram source address not allowed: %s", src)
 		}
 	}
@@ -400,14 +460,34 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 		})
 	}
 	if !isAllowedDst {
-		c.emitPolicyDropICMP(data)
+		reason := "dst_not_allowed"
+		if routeAllowsDestinationButNotProtocol(localRoutes, dst, version, ipProto) {
+			reason = "proto_not_allowed"
+		}
+		c.emitPolicyDropICMP(data, reason)
 		return fmt.Errorf("connect-ip: datagram destination address / protocol not allowed: %s (protocol: %d)", dst, ipProto)
 	}
 	return nil
 }
 
-func (c *Conn) emitPolicyDropICMP(original []byte) {
+func routeAllowsDestinationButNotProtocol(routes []IPRoute, dst netip.Addr, version uint8, ipProto uint8) bool {
+	if isICMPProtocol(version, ipProto) {
+		return false
+	}
+	for _, r := range routes {
+		if r.StartIP.Compare(dst) > 0 || dst.Compare(r.EndIP) > 0 {
+			continue
+		}
+		if r.IPProtocol != 0 && r.IPProtocol != ipProto {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conn) emitPolicyDropICMP(original []byte, reason string) {
 	policyDropICMPAttemptTotal.Add(1)
+	incrementPolicyDropICMPReason(reason)
 	icmpPacket, err := composeICMPPolicyDropPacket(original)
 	if err != nil {
 		log.Printf("connect-ip: failed to compose policy-drop ICMP: %v", err)
@@ -578,9 +658,7 @@ func packetTuple(packet []byte) (src netip.Addr, dst netip.Addr, ipProto uint8, 
 		}
 		proto, protoErr := ipv6UpperLayerProtocol(packet)
 		if protoErr != nil {
-			// Keep fail-closed checks active while preserving compatibility with
-			// packets that carry unsupported extension chains in some integrations.
-			proto = packet[6]
+			return netip.Addr{}, netip.Addr{}, 0, version, fmt.Errorf("%w: %v", ErrIPv6ExtensionChainAmbiguous, protoErr)
 		}
 		return netip.AddrFrom16([16]byte(packet[8:24])), netip.AddrFrom16([16]byte(packet[24:40])), proto, version, nil
 	}

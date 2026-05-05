@@ -3,6 +3,7 @@ package connectip
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -117,7 +119,7 @@ func TestRouteAdvertisement(t *testing.T) {
 		client.AdvertiseRoute(ctx, []IPRoute{
 			{StartIP: netip.MustParseAddr("1.1.1.2"), EndIP: netip.MustParseAddr("1.1.1.1"), IPProtocol: 42},
 		}),
-		"invalid route advertising start_ip: 1.1.1.2 larger than 1.1.1.1",
+		"invalid route advertisement: route range 0 start IP is greater than end IP",
 	)
 
 	// advertise some routes and make sure they're received
@@ -137,6 +139,45 @@ func TestRouteAdvertisement(t *testing.T) {
 	routes, err = server.Routes(ctx)
 	require.NoError(t, err)
 	require.Empty(t, routes)
+}
+
+func TestPeerInvalidRouteAdvertisementCapsuleAbortsSession(t *testing.T) {
+	client, server := setupConns(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, client.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.1"), EndIP: netip.MustParseAddr("10.0.0.5"), IPProtocol: 0},
+	}))
+	_, err := server.Routes(ctx)
+	require.NoError(t, err)
+
+	// Inject malformed ROUTE_ADVERTISEMENT directly into the peer stream to
+	// validate receive-side abort semantics, not sender-side pre-validation.
+	badRange := []byte{4, 10, 0, 0, 20, 10, 0, 0, 10, 0} // start > end
+	frame := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+	frame = quicvarint.Append(frame, uint64(len(badRange)))
+	frame = append(frame, badRange...)
+	_, err = client.str.Write(frame)
+	require.NoError(t, err)
+
+	var closeErr *CloseError
+	require.Eventually(t, func() bool {
+		_, routeErr := server.Routes(context.Background())
+		if !errors.Is(routeErr, net.ErrClosed) {
+			return false
+		}
+		return errors.As(routeErr, &closeErr) && closeErr.Remote
+	}, time.Second, 10*time.Millisecond)
+
+	_, writeErr := server.WritePacket([]byte{
+		0x60, 0x00, 0x00, 0x00,
+		0x00, 0x00,
+		0x00, 0x2A,
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88,
+	})
+	require.ErrorIs(t, writeErr, net.ErrClosed)
 }
 
 func TestTTLs(t *testing.T) {
@@ -296,4 +337,205 @@ func TestClosing(t *testing.T) {
 	require.ErrorIs(t, err, net.ErrClosed)
 	_, err = server.WritePacket(ipv6Packet)
 	require.ErrorIs(t, err, net.ErrClosed)
+}
+
+func TestDialScopedTemplateCarriesDefaultFlowScopeToServer(t *testing.T) {
+	p := &Proxy{}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	template := uritemplate.MustNew(fmt.Sprintf("https://localhost:%d/connect-ip/{target}/{ipproto}", conn.LocalAddr().(*net.UDPAddr).Port))
+	reqChan := make(chan *Request, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/connect-ip/", func(w http.ResponseWriter, r *http.Request) {
+		mreq, err := ParseRequest(r, template)
+		require.NoError(t, err)
+		reqChan <- mreq
+		_, err = p.Proxy(w, mreq)
+		require.NoError(t, err)
+	})
+	s := http3.Server{
+		Handler:         mux,
+		EnableDatagrams: true,
+		TLSConfig:       tlsConf,
+	}
+	go func() { s.Serve(conn) }()
+	t.Cleanup(func() { s.Close() })
+
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { udpConn.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cconn, err := quic.Dial(
+		ctx,
+		udpConn,
+		conn.LocalAddr(),
+		&tls.Config{ServerName: "localhost", RootCAs: certPool, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true},
+	)
+	require.NoError(t, err)
+	tr := &http3.Transport{EnableDatagrams: true}
+	t.Cleanup(func() { tr.Close() })
+
+	client, rsp, err := Dial(ctx, tr.NewClientConn(cconn), template)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rsp.StatusCode)
+	t.Cleanup(func() { client.Close() })
+
+	select {
+	case gotReq := <-reqChan:
+		require.True(t, gotReq.HasTarget)
+		require.Equal(t, netip.MustParsePrefix("0.0.0.0/0"), gotReq.Target)
+		require.True(t, gotReq.HasIPProto)
+		require.Equal(t, uint8(0), gotReq.IPProto)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for scoped request at server")
+	}
+}
+
+func TestScopedTemplateMalformedTargetFailsClosed(t *testing.T) {
+	p := &Proxy{}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	template := uritemplate.MustNew(fmt.Sprintf("https://localhost:%d/connect-ip/{target}/{ipproto}", conn.LocalAddr().(*net.UDPAddr).Port))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/connect-ip/", func(w http.ResponseWriter, r *http.Request) {
+		mreq, err := ParseRequest(r, template)
+		if err != nil {
+			var parseErr *RequestParseError
+			if errors.As(err, &parseErr) {
+				http.Error(w, parseErr.Error(), parseErr.HTTPStatus)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, err = p.Proxy(w, mreq)
+		require.NoError(t, err)
+	})
+	s := http3.Server{
+		Handler:         mux,
+		EnableDatagrams: true,
+		TLSConfig:       tlsConf,
+	}
+	go func() { s.Serve(conn) }()
+	t.Cleanup(func() { s.Close() })
+
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	t.Cleanup(func() { udpConn.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cconn, err := quic.Dial(
+		ctx,
+		udpConn,
+		conn.LocalAddr(),
+		&tls.Config{ServerName: "localhost", RootCAs: certPool, NextProtos: []string{http3.NextProtoH3}},
+		&quic.Config{EnableDatagrams: true},
+	)
+	require.NoError(t, err)
+	tr := &http3.Transport{EnableDatagrams: true}
+	t.Cleanup(func() { tr.Close() })
+	h3conn := tr.NewClientConn(cconn)
+
+	rstr, err := h3conn.OpenRequestStream(ctx)
+	require.NoError(t, err)
+	badURL := fmt.Sprintf("https://localhost:%d/connect-ip/not-a-prefix/17", conn.LocalAddr().(*net.UDPAddr).Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, badURL, nil)
+	require.NoError(t, err)
+	req.Proto = requestProtocol
+	req.Header = http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
+	require.NoError(t, rstr.SendRequestHeader(req))
+
+	rsp, err := rstr.ReadResponse()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, rsp.StatusCode)
+}
+
+func TestPolicyRejectReasonCountersClientServer(t *testing.T) {
+	t.Run("src_not_allowed", func(t *testing.T) {
+		_, server := setupConns(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		require.NoError(t, server.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
+		before := PolicyDropICMPReasonBreakdown()["src_not_allowed"]
+
+		packet, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(10, 200, 0, 3),
+			Dst:      net.IPv4(8, 8, 8, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+
+		err = server.handleIncomingProxiedPacket(packet)
+		require.ErrorContains(t, err, "source address not allowed")
+		require.Eventually(t, func() bool {
+			return PolicyDropICMPReasonBreakdown()["src_not_allowed"] >= before+1
+		}, time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("dst_not_allowed", func(t *testing.T) {
+		_, server := setupConns(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		require.NoError(t, server.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
+		require.NoError(t, server.AdvertiseRoute(ctx, []IPRoute{
+			{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.0.0.255"), IPProtocol: 17},
+		}))
+		before := PolicyDropICMPReasonBreakdown()["dst_not_allowed"]
+
+		packet, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(10, 200, 0, 2),
+			Dst:      net.IPv4(10, 0, 1, 1),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+
+		err = server.handleIncomingProxiedPacket(packet)
+		require.ErrorContains(t, err, "destination address / protocol not allowed")
+		require.Eventually(t, func() bool {
+			return PolicyDropICMPReasonBreakdown()["dst_not_allowed"] >= before+1
+		}, time.Second, 10*time.Millisecond)
+	})
+
+	t.Run("proto_not_allowed", func(t *testing.T) {
+		_, server := setupConns(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		require.NoError(t, server.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
+		require.NoError(t, server.AdvertiseRoute(ctx, []IPRoute{
+			{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.0.0.255"), IPProtocol: 17},
+		}))
+		before := PolicyDropICMPReasonBreakdown()["proto_not_allowed"]
+
+		packet, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(10, 200, 0, 2),
+			Dst:      net.IPv4(10, 0, 0, 8),
+			Protocol: 6,
+		}).Marshal()
+		require.NoError(t, err)
+
+		err = server.handleIncomingProxiedPacket(packet)
+		require.ErrorContains(t, err, "destination address / protocol not allowed")
+		require.Eventually(t, func() bool {
+			return PolicyDropICMPReasonBreakdown()["proto_not_allowed"] >= before+1
+		}, time.Second, 10*time.Millisecond)
+	})
 }

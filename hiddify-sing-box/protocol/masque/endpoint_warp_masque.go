@@ -2,6 +2,7 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"strings"
@@ -159,9 +160,9 @@ func (e *WarpEndpoint) DialContext(ctx context.Context, network string, destinat
 	e.mu.RUnlock()
 	if runtime == nil {
 		if err := e.lastStartError(); err != nil {
-			return nil, E.Cause(err, "warp_masque startup failed")
+			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
 		}
-		return nil, E.New("endpoint not initialized")
+		return nil, errors.Join(TM.ErrTransportInit, E.New("warp_masque startup in progress"))
 	}
 	return runtime.DialContext(ctx, network, destination)
 }
@@ -172,9 +173,9 @@ func (e *WarpEndpoint) ListenPacket(ctx context.Context, destination M.Socksaddr
 	e.mu.RUnlock()
 	if runtime == nil {
 		if err := e.lastStartError(); err != nil {
-			return nil, E.Cause(err, "warp_masque startup failed")
+			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
 		}
-		return nil, E.New("endpoint not initialized")
+		return nil, errors.Join(TM.ErrTransportInit, E.New("warp_masque startup in progress"))
 	}
 	return runtime.ListenPacket(ctx, destination)
 }
@@ -239,19 +240,21 @@ func (e *WarpEndpoint) startRuntime() {
 		return
 	}
 	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
-		Tag:            e.Tag(),
-		Server:         server,
-		ServerPort:     port,
-		TransportMode:  normalizeTransportMode(e.options.TransportMode),
-		TemplateUDP:    e.options.TemplateUDP,
-		TemplateIP:     e.options.TemplateIP,
-		TemplateTCP:    e.options.TemplateTCP,
-		FallbackPolicy: normalizeFallbackPolicy(e.options.FallbackPolicy),
-		TCPMode:        normalizeTCPMode(e.options.TCPMode),
-		TCPTransport:   normalizeTCPTransport(e.options.TCPTransport),
-		ServerToken:    e.options.ServerToken,
-		TLSServerName:  e.options.TLSServerName,
-		Insecure:       e.options.Insecure,
+		Tag:                      e.Tag(),
+		Server:                   server,
+		ServerPort:               port,
+		TransportMode:            normalizeTransportMode(e.options.TransportMode),
+		TemplateUDP:              e.options.TemplateUDP,
+		TemplateIP:               e.options.TemplateIP,
+		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
+		ConnectIPScopeIPProto:    e.options.ConnectIPScopeIPProto,
+		TemplateTCP:              e.options.TemplateTCP,
+		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
+		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
+		TCPTransport:             normalizeTCPTransport(e.options.TCPTransport),
+		ServerToken:              e.options.ServerToken,
+		TLSServerName:            e.options.TLSServerName,
+		Insecure:                 e.options.Insecure,
 		ConnectIPDatagramCeiling: e.options.MasqueEndpointOptions.MTU,
 		QUICExperimental:         toTransportQUICExperimental(e.options.QUICExperimental),
 		Chain:                    chain,

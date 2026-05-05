@@ -10,6 +10,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
+	TM "github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -38,6 +39,9 @@ func TestWarpEndpointStartupErrorIsObservable(t *testing.T) {
 	_, err = ep.ListenPacket(context.Background(), M.Socksaddr{})
 	if err == nil {
 		t.Fatal("expected startup error to be returned")
+	}
+	if got := TM.ClassifyError(err); got != TM.ErrorClassTransport {
+		t.Fatalf("expected startup error class transport_init, got %s (err=%v)", got, err)
 	}
 }
 
@@ -344,6 +348,19 @@ func TestEndpointRejectsConnectIPTCPTransportInTunOnlyMode(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected connect_ip tcp transport to be rejected in TUN-only mode")
+	}
+}
+
+func TestEndpointScopeFieldsRequireConnectIPTransportMode(t *testing.T) {
+	_, err := NewEndpoint(nil, nil, nil, "scope-without-connect-ip", option.MasqueEndpointOptions{
+		ServerOptions:         option.ServerOptions{Server: "example.com", ServerPort: 443},
+		HopPolicy:             option.MasqueHopPolicySingle,
+		TransportMode:         option.MasqueTransportModeConnectUDP,
+		ConnectIPScopeTarget:  "10.0.0.0/8",
+		ConnectIPScopeIPProto: 17,
+	})
+	if err == nil {
+		t.Fatal("expected connect_ip_scope_* to be rejected when transport_mode!=connect_ip")
 	}
 }
 
