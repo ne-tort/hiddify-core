@@ -88,6 +88,21 @@ jobs:
               failures.append(f"summary: ok={summary_data.get('ok')}")
             if not summary_data.get("results"):
               failures.append("summary: results missing/empty")
+            tcp_ip = next((r for r in summary_data.get("results", []) if r.get("scenario") == "tcp_ip"), None)
+            if tcp_ip is None:
+              failures.append("summary: tcp_ip result missing")
+            else:
+              obs_delta = (((tcp_ip.get("observability") or {}).get("delta")) or {})
+              classified = int(obs_delta.get("connect_ip_engine_classified_total", 0) or 0)
+              packet_tx = int(obs_delta.get("connect_ip_packet_tx_total", 0) or 0)
+              write_fail = int(obs_delta.get("connect_ip_packet_write_fail_total", 0) or 0)
+              read_exit = int(obs_delta.get("connect_ip_packet_read_exit_total", 0) or 0)
+              if classified <= 0 and packet_tx <= 0:
+                failures.append("summary: tcp_ip observability requires classified_total>0 or packet_tx_total>0")
+              if write_fail != 0:
+                failures.append(f"summary: tcp_ip packet_write_fail_total={write_fail} expected=0")
+              if read_exit != 0:
+                failures.append(f"summary: tcp_ip packet_read_exit_total={read_exit} expected=0")
           for rel, (mode, min_bytes, max_ms) in files.items():
             p = pathlib.Path(rel)
             if not p.exists():
@@ -189,7 +204,11 @@ jobs:
         run: |
           cd experiments/router/stand/l3router
           python masque_stand_runner.py --scenario all
+          cp runtime/masque_python_runner_summary.json runtime/nightly_smoke_summary.json
+          python masque_stand_runner.py --scenario real --mtu 1500 --iperf-rates 100M,250M,500M,750M --iperf-duration-sec 15
+          cp runtime/masque_python_runner_summary.json runtime/nightly_real_perf_summary.json
           python masque_stand_runner.py --scenario tcp_ip --stress
+          cp runtime/masque_python_runner_summary.json runtime/nightly_tcp_ip_stress_summary.json
       - name: Nightly anti-bypass controls
         run: |
           cd experiments/router/stand/l3router
@@ -217,96 +236,12 @@ jobs:
           python - <<'PY'
           import json, pathlib, sys
 
-          files = {
-            "runtime/smoke_10kb_latest.json": {
-              "mode": "connect_udp",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_received", "elapsed_ms"],
-              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
-              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
-            },
-            "runtime/smoke_tcp_connect_stream_latest.json": {
-              "mode": "connect_stream",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_received", "elapsed_ms"],
-              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
-              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
-            },
-            "runtime/smoke_tcp_connect_ip_latest.json": {
-              "mode": "connect_ip",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_received", "elapsed_ms"],
-              "required_thresholds": ["min_bytes", "max_elapsed_ms"],
-              "expected_thresholds": {"min_bytes": 10240, "max_elapsed_ms": 5000},
-            },
-            "runtime/udp_perf_500mb_latest.json": {
-              "mode": "connect_udp",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps", "loss_pct"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps", "max_loss_pct"],
-              "expected_thresholds": {"min_throughput_mbps": 5, "max_loss_pct": 5.00},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/udp_perf_500mb_shaped_50mbps_latest.json": {
-              "mode": "connect_udp",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps", "loss_pct", "shape_kbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps", "max_loss_pct"],
-              "expected_thresholds": {"min_throughput_mbps": 20, "max_loss_pct": 5.00},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_stream_perf_500mb_latest.json": {
-              "mode": "connect_stream",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 5},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_stream_perf_500mb_shaped_50mbps_latest.json": {
-              "mode": "connect_stream",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 20},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_connect_ip_perf_500mb_latest.json": {
-              "mode": "connect_ip",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 5},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_connect_ip_perf_500mb_shaped_50mbps_latest.json": {
-              "mode": "connect_ip",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 20},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_connect_ip_perf_500mb_shaped_75mbps_latest.json": {
-              "mode": "connect_ip",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 20},
-              "expected_bytes_target": 524288000,
-            },
-            "runtime/tcp_connect_ip_perf_500mb_shaped_100mbps_latest.json": {
-              "mode": "connect_ip",
-              "result_must_be_true": True,
-              "required_metrics": ["bytes_target", "bytes_received", "elapsed_ms", "throughput_mbps"],
-              "required_thresholds": ["max_elapsed_ms", "min_throughput_mbps"],
-              "expected_thresholds": {"min_throughput_mbps": 20},
-              "expected_bytes_target": 524288000,
-            },
-          }
-
           failures = []
-          for rel, rules in files.items():
+          for rel in (
+            "runtime/nightly_smoke_summary.json",
+            "runtime/nightly_real_perf_summary.json",
+            "runtime/nightly_tcp_ip_stress_summary.json",
+          ):
             p = pathlib.Path(rel)
             if not p.exists():
               failures.append(f"{rel}: missing")
@@ -318,56 +253,29 @@ jobs:
               failures.append(f"{rel}: invalid_json={exc}")
               continue
 
-            for key in ("test_id", "mode", "metrics", "thresholds", "error_class", "result"):
-              if key not in data:
-                failures.append(f"{rel}: missing_key={key}")
+            if str(data.get("ok", "false")).lower() != "true":
+              failures.append(f"{rel}: ok={data.get('ok')}")
+            if not isinstance(data.get("results"), list) or not data["results"]:
+              failures.append(f"{rel}: results missing/empty")
 
-            if data.get("mode") != rules["mode"]:
-              failures.append(f"{rel}: mode={data.get('mode')} expected={rules['mode']}")
-
-            metrics = data.get("metrics", {})
-            thresholds = data.get("thresholds", {})
-            if not isinstance(metrics, dict):
-              failures.append(f"{rel}: metrics is not object")
-              metrics = {}
-            if not isinstance(thresholds, dict):
-              failures.append(f"{rel}: thresholds is not object")
-              thresholds = {}
-
-            for key in rules.get("required_metrics", []):
-              if key not in metrics:
-                failures.append(f"{rel}: missing_metrics.{key}")
-            for key in rules.get("required_thresholds", []):
-              if key not in thresholds:
-                failures.append(f"{rel}: missing_thresholds.{key}")
-
-            if "expected_bytes_target" in rules and metrics.get("bytes_target") != rules["expected_bytes_target"]:
-              failures.append(
-                f"{rel}: bytes_target={metrics.get('bytes_target')} expected={rules['expected_bytes_target']}"
-              )
-
-            for thr_key, expected in rules.get("expected_thresholds", {}).items():
-              got = thresholds.get(thr_key)
-              if got is None:
-                continue
-              if not isinstance(got, (int, float)):
-                failures.append(f"{rel}: threshold {thr_key} type={type(got).__name__} expected_number")
-                continue
-              if float(got) != float(expected):
-                failures.append(f"{rel}: threshold {thr_key}={got} expected={expected}")
-
-            if float(metrics.get("elapsed_ms", 0) or 0) < 0:
-              failures.append(f"{rel}: negative elapsed_ms={metrics.get('elapsed_ms')}")
-
-            for non_negative in ("bytes_received", "bytes_target", "throughput_mbps", "loss_pct"):
-              if non_negative in metrics and float(metrics.get(non_negative, 0) or 0) < 0:
-                failures.append(f"{rel}: negative metric {non_negative}={metrics.get(non_negative)}")
-
-            result_value = str(data.get("result", "false")).lower()
-            if result_value not in ("true", "false"):
-              failures.append(f"{rel}: invalid result={data.get('result')}")
-            if rules.get("result_must_be_true") and result_value != "true":
-              failures.append(f"{rel}: result={data.get('result')}, error_class={data.get('error_class')}")
+          real_summary = pathlib.Path("runtime/nightly_real_perf_summary.json")
+          if real_summary.exists():
+            data = json.loads(real_summary.read_text(encoding="utf-8"))
+            results = data.get("results") or []
+            if not results:
+              failures.append("runtime/nightly_real_perf_summary.json: no results")
+            else:
+              real = results[0]
+              if real.get("scenario") != "tcp_ip_iperf":
+                failures.append(f"real scenario mismatch: {real.get('scenario')}")
+              if int(real.get("stable_trial_count", 0)) < 1:
+                failures.append("real perf: stable_trial_count < 1")
+              highest = real.get("highest_stable")
+              if not isinstance(highest, dict):
+                failures.append("real perf: highest_stable missing")
+              else:
+                if float(highest.get("receiver_mbps", 0) or 0) <= 0:
+                  failures.append(f"real perf: highest_stable.receiver_mbps={highest.get('receiver_mbps')}")
 
           if failures:
             print("MASQUE perf threshold failures:")

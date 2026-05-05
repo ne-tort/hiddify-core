@@ -298,6 +298,8 @@ Current production-track limits:
 - Server mode now supports optional `server_token` auth guard and `allow_private_targets` toggle to reduce open-relay/SSRF risk for TCP CONNECT target dialing.
 - Client mode can pass `server_token` as bearer authorization for TCP CONNECT stream contract compatibility with server auth guard.
 - `warp_masque` uses async startup semantics (parity with legacy endpoint style), so control-plane errors surface on first operational calls when startup fails.
+- **Bootstrap / runtime start:** `ResolveServer` and `Runtime.Start` run with bounded retries and jittered backoff on transient failures; generic `masque` passes the router start context into `Runtime.Start` so cancellation can interrupt an in-flight session dial.
+- **Runtime diagnostics:** shared `common/masque.Runtime` exposes `LifecycleState()` and `LastError()` in addition to `IsReady()` (see `runtime.go`); `warp_masque` still stores the last async startup error for `DialContext`/`ListenPacket` when the runtime handle is not yet installed.
 
 ## RC Gate Commands
 
@@ -335,6 +337,12 @@ Applies when **`tcp_transport=connect_stream`** (only value accepted for MASQUE 
 - Route + tun packet flows.
 - Fallback and reconnect scenarios.
 - Parallel operation with legacy `warp`.
+
+## MTU and CONNECT-IP ceiling (warp_masque parity)
+
+- Generic `masque` maps outbound `mtu` into `ConnectIPDatagramCeiling` for the shared `CoreClientFactory` session (`protocol/masque/endpoint.go`).
+- `warp_masque` uses the same mapping: `MasqueEndpointOptions.MTU` is propagated on startup via `RuntimeOptions.ConnectIPDatagramCeiling` (`protocol/masque/endpoint_warp_masque.go`), so CONNECT-IP / datagram ceiling behavior matches generic `masque` for the same JSON `mtu`.
+- Upper clamp for the effective ceiling in transport defaults to **1500**; lab override: environment variable **`HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX`** (see `IDEAL-MASQUE-ARCHITECTURE.md`).
 
 ## Risks and Mitigations
 - Cloudflare behavior can diverge from RFC details.

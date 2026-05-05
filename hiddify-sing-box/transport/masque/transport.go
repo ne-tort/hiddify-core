@@ -31,6 +31,51 @@ import (
 
 const defaultUDPInitialPacketSize uint16 = 1350
 
+const defaultConnectIPDatagramCeilingMax = 1500
+
+// connectIPDatagramCeilingMax is the inclusive upper bound for ConnectIPDatagramCeiling (full IP datagram bytes).
+// Default 1500 for typical QUIC interoperability; override with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535] for lab jumbo.
+func connectIPDatagramCeilingMax() int {
+	raw := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX"))
+	if raw == "" {
+		return defaultConnectIPDatagramCeilingMax
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1280 || n > 65535 {
+		return defaultConnectIPDatagramCeilingMax
+	}
+	return n
+}
+
+// masqueUDPDatagramSplitConn splits large application UDP payloads for CONNECT-UDP so each
+// WriteTo matches QUIC HTTP datagram sizing expectations (tunnel-originated UDP).
+type masqueUDPDatagramSplitConn struct {
+	net.PacketConn
+	maxPayload int
+}
+
+func (c *masqueUDPDatagramSplitConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if len(p) <= c.maxPayload {
+		return c.PacketConn.WriteTo(p, addr)
+	}
+	sent := 0
+	for sent < len(p) {
+		end := sent + c.maxPayload
+		if end > len(p) {
+			end = len(p)
+		}
+		n, err := c.PacketConn.WriteTo(p[sent:end], addr)
+		sent += n
+		if err != nil {
+			return sent, err
+		}
+		if n == 0 {
+			return sent, fmt.Errorf("masque: zero-length WriteTo on CONNECT-UDP split")
+		}
+	}
+	return len(p), nil
+}
+
 // masquePacketPlaneQUICConfig applies defaults for CONNECT-IP / CONNECT-UDP over HTTP/3.
 // quic-go's default MaxIdleTimeout (30s) can close a session during long bulk datagram
 // transfers when pacing and receiver-side drain stretch wall-clock beyond the idle window.
@@ -117,6 +162,7 @@ type connectIPObservabilityCounters struct {
 	engineDropByReason map[string]uint64
 	enginePMTUUpdateByReason map[string]uint64
 	currentSessionID string
+	lastPTBObsEmitUnixMilli atomic.Int64
 }
 
 var connectIPCounters = connectIPObservabilityCounters{
@@ -239,12 +285,21 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 	if effectiveCeiling < 1280 {
 		effectiveCeiling = 1280
 	}
-	if effectiveCeiling > 1500 {
-		effectiveCeiling = 1500
+	ceilingMax := connectIPDatagramCeilingMax()
+	if effectiveCeiling > ceilingMax {
+		effectiveCeiling = ceilingMax
 	}
 	initialPayload := effectiveCeiling - 28
 	if initialPayload < 512 {
 		initialPayload = 512
+	}
+	masqueUDPWriteMax := effectiveCeiling - 120
+	if masqueUDPWriteMax < 512 {
+		masqueUDPWriteMax = 512
+	}
+	const masqueUDPWriteHardCap = 1152
+	if masqueUDPWriteMax > masqueUDPWriteHardCap {
+		masqueUDPWriteMax = masqueUDPWriteHardCap
 	}
 	return &coreSession{
 		options:      options,
@@ -254,6 +309,7 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		capabilities: CapabilitySet{ExtendedConnect: true, Datagrams: true, CapsuleProtocol: true, ConnectUDP: true, ConnectIP: true, ConnectTCP: tcpCapable},
 		hopOrder:     resolveHopOrder(options.Hops),
 		connectIPDatagramCeiling: effectiveCeiling,
+		masqueUDPWriteMax:        masqueUDPWriteMax,
 		connectIPPMTUState: &connectIPPMTUState{
 			currentPayload: initialPayload,
 			minPayload:     512,
@@ -277,6 +333,7 @@ type coreSession struct {
 	hopOrder     []HopOptions
 	hopIndex     int
 	connectIPDatagramCeiling int
+	masqueUDPWriteMax        int
 	connectIPPMTUState *connectIPPMTUState
 }
 
@@ -285,6 +342,9 @@ type connectIPUDPPacketConn struct {
 	localV4   netip.Addr
 	pmtuState *connectIPPMTUState
 	deadlines connDeadlines
+	readMu    sync.Mutex
+	readBuffer []byte
+	readScratchAddr net.UDPAddr
 	closed    atomic.Bool
 }
 
@@ -294,12 +354,55 @@ type connectIPPMTUState struct {
 	minPayload int
 	maxPayload int
 	successSinceDecrease int
+	lastMinus64UnixMilli int64
 }
 
 type connDeadlines struct {
 	mu    sync.RWMutex
 	read  time.Time
 	write time.Time
+}
+
+// parseICMPPTBHopMTU extracts the next-hop IP MTU from a full ICMP feedback IP packet
+// (IPv4 carrying ICMP type 3 code 4, or IPv6 carrying ICMPv6 type 2).
+func parseICMPPTBHopMTU(icmpFullPacket []byte) (ipMTU int, isIPv6 bool, ok bool) {
+	if len(icmpFullPacket) < 20 {
+		return 0, false, false
+	}
+	switch icmpFullPacket[0] >> 4 {
+	case 4:
+		ihl := int(icmpFullPacket[0]&0x0f) * 4
+		if ihl < 20 || len(icmpFullPacket) < ihl+8 {
+			return 0, false, false
+		}
+		if icmpFullPacket[9] != 1 {
+			return 0, false, false
+		}
+		icmpOff := ihl
+		if icmpFullPacket[icmpOff] != 3 || icmpFullPacket[icmpOff+1] != 4 {
+			return 0, false, false
+		}
+		mtu := int(binary.BigEndian.Uint16(icmpFullPacket[icmpOff+6 : icmpOff+8]))
+		return mtu, false, mtu >= 576 && mtu <= 65535
+	case 6:
+		if len(icmpFullPacket) < 48 {
+			return 0, false, false
+		}
+		if icmpFullPacket[6] != 58 {
+			return 0, false, false
+		}
+		icmpOff := 40
+		if len(icmpFullPacket) < icmpOff+8 {
+			return 0, false, false
+		}
+		if icmpFullPacket[icmpOff] != 2 || icmpFullPacket[icmpOff+1] != 0 {
+			return 0, false, false
+		}
+		mtu := int(binary.BigEndian.Uint32(icmpFullPacket[icmpOff+4 : icmpOff+8]))
+		return mtu, true, mtu >= 1280 && mtu <= 65535
+	default:
+		return 0, false, false
+	}
 }
 
 func (s *coreSession) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -340,7 +443,7 @@ func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr)
 		s.udpClient = s.newUDPClient()
 		conn, _, err = s.udpClient.DialAddr(ctx, s.templateUDP, target)
 		if err == nil {
-			return conn, nil
+			return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
 		}
 		for s.advanceHop() {
 			if resetErr := s.resetHopTemplates(); resetErr != nil {
@@ -351,12 +454,12 @@ func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr)
 			}
 			conn, _, err = s.udpClient.DialAddr(ctx, s.templateUDP, target)
 			if err == nil {
-				return conn, nil
+				return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
 			}
 		}
 		return nil, err
 	}
-	return conn, nil
+	return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
 }
 
 func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net.PacketConn {
@@ -370,6 +473,9 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
 		if connectIPSession.datagramCeiling > 0 {
 			maxDatagram = connectIPSession.datagramCeiling
+		}
+		if cap := connectIPDatagramCeilingMax(); maxDatagram > cap {
+			maxDatagram = cap
 		}
 		if connectIPSession.pmtuState != nil {
 			pmtuState = connectIPSession.pmtuState
@@ -406,6 +512,8 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		session:   session,
 		localV4:   localV4,
 		pmtuState: pmtuState,
+		readBuffer: make([]byte, 64*1024),
+		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
 }
 
@@ -416,21 +524,24 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	if c.deadlines.readTimeoutExceeded() {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
-	packet := make([]byte, 64*1024)
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 	for {
-		n, err = c.session.ReadPacket(packet)
+		n, err = c.session.ReadPacket(c.readBuffer)
 		if err != nil {
 			return 0, nil, err
 		}
 		connectIPCounters.engineIngressTotal.Add(1)
-		payload, src, srcPort, parseErr := parseIPv4UDPPacket(packet[:n])
+		payload, src, srcPort, parseErr := parseIPv4UDPPacket(c.readBuffer[:n])
 		if parseErr != nil {
 			incConnectIPEngineDropReason("read_parse")
 			continue
 		}
 		connectIPCounters.engineClassifiedTotal.Add(1)
 		copyLen := copy(p, payload)
-		return copyLen, &net.UDPAddr{IP: net.IP(src.AsSlice()), Port: int(srcPort)}, nil
+		c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], src.AsSlice()...)
+		c.readScratchAddr.Port = int(srcPort)
+		return copyLen, &c.readScratchAddr, nil
 	}
 }
 
@@ -471,8 +582,11 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 		connectIPCounters.engineClassifiedTotal.Add(1)
 		if len(icmp) > 0 {
 			connectIPCounters.engineICMPFeedbackTotal.Add(1)
-			incConnectIPEngineDropReason("pmtu_feedback")
-			c.decreasePayloadCeiling("ptb_feedback")
+			if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
+				c.applyPTBToUDPPayload(ipMTU, isV6)
+			} else {
+				c.decreasePayloadCeiling("ptb_feedback")
+			}
 		} else {
 			c.maybeRecoverPayloadCeiling()
 		}
@@ -517,11 +631,45 @@ func (c *connectIPUDPPacketConn) currentPayloadCeiling() int {
 	return c.pmtuState.currentPayload
 }
 
+func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool) {
+	if c.pmtuState == nil {
+		return
+	}
+	overhead := 28
+	if isIPv6 {
+		overhead = 48
+	}
+	udpMax := ipPathMTU - overhead
+	if udpMax < 512 {
+		udpMax = 512
+	}
+	c.pmtuState.mu.Lock()
+	if udpMax > c.pmtuState.maxPayload {
+		udpMax = c.pmtuState.maxPayload
+	}
+	if udpMax < c.pmtuState.currentPayload {
+		c.pmtuState.currentPayload = udpMax
+		c.pmtuState.successSinceDecrease = 0
+	}
+	current := c.pmtuState.currentPayload
+	c.pmtuState.mu.Unlock()
+	setConnectIPEngineEffectiveUDPPayload(current, "ptb_mtu_hint")
+}
+
 func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) {
 	if c.pmtuState == nil {
 		return
 	}
+	const pmtuMinus64DebounceMs = 80
 	c.pmtuState.mu.Lock()
+	if reason == "ptb_feedback" {
+		now := time.Now().UnixMilli()
+		if c.pmtuState.lastMinus64UnixMilli != 0 && now-c.pmtuState.lastMinus64UnixMilli < pmtuMinus64DebounceMs {
+			c.pmtuState.mu.Unlock()
+			return
+		}
+		c.pmtuState.lastMinus64UnixMilli = now
+	}
 	next := c.pmtuState.currentPayload - 64
 	if next < c.pmtuState.minPayload {
 		next = c.pmtuState.minPayload
@@ -1285,7 +1433,7 @@ func (s *connectIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 	maybeEmitConnectIPActiveSnapshot()
 	if len(icmp) > 0 {
 		connectIPCounters.ptbRxTotal.Add(1)
-		emitConnectIPObservabilityEvent("packet_ptb_rx")
+		maybeEmitConnectIPPTBObs("packet_ptb_rx")
 	}
 	return icmp, err
 }
@@ -1382,6 +1530,19 @@ func setConnectIPSessionID() {
 	connectIPCounters.lastActiveEmitUnixMilli.Store(0)
 	connectIPCounters.firstTxMarkerEmitted.Store(0)
 	connectIPCounters.firstRxMarkerEmitted.Store(0)
+	connectIPCounters.lastPTBObsEmitUnixMilli.Store(0)
+}
+
+func maybeEmitConnectIPPTBObs(reason string) {
+	now := time.Now().UnixMilli()
+	last := connectIPCounters.lastPTBObsEmitUnixMilli.Load()
+	if last != 0 && now-last < 1000 {
+		return
+	}
+	if !connectIPCounters.lastPTBObsEmitUnixMilli.CompareAndSwap(last, now) {
+		return
+	}
+	emitConnectIPObservabilityEvent(reason)
 }
 
 func maybeEmitConnectIPActiveSnapshot() {
@@ -1453,6 +1614,7 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_datagram_context_unknown_total": connectip.UnknownContextDatagramTotal(),
 		"connect_ip_datagram_malformed_total": connectip.MalformedDatagramTotal(),
 		"connect_ip_policy_drop_icmp_total": connectip.PolicyDropICMPTotal(),
+		"connect_ip_policy_drop_icmp_attempt_total": connectip.PolicyDropICMPAttemptTotal(),
 	}
 }
 

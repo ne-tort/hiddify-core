@@ -23,6 +23,7 @@ import (
 type Endpoint struct {
 	endpoint.Adapter
 	runtime CM.Runtime
+	baseCtx context.Context
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
@@ -42,6 +43,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	return &Endpoint{
 		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+		baseCtx: ctx,
 		runtime: CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 			Tag:              tag,
 			Server:           options.Server,
@@ -66,7 +68,11 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 
 func (e *Endpoint) Start(stage adapter.StartStage) error {
 	if stage == adapter.StartStatePostStart {
-		return e.runtime.Start(context.Background())
+		startCtx := e.baseCtx
+		if startCtx == nil {
+			startCtx = context.Background()
+		}
+		return e.runtime.Start(startCtx)
 	}
 	return nil
 }

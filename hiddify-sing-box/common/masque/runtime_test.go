@@ -2,6 +2,7 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -39,6 +40,30 @@ type testFactory struct {
 
 func (f testFactory) NewSession(ctx context.Context, options T.ClientOptions) (T.ClientSession, error) {
 	return f.session, nil
+}
+
+type errSessionFactory struct {
+	err error
+}
+
+func (f errSessionFactory) NewSession(ctx context.Context, options T.ClientOptions) (T.ClientSession, error) {
+	return nil, f.err
+}
+
+func TestRuntimeLastErrorOnStartFailure(t *testing.T) {
+	rt := NewRuntime(errSessionFactory{err: errors.New("dial refused")}, RuntimeOptions{})
+	if err := rt.Start(context.Background()); err == nil {
+		t.Fatal("expected start error")
+	}
+	if rt.IsReady() {
+		t.Fatal("expected not ready")
+	}
+	if rt.LifecycleState() != StateDegraded {
+		t.Fatalf("lifecycle state: %v", rt.LifecycleState())
+	}
+	if rt.LastError() == nil {
+		t.Fatal("expected LastError after failed Start")
+	}
 }
 
 func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {

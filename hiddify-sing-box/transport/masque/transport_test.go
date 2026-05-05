@@ -237,6 +237,15 @@ func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
 	}
 }
 
+func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
+	rec := &recordingIPPacketSession{}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	_, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5601})
+	if err == nil {
+		t.Fatal("expected IPv6 destination rejection for temporary IPv4-only UDP bridge contract")
+	}
+}
+
 func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
 	packet, err := buildIPv4UDPPacket(
 		netip.MustParseAddr("10.200.0.2"),
@@ -358,6 +367,34 @@ func (s *recordingIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 }
 
 func (s *recordingIPPacketSession) Close() error { return nil }
+
+func TestParseICMPPTBHopMTUIPv4(t *testing.T) {
+	pkt := make([]byte, 28)
+	pkt[0] = 0x45
+	pkt[9] = 1
+	icmpOff := 20
+	pkt[icmpOff] = 3
+	pkt[icmpOff+1] = 4
+	binary.BigEndian.PutUint16(pkt[icmpOff+6:icmpOff+8], 1200)
+	mtu, v6, ok := parseICMPPTBHopMTU(pkt)
+	if !ok || v6 || mtu != 1200 {
+		t.Fatalf("parse: mtu=%d v6=%v ok=%v", mtu, v6, ok)
+	}
+}
+
+func TestParseICMPPTBHopMTUIPv6(t *testing.T) {
+	pkt := make([]byte, 48)
+	pkt[0] = 0x60
+	pkt[6] = 58
+	icmpOff := 40
+	pkt[icmpOff] = 2
+	pkt[icmpOff+1] = 0
+	binary.BigEndian.PutUint32(pkt[icmpOff+4:icmpOff+8], 1400)
+	mtu, v6, ok := parseICMPPTBHopMTU(pkt)
+	if !ok || !v6 || mtu != 1400 {
+		t.Fatalf("parse: mtu=%d v6=%v ok=%v", mtu, v6, ok)
+	}
+}
 
 type fakeDeadlineReader struct{}
 

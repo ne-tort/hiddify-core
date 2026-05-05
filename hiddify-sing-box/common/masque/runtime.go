@@ -2,6 +2,7 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,8 @@ const transportModeConnectIP = "connect_ip"
 type Runtime interface {
 	Start(ctx context.Context) error
 	IsReady() bool
+	LifecycleState() State
+	LastError() error
 	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
 	ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
 	OpenIPSession(ctx context.Context) (T.IPPacketSession, error)
@@ -65,8 +68,10 @@ type runtimeImpl struct {
 	session T.ClientSession
 	ipPlane T.IPPacketSession
 
-	mu    sync.RWMutex
-	state atomic.Uint32
+	mu        sync.RWMutex
+	state     atomic.Uint32
+	lastErrMu sync.Mutex
+	lastErr   error
 }
 
 func NewRuntime(factory T.ClientFactory, options RuntimeOptions) Runtime {
@@ -84,6 +89,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 	if State(r.state.Load()) == StateClosed {
 		return E.New("runtime is closed")
 	}
+	r.clearLastErrLocked()
 	r.state.Store(uint32(StateConnecting))
 	if r.session != nil {
 		if r.ipPlane != nil {
@@ -103,6 +109,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				r.state.Store(uint32(StateDegraded))
+				r.setLastErrLocked(ctx.Err())
 				return ctx.Err()
 			case <-time.After(time.Duration(attempt) * 100 * time.Millisecond):
 			}
@@ -132,6 +139,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 	}
 	if err != nil {
 		r.state.Store(uint32(StateDegraded))
+		r.setLastErrLocked(err)
 		return err
 	}
 	r.session = session
@@ -141,10 +149,12 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			_ = session.Close()
 			r.session = nil
 			r.state.Store(uint32(StateDegraded))
+			r.setLastErrLocked(err)
 			return err
 		}
 		r.ipPlane = ipPlane
 	}
+	r.clearLastErrLocked()
 	r.state.Store(uint32(StateReady))
 	return nil
 }
@@ -178,13 +188,49 @@ func (r *runtimeImpl) IsReady() bool {
 	return State(r.state.Load()) == StateReady
 }
 
+func (r *runtimeImpl) LifecycleState() State {
+	return State(r.state.Load())
+}
+
+func (r *runtimeImpl) LastError() error {
+	r.lastErrMu.Lock()
+	defer r.lastErrMu.Unlock()
+	return r.lastErr
+}
+
+func (r *runtimeImpl) clearLastErrLocked() {
+	r.lastErrMu.Lock()
+	r.lastErr = nil
+	r.lastErrMu.Unlock()
+}
+
+func (r *runtimeImpl) setLastErrLocked(err error) {
+	r.lastErrMu.Lock()
+	r.lastErr = err
+	r.lastErrMu.Unlock()
+}
+
+func (r *runtimeImpl) notReadyDialErr() error {
+	base := E.New("runtime is not ready")
+	r.lastErrMu.Lock()
+	le := r.lastErr
+	r.lastErrMu.Unlock()
+	if le != nil {
+		return errors.Join(base, le)
+	}
+	return base
+}
+
 func (r *runtimeImpl) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	r.mu.RLock()
 	session := r.session
-	ready := State(r.state.Load()) == StateReady
+	state := State(r.state.Load())
 	r.mu.RUnlock()
-	if !ready || session == nil {
-		return nil, E.New("runtime is not ready")
+	if state == StateClosed {
+		return nil, E.New("runtime is closed")
+	}
+	if state != StateReady || session == nil {
+		return nil, r.notReadyDialErr()
 	}
 	return session.DialContext(ctx, network, destination)
 }
@@ -192,10 +238,13 @@ func (r *runtimeImpl) DialContext(ctx context.Context, network string, destinati
 func (r *runtimeImpl) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	r.mu.RLock()
 	session := r.session
-	ready := State(r.state.Load()) == StateReady
+	state := State(r.state.Load())
 	r.mu.RUnlock()
-	if !ready || session == nil {
-		return nil, E.New("runtime is not ready")
+	if state == StateClosed {
+		return nil, E.New("runtime is closed")
+	}
+	if state != StateReady || session == nil {
+		return nil, r.notReadyDialErr()
 	}
 	return session.ListenPacket(ctx, destination)
 }
@@ -204,10 +253,13 @@ func (r *runtimeImpl) OpenIPSession(ctx context.Context) (T.IPPacketSession, err
 	r.mu.RLock()
 	session := r.session
 	ipPlane := r.ipPlane
-	ready := State(r.state.Load()) == StateReady
+	state := State(r.state.Load())
 	r.mu.RUnlock()
-	if !ready || session == nil {
-		return nil, E.New("runtime is not ready")
+	if state == StateClosed {
+		return nil, E.New("runtime is closed")
+	}
+	if state != StateReady || session == nil {
+		return nil, r.notReadyDialErr()
 	}
 	if ipPlane != nil {
 		return ipPlane, nil

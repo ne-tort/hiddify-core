@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
@@ -14,6 +15,15 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestEmitPolicyDropICMPIncrementsAttemptOnComposeFailure(t *testing.T) {
+	var c Conn
+	beforeA := PolicyDropICMPAttemptTotal()
+	beforeS := PolicyDropICMPTotal()
+	c.emitPolicyDropICMP(nil)
+	require.Equal(t, beforeA+1, PolicyDropICMPAttemptTotal())
+	require.Equal(t, beforeS, PolicyDropICMPTotal())
+}
 
 var ipv6Header = []byte{
 	0x60, 0x00, 0x00, 0x00, // Version, Traffic Class, Flow Label
@@ -270,6 +280,51 @@ func TestSendingDatagrams(t *testing.T) {
 		err := conn.composeDatagram(&datagram, []byte{})
 		require.ErrorContains(t, err, "empty packet")
 	})
+
+	t.Run("composeDatagram rejects egress source outside assigned and routes", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
+		require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
+			{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.0.0.255"), IPProtocol: 17},
+		}))
+		hdr, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(192, 168, 1, 10),
+			Dst:      net.IPv4(10, 200, 0, 2),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		var datagram []byte
+		err = conn.composeDatagram(&datagram, hdr)
+		require.ErrorContains(t, err, "source address / protocol not allowed")
+	})
+
+	t.Run("composeDatagram rejects egress destination outside peer prefix", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{})
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
+		require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
+			{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.0.0.255"), IPProtocol: 17},
+		}))
+		conn.peerAddresses = []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}
+		hdr, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(10, 0, 0, 4),
+			Dst:      net.IPv4(10, 200, 0, 3),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		var datagram []byte
+		err = conn.composeDatagram(&datagram, hdr)
+		require.ErrorContains(t, err, "destination address not allowed")
+	})
 }
 
 func TestWritePacketFailures(t *testing.T) {
@@ -306,8 +361,16 @@ func TestWritePacketFailures(t *testing.T) {
 	})
 }
 
-func TestSendLargeDatagrams(t *testing.T) {
-	str := &mockStream{sendDatagramErr: &quic.DatagramTooLargeError{}}
+func TestPTBMTUFromDatagramTooLarge(t *testing.T) {
+	require.Equal(t, 1280, ptbMTUFromDatagramTooLarge(nil))
+	require.Equal(t, 1280, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{}))
+	require.Equal(t, 1280, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 800}))
+	require.Equal(t, 1350, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1350}))
+	require.Equal(t, 9000, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 120_000}))
+}
+
+func TestSendLargeDatagramsICMPMTUReflectsQuicHint(t *testing.T) {
+	str := &mockStream{sendDatagramErr: &quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1350}}
 	conn := newProxiedConn(str)
 	data, err := (&ipv4.Header{
 		Version:  4,
@@ -318,7 +381,13 @@ func TestSendLargeDatagrams(t *testing.T) {
 		Protocol: 17,
 	}).Marshal()
 	require.NoError(t, err)
-	icmp, err := conn.WritePacket(data)
+	icmpPacket, err := conn.WritePacket(data)
 	require.NoError(t, err)
-	require.NotNil(t, icmp)
+	require.NotNil(t, icmpPacket)
+	require.GreaterOrEqual(t, len(icmpPacket), ipv4.HeaderLen+8)
+	msg, err := icmp.ParseMessage(1, icmpPacket[ipv4.HeaderLen:])
+	require.NoError(t, err)
+	require.Equal(t, ipv4.ICMPTypeDestinationUnreachable, msg.Type)
+	require.Equal(t, 4, msg.Code)
+	require.NotNil(t, msg.Body)
 }

@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -57,14 +58,15 @@ func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSe
 	localV4 := netip.MustParseAddr("198.18.0.2")
 	localV6 := netip.MustParseAddr("fd00::2")
 	mtu := 1500
+	ceilingMax := connectIPDatagramCeilingMax()
 	foundV4 := false
 	foundV6 := false
 	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
 		if connectIPSession.datagramCeiling > 0 {
 			if connectIPSession.datagramCeiling < 1280 {
 				mtu = 1280
-			} else if connectIPSession.datagramCeiling > 1500 {
-				mtu = 1500
+			} else if connectIPSession.datagramCeiling > ceilingMax {
+				mtu = ceilingMax
 			} else {
 				mtu = connectIPSession.datagramCeiling
 			}
@@ -257,7 +259,7 @@ func (s *connectIPTCPNetstack) readLoop() {
 			continue
 		}
 		packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(append([]byte(nil), readBuffer[:n]...)),
+			Payload: buffer.MakeWithData(bytes.Clone(readBuffer[:n])),
 		})
 		switch readBuffer[0] >> 4 {
 		case 4:
@@ -320,9 +322,11 @@ func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, er
 	// connect-ip-go mutates TTL/HopLimit in-place. Send a private copy
 	// to preserve deterministic packet semantics across retries/callers.
 	const maxAttempts = 3
+	basePayload := bytes.Clone(outbound)
+	attemptPayload := make([]byte, len(basePayload))
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		attemptPayload := append([]byte(nil), outbound...)
+		copy(attemptPayload, basePayload)
 		connectIPCounters.netstackWriteAttemptTotal.Add(1)
 		icmp, err := s.session.WritePacket(attemptPayload)
 		if err == nil {
@@ -372,7 +376,7 @@ func (s *connectIPTCPNetstack) injectPacket(packetBytes []byte) {
 		return
 	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(append([]byte(nil), packetBytes...)),
+		Payload: buffer.MakeWithData(bytes.Clone(packetBytes)),
 	})
 	switch packetBytes[0] >> 4 {
 	case 4:

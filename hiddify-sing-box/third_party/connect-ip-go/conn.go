@@ -56,7 +56,8 @@ var (
 	unknownCapsuleTotal         atomic.Uint64
 	unknownContextDatagramTotal atomic.Uint64
 	malformedDatagramTotal      atomic.Uint64
-	policyDropICMPTotal         atomic.Uint64
+	policyDropICMPTotal        atomic.Uint64
+	policyDropICMPAttemptTotal atomic.Uint64
 )
 
 func UnknownCapsuleTotal() uint64 {
@@ -75,10 +76,31 @@ func PolicyDropICMPTotal() uint64 {
 	return policyDropICMPTotal.Load()
 }
 
+func PolicyDropICMPAttemptTotal() uint64 {
+	return policyDropICMPAttemptTotal.Load()
+}
+
 // If a packet is too large to fit into a QUIC datagram,
 // we send an ICMP Packet Too Big packet.
 // On IPv6, the minimum MTU of a link is 1280 bytes.
 const minMTU = 1280
+
+// ptbMTUFromDatagramTooLarge picks the ICMP PTB "MTU of next hop" hint from quic-go.
+// Falls back to minMTU when the error carries no positive size; clamps to avoid absurd values.
+func ptbMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
+	if err == nil || err.MaxDatagramPayloadSize <= 0 {
+		return minMTU
+	}
+	mtu := int(err.MaxDatagramPayloadSize)
+	if mtu < minMTU {
+		mtu = minMTU
+	}
+	const ptbUpperClamp = 9000
+	if mtu > ptbUpperClamp {
+		mtu = ptbUpperClamp
+	}
+	return mtu
+}
 
 // Pool for datagram buffers with required offset.
 var datagramPool = sync.Pool{
@@ -337,29 +359,9 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	if len(data) == 0 {
 		return errors.New("connect-ip: empty packet")
 	}
-	var src, dst netip.Addr
-	var ipProto uint8
-	var err error
-	switch v := ipVersion(data); v {
-	default:
-		return fmt.Errorf("connect-ip: unknown IP versions: %d", v)
-	case 4:
-		if len(data) < ipv4.HeaderLen {
-			return fmt.Errorf("connect-ip: malformed datagram: too short")
-		}
-		src = netip.AddrFrom4([4]byte(data[12:16]))
-		dst = netip.AddrFrom4([4]byte(data[16:20]))
-		ipProto = data[9]
-	case 6:
-		if len(data) < ipv6.HeaderLen {
-			return fmt.Errorf("connect-ip: malformed datagram: too short")
-		}
-		src = netip.AddrFrom16([16]byte(data[8:24]))
-		dst = netip.AddrFrom16([16]byte(data[24:40]))
-		ipProto, err = ipv6UpperLayerProtocol(data)
-		if err != nil {
-			return err
-		}
+	src, dst, ipProto, version, err := packetTuple(data)
+	if err != nil {
+		return err
 	}
 
 	c.mu.Lock()
@@ -391,7 +393,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 				return false
 			}
 			// ICMP is always allowed
-			if (ipVersion(data) == 4 && ipProto == ipProtoICMP) || (ipVersion(data) == 6 && ipProto == ipProtoICMPv6) {
+			if isICMPProtocol(version, ipProto) {
 				return true
 			}
 			return r.IPProtocol == 0 || r.IPProtocol == ipProto
@@ -405,6 +407,7 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 }
 
 func (c *Conn) emitPolicyDropICMP(original []byte) {
+	policyDropICMPAttemptTotal.Add(1)
 	icmpPacket, err := composeICMPPolicyDropPacket(original)
 	if err != nil {
 		log.Printf("connect-ip: failed to compose policy-drop ICMP: %v", err)
@@ -433,7 +436,7 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	if err := c.str.SendDatagram(*buf); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			icmpPacket, icmpErr := composeICMPTooLargePacket(b, minMTU)
+			icmpPacket, icmpErr := composeICMPTooLargePacket(b, ptbMTUFromDatagramTooLarge(errDTL))
 			if icmpErr != nil {
 				log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
 				return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
@@ -454,7 +457,6 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 }
 
 func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
-	// TODO: implement src, dst and ipproto checks
 	if len(src) == 0 {
 		return errors.New("connect-ip: empty packet")
 	}
@@ -491,7 +493,101 @@ func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 		}
 		packet[7]-- // Decrement Hop Limit
 	}
+	if err := c.validateOutgoingProxiedPacket(packet); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (c *Conn) validateOutgoingProxiedPacket(packet []byte) error {
+	c.mu.Lock()
+	assignedAddresses := c.assignedAddresses
+	localRoutes := c.localRoutes
+	peerAddresses := c.peerAddresses
+	c.mu.Unlock()
+	if len(assignedAddresses) == 0 && len(localRoutes) == 0 && peerAddresses == nil {
+		return nil
+	}
+	src, dst, ipProto, version, err := packetTuple(packet)
+	if err != nil {
+		return err
+	}
+
+	isAllowedSrc := false
+	hasSameFamilySourcePolicy := false
+	if len(assignedAddresses) > 0 {
+		isAllowedSrc = slices.ContainsFunc(assignedAddresses, func(p netip.Prefix) bool {
+			if p.Addr().BitLen() != src.BitLen() {
+				return false
+			}
+			hasSameFamilySourcePolicy = true
+			return p.Contains(src)
+		})
+	}
+	if !isAllowedSrc {
+		isAllowedSrc = slices.ContainsFunc(localRoutes, func(r IPRoute) bool {
+			if r.StartIP.BitLen() != src.BitLen() || r.EndIP.BitLen() != src.BitLen() {
+				return false
+			}
+			hasSameFamilySourcePolicy = true
+			if r.StartIP.Compare(src) > 0 || src.Compare(r.EndIP) > 0 {
+				return false
+			}
+			if isICMPProtocol(version, ipProto) {
+				return true
+			}
+			return r.IPProtocol == 0 || r.IPProtocol == ipProto
+		})
+	}
+	if hasSameFamilySourcePolicy && !isAllowedSrc {
+		return fmt.Errorf("connect-ip: datagram source address / protocol not allowed: %s (protocol: %d)", src, ipProto)
+	}
+
+	if peerAddresses != nil {
+		hasSameFamilyDestinationPolicy := false
+		isAllowedDst := slices.ContainsFunc(peerAddresses, func(p netip.Prefix) bool {
+			if p.Addr().BitLen() != dst.BitLen() {
+				return false
+			}
+			hasSameFamilyDestinationPolicy = true
+			return p.Contains(dst)
+		})
+		if hasSameFamilyDestinationPolicy && !isAllowedDst {
+			return fmt.Errorf("connect-ip: datagram destination address not allowed: %s", dst)
+		}
+	}
+	return nil
+}
+
+func packetTuple(packet []byte) (src netip.Addr, dst netip.Addr, ipProto uint8, version uint8, err error) {
+	if len(packet) == 0 {
+		return netip.Addr{}, netip.Addr{}, 0, 0, errors.New("connect-ip: empty packet")
+	}
+	version = ipVersion(packet)
+	switch version {
+	default:
+		return netip.Addr{}, netip.Addr{}, 0, version, fmt.Errorf("connect-ip: unknown IP versions: %d", version)
+	case 4:
+		if len(packet) < ipv4.HeaderLen {
+			return netip.Addr{}, netip.Addr{}, 0, version, fmt.Errorf("connect-ip: malformed datagram: too short")
+		}
+		return netip.AddrFrom4([4]byte(packet[12:16])), netip.AddrFrom4([4]byte(packet[16:20])), packet[9], version, nil
+	case 6:
+		if len(packet) < ipv6.HeaderLen {
+			return netip.Addr{}, netip.Addr{}, 0, version, fmt.Errorf("connect-ip: malformed datagram: too short")
+		}
+		proto, protoErr := ipv6UpperLayerProtocol(packet)
+		if protoErr != nil {
+			// Keep fail-closed checks active while preserving compatibility with
+			// packets that carry unsupported extension chains in some integrations.
+			proto = packet[6]
+		}
+		return netip.AddrFrom16([16]byte(packet[8:24])), netip.AddrFrom16([16]byte(packet[24:40])), proto, version, nil
+	}
+}
+
+func isICMPProtocol(version uint8, proto uint8) bool {
+	return (version == 4 && proto == ipProtoICMP) || (version == 6 && proto == ipProtoICMPv6)
 }
 
 func (c *Conn) Close() error {

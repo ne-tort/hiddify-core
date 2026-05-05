@@ -2,10 +2,12 @@ package masque
 
 import (
 	"context"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -200,9 +202,30 @@ func (e *WarpEndpoint) startRuntime() {
 	if bootstrap == nil {
 		bootstrap = e.bootstrapProfile
 	}
-	server, port, err := bootstrap(baseCtx)
-	if err != nil {
-		e.startErr.Store(err)
+	const warpBootstrapMaxAttempts = 4
+	var server string
+	var port uint16
+	var bootstrapErr error
+	for attempt := 0; attempt < warpBootstrapMaxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(120+attempt*80+rand.IntN(160)) * time.Millisecond
+			select {
+			case <-baseCtx.Done():
+				e.startErr.Store(baseCtx.Err())
+				return
+			case <-time.After(backoff):
+			}
+		}
+		s, p, err := bootstrap(baseCtx)
+		if err == nil {
+			server, port = s, p
+			bootstrapErr = nil
+			break
+		}
+		bootstrapErr = err
+	}
+	if bootstrapErr != nil {
+		e.startErr.Store(bootstrapErr)
 		return
 	}
 	chain, err := CM.BuildChain(e.options.MasqueEndpointOptions)
@@ -215,7 +238,7 @@ func (e *WarpEndpoint) startRuntime() {
 		e.startErr.Store(err)
 		return
 	}
-	runtime := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
+	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 		Tag:            e.Tag(),
 		Server:         server,
 		ServerPort:     port,
@@ -229,21 +252,41 @@ func (e *WarpEndpoint) startRuntime() {
 		ServerToken:    e.options.ServerToken,
 		TLSServerName:  e.options.TLSServerName,
 		Insecure:       e.options.Insecure,
-		QUICExperimental: toTransportQUICExperimental(e.options.QUICExperimental),
-		Chain:          chain,
-		QUICDial:       quicDial,
+		ConnectIPDatagramCeiling: e.options.MasqueEndpointOptions.MTU,
+		QUICExperimental:         toTransportQUICExperimental(e.options.QUICExperimental),
+		Chain:                    chain,
+		QUICDial:                 quicDial,
 	})
-	if err := runtime.Start(baseCtx); err != nil {
-		e.startErr.Store(err)
+	const warpRuntimeStartMaxAttempts = 3
+	var startErr error
+	for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(180+attempt*120+rand.IntN(120)) * time.Millisecond
+			select {
+			case <-baseCtx.Done():
+				e.startErr.Store(baseCtx.Err())
+				_ = rt.Close()
+				return
+			case <-time.After(backoff):
+			}
+		}
+		startErr = rt.Start(baseCtx)
+		if startErr == nil {
+			break
+		}
+	}
+	if startErr != nil {
+		e.startErr.Store(startErr)
+		_ = rt.Close()
 		return
 	}
 	if e.closed.Load() {
-		_ = runtime.Close()
+		_ = rt.Close()
 		e.startErr.Store(E.New("warp_masque endpoint closed during startup"))
 		return
 	}
 	e.mu.Lock()
-	e.runtime = runtime
+	e.runtime = rt
 	e.mu.Unlock()
 }
 

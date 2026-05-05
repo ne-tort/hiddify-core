@@ -35,6 +35,15 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// connectIPServerParseDropTotal counts inbound CONNECT-IP packets dropped at the
+// server IP parse boundary (non-fatal; read continues).
+var connectIPServerParseDropTotal atomic.Uint64
+
+// ConnectIPServerParseDropTotal exposes the parse-drop counter for tests/ops.
+func ConnectIPServerParseDropTotal() uint64 {
+	return connectIPServerParseDropTotal.Load()
+}
+
 type ServerEndpoint struct {
 	endpoint.Adapter
 	options    option.MasqueEndpointOptions
@@ -487,6 +496,7 @@ func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 		buffer.Truncate(n)
 		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(buffer.Bytes())
 		if parseErr != nil {
+			connectIPServerParseDropTotal.Add(1)
 			buffer.Reset()
 			continue
 		}
@@ -532,6 +542,7 @@ func (c *connectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 		}
 		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(p[:n])
 		if parseErr != nil {
+			connectIPServerParseDropTotal.Add(1)
 			continue
 		}
 		if payloadStart > 0 || payloadEnd < n {
