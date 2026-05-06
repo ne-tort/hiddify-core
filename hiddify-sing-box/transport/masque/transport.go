@@ -1814,6 +1814,14 @@ func maybeEmitConnectIPActiveSnapshot() {
 	emitConnectIPObservabilityEvent("periodic_active")
 }
 
+// connectIPServerParseDropSupplier is set from protocol/masque init (server CONNECT-IP parse drops).
+var connectIPServerParseDropSupplier func() uint64
+
+// RegisterConnectIPServerParseDropSupplier merges server-side parse-drop totals into CONNECT_IP_OBS snapshots.
+func RegisterConnectIPServerParseDropSupplier(fn func() uint64) {
+	connectIPServerParseDropSupplier = fn
+}
+
 func ConnectIPObservabilitySnapshot() map[string]any {
 	connectIPCounters.mu.Lock()
 	reasons := make(map[string]uint64, len(connectIPCounters.sessionResetByReason))
@@ -1840,7 +1848,7 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 	scopeTarget := connectIPCounters.currentScopeTarget
 	scopeIPProto := connectIPCounters.currentScopeIPProto
 	connectIPCounters.mu.Unlock()
-	return map[string]any{
+	out := map[string]any{
 		"connect_ip_obs_contract_version":             "v1",
 		"connect_ip_session_id":                       sessionID,
 		"connect_ip_scope_target":                     scopeTarget,
@@ -1882,6 +1890,10 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		// QUIC conn-level DATAGRAM receive-queue overflow (patched quic-go datagram_queue.go).
 		"quic_datagram_rcv_queue_drop_total": quic.DatagramReceiveQueueDropTotal(),
 	}
+	if fn := connectIPServerParseDropSupplier; fn != nil {
+		out["connect_ip_server_parse_drop_total"] = fn()
+	}
+	return out
 }
 
 func emitConnectIPObservabilityEvent(reason string) {
