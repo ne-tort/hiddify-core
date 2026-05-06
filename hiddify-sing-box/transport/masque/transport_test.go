@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1881,7 +1882,6 @@ func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, target
 	if err != nil {
 		t.Fatalf("listen quic udp: %v", err)
 	}
-	t.Cleanup(func() { _ = quicConn.Close() })
 	proxyPort := quicConn.LocalAddr().(*net.UDPAddr).Port
 
 	mux := http.NewServeMux()
@@ -1898,8 +1898,17 @@ func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, target
 		EnableDatagrams: true,
 		Handler:         mux,
 	}
-	t.Cleanup(func() { _ = server.Close() })
-	go func() { _ = server.Serve(quicConn) }()
+	var serveWG sync.WaitGroup
+	serveWG.Add(1)
+	go func() {
+		defer serveWG.Done()
+		_ = server.Serve(quicConn)
+	}()
+	t.Cleanup(func() {
+		_ = server.Close()
+		serveWG.Wait()
+		_ = quicConn.Close()
+	})
 	time.Sleep(20 * time.Millisecond)
 	return proxyPort
 }
