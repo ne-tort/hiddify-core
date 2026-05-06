@@ -23,6 +23,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
+	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -74,6 +75,30 @@ func TestParseIPDestinationAndPayloadIPv6UDP(t *testing.T) {
 	}
 }
 
+func TestParseIPDestinationAndPayloadIPv6UDPWithExtensionHeader(t *testing.T) {
+	payload := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	packet := makeIPv6UDPPacketWithHopByHop(
+		netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("2001:db8::2"),
+		2000,
+		5601,
+		payload,
+	)
+	destination, payloadStart, payloadEnd, err := parseIPDestinationAndPayload(packet)
+	if err != nil {
+		t.Fatalf("parse ipv6 udp packet with extension header: %v", err)
+	}
+	if !destination.Addr.IsValid() || destination.Addr.String() != "2001:db8::2" {
+		t.Fatalf("unexpected destination addr: %v", destination.Addr)
+	}
+	if destination.Port != 5601 {
+		t.Fatalf("unexpected destination port: %d", destination.Port)
+	}
+	if got := packet[payloadStart:payloadEnd]; string(got) != string(payload) {
+		t.Fatalf("unexpected payload slice: %v", got)
+	}
+}
+
 func TestParseIPDestinationAndPayloadIPv4IgnoresTrailingGarbage(t *testing.T) {
 	payload := []byte{0xde, 0xad, 0xbe}
 	packet := makeIPv4UDPPacket(
@@ -99,6 +124,30 @@ func TestParseIPDestinationAndPayloadIPv4IgnoresTrailingGarbage(t *testing.T) {
 	}
 }
 
+func TestParseIPDestinationAndPayloadIPv4UDPPayloadCutByDeclaredLength(t *testing.T) {
+	payload := []byte{0x01, 0x02, 0x03, 0x04}
+	packet := makeIPv4UDPPacket(
+		netip.MustParseAddr("10.0.0.1"),
+		netip.MustParseAddr("10.0.0.2"),
+		12000,
+		5601,
+		payload,
+	)
+	// Keep IP total length intact, but shrink UDP length so parser must cut payload.
+	packet[24] = 0
+	packet[25] = 10 // UDP header (8) + 2 payload bytes
+
+	_, payloadStart, payloadEnd, err := parseIPDestinationAndPayload(packet)
+	if err != nil {
+		t.Fatalf("parse ipv4 udp packet with shortened udpLen: %v", err)
+	}
+	got := packet[payloadStart:payloadEnd]
+	want := payload[:2]
+	if string(got) != string(want) {
+		t.Fatalf("unexpected payload after udpLen cut: got=%v want=%v", got, want)
+	}
+}
+
 func TestParseIPDestinationAndPayloadMalformed(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -108,6 +157,7 @@ func TestParseIPDestinationAndPayloadMalformed(t *testing.T) {
 		{name: "bad-version", packet: []byte{0x20, 0x00, 0x00}},
 		{name: "truncated-ipv4", packet: []byte{0x45, 0x00, 0x00, 0x10}},
 		{name: "truncated-ipv6", packet: []byte{0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 17}},
+		{name: "malformed-ipv6-extension-chain", packet: []byte{0x60, 0x00, 0x00, 0x00, 0x00, 0x08, 0, 64}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,6 +166,23 @@ func TestParseIPDestinationAndPayloadMalformed(t *testing.T) {
 				t.Fatal("expected parse error")
 			}
 		})
+	}
+}
+
+func TestParseIPDestinationAndPayloadIPv6InvalidExtensionHeaderLengthFailClosed(t *testing.T) {
+	packet := makeIPv6UDPPacketWithHopByHop(
+		netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("2001:db8::2"),
+		2000,
+		5601,
+		[]byte{0xaa, 0xbb, 0xcc},
+	)
+	// Corrupt ext header len: requires 256 bytes, which exceeds packet size.
+	packet[41] = 31
+
+	_, _, _, err := parseIPDestinationAndPayload(packet)
+	if err == nil {
+		t.Fatal("expected fail-closed parse error for malformed ipv6 extension header length")
 	}
 }
 
@@ -252,6 +319,20 @@ func TestConnectIPRouteAdvertisePeerCloseLifecycleParity(t *testing.T) {
 	}
 
 	writeRouteAdvertiseDualSignalArtifactIfRequested(t, actualClass, resultClass)
+}
+
+func TestServerEndpointDialContextRejectsInvalidDestinationAsCapability(t *testing.T) {
+	endpoint := &ServerEndpoint{}
+	_, err := endpoint.DialContext(context.Background(), "tcp", M.Socksaddr{})
+	if err == nil {
+		t.Fatal("expected invalid destination to be rejected")
+	}
+	if !errors.Is(err, TM.ErrCapability) {
+		t.Fatalf("expected ErrCapability for invalid destination, got: %v", err)
+	}
+	if got := TM.ClassifyError(err); got != TM.ErrorClassCapability {
+		t.Fatalf("expected capability class for invalid destination, got: %s", got)
+	}
 }
 
 func writeRouteAdvertiseDualSignalArtifactIfRequested(t *testing.T, actualClass, resultClass TM.ErrorClass) {
@@ -602,6 +683,36 @@ func makeIPv6UDPPacket(src, dst netip.Addr, srcPort, dstPort uint16, payload []b
 	packet[44] = byte(udpLen >> 8)
 	packet[45] = byte(udpLen)
 	copy(packet[48:], payload)
+	return packet
+}
+
+func makeIPv6UDPPacketWithHopByHop(src, dst netip.Addr, srcPort, dstPort uint16, payload []byte) []byte {
+	const (
+		baseHeaderLen = 40
+		extHeaderLen  = 8
+	)
+	udpLen := 8 + len(payload)
+	packet := make([]byte, baseHeaderLen+extHeaderLen+udpLen)
+	packet[0] = 0x60
+	packet[4] = byte((extHeaderLen + udpLen) >> 8)
+	packet[5] = byte(extHeaderLen + udpLen)
+	packet[6] = 0 // Hop-by-Hop extension header
+	packet[7] = 64
+	copy(packet[8:24], src.AsSlice())
+	copy(packet[24:40], dst.AsSlice())
+
+	packet[40] = 17 // next header: UDP
+	packet[41] = 0  // extension header length in 8-byte units (0 => 8 bytes)
+	// bytes [42:48] keep zero as extension header payload.
+
+	udpOffset := baseHeaderLen + extHeaderLen
+	packet[udpOffset+0] = byte(srcPort >> 8)
+	packet[udpOffset+1] = byte(srcPort)
+	packet[udpOffset+2] = byte(dstPort >> 8)
+	packet[udpOffset+3] = byte(dstPort)
+	packet[udpOffset+4] = byte(udpLen >> 8)
+	packet[udpOffset+5] = byte(udpLen)
+	copy(packet[udpOffset+8:], payload)
 	return packet
 }
 

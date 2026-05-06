@@ -17,6 +17,8 @@ import (
 	N "github.com/sagernet/sing/common/network"
 )
 
+var newQUICOutboundDialer = dialer.New
+
 func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remoteIsDomain bool) (TM.QUICDialFunc, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -32,7 +34,7 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 				err = E.New("dialer.New panic: ", r)
 			}
 		}()
-		outboundDialer, err = dialer.New(ctx, options, remoteIsDomain)
+		outboundDialer, err = newQUICOutboundDialer(ctx, options, remoteIsDomain)
 	}()
 	if err != nil {
 		if reflect.DeepEqual(options, option.DialerOptions{}) {

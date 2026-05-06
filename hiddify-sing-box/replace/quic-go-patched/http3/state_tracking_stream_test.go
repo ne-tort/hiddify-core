@@ -281,10 +281,12 @@ func TestDatagramReceiving(t *testing.T) {
 		t.Fatal("should have received a datagram")
 	}
 
-	// up to 32 datagrams can be queued
+	// up to streamDatagramQueueLen datagrams can be queued; one extra enqueue is dropped
+	beforeDrops := StreamDatagramQueueDropTotal()
 	for i := range streamDatagramQueueLen + 1 {
 		str.enqueueDatagram([]byte{uint8(i)})
 	}
+	require.Equal(t, beforeDrops+1, StreamDatagramQueueDropTotal())
 	for i := range streamDatagramQueueLen {
 		data, err := str.ReceiveDatagram(context.Background())
 		require.NoError(t, err)

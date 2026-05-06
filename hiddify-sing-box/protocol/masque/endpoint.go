@@ -147,14 +147,20 @@ func normalizeTCPTransport(mode string) string {
 }
 
 // validateMasqueOptions enforces coupling between transport_mode, fallback_policy,
-// tcp_mode and templates. Behavioural routing (including masque_or_direct) is resolved
-// by the Router / dial planner and the TransportMode/TCP fields passed into RuntimeOptions;
+// tcp_mode and templates. UDP vs CONNECT-IP plane is not flipped here; for TCP,
+// tcp_mode=masque_or_direct with fallback_policy=direct_explicit triggers CONNECT-stream
+// first then optional direct TCP in coreSession.DialContext (transport/masque).
 // common/masque.Runtime does not implicitly switch connect_udp ↔ connect_ip.
 // See hiddify-core/docs/masque-warp-architecture.md (monorepo layout).
 func validateMasqueOptions(options option.MasqueEndpointOptions) error {
-	modeRaw := strings.ToLower(strings.TrimSpace(options.TransportMode))
+	modeNormalized := normalizeMode(options.Mode)
+	modeRaw := strings.ToLower(strings.TrimSpace(options.Mode))
+	if modeRaw != "" && modeRaw != option.MasqueModeClient && modeRaw != option.MasqueModeServer {
+		return E.New("invalid mode")
+	}
+	transportModeRaw := strings.ToLower(strings.TrimSpace(options.TransportMode))
 	mode := normalizeTransportMode(options.TransportMode)
-	if modeRaw != "" && modeRaw != option.MasqueTransportModeAuto && modeRaw != option.MasqueTransportModeConnectUDP && modeRaw != option.MasqueTransportModeConnectIP {
+	if transportModeRaw != "" && transportModeRaw != option.MasqueTransportModeAuto && transportModeRaw != option.MasqueTransportModeConnectUDP && transportModeRaw != option.MasqueTransportModeConnectIP {
 		return E.New("invalid transport_mode")
 	}
 	if mode != option.MasqueTransportModeAuto &&
@@ -210,15 +216,15 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		return E.New("hops are required for chain hop_policy")
 	}
 	if hopPolicy == option.MasqueHopPolicySingle && strings.TrimSpace(options.Server) == "" {
-		if normalizeMode(options.Mode) != option.MasqueModeServer {
+		if modeNormalized != option.MasqueModeServer {
 			return E.New("server is required for single hop policy")
 		}
 	}
-	if normalizeMode(options.Mode) == option.MasqueModeServer {
+	if modeNormalized == option.MasqueModeServer {
 		if strings.TrimSpace(options.Server) != "" || options.ServerPort != 0 || len(options.Hops) > 0 || strings.TrimSpace(options.HopPolicy) != "" {
 			return E.New("server mode does not accept client-side server/hop fields")
 		}
-		if modeRaw != "" || fallbackRaw != "" || tcpModeRaw != "" || tcpTransportRaw != "" {
+		if transportModeRaw != "" || fallbackRaw != "" || tcpModeRaw != "" || tcpTransportRaw != "" {
 			return E.New("server mode does not accept client transport/tcp policy fields")
 		}
 		if strings.TrimSpace(options.ConnectIPScopeTarget) != "" || options.ConnectIPScopeIPProto != 0 {
@@ -245,11 +251,11 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		}
 	}
 	if _, err := CM.BuildChain(options); err != nil {
-		if normalizeMode(options.Mode) != option.MasqueModeServer {
+		if modeNormalized != option.MasqueModeServer {
 			return err
 		}
 	}
-	if normalizeMode(options.Mode) == option.MasqueModeServer {
+	if modeNormalized == option.MasqueModeServer {
 		if options.ListenPort == 0 {
 			return E.New("listen_port is required in server mode")
 		}
@@ -259,6 +265,26 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		if rawTCPTemplate := strings.TrimSpace(options.TemplateTCP); rawTCPTemplate != "" {
 			if !strings.Contains(rawTCPTemplate, "{target_host}") || !strings.Contains(rawTCPTemplate, "{target_port}") {
 				return E.New("server mode template_tcp must include {target_host} and {target_port}")
+			}
+		}
+		if rawUDPTemplate := strings.TrimSpace(options.TemplateUDP); rawUDPTemplate != "" {
+			if !strings.Contains(rawUDPTemplate, "{target_host}") || !strings.Contains(rawUDPTemplate, "{target_port}") {
+				return E.New("server mode template_udp must include {target_host} and {target_port}")
+			}
+		}
+		serverPaths := make(map[string]string, 3)
+		if err := addServerTemplatePath(serverPaths, pathFromTemplate(defaultTemplateIfEmpty(strings.TrimSpace(options.TemplateUDP), "https://masque.local/masque/udp/{target_host}/{target_port}")), "template_udp"); err != nil {
+			return err
+		}
+		if err := addServerTemplatePath(serverPaths, pathFromTemplate(defaultTemplateIfEmpty(strings.TrimSpace(options.TemplateIP), "https://masque.local/masque/ip")), "template_ip"); err != nil {
+			return err
+		}
+		if err := addServerTemplatePath(serverPaths, pathFromTemplate(defaultTemplateIfEmpty(strings.TrimSpace(options.TemplateTCP), "https://masque.local/masque/tcp/{target_host}/{target_port}")), "template_tcp"); err != nil {
+			return err
+		}
+		for path, owner := range serverPaths {
+			if path == "/" {
+				return E.New("server mode ", owner, " resolves to root path '/' and is not allowed")
 			}
 		}
 		for _, p := range options.AllowedTargetPorts {
@@ -290,15 +316,41 @@ func validateMasqueOptions(options option.MasqueEndpointOptions) error {
 		if mode != option.MasqueTransportModeConnectIP && (strings.TrimSpace(options.ConnectIPScopeTarget) != "" || options.ConnectIPScopeIPProto != 0) {
 			return E.New("connect_ip_scope_* requires transport_mode=connect_ip")
 		}
-		if tcpTransportRaw == option.MasqueTCPTransportAuto {
-			return E.New("tcp_transport=auto is not allowed for production client profiles; use connect_stream explicitly (TUN-only client rejects tcp_transport=connect_ip)")
+		if mode == option.MasqueTransportModeConnectIP && (strings.TrimSpace(options.ConnectIPScopeTarget) != "" || options.ConnectIPScopeIPProto != 0) {
+			rawTemplateIP := strings.TrimSpace(options.TemplateIP)
+			if rawTemplateIP == "" || !strings.Contains(rawTemplateIP, "{target}") || !strings.Contains(rawTemplateIP, "{ipproto}") {
+				return E.New("connect_ip_scope_* requires template_ip with flow forwarding variables {target}/{ipproto}")
+			}
+		}
+		if tcpTransportRaw == "" || tcpTransportRaw == option.MasqueTCPTransportAuto {
+			return E.New("client mode requires explicit tcp_transport=connect_stream; implicit/auto values are not allowed (TUN-only client rejects tcp_transport=connect_ip)")
 		}
 		if rawTCPTemplate := strings.TrimSpace(options.TemplateTCP); rawTCPTemplate != "" {
 			if !strings.Contains(rawTCPTemplate, "{target_host}") || !strings.Contains(rawTCPTemplate, "{target_port}") {
 				return E.New("client mode template_tcp must include {target_host} and {target_port}")
 			}
 		}
+		if rawUDPTemplate := strings.TrimSpace(options.TemplateUDP); rawUDPTemplate != "" {
+			if !strings.Contains(rawUDPTemplate, "{target_host}") || !strings.Contains(rawUDPTemplate, "{target_port}") {
+				return E.New("client mode template_udp must include {target_host} and {target_port}")
+			}
+		}
 	}
+	return nil
+}
+
+func defaultTemplateIfEmpty(raw string, fallback string) string {
+	if raw == "" {
+		return fallback
+	}
+	return raw
+}
+
+func addServerTemplatePath(paths map[string]string, path string, owner string) error {
+	if previous, exists := paths[path]; exists {
+		return E.New("server mode template path collision between ", previous, " and ", owner)
+	}
+	paths[path] = owner
 	return nil
 }
 

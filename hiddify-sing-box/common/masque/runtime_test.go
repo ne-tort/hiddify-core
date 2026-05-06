@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync/atomic"
 	"strings"
 	"testing"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	T "github.com/sagernet/sing-box/transport/masque"
@@ -62,6 +64,20 @@ func (f errSessionFactory) NewSession(ctx context.Context, options T.ClientOptio
 	return nil, f.err
 }
 
+type countingErrSessionFactory struct {
+	err      error
+	attempts int32
+}
+
+func (f *countingErrSessionFactory) NewSession(ctx context.Context, options T.ClientOptions) (T.ClientSession, error) {
+	atomic.AddInt32(&f.attempts, 1)
+	return nil, f.err
+}
+
+func (f *countingErrSessionFactory) Attempts() int {
+	return int(atomic.LoadInt32(&f.attempts))
+}
+
 // cancelProbeFactory fails NewSession when ctx is already cancelled (models transport respecting router/box ctx).
 type cancelProbeFactory struct{}
 
@@ -104,6 +120,85 @@ func TestRuntimeLastErrorOnStartFailure(t *testing.T) {
 	}
 	if rt.LastError() == nil {
 		t.Fatal("expected LastError after failed Start")
+	}
+}
+
+func TestRuntimeStartRetryBudgetDeterministicThreeAttempts(t *testing.T) {
+	factory := &countingErrSessionFactory{
+		err: errors.Join(T.ErrTransportInit, errors.New("quic handshake failed")),
+	}
+	rt := NewRuntime(factory, RuntimeOptions{})
+	startErr := rt.Start(context.Background())
+	if startErr == nil {
+		t.Fatal("expected start to fail and exhaust retry budget")
+	}
+	if !errors.Is(startErr, T.ErrTransportInit) {
+		t.Fatalf("expected transport init cause after retry budget exhaustion, got: %v", startErr)
+	}
+	if gotAttempts := factory.Attempts(); gotAttempts != 3 {
+		t.Fatalf("expected runtime start retry budget=3 attempts, got: %d", gotAttempts)
+	}
+	if rt.LifecycleState() != StateDegraded {
+		t.Fatalf("expected degraded after retry budget exhaustion, got: %v", rt.LifecycleState())
+	}
+}
+
+func TestRuntimeStartCancelledDuringBackoffStopsFurtherAttempts(t *testing.T) {
+	factory := &countingErrSessionFactory{
+		err: errors.Join(T.ErrTransportInit, errors.New("transient transport bootstrap failure")),
+	}
+	rt := NewRuntime(factory, RuntimeOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		// Cancel while Start waits in reconnect backoff (attempt=1 -> 100ms),
+		// so retry loop must terminate before making second NewSession call.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	startErr := rt.Start(ctx)
+	if startErr == nil {
+		t.Fatal("expected start cancellation during retry backoff")
+	}
+	if !errors.Is(startErr, context.Canceled) {
+		t.Fatalf("expected context canceled cause from start cancellation, got: %v", startErr)
+	}
+	if !errors.Is(startErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected lifecycle sentinel on start cancellation, got: %v", startErr)
+	}
+	if got := T.ClassifyError(startErr); got != T.ErrorClassLifecycle {
+		t.Fatalf("expected lifecycle class for start cancellation, got: %s", got)
+	}
+	if gotAttempts := factory.Attempts(); gotAttempts != 1 {
+		t.Fatalf("expected cancel during backoff to stop retries after first attempt, got attempts=%d", gotAttempts)
+	}
+	if rt.LifecycleState() != StateDegraded {
+		t.Fatalf("expected degraded after cancelled start, got: %v", rt.LifecycleState())
+	}
+}
+
+func TestRuntimeReadyDialCanceledKeepsTCPDialClassOutsideStartPath(t *testing.T) {
+	rt := NewRuntime(testFactory{session: &testSession{
+		dialErr: errors.Join(T.ErrTCPConnectStreamFailed, context.Canceled),
+	}}, RuntimeOptions{})
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+
+	_, dialErr := rt.DialContext(context.Background(), "tcp", M.Socksaddr{
+		Fqdn: "example.com",
+		Port: 443,
+	})
+	if dialErr == nil {
+		t.Fatal("expected dial error from session")
+	}
+	if !errors.Is(dialErr, context.Canceled) {
+		t.Fatalf("expected context canceled cause from dial path, got: %v", dialErr)
+	}
+	if !errors.Is(dialErr, T.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected tcp connect-stream sentinel from dial path, got: %v", dialErr)
+	}
+	if got := T.ClassifyError(dialErr); got != T.ErrorClassDial {
+		t.Fatalf("expected tcp_dial class outside start-path cancellation, got: %s", got)
 	}
 }
 
@@ -227,6 +322,52 @@ func TestRuntimeDegradedNotReadyPreservesDialClass(t *testing.T) {
 	}
 	if got := T.ClassifyError(rt.LastError()); got != T.ErrorClassDial {
 		t.Fatalf("expected runtime last error class dial, got: %s", got)
+	}
+}
+
+func TestRuntimeDegradedNotReadyPreservesCapabilityClassForTCPBoundary(t *testing.T) {
+	startCause := errors.Join(T.ErrTCPPathNotImplemented, errors.New("tcp transport auto is disabled"))
+	rt := NewRuntime(errSessionFactory{err: startCause}, RuntimeOptions{})
+	startErr := rt.Start(context.Background())
+	if !errors.Is(startErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected tcp path boundary cause from start, got: %v", startErr)
+	}
+	if got := T.ClassifyError(startErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected start error class capability, got: %s", got)
+	}
+	if rt.LifecycleState() != StateDegraded {
+		t.Fatalf("expected degraded state after tcp boundary failure, got: %v", rt.LifecycleState())
+	}
+
+	_, dialErr := rt.DialContext(context.Background(), "tcp", M.Socksaddr{
+		Fqdn: "example.com",
+		Port: 443,
+	})
+	if dialErr == nil {
+		t.Fatal("expected dial failure while runtime is degraded")
+	}
+	if !errors.Is(dialErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected dial error to retain tcp boundary cause, got: %v", dialErr)
+	}
+	if got := T.ClassifyError(dialErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected dial error class capability, got: %s", got)
+	}
+
+	_, listenErr := rt.ListenPacket(context.Background(), M.Socksaddr{
+		Fqdn: "example.com",
+		Port: 53,
+	})
+	if listenErr == nil {
+		t.Fatal("expected listen packet failure while runtime is degraded")
+	}
+	if !errors.Is(listenErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected listen packet error to retain tcp boundary cause, got: %v", listenErr)
+	}
+	if got := T.ClassifyError(listenErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected listen packet error class capability, got: %s", got)
+	}
+	if got := T.ClassifyError(rt.LastError()); got != T.ErrorClassCapability {
+		t.Fatalf("expected runtime last error class capability, got: %s", got)
 	}
 }
 
@@ -402,6 +543,9 @@ func TestRuntimeClosedDialAndListenDoNotJoinStaleLastError(t *testing.T) {
 	if !strings.Contains(dialErr.Error(), "runtime is closed") {
 		t.Fatalf("expected closed runtime dial error, got: %v", dialErr)
 	}
+	if !errors.Is(dialErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected closed runtime dial error to include lifecycle sentinel, got: %v", dialErr)
+	}
 	if errors.Is(dialErr, T.ErrPolicyFallbackDenied) {
 		t.Fatalf("closed dial error must not include stale policy cause, got: %v", dialErr)
 	}
@@ -416,8 +560,137 @@ func TestRuntimeClosedDialAndListenDoNotJoinStaleLastError(t *testing.T) {
 	if !strings.Contains(listenErr.Error(), "runtime is closed") {
 		t.Fatalf("expected closed runtime listen error, got: %v", listenErr)
 	}
+	if !errors.Is(listenErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected closed runtime listen error to include lifecycle sentinel, got: %v", listenErr)
+	}
 	if errors.Is(listenErr, T.ErrPolicyFallbackDenied) {
 		t.Fatalf("closed listen error must not include stale policy cause, got: %v", listenErr)
+	}
+}
+
+func TestRuntimeClosedDialAndListenKeepLifecycleClassAfterCapabilityFailure(t *testing.T) {
+	rt := NewRuntime(errSessionFactory{err: T.ErrTCPPathNotImplemented}, RuntimeOptions{})
+	startErr := rt.Start(context.Background())
+	if !errors.Is(startErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected tcp capability reject from start, got: %v", startErr)
+	}
+	if got := T.ClassifyError(startErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected start error class capability, got: %s", got)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	if rt.LifecycleState() != StateClosed {
+		t.Fatalf("expected closed state, got: %v", rt.LifecycleState())
+	}
+
+	_, dialErr := rt.DialContext(context.Background(), "tcp", M.Socksaddr{
+		Fqdn: "example.com",
+		Port: 443,
+	})
+	if dialErr == nil {
+		t.Fatal("expected dial failure on closed runtime")
+	}
+	if !strings.Contains(dialErr.Error(), "runtime is closed") {
+		t.Fatalf("expected closed runtime dial error, got: %v", dialErr)
+	}
+	if !errors.Is(dialErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected closed runtime dial error to include lifecycle sentinel, got: %v", dialErr)
+	}
+	if errors.Is(dialErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("closed dial error must not include stale capability cause, got: %v", dialErr)
+	}
+	if got := T.ClassifyError(dialErr); got != T.ErrorClassLifecycle {
+		t.Fatalf("expected closed dial error class lifecycle, got: %s", got)
+	}
+
+	_, listenErr := rt.ListenPacket(context.Background(), M.Socksaddr{
+		Fqdn: "example.com",
+		Port: 53,
+	})
+	if listenErr == nil {
+		t.Fatal("expected listen packet failure on closed runtime")
+	}
+	if !strings.Contains(listenErr.Error(), "runtime is closed") {
+		t.Fatalf("expected closed runtime listen error, got: %v", listenErr)
+	}
+	if !errors.Is(listenErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected closed runtime listen error to include lifecycle sentinel, got: %v", listenErr)
+	}
+	if errors.Is(listenErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("closed listen error must not include stale capability cause, got: %v", listenErr)
+	}
+	if got := T.ClassifyError(listenErr); got != T.ErrorClassLifecycle {
+		t.Fatalf("expected closed listen error class lifecycle, got: %s", got)
+	}
+}
+
+func TestRuntimeClosedOpenIPSessionKeepsLifecycleClassAfterCapabilityFailure(t *testing.T) {
+	rt := NewRuntime(errSessionFactory{err: T.ErrTCPPathNotImplemented}, RuntimeOptions{})
+	startErr := rt.Start(context.Background())
+	if !errors.Is(startErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected tcp capability reject from start, got: %v", startErr)
+	}
+	if got := T.ClassifyError(startErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected start error class capability, got: %s", got)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	if rt.LifecycleState() != StateClosed {
+		t.Fatalf("expected closed state, got: %v", rt.LifecycleState())
+	}
+
+	ipErr := errors.New("expected open ip failure on closed runtime")
+	if _, err := rt.OpenIPSession(context.Background()); err == nil {
+		t.Fatal(ipErr)
+	} else {
+		if !strings.Contains(err.Error(), "runtime is closed") {
+			t.Fatalf("expected closed runtime open ip error, got: %v", err)
+		}
+		if !errors.Is(err, T.ErrLifecycleClosed) {
+			t.Fatalf("expected closed runtime open ip error to include lifecycle sentinel, got: %v", err)
+		}
+		if errors.Is(err, T.ErrTCPPathNotImplemented) {
+			t.Fatalf("closed open ip error must not include stale capability cause, got: %v", err)
+		}
+		if got := T.ClassifyError(err); got != T.ErrorClassLifecycle {
+			t.Fatalf("expected closed open ip error class lifecycle, got: %s", got)
+		}
+	}
+}
+
+func TestRuntimeClosedStartKeepsLifecycleClassAfterCapabilityFailure(t *testing.T) {
+	rt := NewRuntime(errSessionFactory{err: T.ErrTCPPathNotImplemented}, RuntimeOptions{})
+	startErr := rt.Start(context.Background())
+	if !errors.Is(startErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected tcp capability reject from start, got: %v", startErr)
+	}
+	if got := T.ClassifyError(startErr); got != T.ErrorClassCapability {
+		t.Fatalf("expected start error class capability, got: %s", got)
+	}
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close runtime: %v", err)
+	}
+	if rt.LifecycleState() != StateClosed {
+		t.Fatalf("expected closed state, got: %v", rt.LifecycleState())
+	}
+
+	restartErr := rt.Start(context.Background())
+	if restartErr == nil {
+		t.Fatal("expected start failure on closed runtime")
+	}
+	if !strings.Contains(restartErr.Error(), "runtime is closed") {
+		t.Fatalf("expected closed runtime start error, got: %v", restartErr)
+	}
+	if !errors.Is(restartErr, T.ErrLifecycleClosed) {
+		t.Fatalf("expected closed runtime start error to include lifecycle sentinel, got: %v", restartErr)
+	}
+	if errors.Is(restartErr, T.ErrTCPPathNotImplemented) {
+		t.Fatalf("closed start error must not include stale capability cause, got: %v", restartErr)
+	}
+	if got := T.ClassifyError(restartErr); got != T.ErrorClassLifecycle {
+		t.Fatalf("expected closed start error class lifecycle, got: %s", got)
 	}
 }
 

@@ -18,12 +18,14 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -125,9 +127,14 @@ type CapabilitySet struct {
 var (
 	ErrTCPPathNotImplemented  = errors.New("tcp path is not implemented for selected MASQUE transport")
 	ErrTCPOverConnectIP       = errors.New("tcp over connect-ip path is not implemented yet")
+	ErrUnsupportedNetwork     = errors.New("masque session unsupported network")
 	ErrPolicyFallbackDenied   = errors.New("masque tcp fallback policy denied")
 	ErrTCPConnectStreamFailed = errors.New("masque tcp connect-stream failed")
 )
+
+func unsupportedNetworkError(network string) error {
+	return errors.Join(ErrUnsupportedNetwork, E.New("unsupported network in masque session: ", network))
+}
 
 type connectIPObservabilityCounters struct {
 	ptbRxTotal                   atomic.Uint64
@@ -239,14 +246,17 @@ type IPPacketSession interface {
 type DirectClientFactory struct{}
 
 func (f DirectClientFactory) NewSession(ctx context.Context, options ClientOptions) (ClientSession, error) {
+	tcpTransport := normalizeTCPTransport(options.TCPTransport)
 	return &directSession{
 		dialer:       net.Dialer{},
-		capabilities: CapabilitySet{ConnectUDP: true, ConnectIP: false, ConnectTCP: true},
+		tcpTransport: tcpTransport,
+		capabilities: CapabilitySet{ConnectUDP: true, ConnectIP: false, ConnectTCP: tcpTransport == "connect_stream"},
 	}, nil
 }
 
 type directSession struct {
 	dialer       net.Dialer
+	tcpTransport string
 	capabilities CapabilitySet
 }
 
@@ -254,15 +264,20 @@ func (s *directSession) DialContext(ctx context.Context, network string, destina
 	switch strings.ToLower(network) {
 	case "tcp", "tcp4", "tcp6":
 	default:
-		return nil, E.New("unsupported network in masque session: ", network)
+		return nil, unsupportedNetworkError(network)
 	}
-	if destination.IsFqdn() {
-		return s.dialer.DialContext(ctx, network, net.JoinHostPort(destination.Fqdn, strconv.Itoa(int(destination.Port))))
+	switch s.tcpTransport {
+	case "connect_stream":
+	case "connect_ip":
+		return nil, errors.Join(ErrTCPOverConnectIP, errors.New("connect_ip is TUN packet-plane only"))
+	default:
+		return nil, ErrTCPPathNotImplemented
 	}
-	if destination.Addr.IsValid() {
-		return s.dialer.DialContext(ctx, network, net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port))))
+	host, err := resolveDestinationHost(destination)
+	if err != nil {
+		return nil, err
 	}
-	return nil, E.New("invalid destination")
+	return s.dialer.DialContext(ctx, network, net.JoinHostPort(host, strconv.Itoa(int(destination.Port))))
 }
 
 func (s *directSession) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -274,9 +289,9 @@ func (s *directSession) ListenPacket(ctx context.Context, destination M.Socksadd
 
 func (s *directSession) OpenIPSession(ctx context.Context) (IPPacketSession, error) {
 	if !s.capabilities.ConnectIP {
-		return nil, E.New("masque backend does not support CONNECT-IP")
+		return nil, errors.Join(ErrCapability, errors.New("masque backend does not support CONNECT-IP"))
 	}
-	return nil, E.New("CONNECT-IP is not available in direct backend")
+	return nil, errors.Join(ErrCapability, errors.New("CONNECT-IP is not available in direct backend"))
 }
 
 func (s *directSession) Capabilities() CapabilitySet {
@@ -338,6 +353,7 @@ type coreSession struct {
 	mu                       sync.Mutex
 	options                  ClientOptions
 	udpClient                *qmasque.Client
+	udpDial                  func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error)
 	ipConn                   *connectip.Conn
 	ipHTTPConn               *http3.ClientConn
 	ipHTTP                   *http3.Transport
@@ -424,11 +440,23 @@ func parseICMPPTBHopMTU(icmpFullPacket []byte) (ipMTU int, isIPv6 bool, ok bool)
 
 func (s *coreSession) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if !isTCPNetwork(network) {
-		return nil, E.New("unsupported network in masque session: ", network)
+		return nil, unsupportedNetworkError(network)
 	}
 	switch normalizeTCPTransport(s.options.TCPTransport) {
 	case "connect_stream":
-		return s.dialTCPStream(ctx, destination)
+		conn, err := s.dialTCPStream(ctx, destination)
+		if err == nil {
+			return conn, nil
+		}
+		if tcpMasqueDirectFallbackEnabled(s.options) && isTCPMasqueDirectFallbackEligible(err, ctx) {
+			if host, hostErr := resolveDestinationHost(destination); hostErr == nil {
+				tcpTracef("masque tcp masque_or_direct+fallback=direct_explicit: CONNECT-stream failed, trying direct tcp host=%s port=%d", host, destination.Port)
+			} else {
+				tcpTracef("masque tcp masque_or_direct+fallback=direct_explicit: CONNECT-stream failed, direct tcp host resolution failed err=%v", hostErr)
+			}
+			return s.dialDirectTCP(ctx, network, destination)
+		}
+		return nil, err
 	case "connect_ip":
 		return nil, errors.Join(ErrTCPOverConnectIP, errors.New("connect_ip is TUN packet-plane only"))
 	default:
@@ -437,46 +465,83 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 }
 
 func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	targetHost, err := resolveDestinationHost(destination)
+	if err != nil {
+		return nil, err
+	}
+	target := net.JoinHostPort(targetHost, strconv.Itoa(int(destination.Port)))
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if strings.EqualFold(strings.TrimSpace(s.options.TransportMode), "connect_ip") {
 		ipSession, err := s.openIPSessionLocked(ctx)
+		s.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
 		return newConnectIPUDPPacketConn(ctx, ipSession), nil
 	}
 	if !s.capabilities.ConnectUDP {
+		s.mu.Unlock()
 		return nil, E.New("masque backend does not support CONNECT-UDP")
 	}
 	if s.udpClient == nil {
 		s.udpClient = s.newUDPClient()
 	}
-	target := net.JoinHostPort(s.resolveDestinationHost(destination), strconv.Itoa(int(destination.Port)))
-	conn, _, err := s.udpClient.DialAddr(ctx, s.templateUDP, target)
+	udpClient := s.udpClient
+	templateUDP := s.templateUDP
+	s.mu.Unlock()
+
+	conn, err := s.dialUDPAddr(ctx, udpClient, templateUDP, target)
 	if err != nil {
 		// first retry: same hop, force client re-dial
-		_ = s.udpClient.Close()
-		s.udpClient = s.newUDPClient()
-		conn, _, err = s.udpClient.DialAddr(ctx, s.templateUDP, target)
+		s.mu.Lock()
+		if s.udpClient == udpClient && s.udpClient != nil {
+			_ = s.udpClient.Close()
+			s.udpClient = s.newUDPClient()
+		} else if s.udpClient == nil {
+			s.udpClient = s.newUDPClient()
+		}
+		udpClient = s.udpClient
+		templateUDP = s.templateUDP
+		s.mu.Unlock()
+
+		conn, err = s.dialUDPAddr(ctx, udpClient, templateUDP, target)
 		if err == nil {
 			return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
 		}
-		for s.advanceHop() {
+
+		s.mu.Lock()
+		for {
+			if !s.advanceHop() {
+				s.mu.Unlock()
+				return nil, err
+			}
 			if resetErr := s.resetHopTemplates(); resetErr != nil {
+				s.mu.Unlock()
 				return nil, resetErr
 			}
 			if s.udpClient == nil {
 				s.udpClient = s.newUDPClient()
 			}
-			conn, _, err = s.udpClient.DialAddr(ctx, s.templateUDP, target)
+			udpClient = s.udpClient
+			templateUDP = s.templateUDP
+			s.mu.Unlock()
+			conn, err = s.dialUDPAddr(ctx, udpClient, templateUDP, target)
 			if err == nil {
 				return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
 			}
+			s.mu.Lock()
 		}
-		return nil, err
 	}
 	return &masqueUDPDatagramSplitConn{PacketConn: conn, maxPayload: s.masqueUDPWriteMax}, nil
+}
+
+func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
+	if s.udpDial != nil {
+		return s.udpDial(ctx, client, template, target)
+	}
+	conn, _, err := client.DialAddr(ctx, template, target)
+	return conn, err
 }
 
 func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net.PacketConn {
@@ -942,14 +1007,14 @@ func (s *coreSession) Close() error {
 	return errors.Join(errs...)
 }
 
-func (s *coreSession) resolveDestinationHost(destination M.Socksaddr) string {
+func resolveDestinationHost(destination M.Socksaddr) (string, error) {
 	if destination.IsFqdn() {
-		return destination.Fqdn
+		return destination.Fqdn, nil
 	}
 	if destination.Addr.IsValid() {
-		return destination.Addr.String()
+		return destination.Addr.String(), nil
 	}
-	return "127.0.0.1"
+	return "", errors.Join(ErrCapability, E.New("invalid destination"))
 }
 
 func (s *coreSession) openHTTP3ClientConn(ctx context.Context) (*http3.ClientConn, error) {
@@ -988,8 +1053,10 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		if strings.TrimSpace(server) != "" && port != 0 {
+		if strings.TrimSpace(server) != "" {
 			options.Server = server
+		}
+		if port != 0 {
 			options.ServerPort = port
 		}
 	}
@@ -1163,6 +1230,10 @@ func (s *coreSession) resetHopTemplates() error {
 		s.ipHTTP = nil
 	}
 	s.ipHTTPConn = nil
+	if s.tcpHTTP != nil {
+		s.tcpHTTP.Close()
+		s.tcpHTTP = nil
+	}
 	return nil
 }
 
@@ -1182,6 +1253,40 @@ func normalizeTCPTransport(mode string) string {
 	default:
 		return "auto"
 	}
+}
+
+func tcpMasqueDirectFallbackEnabled(opt ClientOptions) bool {
+	return strings.EqualFold(strings.TrimSpace(opt.TCPMode), option.MasqueTCPModeMasqueOrDirect) &&
+		strings.EqualFold(strings.TrimSpace(opt.FallbackPolicy), option.MasqueFallbackPolicyDirectExplicit)
+}
+
+// isTCPMasqueDirectFallbackEligible limits direct TCP fallback to CONNECT-stream failures after an
+// explicit MasqueTCPModeMasqueOrDirect + MasqueFallbackPolicyDirectExplicit profile (validated in endpoint).
+func isTCPMasqueDirectFallbackEligible(err error, ctx context.Context) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, ErrAuthFailed) || errors.Is(err, ErrLifecycleClosed) || errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	return errors.Is(err, ErrTCPConnectStreamFailed)
+}
+
+func (s *coreSession) dialDirectTCP(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	d := net.Dialer{}
+	targetHost, err := resolveDestinationHost(destination)
+	if err != nil {
+		return nil, err
+	}
+	port := strconv.Itoa(int(destination.Port))
+	if strings.TrimSpace(targetHost) == "" {
+		return nil, E.New("invalid masque direct-tcp destination host")
+	}
+	addr := net.JoinHostPort(targetHost, port)
+	return d.DialContext(ctx, network, addr)
 }
 
 func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
@@ -1221,7 +1326,10 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 	tcpHTTP := s.tcpHTTP
 	s.mu.Unlock()
 
-	targetHost := s.resolveDestinationHost(destination)
+	targetHost, err := resolveDestinationHost(destination)
+	if err != nil {
+		return nil, err
+	}
 	targetPort := destination.Port
 	expanded, err := templateTCP.Expand(uritemplate.Values{
 		"target_host": uritemplate.String(targetHost),
@@ -1239,6 +1347,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		serverHost = net.JoinHostPort(options.Server, strconv.Itoa(int(options.ServerPort)))
 	}
 	const maxAttempts = 3
+	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			return nil, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
@@ -1262,8 +1371,13 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		roundTripper := s.getTCPRoundTripper(tcpHTTP)
 		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
+			lastRoundTripErr = roundTripErr
 			_ = pr.Close()
 			_ = pw.Close()
+			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
+				tcpTracef("masque tcp connect_stream cancelled host=%s port=%d attempt=%d error_class=%s err=%v", targetHost, targetPort, attempt+1, ClassifyError(ErrTCPConnectStreamFailed), roundTripErr)
+				return nil, errors.Join(ErrTCPConnectStreamFailed, roundTripErr)
+			}
 			if attempt+1 < maxAttempts && isRetryableTCPStreamError(roundTripErr) && ctx.Err() == nil {
 				tcpTracef("masque tcp connect_stream retry host=%s port=%d attempt=%d error_class=%s err=%v", targetHost, targetPort, attempt+1, ClassifyError(ErrTCPConnectStreamFailed), roundTripErr)
 				s.resetTCPHTTPTransport()
@@ -1276,7 +1390,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 				continue
 			}
 			tcpTracef("masque tcp connect_stream failed host=%s port=%d status=roundtrip_error error_class=%s err=%v", targetHost, targetPort, ClassifyError(ErrTCPConnectStreamFailed), roundTripErr)
-			return nil, fmt.Errorf("%w: %v", ErrTCPConnectStreamFailed, roundTripErr)
+			return nil, errors.Join(ErrTCPConnectStreamFailed, roundTripErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			_ = pr.Close()
@@ -1294,11 +1408,15 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		return &streamConn{
 			reader: resp.Body,
 			writer: pw,
+			ctx:    ctx,
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
 		}, nil
 	}
-	return nil, fmt.Errorf("%w: exhausted retries", ErrTCPConnectStreamFailed)
+	if lastRoundTripErr != nil {
+		return nil, errors.Join(ErrTCPConnectStreamFailed, lastRoundTripErr)
+	}
+	return nil, ErrTCPConnectStreamFailed
 }
 
 func (s *coreSession) getTCPRoundTripper(defaultTransport *http3.Transport) http.RoundTripper {
@@ -1345,11 +1463,27 @@ func isRetryableTCPStreamError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "timeout") ||
-		strings.Contains(s, "no recent network activity") ||
-		strings.Contains(s, "idle timeout") ||
-		strings.Contains(s, "application error")
+	// TCP CONNECT-STREAM retry budget is only for transient round-trip / QUIC / H3 failures.
+	// Use typed contracts instead of string matching to keep behavior stable across platforms.
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Treat handshake timeout as transient (covers some paths that don't surface a net.Error).
+	var hsTimeout *quic.HandshakeTimeoutError
+	if errors.As(err, &hsTimeout) {
+		return true
+	}
+	// Closed connections are not retryable for CONNECT-STREAM dial; they typically indicate
+	// a deterministic lifecycle outcome on this hop (or explicit shutdown).
+	if errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	return false
 }
 
 // Kept for test-level compatibility while CONNECT-IP TCP dial path is disabled in runtime.
@@ -1357,12 +1491,17 @@ func isRetryableConnectIPError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "timeout") ||
-		strings.Contains(s, "no recent network activity") ||
-		strings.Contains(s, "idle timeout") ||
-		strings.Contains(s, "use of closed network connection") ||
-		strings.Contains(s, "connection reset by peer")
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return false
 }
 
 func waitContextBackoff(ctx context.Context, d time.Duration) error {
@@ -1413,6 +1552,7 @@ type streamConn struct {
 	mu     sync.Mutex
 	reader io.ReadCloser
 	writer io.WriteCloser
+	ctx    context.Context
 	local  net.Addr
 	remote net.Addr
 }
@@ -1434,6 +1574,11 @@ func (c *streamConn) Read(p []byte) (int, error) {
 	if err == nil {
 		return n, nil
 	}
+	if c.ctx != nil {
+		if ctxErr := context.Cause(c.ctx); ctxErr != nil {
+			return n, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
+		}
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return n, errors.Join(ErrTCPConnectStreamFailed, err)
 	}
@@ -1443,6 +1588,11 @@ func (c *streamConn) Write(p []byte) (int, error) {
 	n, err := c.writer.Write(p)
 	if err == nil {
 		return n, nil
+	}
+	if c.ctx != nil {
+		if ctxErr := context.Cause(c.ctx); ctxErr != nil {
+			return n, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
+		}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return n, errors.Join(ErrTCPConnectStreamFailed, err)
@@ -1566,19 +1716,24 @@ func classifyConnectIPErrorReason(err error) string {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	text := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(text, "timeout"), strings.Contains(text, "deadline"):
-		return "timeout"
-	case strings.Contains(text, "temporar"):
-		return "temporary"
-	case strings.Contains(text, "too large"), strings.Contains(text, "mtu"):
-		return "mtu"
-	case strings.Contains(text, "closed"):
-		return "closed"
-	default:
-		return "other"
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return "timeout"
+		}
+		if netErr.Temporary() {
+			return "temporary"
+		}
 	}
+	// MTU / payload size constraints should be observable without relying on error strings.
+	var tooLarge *quic.DatagramTooLargeError
+	if errors.As(err, &tooLarge) {
+		return "mtu"
+	}
+	if errors.Is(err, syscall.EMSGSIZE) {
+		return "mtu"
+	}
+	return "other"
 }
 
 func incConnectIPWriteFailReason(reason string) {
@@ -1722,6 +1877,10 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_policy_drop_icmp_total":           connectip.PolicyDropICMPTotal(),
 		"connect_ip_policy_drop_icmp_attempt_total":   connectip.PolicyDropICMPAttemptTotal(),
 		"connect_ip_policy_drop_icmp_reason_total":    policyDropICMPReasonSnapshot(),
+		// Process-wide HTTP/3 per-stream DATAGRAM queue drops (patched quic-go http3); correlates with bulk/burst loss.
+		"http3_stream_datagram_queue_drop_total": http3.StreamDatagramQueueDropTotal(),
+		// QUIC conn-level DATAGRAM receive-queue overflow (patched quic-go datagram_queue.go).
+		"quic_datagram_rcv_queue_drop_total": quic.DatagramReceiveQueueDropTotal(),
 	}
 }
 

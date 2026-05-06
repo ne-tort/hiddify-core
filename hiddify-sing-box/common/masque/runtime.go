@@ -102,7 +102,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if State(r.state.Load()) == StateClosed {
-		return E.New("runtime is closed")
+		return runtimeClosedErr()
 	}
 	r.clearLastErrLocked()
 	r.state.Store(uint32(StateConnecting))
@@ -241,6 +241,10 @@ func (r *runtimeImpl) notReadyDialErr() error {
 	return base
 }
 
+func runtimeClosedErr() error {
+	return errors.Join(T.ErrLifecycleClosed, E.New("runtime is closed"))
+}
+
 // DialContext, ListenPacket and OpenIPSession forward to the active coreSession built in Start;
 // they do not reinterpret FallbackPolicy/tcp_mode or change the UDP vs CONNECT-IP plane.
 func (r *runtimeImpl) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -249,7 +253,7 @@ func (r *runtimeImpl) DialContext(ctx context.Context, network string, destinati
 	state := State(r.state.Load())
 	r.mu.RUnlock()
 	if state == StateClosed {
-		return nil, E.New("runtime is closed")
+		return nil, runtimeClosedErr()
 	}
 	if state != StateReady || session == nil {
 		return nil, r.notReadyDialErr()
@@ -263,7 +267,7 @@ func (r *runtimeImpl) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	state := State(r.state.Load())
 	r.mu.RUnlock()
 	if state == StateClosed {
-		return nil, E.New("runtime is closed")
+		return nil, runtimeClosedErr()
 	}
 	if state != StateReady || session == nil {
 		return nil, r.notReadyDialErr()
@@ -278,7 +282,7 @@ func (r *runtimeImpl) OpenIPSession(ctx context.Context) (T.IPPacketSession, err
 	state := State(r.state.Load())
 	r.mu.RUnlock()
 	if state == StateClosed {
-		return nil, E.New("runtime is closed")
+		return nil, runtimeClosedErr()
 	}
 	if state != StateReady || session == nil {
 		return nil, r.notReadyDialErr()

@@ -5,11 +5,22 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 )
 
-const streamDatagramQueueLen = 32
+// streamDatagramQueueDropTotal counts DATAGRAM frames dropped because the per-stream
+// backlog reached streamDatagramQueueLen (enqueueDatagram silent drop).
+var streamDatagramQueueDropTotal atomic.Uint64
+
+// StreamDatagramQueueDropTotal returns enqueueDatagram drops due to a full per-stream queue (process-wide).
+func StreamDatagramQueueDropTotal() uint64 {
+	return streamDatagramQueueDropTotal.Load()
+}
+
+// Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
+const streamDatagramQueueLen = 128
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -139,6 +150,7 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 		return
 	}
 	if len(s.queue) >= streamDatagramQueueLen {
+		streamDatagramQueueDropTotal.Add(1)
 		return
 	}
 	s.queue = append(s.queue, data)

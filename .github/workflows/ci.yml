@@ -52,6 +52,10 @@ jobs:
           go test -C third_party/connect-ip-go -run 'TestPacketTupleRejectsAmbiguousIPv6ExtensionChain' .
           MASQUE_EXPERIMENTAL_QUIC=1 go test ./protocol/masque ./transport/masque -tags with_masque -run 'TestEndpointRejectsQUICExperimentalWithoutEnv|TestApplyQUICExperimentalOptions'
           go test ./transport/masque -tags with_masque -run 'TestCoreClientFactoryConnectTCPCapabilityByTransport|TestConnectIPPacketSessionDatagramCeiling|TestBuildTemplatesApplyConnectIPFlowScope|TestBuildTemplatesRejectScopeWithoutTemplateVars|TestConnectIPObservabilitySnapshotPolicyReasonContract'
+      - name: MASQUE CONNECT-STREAM non-auth matrix gate (pre-docker typed helper)
+        run: |
+          cd hiddify-sing-box
+          python ../../experiments/router/stand/l3router/masque_runtime_ci_gate_asserts.py --assert-connect-stream-non-auth-status-matrix --workdir .
       - name: MASQUE lifecycle parity harness gate (pre-docker)
         run: |
           cd hiddify-sing-box
@@ -68,6 +72,7 @@ jobs:
           cd experiments/router/stand/l3router
           test -f masque_stand_runner.py
           test -f docker-compose.masque-e2e.yml
+          test -f artifacts/sing-box-linux-amd64
           test -f configs/masque-client.json
           test -f configs/masque-client-connect-ip.json
       - name: Run MASQUE smoke gate via stand runner
@@ -142,6 +147,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ^1.25.6
+      - name: MASQUE CONNECT-STREAM non-auth matrix gate (nightly pre-docker typed helper)
+        run: |
+          cd hiddify-sing-box
+          python ../../experiments/router/stand/l3router/masque_runtime_ci_gate_asserts.py --assert-connect-stream-non-auth-status-matrix --workdir .
       - name: Build Linux sing-box for MASQUE stand
         run: |
           cd hiddify-sing-box

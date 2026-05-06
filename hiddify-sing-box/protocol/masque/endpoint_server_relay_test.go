@@ -168,6 +168,53 @@ func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
 	}
 }
 
+func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t *testing.T) {
+	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	ep := &ServerEndpoint{
+		options: option.MasqueEndpointOptions{
+			AllowPrivateTargets: false,
+			AllowedTargetPorts:  []uint16{443},
+			BlockedTargetPorts:  []uint16{443},
+		},
+	}
+	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	rec := httptest.NewRecorder()
+
+	ep.handleTCPConnectRequest(rec, req, template)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+	if got := TM.ClassifyError(TM.ErrPolicyFallbackDenied); got != TM.ErrorClassPolicy {
+		t.Fatalf("expected policy class for blocked port path, got: %s", got)
+	}
+}
+
+func TestServerHandleTCPConnectRequestTemplateHostMismatchRejected(t *testing.T) {
+	template, err := uritemplate.New("https://masque.expected/masque/tcp/{target_host}/{target_port}")
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	ep := &ServerEndpoint{
+		options: option.MasqueEndpointOptions{
+			AllowPrivateTargets: true,
+		},
+	}
+	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	// Boundary contract: CONNECT authority must match template host.
+	req.Host = "masque.local"
+	rec := httptest.NewRecorder()
+
+	ep.handleTCPConnectRequest(rec, req, template)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
 func newConnectRequest(t *testing.T, path string, body io.ReadCloser) *http.Request {
 	t.Helper()
 	rawURL := "https://masque.local" + path

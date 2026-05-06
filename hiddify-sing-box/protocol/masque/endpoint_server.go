@@ -327,7 +327,7 @@ func (e *ServerEndpoint) DialContext(ctx context.Context, network string, destin
 	if destination.Addr.IsValid() {
 		return e.dialer.DialContext(ctx, network, net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port))))
 	}
-	return nil, E.New("invalid destination")
+	return nil, errors.Join(TM.ErrCapability, E.New("invalid destination"))
 }
 
 func (e *ServerEndpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -777,17 +777,25 @@ func parseIPDestinationAndPayload(packet []byte) (M.Socksaddr, int, int, error) 
 			return M.Socksaddr{}, 0, 0, E.New("invalid ipv6 packet")
 		}
 		destination := M.Socksaddr{Addr: netip.AddrFrom16([16]byte(packet[24:40]))}
-		nextHeader := packet[6]
-		if (nextHeader == 6 || nextHeader == 17) && len(packet) >= 44 {
-			destination.Port = uint16(packet[42])<<8 | uint16(packet[43])
+		nextHeader, transportOffset, err := ipv6TransportHeaderOffset(packet)
+		if err != nil {
+			return M.Socksaddr{}, 0, 0, err
+		}
+		if (nextHeader == 6 || nextHeader == 17) && len(packet) >= transportOffset+4 {
+			destination.Port = uint16(packet[transportOffset+2])<<8 | uint16(packet[transportOffset+3])
 		}
 		payloadStart, payloadEnd := 0, len(packet)
-		if nextHeader == 17 && len(packet) >= 48 {
-			payloadStart = 48
-			payloadEnd = len(packet)
-			udpLen := int(uint16(packet[44])<<8 | uint16(packet[45]))
+		if nextHeader == 17 && len(packet) >= transportOffset+8 {
+			payloadStart = transportOffset + 8
+			totalLen := len(packet)
+			ipPayloadLen := int(uint16(packet[4])<<8 | uint16(packet[5]))
+			if ipPayloadLen > 0 {
+				totalLen = intMin(totalLen, 40+ipPayloadLen)
+			}
+			payloadEnd = totalLen
+			udpLen := int(uint16(packet[transportOffset+4])<<8 | uint16(packet[transportOffset+5]))
 			if udpLen >= 8 {
-				payloadEnd = intMin(payloadEnd, 40+udpLen)
+				payloadEnd = intMin(payloadEnd, transportOffset+udpLen)
 			}
 			if payloadStart > payloadEnd || payloadEnd > len(packet) {
 				return M.Socksaddr{}, 0, 0, E.New("invalid ipv6 udp payload")
@@ -796,6 +804,34 @@ func parseIPDestinationAndPayload(packet []byte) (M.Socksaddr, int, int, error) 
 		return destination, payloadStart, payloadEnd, nil
 	default:
 		return M.Socksaddr{}, 0, 0, E.New("unsupported ip packet version")
+	}
+}
+
+func ipv6TransportHeaderOffset(packet []byte) (uint8, int, error) {
+	nextHeader := packet[6]
+	offset := 40
+	for {
+		switch nextHeader {
+		// RFC 8200 extension headers encoded in 8-byte units.
+		case 0, 43, 60, 135, 139, 140, 253, 254:
+			if len(packet) < offset+2 {
+				return 0, 0, E.New("invalid ipv6 extension header")
+			}
+			headerLen := int(packet[offset+1]+1) * 8
+			if headerLen <= 0 || len(packet) < offset+headerLen {
+				return 0, 0, E.New("invalid ipv6 extension header length")
+			}
+			nextHeader = packet[offset]
+			offset += headerLen
+		case 44:
+			if len(packet) < offset+8 {
+				return 0, 0, E.New("invalid ipv6 fragment header")
+			}
+			nextHeader = packet[offset]
+			offset += 8
+		default:
+			return nextHeader, offset, nil
+		}
 	}
 }
 

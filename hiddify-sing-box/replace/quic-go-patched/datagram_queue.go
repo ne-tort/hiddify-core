@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/utils/ringbuffer"
@@ -15,6 +16,15 @@ const (
 	maxDatagramSendQueueLen = 65536
 	maxDatagramRcvQueueLen  = 262144
 )
+
+// datagramRcvQueueDropTotal counts inbound DATAGRAM frames dropped because rcvQueue
+// reached maxDatagramRcvQueueLen (silent drop besides optional Debug log).
+var datagramRcvQueueDropTotal atomic.Uint64
+
+// DatagramReceiveQueueDropTotal returns receive-queue overflow drops (process-wide).
+func DatagramReceiveQueueDropTotal() uint64 {
+	return datagramRcvQueueDropTotal.Load()
+}
 
 type datagramQueue struct {
 	sendMx    sync.Mutex
@@ -44,8 +54,7 @@ func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
 }
 
 // Add queues a new DATAGRAM frame for sending.
-// Up to 32 DATAGRAM frames will be queued.
-// Once that limit is reached, Add blocks until the queue size has reduced.
+// sendQueue grows up to maxDatagramSendQueueLen; beyond that Add blocks until a send drains the queue.
 func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 	h.sendMx.Lock()
 
@@ -104,6 +113,8 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 		case h.rcvd <- struct{}{}:
 		default:
 		}
+	} else {
+		datagramRcvQueueDropTotal.Add(1)
 	}
 	h.rcvMx.Unlock()
 	if !queued && h.logger.Debug() {

@@ -37,11 +37,12 @@ func ClassifyError(err error) ErrorClass {
 		return ErrorClassUnknown
 	case errors.Is(err, ErrMisconfig):
 		return ErrorClassMisconfig
-	case errors.Is(err, ErrCapability), errors.Is(err, ErrTCPPathNotImplemented), errors.Is(err, ErrTCPOverConnectIP):
+	case errors.Is(err, ErrCapability), errors.Is(err, ErrTCPPathNotImplemented), errors.Is(err, ErrTCPOverConnectIP), errors.Is(err, ErrUnsupportedNetwork):
 		return ErrorClassCapability
 	case errors.Is(err, ErrAuthFailed):
 		return ErrorClassAuth
-	case errors.Is(err, ErrLifecycleClosed), errors.Is(err, net.ErrClosed):
+	// Keep lifecycle classification deterministic when the caller explicitly closes the runtime.
+	case errors.Is(err, ErrLifecycleClosed):
 		return ErrorClassLifecycle
 	case errors.Is(err, ErrTransportInit):
 		return ErrorClassTransport
@@ -49,6 +50,10 @@ func ClassifyError(err error) ErrorClass {
 		return ErrorClassTCPStackInit
 	case errors.Is(err, ErrTCPDial), errors.Is(err, ErrTCPConnectStreamFailed):
 		return ErrorClassDial
+	// net.ErrClosed is a broad sentinel that frequently appears as an unwrap cause for QUIC / H3 errors.
+	// Prefer explicit masque sentinels (dial/transport/etc.) over a generic lifecycle classification.
+	case errors.Is(err, net.ErrClosed):
+		return ErrorClassLifecycle
 	case errors.Is(err, ErrPolicyFallbackDenied):
 		return ErrorClassPolicy
 	default:
