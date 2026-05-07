@@ -1887,6 +1887,55 @@ func maybeEmitConnectIPActiveSnapshot() {
 	emitConnectIPObservabilityEvent("periodic_active")
 }
 
+// ObserveConnectIPServerReadError mirrors connectIPPacketSession.ReadPacket accounting when
+// connectip.Conn.ReadPacket fails on the server packet plane (protocol/masque connectIPNetPacketConn).
+func ObserveConnectIPServerReadError(err error) {
+	if err == nil {
+		return
+	}
+	connectIPCounters.packetReadExitTotal.Add(1)
+	incConnectIPReadDropReason(classifyConnectIPErrorReason(err))
+	emitConnectIPObservabilityEvent("packet_read_exit")
+}
+
+// ObserveConnectIPServerReadSuccess records one accepted inbound IP datagram (raw ReadPacket length)
+// after parse succeeds on the server CONNECT-IP path.
+func ObserveConnectIPServerReadSuccess(rawLen int) {
+	if rawLen <= 0 {
+		return
+	}
+	connectIPCounters.packetRxTotal.Add(1)
+	connectIPCounters.bytesRxTotal.Add(uint64(rawLen))
+	if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
+		emitConnectIPObservabilityEvent("first_packet_rx")
+	}
+	maybeEmitConnectIPActiveSnapshot()
+}
+
+// ObserveConnectIPServerWriteIteration mirrors one connectip.Conn.WritePacket hop from the server
+// ICMP-relay loop (including PTB follow-up writes).
+func ObserveConnectIPServerWriteIteration(payloadLen int, icmpLen int, err error) {
+	if err != nil {
+		connectIPCounters.packetWriteFailTotal.Add(1)
+		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
+		emitConnectIPObservabilityEvent("packet_write_fail")
+		return
+	}
+	if payloadLen <= 0 {
+		return
+	}
+	connectIPCounters.packetTxTotal.Add(1)
+	connectIPCounters.bytesTxTotal.Add(uint64(payloadLen))
+	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
+		emitConnectIPObservabilityEvent("first_packet_tx")
+	}
+	maybeEmitConnectIPActiveSnapshot()
+	if icmpLen > 0 {
+		connectIPCounters.ptbRxTotal.Add(1)
+		maybeEmitConnectIPPTBObs("packet_ptb_rx")
+	}
+}
+
 // connectIPServerParseDropSupplier is set from protocol/masque init (server CONNECT-IP parse drops).
 var connectIPServerParseDropSupplier func() uint64
 

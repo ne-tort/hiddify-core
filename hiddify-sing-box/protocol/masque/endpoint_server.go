@@ -554,6 +554,7 @@ func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 	for {
 		n, err := c.conn.ReadPacket(buffer.FreeBytes())
 		if err != nil {
+			TM.ObserveConnectIPServerReadError(err)
 			return M.Socksaddr{}, err
 		}
 		buffer.Truncate(n)
@@ -570,6 +571,7 @@ func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 			buffer.Advance(payloadStart)
 			buffer.Truncate(payloadEnd - payloadStart)
 		}
+		TM.ObserveConnectIPServerReadSuccess(n)
 		return destination, nil
 	}
 }
@@ -585,6 +587,7 @@ func (c *connectIPNetPacketConn) writeOutgoingWithICMPRelay(packet []byte) error
 	payload := packet
 	for i := 0; i < connectIPMaxICMPRelay; i++ {
 		icmp, err := c.conn.WritePacket(payload)
+		TM.ObserveConnectIPServerWriteIteration(len(payload), len(icmp), err)
 		if err != nil {
 			return err
 		}
@@ -603,8 +606,10 @@ func (c *connectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	for {
 		n, err = c.conn.ReadPacket(p)
 		if err != nil {
+			TM.ObserveConnectIPServerReadError(err)
 			return 0, nil, err
 		}
+		rawN := n
 		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(p[:n])
 		if parseErr != nil {
 			connectIPServerParseDropTotal.Add(1)
@@ -615,6 +620,7 @@ func (c *connectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 			copy(p[:payloadLen], p[payloadStart:payloadEnd])
 			n = payloadLen
 		}
+		TM.ObserveConnectIPServerReadSuccess(rawN)
 		return n, &net.IPAddr{IP: net.IP(destination.Addr.AsSlice())}, nil
 	}
 }
