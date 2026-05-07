@@ -20,7 +20,9 @@ func StreamDatagramQueueDropTotal() uint64 {
 }
 
 // Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
-const streamDatagramQueueLen = 128
+// CONNECT-IP / MASQUE bulk can exceed transient drain headroom when this is tiny (e.g. 128
+// fills in sub-millisecond bursts at high MB/s with ~1.2KiB QUIC payloads).
+const streamDatagramQueueLen = 1024
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
