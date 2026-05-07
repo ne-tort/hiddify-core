@@ -381,6 +381,7 @@ type coreSession struct {
 type connectIPUDPPacketConn struct {
 	session         IPPacketSession
 	localV4         netip.Addr
+	localBind       *net.UDPAddr
 	pmtuState       *connectIPPMTUState
 	deadlines       connDeadlines
 	readMu          sync.Mutex
@@ -600,9 +601,12 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 	currentPayload := pmtuState.currentPayload
 	pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(currentPayload, "session_init")
+	l4 := localV4.As4()
+	localIP := net.IPv4(l4[0], l4[1], l4[2], l4[3])
 	return &connectIPUDPPacketConn{
 		session:         session,
 		localV4:         localV4,
+		localBind:       &net.UDPAddr{IP: localIP, Port: 53000},
 		pmtuState:       pmtuState,
 		readBuffer:      make([]byte, 64*1024),
 		writeBuffer:     make([]byte, 0, 2048),
@@ -718,8 +722,7 @@ func (c *connectIPUDPPacketConn) Close() error {
 }
 
 func (c *connectIPUDPPacketConn) LocalAddr() net.Addr {
-	a := c.localV4.As4()
-	return &net.UDPAddr{IP: net.IPv4(a[0], a[1], a[2], a[3]), Port: 53000}
+	return c.localBind
 }
 
 func (c *connectIPUDPPacketConn) SetDeadline(t time.Time) error {

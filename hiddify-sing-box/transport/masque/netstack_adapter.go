@@ -177,13 +177,18 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 }
 
 func addStackAddress(gStack *stack.Stack, nic int, addr netip.Addr) error {
-	proto := ipv6.ProtocolNumber
+	var tAddr tcpip.Address
+	var proto tcpip.NetworkProtocolNumber
 	if addr.Is4() {
 		proto = ipv4.ProtocolNumber
+		tAddr = tcpip.AddrFrom4(addr.As4())
+	} else {
+		proto = ipv6.ProtocolNumber
+		tAddr = tcpip.AddrFrom16(addr.As16())
 	}
 	err := gStack.AddProtocolAddress(tcpip.NICID(nic), tcpip.ProtocolAddress{
 		Protocol:          proto,
-		AddressWithPrefix: tcpip.AddrFromSlice(addr.AsSlice()).WithPrefix(),
+		AddressWithPrefix: tAddr.WithPrefix(),
 	}, stack.AddressProperties{})
 	if err != nil {
 		return gonet.TranslateNetstackError(err)
@@ -228,15 +233,19 @@ func (s *connectIPTCPNetstack) DialContext(ctx context.Context, destination M.So
 }
 
 func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {
-	proto := ipv6.ProtocolNumber
-	if endpoint.Addr().Is4() {
-		proto = ipv4.ProtocolNumber
+	a := endpoint.Addr()
+	if a.Is4() {
+		return tcpip.FullAddress{
+			NIC:  1,
+			Addr: tcpip.AddrFrom4(a.As4()),
+			Port: endpoint.Port(),
+		}, ipv4.ProtocolNumber
 	}
 	return tcpip.FullAddress{
 		NIC:  1,
-		Addr: tcpip.AddrFromSlice(endpoint.Addr().AsSlice()),
+		Addr: tcpip.AddrFrom16(a.As16()),
 		Port: endpoint.Port(),
-	}, proto
+	}, ipv6.ProtocolNumber
 }
 
 func (s *connectIPTCPNetstack) readLoop() {
