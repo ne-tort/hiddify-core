@@ -17,6 +17,11 @@ var MaxDatagramSize protocol.ByteCount = 16383
 type DatagramFrame struct {
 	DataLenPresent bool
 	Data           []byte
+	// OutgoingPayloadRelease, when set on outbound frames queued by QUIC, is invoked
+	// exactly once after Data is copied into the wire payload (encrypt buffer) or when
+	// the frame is dropped before serialization. Leave nil for frames created by the
+	// parser/receive path or by tests/handlers allocating Data directly.
+	OutgoingPayloadRelease func()
 }
 
 func parseDatagramFrame(b []byte, typ FrameType, _ protocol.Version) (*DatagramFrame, int, error) {

@@ -250,21 +250,25 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 }
 
 func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
-	// TODO: this creates a lot of garbage and an additional copy
-	data := make([]byte, 0, len(b)+8)
 	quarterStreamID := uint64(streamID / 4)
-	data = quicvarint.Append(data, uint64(streamID/4))
-	data = append(data, b...)
+	bufPtr := quic.AcquireHTTP3DatagramBuffer()
+	*bufPtr = (*bufPtr)[:0]
+	*bufPtr = quicvarint.Append(*bufPtr, quarterStreamID)
+	*bufPtr = append(*bufPtr, b...)
 	if c.qlogger != nil {
 		c.qlogger.RecordEvent(qlog.DatagramCreated{
 			QuaterStreamID: quarterStreamID,
 			Raw: qlog.RawInfo{
-				Length:        len(data),
+				Length:        len(*bufPtr),
 				PayloadLength: len(b),
 			},
 		})
 	}
-	return c.conn.SendDatagram(data)
+	if err := c.conn.EnqueuePooledHTTPDatagram(bufPtr); err != nil {
+		quic.ReleaseHTTP3DatagramBuffer(bufPtr)
+		return err
+	}
+	return nil
 }
 
 func (c *rawConn) receiveDatagrams() error {

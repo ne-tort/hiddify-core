@@ -661,6 +661,7 @@ func (p *packetPacker) composeNextPacket(
 				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
 				// Discard this frame. There's no point in retrying this in the next packet,
 				// as it's unlikely that the available packet size will increase.
+				releaseOutgoingDatagramPayload(f)
 				p.datagramQueue.Pop()
 			}
 			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
@@ -967,11 +968,14 @@ func (p *packetPacker) appendPacketPayload(raw []byte, pl payload, paddingLen pr
 	if len(pl.frames) > 1 {
 		p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
 	}
-	for _, f := range pl.frames {
+	for _, fr := range pl.frames {
 		var err error
-		raw, err = f.Frame.Append(raw, v)
+		raw, err = fr.Frame.Append(raw, v)
 		if err != nil {
 			return nil, err
+		}
+		if df, ok := fr.Frame.(*wire.DatagramFrame); ok {
+			releaseOutgoingDatagramPayload(df)
 		}
 	}
 	for _, f := range pl.streamFrames {

@@ -59,6 +59,15 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 	h.sendMx.Lock()
 
 	for {
+		// Closed must win over a spurious sentinel on h.sent once the send queue has
+		// been drained synchronously inside CloseWithError (no Pop notification fired).
+		select {
+		case <-h.closed:
+			err := h.closeErr
+			h.sendMx.Unlock()
+			return err
+		default:
+		}
 		if h.sendQueue.Len() < maxDatagramSendQueueLen {
 			h.sendQueue.PushBack(f)
 			h.sendMx.Unlock()
@@ -147,4 +156,10 @@ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 func (h *datagramQueue) CloseWithError(e error) {
 	h.closeErr = e
 	close(h.closed)
+	h.sendMx.Lock()
+	for !h.sendQueue.Empty() {
+		f := h.sendQueue.PopFront()
+		releaseOutgoingDatagramPayload(f)
+	}
+	h.sendMx.Unlock()
 }

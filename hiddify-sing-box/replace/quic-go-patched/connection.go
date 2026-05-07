@@ -3026,19 +3026,49 @@ func (c *Conn) SendDatagram(p []byte) error {
 		return errors.New("datagram support disabled")
 	}
 
+	bufPtr := AcquireHTTP3DatagramBuffer()
+	*bufPtr = (*bufPtr)[:0]
+	*bufPtr = append(*bufPtr, p...)
+	return c.enqueuePooledOutgoingDatagramFrame(bufPtr)
+}
+
+// EnqueuePooledHTTPDatagram queues a QUIC DATAGRAM whose payload already contains the
+// HTTP/3 capsule prefix (quarter-stream-ID varint + datagram bytes, RFC 9297). The *[]byte is
+// typically from AcquireHTTP3DatagramBuffer; ownership transfers on success until the QUIC
+// stack copies payload into outgoing crypto frames.
+func (c *Conn) EnqueuePooledHTTPDatagram(bufPtr *[]byte) error {
+	return c.enqueuePooledOutgoingDatagramFrame(bufPtr)
+}
+
+func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte) error {
+	if bufPtr == nil {
+		return errors.New("datagram enqueue: nil buffer pointer")
+	}
+	p := *bufPtr
 	f := &wire.DatagramFrame{DataLenPresent: true}
-	// The payload size estimate is conservative.
-	// Under many circumstances we could send a few more bytes.
 	maxDataLen := min(
 		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
 		protocol.ByteCount(c.currentMTUEstimate.Load()),
 	)
 	if protocol.ByteCount(len(p)) > maxDataLen {
+		ReleaseHTTP3DatagramBuffer(bufPtr)
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
 	}
-	f.Data = make([]byte, len(p))
-	copy(f.Data, p)
-	return c.datagramQueue.Add(f)
+	f.Data = p
+	if cap(p) <= 16*1024 {
+		attachPooledOutgoingPayload(f, bufPtr)
+	}
+
+	err := c.datagramQueue.Add(f)
+	if err != nil {
+		if f.OutgoingPayloadRelease != nil {
+			releaseOutgoingDatagramPayload(f)
+		} else {
+			ReleaseHTTP3DatagramBuffer(bufPtr)
+		}
+		return err
+	}
+	return nil
 }
 
 // ReceiveDatagram gets a message received in a QUIC datagram, as specified in RFC 9221.
