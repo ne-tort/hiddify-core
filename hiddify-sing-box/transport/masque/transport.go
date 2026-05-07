@@ -695,9 +695,8 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 		}
 		connectIPCounters.bridgeWriteOkTotal.Add(1)
 		connectIPCounters.engineClassifiedTotal.Add(1)
-		// Bridge egress can run as short unidirectional bursts; emit periodic active
-		// snapshots from this hot path so runner deltas observe write progress.
-		maybeEmitConnectIPActiveSnapshot()
+		// Active snapshot cadence runs in connectIPPacketSession.WritePacket (below);
+		// avoid duplicate maybeEmit per datagram (syscalls + atomic contention).
 		if len(icmp) > 0 {
 			connectIPCounters.engineICMPFeedbackTotal.Add(1)
 			if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {

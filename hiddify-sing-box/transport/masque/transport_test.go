@@ -880,20 +880,6 @@ func TestConnectIPUDPPacketConnWriteToSplitsLargePayload(t *testing.T) {
 	}
 }
 
-func TestConnectIPUDPPacketConnWriteToEmitsActiveSnapshotCadence(t *testing.T) {
-	previous := connectIPCounters.lastActiveEmitUnixMilli.Swap(0)
-	defer connectIPCounters.lastActiveEmitUnixMilli.Store(previous)
-	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec)
-	_, err := conn.WriteTo([]byte("cadence"), &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
-	if err != nil {
-		t.Fatalf("write to: %v", err)
-	}
-	if got := connectIPCounters.lastActiveEmitUnixMilli.Load(); got == 0 {
-		t.Fatal("expected active snapshot cadence tick from udp bridge write path")
-	}
-}
-
 func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
 	packet, err := buildIPv4UDPPacket(
 		netip.MustParseAddr("10.200.0.2"),
