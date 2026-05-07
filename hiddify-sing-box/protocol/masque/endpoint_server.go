@@ -564,9 +564,11 @@ func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 			continue
 		}
 		if payloadStart > 0 || payloadEnd < n {
-			payloadLen := payloadEnd - payloadStart
-			copy(buffer.Bytes()[:payloadLen], buffer.Bytes()[payloadStart:payloadEnd])
-			buffer.Truncate(payloadLen)
+			// Avoid the per-packet memmove of the IPv4/IPv6+UDP payload by
+			// shifting the buffer window in place; the caller observes only
+			// buffer.Bytes() after Advance/Truncate.
+			buffer.Advance(payloadStart)
+			buffer.Truncate(payloadEnd - payloadStart)
 		}
 		return destination, nil
 	}

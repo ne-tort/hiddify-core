@@ -157,6 +157,12 @@ type connectIPObservabilityCounters struct {
 	engineICMPFeedbackTotal      atomic.Uint64
 	enginePMTUUpdateTotal        atomic.Uint64
 	engineEffectiveUDPPayload    atomic.Uint64
+	bridgeUDPTXAttemptTotal      atomic.Uint64
+	bridgeBuildTotal             atomic.Uint64
+	bridgeWriteEnterTotal        atomic.Uint64
+	bridgeWriteChunkTotal        atomic.Uint64
+	bridgeWriteOkTotal           atomic.Uint64
+	bridgeWriteErrTotal          atomic.Uint64
 	firstTxMarkerEmitted         atomic.Uint32
 	firstRxMarkerEmitted         atomic.Uint32
 	emitSeq                      atomic.Uint64
@@ -168,6 +174,7 @@ type connectIPObservabilityCounters struct {
 	packetReadDropByReason       map[string]uint64
 	engineDropByReason           map[string]uint64
 	enginePMTUUpdateByReason     map[string]uint64
+	bridgeWriteErrByReason       map[string]uint64
 	currentSessionID             string
 	currentScopeTarget           string
 	currentScopeIPProto          uint8
@@ -180,6 +187,7 @@ var connectIPCounters = connectIPObservabilityCounters{
 	packetReadDropByReason:   make(map[string]uint64),
 	engineDropByReason:       make(map[string]uint64),
 	enginePMTUUpdateByReason: make(map[string]uint64),
+	bridgeWriteErrByReason:   make(map[string]uint64),
 }
 
 func policyDropICMPReasonSnapshot() map[string]uint64 {
@@ -376,7 +384,9 @@ type connectIPUDPPacketConn struct {
 	pmtuState       *connectIPPMTUState
 	deadlines       connDeadlines
 	readMu          sync.Mutex
+	writeMu         sync.Mutex
 	readBuffer      []byte
+	writeBuffer     []byte
 	readScratchAddr net.UDPAddr
 	closed          atomic.Bool
 }
@@ -595,6 +605,7 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		localV4:         localV4,
 		pmtuState:       pmtuState,
 		readBuffer:      make([]byte, 64*1024),
+		writeBuffer:     make([]byte, 0, 2048),
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
 }
@@ -621,7 +632,8 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 		}
 		connectIPCounters.engineClassifiedTotal.Add(1)
 		copyLen := copy(p, payload)
-		c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], src.AsSlice()...)
+		src4 := src.As4()
+		c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], src4[:]...)
 		c.readScratchAddr.Port = int(srcPort)
 		return copyLen, &c.readScratchAddr, nil
 	}
@@ -646,31 +658,55 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 	if !dstAddr.Is4() {
 		return 0, errors.New("connect-ip udp bridge currently supports IPv4 destination only")
 	}
+	src4 := c.localV4.As4()
+	dst4 := dstAddr.As4()
+	dstPort := uint16(udpAddr.Port)
+	const srcPort uint16 = 53000
+	headerTemplate := newIPv4UDPHeaderTemplate(src4, srcPort, dst4, dstPort)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	connectIPCounters.bridgeWriteEnterTotal.Add(1)
+	connectIPCounters.bridgeUDPTXAttemptTotal.Add(1)
+	maxPayload := c.currentPayloadCeiling()
 	for offset := 0; offset < len(p); {
-		maxPayload := c.currentPayloadCeiling()
+		connectIPCounters.bridgeWriteChunkTotal.Add(1)
 		end := offset + maxPayload
 		if end > len(p) {
 			end = len(p)
 		}
-		packet, buildErr := buildIPv4UDPPacket(c.localV4, uint16(53000), dstAddr, uint16(udpAddr.Port), p[offset:end])
+		packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(c.writeBuffer, headerTemplate, p[offset:end])
 		if buildErr != nil {
+			connectIPCounters.bridgeWriteErrTotal.Add(1)
+			connectIPCounters.mu.Lock()
+			connectIPCounters.bridgeWriteErrByReason["build_packet"]++
+			connectIPCounters.mu.Unlock()
 			return 0, buildErr
 		}
+		connectIPCounters.bridgeBuildTotal.Add(1)
+		c.writeBuffer = packet[:0]
 		icmp, writeErr := c.session.WritePacket(packet)
 		err = writeErr
 		if err != nil {
+			connectIPCounters.bridgeWriteErrTotal.Add(1)
+			connectIPCounters.mu.Lock()
+			connectIPCounters.bridgeWriteErrByReason["session_write_packet"]++
+			connectIPCounters.mu.Unlock()
 			return 0, err
 		}
+		connectIPCounters.bridgeWriteOkTotal.Add(1)
 		connectIPCounters.engineClassifiedTotal.Add(1)
+		// Bridge egress can run as short unidirectional bursts; emit periodic active
+		// snapshots from this hot path so runner deltas observe write progress.
+		maybeEmitConnectIPActiveSnapshot()
 		if len(icmp) > 0 {
 			connectIPCounters.engineICMPFeedbackTotal.Add(1)
 			if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
-				c.applyPTBToUDPPayload(ipMTU, isV6)
+				maxPayload = c.applyPTBToUDPPayload(ipMTU, isV6)
 			} else {
-				c.decreasePayloadCeiling("ptb_feedback")
+				maxPayload = c.decreasePayloadCeiling("ptb_feedback")
 			}
 		} else {
-			c.maybeRecoverPayloadCeiling()
+			maxPayload = c.maybeRecoverPayloadCeiling()
 		}
 		offset = end
 	}
@@ -683,7 +719,8 @@ func (c *connectIPUDPPacketConn) Close() error {
 }
 
 func (c *connectIPUDPPacketConn) LocalAddr() net.Addr {
-	return &net.UDPAddr{IP: net.IP(c.localV4.AsSlice()), Port: 53000}
+	a := c.localV4.As4()
+	return &net.UDPAddr{IP: net.IPv4(a[0], a[1], a[2], a[3]), Port: 53000}
 }
 
 func (c *connectIPUDPPacketConn) SetDeadline(t time.Time) error {
@@ -713,9 +750,9 @@ func (c *connectIPUDPPacketConn) currentPayloadCeiling() int {
 	return c.pmtuState.currentPayload
 }
 
-func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool) {
+func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool) int {
 	if c.pmtuState == nil {
-		return
+		return 1172
 	}
 	overhead := 28
 	if isIPv6 {
@@ -726,6 +763,9 @@ func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool
 		udpMax = 512
 	}
 	c.pmtuState.mu.Lock()
+	if c.pmtuState.currentPayload <= 0 {
+		c.pmtuState.currentPayload = 1172
+	}
 	if udpMax > c.pmtuState.maxPayload {
 		udpMax = c.pmtuState.maxPayload
 	}
@@ -736,19 +776,24 @@ func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool
 	current := c.pmtuState.currentPayload
 	c.pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(current, "ptb_mtu_hint")
+	return current
 }
 
-func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) {
+func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) int {
 	if c.pmtuState == nil {
-		return
+		return 1172
 	}
 	const pmtuMinus64DebounceMs = 80
 	c.pmtuState.mu.Lock()
+	if c.pmtuState.currentPayload <= 0 {
+		c.pmtuState.currentPayload = 1172
+	}
 	if reason == "ptb_feedback" {
 		now := time.Now().UnixMilli()
 		if c.pmtuState.lastMinus64UnixMilli != 0 && now-c.pmtuState.lastMinus64UnixMilli < pmtuMinus64DebounceMs {
+			current := c.pmtuState.currentPayload
 			c.pmtuState.mu.Unlock()
-			return
+			return current
 		}
 		c.pmtuState.lastMinus64UnixMilli = now
 	}
@@ -763,18 +808,23 @@ func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) {
 	current := c.pmtuState.currentPayload
 	c.pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(current, reason)
+	return current
 }
 
-func (c *connectIPUDPPacketConn) maybeRecoverPayloadCeiling() {
+func (c *connectIPUDPPacketConn) maybeRecoverPayloadCeiling() int {
 	if c.pmtuState == nil {
-		return
+		return 1172
 	}
 	const recoverySuccessWindow = 256
 	c.pmtuState.mu.Lock()
+	if c.pmtuState.currentPayload <= 0 {
+		c.pmtuState.currentPayload = 1172
+	}
 	c.pmtuState.successSinceDecrease++
 	if c.pmtuState.currentPayload >= c.pmtuState.maxPayload || c.pmtuState.successSinceDecrease < recoverySuccessWindow {
+		current := c.pmtuState.currentPayload
 		c.pmtuState.mu.Unlock()
-		return
+		return current
 	}
 	next := c.pmtuState.currentPayload + 16
 	if next > c.pmtuState.maxPayload {
@@ -785,6 +835,7 @@ func (c *connectIPUDPPacketConn) maybeRecoverPayloadCeiling() {
 	current := c.pmtuState.currentPayload
 	c.pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(current, "recovery_increase")
+	return current
 }
 
 func (d *connDeadlines) setDeadline(t time.Time) {
@@ -819,25 +870,50 @@ func (d *connDeadlines) writeTimeoutExceeded() bool {
 }
 
 func buildIPv4UDPPacket(src netip.Addr, srcPort uint16, dst netip.Addr, dstPort uint16, payload []byte) ([]byte, error) {
+	return buildIPv4UDPPacketInplace(nil, src, srcPort, dst, dstPort, payload)
+}
+
+func buildIPv4UDPPacketInplace(buffer []byte, src netip.Addr, srcPort uint16, dst netip.Addr, dstPort uint16, payload []byte) ([]byte, error) {
 	if !src.Is4() || !dst.Is4() {
 		return nil, errors.New("ipv4 udp packet builder requires ipv4 addresses")
 	}
+	return buildIPv4UDPPacketInplaceV4(buffer, src.As4(), srcPort, dst.As4(), dstPort, payload)
+}
+
+func buildIPv4UDPPacketInplaceV4(buffer []byte, src4 [4]byte, srcPort uint16, dst4 [4]byte, dstPort uint16, payload []byte) ([]byte, error) {
+	return buildIPv4UDPPacketInplaceHeaderV4(buffer, newIPv4UDPHeaderTemplate(src4, srcPort, dst4, dstPort), payload)
+}
+
+func newIPv4UDPHeaderTemplate(src4 [4]byte, srcPort uint16, dst4 [4]byte, dstPort uint16) [28]byte {
+	var header [28]byte
+	header[0] = 0x45
+	header[1] = 0x00
+	binary.BigEndian.PutUint16(header[4:6], 0)
+	binary.BigEndian.PutUint16(header[6:8], 0)
+	header[8] = 64
+	header[9] = 17
+	copy(header[12:16], src4[:])
+	copy(header[16:20], dst4[:])
+	binary.BigEndian.PutUint16(header[20:22], srcPort)
+	binary.BigEndian.PutUint16(header[22:24], dstPort)
+	return header
+}
+
+func buildIPv4UDPPacketInplaceHeaderV4(buffer []byte, headerTemplate [28]byte, payload []byte) ([]byte, error) {
 	const ipv4HeaderLen = 20
 	const udpHeaderLen = 8
 	totalLen := ipv4HeaderLen + udpHeaderLen + len(payload)
-	packet := make([]byte, totalLen)
-	packet[0] = 0x45
-	packet[1] = 0x00
+	packet := buffer
+	if cap(packet) < totalLen {
+		packet = make([]byte, totalLen)
+	} else {
+		packet = packet[:totalLen]
+	}
+	copy(packet[:udpHeaderLen+ipv4HeaderLen], headerTemplate[:])
 	binary.BigEndian.PutUint16(packet[2:4], uint16(totalLen))
-	binary.BigEndian.PutUint16(packet[4:6], 0)
-	binary.BigEndian.PutUint16(packet[6:8], 0)
-	packet[8] = 64
-	packet[9] = 17
-	copy(packet[12:16], src.AsSlice())
-	copy(packet[16:20], dst.AsSlice())
+	// headerTemplate keeps bytes [10:12] zero so calculateIPv4Checksum below
+	// always reads zeros for the checksum field even on a reused buffer.
 	binary.BigEndian.PutUint16(packet[10:12], ipv4HeaderChecksum(packet[:ipv4HeaderLen]))
-	binary.BigEndian.PutUint16(packet[20:22], srcPort)
-	binary.BigEndian.PutUint16(packet[22:24], dstPort)
 	binary.BigEndian.PutUint16(packet[24:26], uint16(udpHeaderLen+len(payload)))
 	binary.BigEndian.PutUint16(packet[26:28], 0)
 	copy(packet[28:], payload)
@@ -1844,6 +1920,10 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 	for k, v := range connectIPCounters.enginePMTUUpdateByReason {
 		pmtuUpdateReasons[k] = v
 	}
+	bridgeWriteErrReasons := make(map[string]uint64, len(connectIPCounters.bridgeWriteErrByReason))
+	for k, v := range connectIPCounters.bridgeWriteErrByReason {
+		bridgeWriteErrReasons[k] = v
+	}
 	sessionID := connectIPCounters.currentSessionID
 	scopeTarget := connectIPCounters.currentScopeTarget
 	scopeIPProto := connectIPCounters.currentScopeIPProto
@@ -1878,6 +1958,13 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_engine_pmtu_update_total":         connectIPCounters.enginePMTUUpdateTotal.Load(),
 		"connect_ip_engine_pmtu_update_reason_total":  pmtuUpdateReasons,
 		"connect_ip_engine_effective_udp_payload":     connectIPCounters.engineEffectiveUDPPayload.Load(),
+		"connect_ip_bridge_udp_tx_attempt_total":      connectIPCounters.bridgeUDPTXAttemptTotal.Load(),
+		"connect_ip_bridge_build_total":               connectIPCounters.bridgeBuildTotal.Load(),
+		"connect_ip_bridge_write_enter_total":         connectIPCounters.bridgeWriteEnterTotal.Load(),
+		"connect_ip_bridge_write_chunk_total":         connectIPCounters.bridgeWriteChunkTotal.Load(),
+		"connect_ip_bridge_write_ok_total":            connectIPCounters.bridgeWriteOkTotal.Load(),
+		"connect_ip_bridge_write_err_total":           connectIPCounters.bridgeWriteErrTotal.Load(),
+		"connect_ip_bridge_write_err_reason_total":    bridgeWriteErrReasons,
 		"connect_ip_session_reset_total":              reasons,
 		"connect_ip_capsule_unknown_total":            connectip.UnknownCapsuleTotal(),
 		"connect_ip_datagram_context_unknown_total":   connectip.UnknownContextDatagramTotal(),

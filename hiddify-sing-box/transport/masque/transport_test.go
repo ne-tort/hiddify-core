@@ -802,6 +802,26 @@ func TestBuildAndParseIPv4UDPPacket(t *testing.T) {
 	}
 }
 
+func TestBuildIPv4UDPPacketInplaceReusesBuffer(t *testing.T) {
+	src := netip.MustParseAddr("198.18.0.2")
+	dst := netip.MustParseAddr("10.200.0.2")
+	initial := make([]byte, 0, 2048)
+	packetA, err := buildIPv4UDPPacketInplace(initial, src, 53000, dst, 5601, []byte("a"))
+	if err != nil {
+		t.Fatalf("first packet build: %v", err)
+	}
+	packetB, err := buildIPv4UDPPacketInplace(packetA[:0], src, 53000, dst, 5601, []byte("bbbb"))
+	if err != nil {
+		t.Fatalf("second packet build: %v", err)
+	}
+	if len(packetB) != 32 {
+		t.Fatalf("unexpected packet size: got=%d want=32", len(packetB))
+	}
+	if &packetA[:1][0] != &packetB[:1][0] {
+		t.Fatal("expected in-place builder to reuse caller-provided capacity")
+	}
+}
+
 func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
 	rec := &recordingIPPacketSession{}
 	conn := newConnectIPUDPPacketConn(context.Background(), rec)
@@ -831,6 +851,46 @@ func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
 	_, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5601})
 	if err == nil {
 		t.Fatal("expected IPv6 destination rejection for temporary IPv4-only UDP bridge contract")
+	}
+}
+
+func TestConnectIPUDPPacketConnWriteToSplitsLargePayload(t *testing.T) {
+	rec := &recordingIPPacketSession{}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	payload := bytes.Repeat([]byte{0xab}, 2500)
+	n, err := conn.WriteTo(payload, &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
+	if err != nil {
+		t.Fatalf("write to: %v", err)
+	}
+	if n != len(payload) {
+		t.Fatalf("unexpected write n: got=%d want=%d", n, len(payload))
+	}
+	if len(rec.writes) != 3 {
+		t.Fatalf("unexpected write count: got=%d want=3", len(rec.writes))
+	}
+	for _, packet := range rec.writes {
+		dst := net.IP(packet[16:20]).String()
+		if dst != "10.200.0.2" {
+			t.Fatalf("unexpected destination ip: %s", dst)
+		}
+		dstPort := binary.BigEndian.Uint16(packet[22:24])
+		if dstPort != 5601 {
+			t.Fatalf("unexpected destination port: %d", dstPort)
+		}
+	}
+}
+
+func TestConnectIPUDPPacketConnWriteToEmitsActiveSnapshotCadence(t *testing.T) {
+	previous := connectIPCounters.lastActiveEmitUnixMilli.Swap(0)
+	defer connectIPCounters.lastActiveEmitUnixMilli.Store(previous)
+	rec := &recordingIPPacketSession{}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	_, err := conn.WriteTo([]byte("cadence"), &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
+	if err != nil {
+		t.Fatalf("write to: %v", err)
+	}
+	if got := connectIPCounters.lastActiveEmitUnixMilli.Load(); got == 0 {
+		t.Fatal("expected active snapshot cadence tick from udp bridge write path")
 	}
 }
 
@@ -1992,6 +2052,7 @@ func (f fakeIPPacketSession) Close() error { return nil }
 
 type recordingIPPacketSession struct {
 	lastWrite  []byte
+	writes     [][]byte
 	readPacket []byte
 }
 
@@ -2005,7 +2066,9 @@ func (s *recordingIPPacketSession) ReadPacket(buffer []byte) (int, error) {
 }
 
 func (s *recordingIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
-	s.lastWrite = append([]byte(nil), buffer...)
+	packet := append([]byte(nil), buffer...)
+	s.lastWrite = packet
+	s.writes = append(s.writes, packet)
 	return nil, nil
 }
 
