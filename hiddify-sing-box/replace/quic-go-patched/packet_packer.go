@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/handshake"
@@ -16,6 +17,22 @@ import (
 )
 
 var errNothingToPack = errors.New("nothing to pack")
+
+// datagramPackerOversizeDropTotal counts outgoing DATAGRAM frames discarded by the
+// 1-RTT packet packer because the frame did not fit in the current packet's remaining
+// payload budget AND the packet did not already carry an ACK frame. This is a silent
+// drop on the QUIC unreliable-datagram TX path; under bursty CONNECT-IP loads it can
+// be the dominant explanation for sub-percent loss on the sink while no QUIC/H3 queue
+// drop counter advances.
+var datagramPackerOversizeDropTotal atomic.Uint64
+
+// DatagramPackerOversizeDropTotal returns the process-wide count of DATAGRAM frames
+// discarded by the packet packer due to oversized-vs-remaining-budget when no ACK
+// frame is co-packed. Used by transport/masque CONNECT_IP_OBS to surface a previously
+// unobservable bucket of QUIC TX loss.
+func DatagramPackerOversizeDropTotal() uint64 {
+	return datagramPackerOversizeDropTotal.Load()
+}
 
 type packer interface {
 	PackCoalescedPacket(onlyAck bool, maxPacketSize protocol.ByteCount, now monotime.Time, v protocol.Version) (*coalescedPacket, error)
@@ -658,11 +675,34 @@ func (p *packetPacker) composeNextPacket(
 				pl.length += size
 				p.datagramQueue.Pop()
 			} else if pl.ack == nil {
-				// The DATAGRAM frame doesn't fit, and the packet doesn't contain an ACK.
-				// Discard this frame. There's no point in retrying this in the next packet,
-				// as it's unlikely that the available packet size will increase.
-				releaseOutgoingDatagramPayload(f)
-				p.datagramQueue.Pop()
+				// The head DATAGRAM frame doesn't fit an otherwise empty payload.
+				// Try to avoid HOL blocking by rotating the queue once and packing the next frame.
+				if p.datagramQueue.Rotate() {
+					if next := p.datagramQueue.Peek(); next != nil {
+						nextSize := next.Length(v)
+						if nextSize <= maxPayloadSize-pl.length {
+							pl.frames = append(pl.frames, ackhandler.Frame{Frame: next})
+							pl.length += nextSize
+							p.datagramQueue.Pop()
+						} else {
+							// Two oversized heads in a row must still make progress.
+							// Rotate back to restore original head and drop it.
+							if !p.datagramQueue.Rotate() {
+								// Queue shape changed unexpectedly; best-effort drop current head.
+							}
+							if oversized := p.datagramQueue.Peek(); oversized != nil {
+								datagramPackerOversizeDropTotal.Add(1)
+								releaseOutgoingDatagramPayload(oversized)
+								p.datagramQueue.Pop()
+							}
+						}
+					}
+				} else {
+					// Single-entry queue: drop to avoid permanent no-progress loops.
+					datagramPackerOversizeDropTotal.Add(1)
+					releaseOutgoingDatagramPayload(f)
+					p.datagramQueue.Pop()
+				}
 			}
 			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
 		}

@@ -702,6 +702,52 @@ func TestPackLargeDatagramFrame(t *testing.T) {
 	require.Nil(t, tp.datagramQueue.Peek()) // make sure the frame is gone
 }
 
+func TestPackLargeDatagramFrameRotatesQueueHead(t *testing.T) {
+	const maxPacketSize = 1000
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+
+	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
+	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+
+	large := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize-10)}
+	small := &wire.DatagramFrame{DataLenPresent: true, Data: []byte("ok")}
+	require.NoError(t, tp.datagramQueue.Add(large))
+	require.NoError(t, tp.datagramQueue.Add(small))
+
+	tp.framer.EXPECT().HasData()
+	buffer := getPacketBuffer()
+	p, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
+	require.NoError(t, err)
+	require.Len(t, p.Frames, 1)
+	require.Equal(t, small, p.Frames[0].Frame)
+	require.Equal(t, large, tp.datagramQueue.Peek())
+}
+
+func TestPackLargeDatagramFrameRotatesThenDropsOversizedHead(t *testing.T) {
+	const maxPacketSize = 1000
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+
+	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
+	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+
+	tooLargeA := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize-10)}
+	tooLargeB := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize-10)}
+	require.NoError(t, tp.datagramQueue.Add(tooLargeA))
+	require.NoError(t, tp.datagramQueue.Add(tooLargeB))
+
+	tp.framer.EXPECT().HasData()
+	buffer := getPacketBuffer()
+	_, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
+	require.ErrorIs(t, err, errNothingToPack)
+	// Ensure no-progress loop is broken: one oversized head is dropped per attempt.
+	require.Equal(t, tooLargeB, tp.datagramQueue.Peek())
+}
+
 func TestPackRetransmissions(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)

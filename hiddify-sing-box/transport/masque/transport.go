@@ -33,6 +33,15 @@ import (
 
 const defaultUDPInitialPacketSize uint16 = 1350
 
+// connectIPUDPWriteBufPool backs CONNECT-IP UDP bridge egress builds (IPv4+UDP+payload).
+// Avoids a process-global mutex on connectIPUDPPacketConn for buffer reuse; WritePacket copies before return.
+var connectIPUDPWriteBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
 const defaultConnectIPDatagramCeilingMax = 1500
 
 // connectIPDatagramCeilingMax is the inclusive upper bound for ConnectIPDatagramCeiling (full IP datagram bytes).
@@ -389,9 +398,7 @@ type connectIPUDPPacketConn struct {
 	pmtuState       *connectIPPMTUState
 	deadlines       connDeadlines
 	readMu          sync.Mutex
-	writeMu         sync.Mutex
 	readBuffer      []byte
-	writeBuffer     []byte
 	readScratchAddr net.UDPAddr
 	closed          atomic.Bool
 }
@@ -619,7 +626,6 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		localBind:       &net.UDPAddr{IP: localIP, Port: 53000},
 		pmtuState:       pmtuState,
 		readBuffer:      make([]byte, 64*1024),
-		writeBuffer:     make([]byte, 0, 2048),
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
 }
@@ -673,8 +679,16 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 	dstPort := uint16(udpAddr.Port)
 	const srcPort uint16 = 53000
 	headerTemplate := newIPv4UDPHeaderTemplate(src4, srcPort, dst4, dstPort)
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
+
+	bufPtr := connectIPUDPWriteBufPool.Get().(*[]byte)
+	defer func() {
+		b := *bufPtr
+		b = b[:0]
+		*bufPtr = b
+		connectIPUDPWriteBufPool.Put(bufPtr)
+	}()
+	writeBuf := *bufPtr
+
 	connectIPCounters.bridgeWriteEnterTotal.Add(1)
 	connectIPCounters.bridgeUDPTXAttemptTotal.Add(1)
 	maxPayload := c.currentPayloadCeiling()
@@ -684,7 +698,7 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 		if end > len(p) {
 			end = len(p)
 		}
-		packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(c.writeBuffer, headerTemplate, p[offset:end])
+		packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(writeBuf, headerTemplate, p[offset:end])
 		if buildErr != nil {
 			connectIPCounters.bridgeWriteErrTotal.Add(1)
 			connectIPCounters.mu.Lock()
@@ -693,7 +707,8 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 			return 0, buildErr
 		}
 		connectIPCounters.bridgeBuildTotal.Add(1)
-		c.writeBuffer = packet[:0]
+		writeBuf = packet[:0]
+		*bufPtr = writeBuf
 		icmp, writeErr := c.session.WritePacket(packet)
 		err = writeErr
 		if err != nil {
@@ -2071,6 +2086,9 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"http3_stream_datagram_queue_drop_total": http3.StreamDatagramQueueDropTotal(),
 		// QUIC conn-level DATAGRAM receive-queue overflow (patched quic-go datagram_queue.go).
 		"quic_datagram_rcv_queue_drop_total": quic.DatagramReceiveQueueDropTotal(),
+		// QUIC packet-packer DATAGRAM oversize drops (frame too large for remaining packet budget AND no co-packed ACK).
+		// Silent TX-side loss bucket previously invisible to OBS; sub-percent CONNECT-IP loss without queue drops typically lands here.
+		"quic_datagram_packer_oversize_drop_total": quic.DatagramPackerOversizeDropTotal(),
 	}
 	if fn := connectIPServerParseDropSupplier; fn != nil {
 		out["connect_ip_server_parse_drop_total"] = fn()

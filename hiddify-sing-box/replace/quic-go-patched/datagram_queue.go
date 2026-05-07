@@ -99,6 +99,19 @@ func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	return h.sendQueue.PeekFront()
 }
 
+// Rotate moves the front DATAGRAM frame to the back of the send queue.
+// It returns false if the queue has fewer than 2 elements.
+func (h *datagramQueue) Rotate() bool {
+	h.sendMx.Lock()
+	defer h.sendMx.Unlock()
+	if h.sendQueue.Len() < 2 {
+		return false
+	}
+	f := h.sendQueue.PopFront()
+	h.sendQueue.PushBack(f)
+	return true
+}
+
 func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
