@@ -349,12 +349,16 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		hopOrder:                 resolveHopOrder(options.Hops),
 		connectIPDatagramCeiling: effectiveCeiling,
 		masqueUDPWriteMax:        masqueUDPWriteMax,
-		connectIPPMTUState: &connectIPPMTUState{
-			currentPayload: initialPayload,
-			minPayload:     512,
-			maxPayload:     initialPayload,
-		},
+		connectIPPMTUState:       newConnectIPPMTUState(initialPayload, 512, initialPayload),
 	}, nil
+}
+
+func newConnectIPPMTUState(currentPayload, minPayload, maxPayload int) *connectIPPMTUState {
+	s := &connectIPPMTUState{}
+	s.currentPayload.Store(int64(currentPayload))
+	s.minPayload.Store(int64(minPayload))
+	s.maxPayload.Store(int64(maxPayload))
+	return s
 }
 
 type coreSession struct {
@@ -392,19 +396,27 @@ type connectIPUDPPacketConn struct {
 	closed          atomic.Bool
 }
 
+// connectIPPMTUState tracks the effective UDP payload ceiling for the
+// CONNECT-IP UDP bridge. The hot path (currentPayloadCeiling on every
+// WriteTo, successSinceDecrease bumped on every successful chunk) reads
+// and increments via atomics; the mutex orders consistent transitions on
+// PTB feedback and recovery (rare).
 type connectIPPMTUState struct {
 	mu                   sync.Mutex
-	currentPayload       int
-	minPayload           int
-	maxPayload           int
-	successSinceDecrease int
-	lastMinus64UnixMilli int64
+	currentPayload       atomic.Int64
+	minPayload           atomic.Int64
+	maxPayload           atomic.Int64
+	successSinceDecrease atomic.Int64
+	lastMinus64UnixMilli atomic.Int64
 }
 
+// connDeadlines stores read/write deadlines as Unix-nanosecond atomics
+// (0 = no deadline). The hot ReadFrom/WriteTo path performs a single
+// atomic.Load to check, avoiding per-packet RLock/RUnlock on a previously
+// shared sync.RWMutex.
 type connDeadlines struct {
-	mu    sync.RWMutex
-	read  time.Time
-	write time.Time
+	read  atomic.Int64
+	write atomic.Int64
 }
 
 // parseICMPPTBHopMTU extracts the next-hop IP MTU from a full ICMP feedback IP packet
@@ -558,11 +570,7 @@ func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, t
 func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net.PacketConn {
 	localV4 := netip.MustParseAddr("198.18.0.2")
 	maxDatagram := 1200
-	pmtuState := &connectIPPMTUState{
-		currentPayload: 1172,
-		minPayload:     512,
-		maxPayload:     1172,
-	}
+	pmtuState := newConnectIPPMTUState(1172, 512, 1172)
 	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
 		if connectIPSession.datagramCeiling > 0 {
 			maxDatagram = connectIPSession.datagramCeiling
@@ -591,14 +599,16 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		maxUDPPayload = 512
 	}
 	pmtuState.mu.Lock()
-	pmtuState.maxPayload = maxUDPPayload
-	if pmtuState.currentPayload <= 0 || pmtuState.currentPayload > maxUDPPayload {
-		pmtuState.currentPayload = maxUDPPayload
+	pmtuState.maxPayload.Store(int64(maxUDPPayload))
+	cur := pmtuState.currentPayload.Load()
+	if cur <= 0 || cur > int64(maxUDPPayload) {
+		cur = int64(maxUDPPayload)
+		pmtuState.currentPayload.Store(cur)
 	}
-	if pmtuState.minPayload <= 0 || pmtuState.minPayload > pmtuState.currentPayload {
-		pmtuState.minPayload = 512
+	if minP := pmtuState.minPayload.Load(); minP <= 0 || minP > cur {
+		pmtuState.minPayload.Store(512)
 	}
-	currentPayload := pmtuState.currentPayload
+	currentPayload := int(cur)
 	pmtuState.mu.Unlock()
 	setConnectIPEngineEffectiveUDPPayload(currentPayload, "session_init")
 	l4 := localV4.As4()
@@ -736,16 +746,25 @@ func (c *connectIPUDPPacketConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+// currentPayloadCeiling returns the current effective UDP payload ceiling.
+// Hot path: invoked once per WriteTo / ReadFrom; lock-free read.
+// Lazy initialisation to 1172 (very rare; only if session_init never ran)
+// is performed under the mutex.
 func (c *connectIPUDPPacketConn) currentPayloadCeiling() int {
 	if c.pmtuState == nil {
 		return 1172
 	}
-	c.pmtuState.mu.Lock()
-	defer c.pmtuState.mu.Unlock()
-	if c.pmtuState.currentPayload <= 0 {
-		c.pmtuState.currentPayload = 1172
+	if v := c.pmtuState.currentPayload.Load(); v > 0 {
+		return int(v)
 	}
-	return c.pmtuState.currentPayload
+	c.pmtuState.mu.Lock()
+	if v := c.pmtuState.currentPayload.Load(); v > 0 {
+		c.pmtuState.mu.Unlock()
+		return int(v)
+	}
+	c.pmtuState.currentPayload.Store(1172)
+	c.pmtuState.mu.Unlock()
+	return 1172
 }
 
 func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool) int {
@@ -761,18 +780,21 @@ func (c *connectIPUDPPacketConn) applyPTBToUDPPayload(ipPathMTU int, isIPv6 bool
 		udpMax = 512
 	}
 	c.pmtuState.mu.Lock()
-	if c.pmtuState.currentPayload <= 0 {
-		c.pmtuState.currentPayload = 1172
+	cur := c.pmtuState.currentPayload.Load()
+	if cur <= 0 {
+		cur = 1172
+		c.pmtuState.currentPayload.Store(cur)
 	}
-	if udpMax > c.pmtuState.maxPayload {
-		udpMax = c.pmtuState.maxPayload
+	if maxP := c.pmtuState.maxPayload.Load(); maxP > 0 && int64(udpMax) > maxP {
+		udpMax = int(maxP)
 	}
-	if udpMax < c.pmtuState.currentPayload {
-		c.pmtuState.currentPayload = udpMax
-		c.pmtuState.successSinceDecrease = 0
+	if int64(udpMax) < cur {
+		c.pmtuState.currentPayload.Store(int64(udpMax))
+		c.pmtuState.successSinceDecrease.Store(0)
+		cur = int64(udpMax)
 	}
-	current := c.pmtuState.currentPayload
 	c.pmtuState.mu.Unlock()
+	current := int(cur)
 	setConnectIPEngineEffectiveUDPPayload(current, "ptb_mtu_hint")
 	return current
 }
@@ -783,88 +805,115 @@ func (c *connectIPUDPPacketConn) decreasePayloadCeiling(reason string) int {
 	}
 	const pmtuMinus64DebounceMs = 80
 	c.pmtuState.mu.Lock()
-	if c.pmtuState.currentPayload <= 0 {
-		c.pmtuState.currentPayload = 1172
+	cur := c.pmtuState.currentPayload.Load()
+	if cur <= 0 {
+		cur = 1172
+		c.pmtuState.currentPayload.Store(cur)
 	}
 	if reason == "ptb_feedback" {
 		now := time.Now().UnixMilli()
-		if c.pmtuState.lastMinus64UnixMilli != 0 && now-c.pmtuState.lastMinus64UnixMilli < pmtuMinus64DebounceMs {
-			current := c.pmtuState.currentPayload
+		if last := c.pmtuState.lastMinus64UnixMilli.Load(); last != 0 && now-last < pmtuMinus64DebounceMs {
 			c.pmtuState.mu.Unlock()
-			return current
+			return int(cur)
 		}
-		c.pmtuState.lastMinus64UnixMilli = now
+		c.pmtuState.lastMinus64UnixMilli.Store(now)
 	}
-	next := c.pmtuState.currentPayload - 64
-	if next < c.pmtuState.minPayload {
-		next = c.pmtuState.minPayload
+	minP := c.pmtuState.minPayload.Load()
+	next := cur - 64
+	if next < minP {
+		next = minP
 	}
-	if next < c.pmtuState.currentPayload {
-		c.pmtuState.currentPayload = next
-		c.pmtuState.successSinceDecrease = 0
+	if next < cur {
+		c.pmtuState.currentPayload.Store(next)
+		c.pmtuState.successSinceDecrease.Store(0)
+		cur = next
 	}
-	current := c.pmtuState.currentPayload
 	c.pmtuState.mu.Unlock()
+	current := int(cur)
 	setConnectIPEngineEffectiveUDPPayload(current, reason)
 	return current
 }
 
+// maybeRecoverPayloadCeiling is called per successful chunk write.
+// Hot fast path: lock-free atomic increment + threshold check; the mutex is
+// taken only when an actual upward transition is required (~once every
+// `recoverySuccessWindow` packets per session).
 func (c *connectIPUDPPacketConn) maybeRecoverPayloadCeiling() int {
 	if c.pmtuState == nil {
 		return 1172
 	}
 	const recoverySuccessWindow = 256
-	c.pmtuState.mu.Lock()
-	if c.pmtuState.currentPayload <= 0 {
-		c.pmtuState.currentPayload = 1172
-	}
-	c.pmtuState.successSinceDecrease++
-	if c.pmtuState.currentPayload >= c.pmtuState.maxPayload || c.pmtuState.successSinceDecrease < recoverySuccessWindow {
-		current := c.pmtuState.currentPayload
+	cur := c.pmtuState.currentPayload.Load()
+	maxP := c.pmtuState.maxPayload.Load()
+	if cur <= 0 {
+		// Lazy initialise on the slow path.
+		c.pmtuState.mu.Lock()
+		cur = c.pmtuState.currentPayload.Load()
+		if cur <= 0 {
+			cur = 1172
+			c.pmtuState.currentPayload.Store(cur)
+		}
+		maxP = c.pmtuState.maxPayload.Load()
 		c.pmtuState.mu.Unlock()
-		return current
 	}
-	next := c.pmtuState.currentPayload + 16
-	if next > c.pmtuState.maxPayload {
-		next = c.pmtuState.maxPayload
+	n := c.pmtuState.successSinceDecrease.Add(1)
+	if maxP > 0 && cur >= maxP {
+		return int(cur)
 	}
-	c.pmtuState.currentPayload = next
-	c.pmtuState.successSinceDecrease = 0
-	current := c.pmtuState.currentPayload
+	if n < recoverySuccessWindow {
+		return int(cur)
+	}
+	c.pmtuState.mu.Lock()
+	cur = c.pmtuState.currentPayload.Load()
+	maxP = c.pmtuState.maxPayload.Load()
+	if maxP > 0 && cur >= maxP {
+		c.pmtuState.mu.Unlock()
+		return int(cur)
+	}
+	if c.pmtuState.successSinceDecrease.Load() < recoverySuccessWindow {
+		c.pmtuState.mu.Unlock()
+		return int(cur)
+	}
+	next := cur + 16
+	if maxP > 0 && next > maxP {
+		next = maxP
+	}
+	c.pmtuState.currentPayload.Store(next)
+	c.pmtuState.successSinceDecrease.Store(0)
 	c.pmtuState.mu.Unlock()
-	setConnectIPEngineEffectiveUDPPayload(current, "recovery_increase")
-	return current
+	setConnectIPEngineEffectiveUDPPayload(int(next), "recovery_increase")
+	return int(next)
+}
+
+func deadlineNanos(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 func (d *connDeadlines) setDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.read = t
-	d.write = t
+	v := deadlineNanos(t)
+	d.read.Store(v)
+	d.write.Store(v)
 }
 
 func (d *connDeadlines) setReadDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.read = t
+	d.read.Store(deadlineNanos(t))
 }
 
 func (d *connDeadlines) setWriteDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.write = t
+	d.write.Store(deadlineNanos(t))
 }
 
 func (d *connDeadlines) readTimeoutExceeded() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return !d.read.IsZero() && time.Now().After(d.read)
+	v := d.read.Load()
+	return v != 0 && time.Now().UnixNano() > v
 }
 
 func (d *connDeadlines) writeTimeoutExceeded() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return !d.write.IsZero() && time.Now().After(d.write)
+	v := d.write.Load()
+	return v != 0 && time.Now().UnixNano() > v
 }
 
 func buildIPv4UDPPacket(src netip.Addr, srcPort uint16, dst netip.Addr, dstPort uint16, payload []byte) ([]byte, error) {

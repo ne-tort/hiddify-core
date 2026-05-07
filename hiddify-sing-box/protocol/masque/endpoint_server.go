@@ -14,7 +14,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -653,38 +652,41 @@ func (c *connectIPNetPacketConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
+// connDeadlines stores read/write deadlines as Unix-nanosecond atomics
+// (0 = no deadline). Hot ReadFrom/WriteTo paths perform a single
+// atomic.Load to check, avoiding per-packet RLock/RUnlock.
 type connDeadlines struct {
-	mu    sync.RWMutex
-	read  time.Time
-	write time.Time
+	read  atomic.Int64
+	write atomic.Int64
+}
+
+func deadlineNanos(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 func (d *connDeadlines) setDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.read = t
-	d.write = t
+	v := deadlineNanos(t)
+	d.read.Store(v)
+	d.write.Store(v)
 }
 
 func (d *connDeadlines) setReadDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.read = t
+	d.read.Store(deadlineNanos(t))
 }
 
 func (d *connDeadlines) setWriteDeadline(t time.Time) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.write = t
+	d.write.Store(deadlineNanos(t))
 }
 
 func (d *connDeadlines) readTimeout() (time.Duration, bool) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if d.read.IsZero() {
+	v := d.read.Load()
+	if v == 0 {
 		return 0, false
 	}
-	timeout := time.Until(d.read)
+	timeout := time.Until(time.Unix(0, v))
 	if timeout <= 0 {
 		return 0, true
 	}
@@ -692,15 +694,13 @@ func (d *connDeadlines) readTimeout() (time.Duration, bool) {
 }
 
 func (d *connDeadlines) readTimeoutExceeded() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return !d.read.IsZero() && time.Now().After(d.read)
+	v := d.read.Load()
+	return v != 0 && time.Now().UnixNano() > v
 }
 
 func (d *connDeadlines) writeTimeoutExceeded() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return !d.write.IsZero() && time.Now().After(d.write)
+	v := d.write.Load()
+	return v != 0 && time.Now().UnixNano() > v
 }
 
 func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) (string, string, error) {
