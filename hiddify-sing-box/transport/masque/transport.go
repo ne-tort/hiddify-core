@@ -654,16 +654,12 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 	if !ok || udpAddr == nil || udpAddr.Port <= 0 {
 		return 0, errors.New("connect-ip udp bridge requires UDP destination")
 	}
-	dstAddr, ok := netip.AddrFromSlice(udpAddr.IP)
-	if !ok {
-		return 0, errors.New("connect-ip udp bridge requires valid destination ip")
-	}
-	dstAddr = dstAddr.Unmap()
-	if !dstAddr.Is4() {
-		return 0, errors.New("connect-ip udp bridge currently supports IPv4 destination only")
+	ip4 := udpAddr.IP.To4()
+	if ip4 == nil {
+		return 0, errors.New("connect-ip udp bridge requires valid IPv4 destination")
 	}
 	src4 := c.localV4.As4()
-	dst4 := dstAddr.As4()
+	dst4 := [4]byte{ip4[0], ip4[1], ip4[2], ip4[3]}
 	dstPort := uint16(udpAddr.Port)
 	const srcPort uint16 = 53000
 	headerTemplate := newIPv4UDPHeaderTemplate(src4, srcPort, dst4, dstPort)
@@ -942,10 +938,9 @@ func parseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort 
 		totalLen = len(packet)
 	}
 	udpStart := ihl
-	srcAddr, ok := netip.AddrFromSlice(packet[12:16])
-	if !ok {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid source ip")
-	}
+	srcAddr := netip.AddrFrom4([4]byte{
+		packet[12], packet[13], packet[14], packet[15],
+	})
 	srcPort = binary.BigEndian.Uint16(packet[udpStart : udpStart+2])
 	udpLen := int(binary.BigEndian.Uint16(packet[udpStart+4 : udpStart+6]))
 	udpPayloadStart := udpStart + 8
