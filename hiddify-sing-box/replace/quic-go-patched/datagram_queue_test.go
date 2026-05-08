@@ -193,3 +193,45 @@ func TestDatagramQueueTryReceiveBurst(t *testing.T) {
 	_, ok = queue.TryReceive()
 	require.False(t, ok)
 }
+
+func TestDatagramQueueRcvRingWrapOrder(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	const n = 5
+	for i := range n {
+		queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte{byte(i)}})
+	}
+	for i := range n {
+		p, ok := queue.TryReceive()
+		require.True(t, ok)
+		require.Equal(t, []byte{byte(i)}, p)
+	}
+	require.Equal(t, uint64(0), DatagramReceiveQueueDropTotal())
+	for i := range n {
+		queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte{byte(i + 10)}})
+	}
+	for i := range n {
+		p, ok := queue.TryReceive()
+		require.True(t, ok)
+		require.Equal(t, []byte{byte(i + 10)}, p)
+	}
+	_, ok := queue.TryReceive()
+	require.False(t, ok)
+}
+
+func TestDatagramQueueRcvRingFullDrops(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	before := DatagramReceiveQueueDropTotal()
+	for i := range maxDatagramRcvQueueLen + 3 {
+		queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte{byte(i % 251)}})
+	}
+	require.Equal(t, before+uint64(3), DatagramReceiveQueueDropTotal())
+	got := 0
+	for {
+		_, ok := queue.TryReceive()
+		if !ok {
+			break
+		}
+		got++
+	}
+	require.Equal(t, maxDatagramRcvQueueLen, got)
+}

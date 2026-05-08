@@ -31,8 +31,13 @@ type datagramQueue struct {
 	sendQueue ringbuffer.RingBuffer[*wire.DatagramFrame]
 	sent      chan struct{} // used to notify Add that a datagram was dequeued
 
-	rcvMx    sync.Mutex
-	rcvQueue [][]byte
+	rcvMx sync.Mutex
+	// rcvRing is a fixed-capacity ring (len == maxDatagramRcvQueueLen when non-nil).
+	// It replaces append/slice-reindex on rcvQueue which could retain a huge backing array
+	// after bursts (CONNECT-IP / CONNECT-UDP high PPS) even when the logical queue drains.
+	rcvRing  [][]byte
+	rcvHead  int
+	rcvCount int
 	rcvd     chan struct{} // used to notify Receive that a new datagram was received
 
 	closeErr error
@@ -122,14 +127,24 @@ func (h *datagramQueue) Pop() {
 	}
 }
 
+func (h *datagramQueue) ensureRcvRingLocked() [][]byte {
+	if h.rcvRing == nil {
+		h.rcvRing = make([][]byte, maxDatagramRcvQueueLen)
+	}
+	return h.rcvRing
+}
+
 // HandleDatagramFrame handles a received DATAGRAM frame.
 func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	data := make([]byte, len(f.Data))
 	copy(data, f.Data)
 	var queued bool
 	h.rcvMx.Lock()
-	if len(h.rcvQueue) < maxDatagramRcvQueueLen {
-		h.rcvQueue = append(h.rcvQueue, data)
+	ring := h.ensureRcvRingLocked()
+	if h.rcvCount < maxDatagramRcvQueueLen {
+		idx := (h.rcvHead + h.rcvCount) % len(ring)
+		ring[idx] = data
+		h.rcvCount++
 		queued = true
 		select {
 		case h.rcvd <- struct{}{}:
@@ -149,11 +164,15 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 func (h *datagramQueue) TryReceive() ([]byte, bool) {
 	h.rcvMx.Lock()
 	defer h.rcvMx.Unlock()
-	if len(h.rcvQueue) == 0 {
+	if h.rcvCount == 0 {
 		return nil, false
 	}
-	data := h.rcvQueue[0]
-	h.rcvQueue = h.rcvQueue[1:]
+	ring := h.ensureRcvRingLocked()
+	idx := h.rcvHead
+	data := ring[idx]
+	ring[idx] = nil
+	h.rcvHead = (h.rcvHead + 1) % len(ring)
+	h.rcvCount--
 	return data, true
 }
 
@@ -161,9 +180,13 @@ func (h *datagramQueue) TryReceive() ([]byte, bool) {
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	for {
 		h.rcvMx.Lock()
-		if len(h.rcvQueue) > 0 {
-			data := h.rcvQueue[0]
-			h.rcvQueue = h.rcvQueue[1:]
+		if h.rcvCount > 0 {
+			ring := h.ensureRcvRingLocked()
+			idx := h.rcvHead
+			data := ring[idx]
+			ring[idx] = nil
+			h.rcvHead = (h.rcvHead + 1) % len(ring)
+			h.rcvCount--
 			h.rcvMx.Unlock()
 			return data, nil
 		}
