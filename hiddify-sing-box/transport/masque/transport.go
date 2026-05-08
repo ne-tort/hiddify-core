@@ -1861,12 +1861,12 @@ func (s *connectIPPacketSession) ReadPacket(buffer []byte) (int, error) {
 		return n, err
 	}
 	if n > 0 {
-		connectIPCounters.packetRxTotal.Add(1)
+		rxSeq := connectIPCounters.packetRxTotal.Add(1)
 		connectIPCounters.bytesRxTotal.Add(uint64(n))
 		if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
 			emitConnectIPObservabilityEvent("first_packet_rx")
 		}
-		maybeEmitConnectIPActiveSnapshot()
+		maybeEmitConnectIPActiveSnapshot(rxSeq)
 	}
 	return n, err
 }
@@ -1885,12 +1885,12 @@ func (s *connectIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 		emitConnectIPObservabilityEvent("packet_write_fail")
 		return icmp, err
 	}
-	connectIPCounters.packetTxTotal.Add(1)
+	txSeq := connectIPCounters.packetTxTotal.Add(1)
 	connectIPCounters.bytesTxTotal.Add(uint64(len(buffer)))
 	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
 		emitConnectIPObservabilityEvent("first_packet_tx")
 	}
-	maybeEmitConnectIPActiveSnapshot()
+	maybeEmitConnectIPActiveSnapshot(txSeq)
 	if len(icmp) > 0 {
 		connectIPCounters.ptbRxTotal.Add(1)
 		maybeEmitConnectIPPTBObs("packet_ptb_rx")
@@ -2013,20 +2013,15 @@ func maybeEmitConnectIPPTBObs(reason string) {
 	emitConnectIPObservabilityEvent(reason)
 }
 
-// Active OBS snapshots are capped at ~1 Hz; invoking time/cas logic on every
-// CONNECT-IP datagram RX/TX was measurable overhead under high throughput.
-var connectIPActiveObsSampleCounter atomic.Uint64
-
-// connectIPActiveObsSampleMask=127 → time-based throttle roughly every 128 hot-path calls once last emit exists.
+// connectIPActiveObsSampleMask=127 → consider ~1 Hz periodic_active only on
+// every 128 RX or every 128 TX packets (respectively), using the seq returned
+// from packetRxTotal/packetTxTotal Add(1)—no separate sampler atomic.
 const connectIPActiveObsSampleMask = uint64(127)
 
-func maybeEmitConnectIPActiveSnapshot() {
-	// Steady-state path (already emitted once): bump sampler only here so the
-	// first packets of a session avoid an atomic.Add on every datagram until
-	// CAS transitions lastActiveEmit from 0.
+func maybeEmitConnectIPActiveSnapshot(planeTick uint64) {
 	last := connectIPCounters.lastActiveEmitUnixMilli.Load()
 	if last != 0 {
-		if (connectIPActiveObsSampleCounter.Add(1) & connectIPActiveObsSampleMask) != 0 {
+		if (planeTick & connectIPActiveObsSampleMask) != 0 {
 			return
 		}
 		now := time.Now().UnixMilli()
@@ -2063,12 +2058,12 @@ func ObserveConnectIPServerReadSuccess(rawLen int) {
 	if rawLen <= 0 {
 		return
 	}
-	connectIPCounters.packetRxTotal.Add(1)
+	rxSeq := connectIPCounters.packetRxTotal.Add(1)
 	connectIPCounters.bytesRxTotal.Add(uint64(rawLen))
 	if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
 		emitConnectIPObservabilityEvent("first_packet_rx")
 	}
-	maybeEmitConnectIPActiveSnapshot()
+	maybeEmitConnectIPActiveSnapshot(rxSeq)
 }
 
 // ObserveConnectIPServerWriteIteration mirrors one connectip.Conn.WritePacket hop from the server
@@ -2083,12 +2078,12 @@ func ObserveConnectIPServerWriteIteration(payloadLen int, icmpLen int, err error
 	if payloadLen <= 0 {
 		return
 	}
-	connectIPCounters.packetTxTotal.Add(1)
+	txSeq := connectIPCounters.packetTxTotal.Add(1)
 	connectIPCounters.bytesTxTotal.Add(uint64(payloadLen))
 	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
 		emitConnectIPObservabilityEvent("first_packet_tx")
 	}
-	maybeEmitConnectIPActiveSnapshot()
+	maybeEmitConnectIPActiveSnapshot(txSeq)
 	if icmpLen > 0 {
 		connectIPCounters.ptbRxTotal.Add(1)
 		maybeEmitConnectIPPTBObs("packet_ptb_rx")
@@ -2178,7 +2173,7 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_policy_drop_icmp_attempt_total":   connectip.PolicyDropICMPAttemptTotal(),
 		"connect_ip_policy_drop_icmp_reason_total":    policyDropICMPReasonSnapshot(),
 		// Process-wide HTTP/3 per-stream DATAGRAM queue drops (patched quic-go http3); correlates with bulk/burst loss.
-		"http3_stream_datagram_queue_drop_total":     http3.StreamDatagramQueueDropTotal(),
+		"http3_stream_datagram_queue_drop_total":       http3.StreamDatagramQueueDropTotal(),
 		"http3_stream_datagram_recv_closed_drop_total": http3.StreamDatagramRecvClosedDropTotal(),
 		// Process-wide drops for DATAGRAM frames mapped to unknown HTTP/3 stream IDs.
 		// Indicates mapping/lifecycle mismatches without stopping the receive loop.
