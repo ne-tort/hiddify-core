@@ -187,19 +187,22 @@ func (s *stateTrackingStream) signalHasDatagram() {
 
 func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	s.mx.Lock()
-	defer s.mx.Unlock()
-
 	if s.recvErr != nil {
+		s.mx.Unlock()
 		streamDatagramRecvClosedDropTotal.Add(1)
 		return
 	}
 	if s.dgCount >= streamDatagramQueueLen {
+		s.mx.Unlock()
 		streamDatagramQueueDropTotal.Add(1)
 		return
 	}
 	idx := (s.dgHead + s.dgCount) % len(s.dgSlots)
 	s.dgSlots[idx] = data
 	s.dgCount++
+	s.mx.Unlock()
+	// Wake waiters without holding the ring mutex; connect-ip/MASQUE ingress is single-writer
+	// per stream but receive path contends on dequeue.
 	s.signalHasDatagram()
 }
 

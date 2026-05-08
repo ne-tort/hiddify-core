@@ -24,6 +24,15 @@ func (m masqueAddr) String() string  { return m.string }
 
 var _ net.Addr = masqueAddr{}
 
+// Backing slices for CONNECT-UDP WriteTo: quic/http3 sends sync-copy into its own pooled
+// QUIC datagram buffer, so reusing scratch here avoids an allocation per egress datagram under load.
+var proxiedConnWriteBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
 type http3Stream interface {
 	io.ReadWriteCloser
 	ReceiveDatagram(context.Context) ([]byte, error)
@@ -107,10 +116,26 @@ start:
 // WriteTo sends a UDP datagram to the target.
 // The net.Addr parameter is ignored.
 func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
-	data := make([]byte, 0, len(contextIDZero)+len(p))
-	data = append(data, contextIDZero...)
-	data = append(data, p...)
-	return len(p), c.str.SendDatagram(data)
+	n = len(p)
+	minCap := len(contextIDZero) + len(p)
+	bufPtr := proxiedConnWriteBufPool.Get().(*[]byte)
+	data := *bufPtr
+	if cap(data) >= minCap {
+		data = data[:0]
+		data = append(data, contextIDZero...)
+		data = append(data, p...)
+		err = c.str.SendDatagram(data)
+		*bufPtr = data[:0]
+		proxiedConnWriteBufPool.Put(bufPtr)
+		return n, err
+	}
+	*bufPtr = data[:0]
+	proxiedConnWriteBufPool.Put(bufPtr)
+	b := make([]byte, 0, minCap)
+	b = append(b, contextIDZero...)
+	b = append(b, p...)
+	err = c.str.SendDatagram(b)
+	return n, err
 }
 
 func (c *proxiedConn) Close() error {
