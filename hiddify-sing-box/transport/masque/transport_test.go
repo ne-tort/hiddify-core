@@ -910,6 +910,43 @@ func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
 	}
 }
 
+func TestConnectIPUDPPacketConnReadFromDirectBufferNoStaging(t *testing.T) {
+	packet, err := buildIPv4UDPPacket(
+		netip.MustParseAddr("10.200.0.2"),
+		5601,
+		netip.MustParseAddr("198.18.0.2"),
+		53000,
+		[]byte("pong"),
+	)
+	if err != nil {
+		t.Fatalf("build packet: %v", err)
+	}
+	rec := &recordingIPPacketSession{readPacket: packet}
+	pc := newConnectIPUDPPacketConn(context.Background(), rec)
+	c := pc.(*connectIPUDPPacketConn)
+	if c.readBuffer != nil {
+		t.Fatal("expected lazy read buffer to be unset before first small-buffer read is skipped")
+	}
+	buf := make([]byte, connectIPUDPDirectReadMin)
+	n, addr, err := c.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read from: %v", err)
+	}
+	if n != 4 || string(buf[:n]) != "pong" {
+		t.Fatalf("unexpected payload after in-place shift: %q", buf[:n])
+	}
+	if c.readBuffer != nil {
+		t.Fatal("large-buffer ReadFrom must not allocate conn.readBuffer")
+	}
+	udpAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("unexpected addr type: %T", addr)
+	}
+	if udpAddr.Port != 5601 || udpAddr.IP.String() != "10.200.0.2" {
+		t.Fatalf("unexpected source addr: %v", udpAddr)
+	}
+}
+
 func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 	templateUDP, err := uritemplate.New("https://example.com/masque/udp/{target_host}/{target_port}")
 	if err != nil {

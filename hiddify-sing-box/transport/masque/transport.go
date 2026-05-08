@@ -45,6 +45,10 @@ var connectIPUDPWriteBufPool = sync.Pool{
 const defaultConnectIPDatagramCeilingMax = 1500
 const connectIPUDPWriteHardCap = 1152
 
+// connectIPUDPDirectReadMin is the minimum caller buffer size for CONNECT-IP UDP ReadFrom to
+// read the full IPv4 datagram straight into p (drops the staging copy via conn.readBuffer).
+const connectIPUDPDirectReadMin = 2048
+
 // connectIPDatagramCeilingMax is the inclusive upper bound for ConnectIPDatagramCeiling (full IP datagram bytes).
 // Default 1500 for typical QUIC interoperability; override with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535] for lab jumbo.
 func connectIPDatagramCeilingMax() int {
@@ -632,7 +636,6 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		localV4:         localV4,
 		localBind:       &net.UDPAddr{IP: localIP, Port: 53000},
 		pmtuState:       pmtuState,
-		readBuffer:      make([]byte, 64*1024),
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
 }
@@ -647,22 +650,42 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 	for {
-		n, err = c.session.ReadPacket(c.readBuffer)
+		var raw []byte
+		if len(p) >= connectIPUDPDirectReadMin {
+			n, err = c.session.ReadPacket(p)
+			raw = p[:n]
+		} else {
+			rb := c.readBuffer
+			if rb == nil {
+				rb = make([]byte, 64*1024)
+				c.readBuffer = rb
+			}
+			n, err = c.session.ReadPacket(rb)
+			raw = rb[:n]
+		}
 		if err != nil {
 			return 0, nil, err
 		}
 		connectIPCounters.engineIngressTotal.Add(1)
-		payload, src, srcPort, parseErr := parseIPv4UDPPacket(c.readBuffer[:n])
+		payloadOff, payloadLen, src, srcPort, parseErr := parseIPv4UDPPacketOffsets(raw)
 		if parseErr != nil {
 			incConnectIPEngineDropReason("read_parse")
 			continue
 		}
 		connectIPCounters.engineClassifiedTotal.Add(1)
-		copyLen := copy(p, payload)
 		src4 := src.As4()
 		c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], src4[:]...)
 		c.readScratchAddr.Port = int(srcPort)
-		return copyLen, &c.readScratchAddr, nil
+		if len(p) >= connectIPUDPDirectReadMin {
+			if payloadLen > len(p) {
+				return 0, nil, fmt.Errorf("connect-ip udp bridge: UDP payload exceeds read buffer (%d > %d)", payloadLen, len(p))
+			}
+			if payloadOff != 0 {
+				copy(p[:payloadLen], p[payloadOff:payloadOff+payloadLen])
+			}
+			return payloadLen, &c.readScratchAddr, nil
+		}
+		return copy(p, raw[payloadOff:payloadOff+payloadLen]), &c.readScratchAddr, nil
 	}
 }
 
@@ -1011,20 +1034,20 @@ func buildIPv4UDPPacketInplaceHeaderV4(buffer []byte, headerTemplate [28]byte, p
 	return packet, nil
 }
 
-func parseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort uint16, err error) {
+func parseIPv4UDPPacketOffsets(packet []byte) (payloadOff int, payloadLen int, src netip.Addr, srcPort uint16, err error) {
 	if len(packet) < 28 {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge packet too short")
+		return 0, 0, netip.Addr{}, 0, errors.New("connect-ip udp bridge packet too short")
 	}
 	version := packet[0] >> 4
 	if version != 4 {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects ipv4 packet")
+		return 0, 0, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects ipv4 packet")
 	}
 	ihl := int(packet[0]&0x0f) * 4
 	if ihl < 20 || len(packet) < ihl+8 {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid ipv4 header length")
+		return 0, 0, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid ipv4 header length")
 	}
 	if packet[9] != 17 {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects udp protocol")
+		return 0, 0, netip.Addr{}, 0, errors.New("connect-ip udp bridge expects udp protocol")
 	}
 	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
 	if totalLen <= 0 || totalLen > len(packet) {
@@ -1038,13 +1061,24 @@ func parseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort 
 	udpLen := int(binary.BigEndian.Uint16(packet[udpStart+4 : udpStart+6]))
 	udpPayloadStart := udpStart + 8
 	if udpLen < 8 || udpPayloadStart > totalLen {
-		return nil, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid udp length")
+		return 0, 0, netip.Addr{}, 0, errors.New("connect-ip udp bridge invalid udp length")
 	}
 	payloadEnd := udpStart + udpLen
 	if payloadEnd > totalLen {
 		payloadEnd = totalLen
 	}
-	return packet[udpPayloadStart:payloadEnd], srcAddr, srcPort, nil
+	if udpPayloadStart > payloadEnd {
+		return udpPayloadStart, 0, srcAddr, srcPort, nil
+	}
+	return udpPayloadStart, payloadEnd - udpPayloadStart, srcAddr, srcPort, nil
+}
+
+func parseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort uint16, err error) {
+	off, ln, addr, sport, err := parseIPv4UDPPacketOffsets(packet)
+	if err != nil {
+		return nil, netip.Addr{}, 0, err
+	}
+	return packet[off : off+ln], addr, sport, nil
 }
 
 func ipv4HeaderChecksum(header []byte) uint16 {
