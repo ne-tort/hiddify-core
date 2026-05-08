@@ -340,16 +340,14 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 }
 
 func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, error) {
-	// connect-ip-go mutates TTL/HopLimit in-place. Send a private copy
-	// to preserve deterministic packet semantics across retries/callers.
+	// connect-ip-go.Conn.WritePacket copies proxied IPv4/v6 payload into its own pooled
+	// compose buffer before decrementing TTL/Hop Limit (composeDatagram). The caller-owned
+	// slice is never mutated — no per-packet Clone was required beyond what WritePacket already does.
 	const maxAttempts = 3
-	basePayload := bytes.Clone(outbound)
-	attemptPayload := make([]byte, len(basePayload))
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		copy(attemptPayload, basePayload)
 		connectIPCounters.netstackWriteAttemptTotal.Add(1)
-		icmp, err := s.session.WritePacket(attemptPayload)
+		icmp, err := s.session.WritePacket(outbound)
 		if err == nil {
 			connectIPCounters.netstackWriteSuccessTotal.Add(1)
 			return icmp, nil
