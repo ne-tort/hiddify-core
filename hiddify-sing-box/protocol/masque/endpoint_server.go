@@ -239,11 +239,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		Handler:         mux,
 		TLSConfig:       http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{tlsCert}}),
 		EnableDatagrams: true,
-		QUICConfig: &quic.Config{
-			EnableDatagrams: true,
-			MaxIdleTimeout:  24 * time.Hour,
-			KeepAlivePeriod: 15 * time.Second,
-		},
+		QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
 	}
 	packetConn, err := net.ListenPacket("udp", addr)
 	if err != nil {
@@ -561,6 +557,9 @@ func (c *connectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 		if parseErr != nil {
 			connectIPServerParseDropTotal.Add(1)
 			buffer.Reset()
+			if c.deadlines.readTimeoutExceeded() {
+				return M.Socksaddr{}, os.ErrDeadlineExceeded
+			}
 			continue
 		}
 		if payloadStart > 0 || payloadEnd < n {
@@ -612,6 +611,9 @@ func (c *connectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 		destination, payloadStart, payloadEnd, parseErr := parseIPDestinationAndPayload(p[:n])
 		if parseErr != nil {
 			connectIPServerParseDropTotal.Add(1)
+			if c.deadlines.readTimeoutExceeded() {
+				return 0, nil, os.ErrDeadlineExceeded
+			}
 			continue
 		}
 		if payloadStart > 0 || payloadEnd < n {

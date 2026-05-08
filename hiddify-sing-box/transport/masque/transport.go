@@ -117,6 +117,14 @@ func newMasqueQUICConfig() *quic.Config {
 	})
 }
 
+// MasqueHTTPServerQUICConfig returns QUIC settings aligned with the MASQUE packet-plane
+// client (idle timeout, keepalive, InitialPacketSize, datagrams) for HTTP/3 server listeners.
+// The server previously used only partial defaults, diverging from dial paths and weakening
+// high-rate CONNECT-IP / CONNECT-UDP symmetry with the client stack.
+func MasqueHTTPServerQUICConfig() *quic.Config {
+	return newMasqueQUICConfig()
+}
+
 type ClientSession interface {
 	DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
 	ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
@@ -670,6 +678,9 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 		payloadOff, payloadLen, src, srcPort, parseErr := parseIPv4UDPPacketOffsets(raw)
 		if parseErr != nil {
 			incConnectIPEngineDropReason("read_parse")
+			if c.deadlines.readTimeoutExceeded() {
+				return 0, nil, os.ErrDeadlineExceeded
+			}
 			continue
 		}
 		connectIPCounters.engineClassifiedTotal.Add(1)
