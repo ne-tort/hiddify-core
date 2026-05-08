@@ -66,7 +66,10 @@ type stateTrackingStream struct {
 
 	sendDatagram func([]byte) error
 	hasData      chan struct{}
-	queue        [][]byte // TODO: use a ring buffer
+	// Fixed-capacity ring for inbound HTTP DATAGRAM frames (capacity = streamDatagramQueueLen).
+	dgSlots [][]byte
+	dgHead  int
+	dgCount int
 
 	mx      sync.Mutex
 	sendErr error
@@ -82,11 +85,16 @@ type streamClearer interface {
 }
 
 func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
+	capacity := streamDatagramQueueLen
+	if capacity < 1 {
+		capacity = 128
+	}
 	t := &stateTrackingStream{
 		Stream:       s,
 		clearer:      clearer,
 		sendDatagram: sendDatagram,
 		hasData:      make(chan struct{}, 1),
+		dgSlots:      make([][]byte, capacity),
 	}
 
 	context.AfterFunc(s.Context(), func() {
@@ -182,20 +190,25 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 		streamDatagramRecvClosedDropTotal.Add(1)
 		return
 	}
-	if len(s.queue) >= streamDatagramQueueLen {
+	if s.dgCount >= streamDatagramQueueLen {
 		streamDatagramQueueDropTotal.Add(1)
 		return
 	}
-	s.queue = append(s.queue, data)
+	idx := (s.dgHead + s.dgCount) % len(s.dgSlots)
+	s.dgSlots[idx] = data
+	s.dgCount++
 	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
+	if s.dgCount > 0 {
+		idx := s.dgHead
+		data := s.dgSlots[idx]
+		s.dgSlots[idx] = nil
+		s.dgHead = (s.dgHead + 1) % len(s.dgSlots)
+		s.dgCount--
 		s.mx.Unlock()
 		return data, nil
 	}
