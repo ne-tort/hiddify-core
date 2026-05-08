@@ -29,7 +29,10 @@ func StreamDatagramRecvClosedDropTotal() uint64 {
 	return streamDatagramRecvClosedDropTotal.Load()
 }
 
-const defaultStreamDatagramQueueLen = 4096
+// Default per-stream backlog was raised from 4096 after CONNECT-IP degrade_matrix triage showed
+// sink-side datagram gaps at high shaped rates without QUIC rcv-queue or packer oversize signals,
+// consistent with transient HTTP/3 per-stream enqueue outpacing application drain.
+const defaultStreamDatagramQueueLen = 8192
 
 // Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
 // CONNECT-IP / MASQUE bulk can exceed transient drain headroom when queue is too small.
