@@ -29,10 +29,10 @@ func StreamDatagramRecvClosedDropTotal() uint64 {
 	return streamDatagramRecvClosedDropTotal.Load()
 }
 
-// Default per-stream backlog was raised from 4096 after CONNECT-IP degrade_matrix triage showed
-// sink-side datagram gaps at high shaped rates without QUIC rcv-queue or packer oversize signals,
-// consistent with transient HTTP/3 per-stream enqueue outpacing application drain.
-const defaultStreamDatagramQueueLen = 8192
+// Default per-stream backlog: raised from 4096→8192→16384 as CONNECT-IP degrade_matrix triage
+// showed sink-side datagram gaps at high shaped rates (~130–140 Mbit) without QUIC rcv-queue or
+// packer oversize signals — transient HTTP/3 per-stream enqueue outpacing application drain.
+const defaultStreamDatagramQueueLen = 16384
 
 // Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
 // CONNECT-IP / MASQUE bulk can exceed transient drain headroom when queue is too small.
@@ -77,6 +77,9 @@ type stateTrackingStream struct {
 	mx      sync.Mutex
 	sendErr error
 	recvErr error
+	// recvClosed mirrors recvErr != nil for enqueueDatagram: cheap load before the ring mutex
+	// so closed streams stop taking the lock on every stray post-close DATAGRAM.
+	recvClosed atomic.Bool
 
 	clearer streamClearer
 }
@@ -132,6 +135,7 @@ func (s *stateTrackingStream) closeReceive(e error) {
 			s.clearer.clearStream(s.StreamID())
 		}
 		s.recvErr = e
+		s.recvClosed.Store(true)
 		s.signalHasDatagram()
 	}
 }
@@ -186,6 +190,10 @@ func (s *stateTrackingStream) signalHasDatagram() {
 }
 
 func (s *stateTrackingStream) enqueueDatagram(data []byte) {
+	if s.recvClosed.Load() {
+		streamDatagramRecvClosedDropTotal.Add(1)
+		return
+	}
 	s.mx.Lock()
 	if s.recvErr != nil {
 		s.mx.Unlock()
