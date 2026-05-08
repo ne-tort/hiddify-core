@@ -144,6 +144,19 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	}
 }
 
+// TryReceive dequeues one received DATAGRAM payload without blocking when the recv
+// queue already contains data (used to drain bursts on the HTTP/3 datagram goroutine).
+func (h *datagramQueue) TryReceive() ([]byte, bool) {
+	h.rcvMx.Lock()
+	defer h.rcvMx.Unlock()
+	if len(h.rcvQueue) == 0 {
+		return nil, false
+	}
+	data := h.rcvQueue[0]
+	h.rcvQueue = h.rcvQueue[1:]
+	return data, true
+}
+
 // Receive gets a received DATAGRAM frame.
 func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	for {

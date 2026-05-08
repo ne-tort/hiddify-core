@@ -178,3 +178,18 @@ func TestDatagramQueueClose(t *testing.T) {
 		}
 	})
 }
+
+func TestDatagramQueueTryReceiveBurst(t *testing.T) {
+	queue := newDatagramQueue(func() {}, utils.DefaultLogger)
+	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("a")})
+	queue.HandleDatagramFrame(&wire.DatagramFrame{Data: []byte("b")})
+
+	p, ok := queue.TryReceive()
+	require.True(t, ok)
+	require.Equal(t, []byte("a"), p)
+	p, ok = queue.TryReceive()
+	require.True(t, ok)
+	require.Equal(t, []byte("b"), p)
+	_, ok = queue.TryReceive()
+	require.False(t, ok)
+}

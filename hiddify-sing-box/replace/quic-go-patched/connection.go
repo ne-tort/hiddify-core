@@ -3079,6 +3079,16 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	return c.datagramQueue.Receive(ctx)
 }
 
+// TryReceiveDatagram returns immediately with the next received QUIC DATAGRAM payload when
+// one is already buffered. If none is queued, ok is false. Used to drain bursts after a
+// blocking ReceiveDatagram without per-frame scheduler hops.
+func (c *Conn) TryReceiveDatagram() ([]byte, bool) {
+	if !c.config.EnableDatagrams || c.datagramQueue == nil {
+		return nil, false
+	}
+	return c.datagramQueue.TryReceive()
+}
+
 // LocalAddr returns the local address of the QUIC connection.
 func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
 

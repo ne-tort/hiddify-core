@@ -345,41 +345,59 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 	return nil
 }
 
+func (c *rawConn) receiveDatagramDispatch(b []byte) error {
+	quarterStreamID, n, err := quicvarint.Parse(b)
+	if err != nil {
+		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+		return fmt.Errorf("could not read quarter stream id: %w", err)
+	}
+	if c.qlogger != nil {
+		c.qlogger.RecordEvent(qlog.DatagramParsed{
+			QuaterStreamID: quarterStreamID,
+			Raw: qlog.RawInfo{
+				Length:        len(b),
+				PayloadLength: len(b) - n,
+			},
+		})
+	}
+	if quarterStreamID > maxQuarterStreamID {
+		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
+		return fmt.Errorf("invalid quarter stream id: %d", quarterStreamID)
+	}
+	streamID := quic.StreamID(4 * quarterStreamID)
+	c.streamMx.RLock()
+	dg, ok := c.streams[streamID]
+	c.streamMx.RUnlock()
+	if !ok {
+		if !c.enqueueUnknownStreamDatagram(streamID, b[n:]) {
+			unknownStreamDatagramDropTotal.Add(1)
+		}
+		return nil
+	}
+	dg.enqueueDatagram(b[n:])
+	return nil
+}
+
 func (c *rawConn) receiveDatagrams() error {
 	for {
 		b, err := c.conn.ReceiveDatagram(context.Background())
 		if err != nil {
 			return err
 		}
-		quarterStreamID, n, err := quicvarint.Parse(b)
-		if err != nil {
-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
-			return fmt.Errorf("could not read quarter stream id: %w", err)
+		if err := c.receiveDatagramDispatch(b); err != nil {
+			return err
 		}
-		if c.qlogger != nil {
-			c.qlogger.RecordEvent(qlog.DatagramParsed{
-				QuaterStreamID: quarterStreamID,
-				Raw: qlog.RawInfo{
-					Length:        len(b),
-					PayloadLength: len(b) - n,
-				},
-			})
-		}
-		if quarterStreamID > maxQuarterStreamID {
-			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
-			return fmt.Errorf("invalid quarter stream id: %w", err)
-		}
-		streamID := quic.StreamID(4 * quarterStreamID)
-		c.streamMx.RLock()
-		dg, ok := c.streams[streamID]
-		c.streamMx.RUnlock()
-		if !ok {
-			if !c.enqueueUnknownStreamDatagram(streamID, b[n:]) {
-				unknownStreamDatagramDropTotal.Add(1)
+		// QUIC rcv buffers may already hold multiple frames; draining here cuts
+		// scheduling overhead between HTTP/3 routing and CONNECT-UDP/CONNECT-IP hot path.
+		for {
+			b2, ok := c.conn.TryReceiveDatagram()
+			if !ok {
+				break
 			}
-			continue
+			if err := c.receiveDatagramDispatch(b2); err != nil {
+				return err
+			}
 		}
-		dg.enqueueDatagram(b[n:])
 	}
 }
 
