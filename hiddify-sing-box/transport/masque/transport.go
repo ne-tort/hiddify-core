@@ -1968,9 +1968,20 @@ func maybeEmitConnectIPPTBObs(reason string) {
 	emitConnectIPObservabilityEvent(reason)
 }
 
+// Active OBS snapshots are capped at ~1 Hz; invoking time/cas logic on every
+// CONNECT-IP datagram RX/TX was measurable overhead under high throughput.
+var connectIPActiveObsSampleCounter atomic.Uint64
+
+// connectIPActiveObsSampleMask=127 → time-based throttle roughly every 128 hot-path calls once last emit exists.
+const connectIPActiveObsSampleMask = uint64(127)
+
 func maybeEmitConnectIPActiveSnapshot() {
-	now := time.Now().UnixMilli()
+	n := connectIPActiveObsSampleCounter.Add(1)
 	last := connectIPCounters.lastActiveEmitUnixMilli.Load()
+	if last != 0 && (n&connectIPActiveObsSampleMask) != 0 {
+		return
+	}
+	now := time.Now().UnixMilli()
 	if last != 0 && now-last < 1000 {
 		return
 	}
