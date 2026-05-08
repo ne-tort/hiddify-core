@@ -171,6 +171,15 @@ var datagramPool = sync.Pool{
 	},
 }
 
+// connRouteView is an immutable snapshot of Connect-IP policy inputs.
+// QUIC datagram read/write paths load it atomically so they never contend
+// with sync.RWMutex on Conn for each packet while route state is mutated rarely.
+type connRouteView struct {
+	peerAddresses     []netip.Prefix
+	localRoutes       []IPRoute
+	assignedAddresses []netip.Prefix
+}
+
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
 	str    http3Stream
@@ -179,14 +188,24 @@ type Conn struct {
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
 
-	mu                sync.RWMutex
+	mu                sync.Mutex
 	peerAddresses     []netip.Prefix // IP prefixes that we assigned to the peer
 	localRoutes       []IPRoute      // IP routes that we advertised to the peer
 	assignedAddresses []netip.Prefix
 	availableRoutes   []IPRoute
 
+	routeView atomic.Pointer[connRouteView]
+
 	closeChan chan struct{}
 	closeErr  error
+}
+
+func (c *Conn) publishRouteViewLocked() {
+	c.routeView.Store(&connRouteView{
+		peerAddresses:     slices.Clone(c.peerAddresses),
+		localRoutes:       slices.Clone(c.localRoutes),
+		assignedAddresses: slices.Clone(c.assignedAddresses),
+	})
 }
 
 func (c *Conn) failClosed(err error) error {
@@ -232,6 +251,7 @@ func newProxiedConn(str http3Stream) *Conn {
 			c.mu.Unlock()
 		}
 	}()
+	c.routeView.Store(&connRouteView{})
 	return c
 }
 
@@ -244,6 +264,7 @@ func (c *Conn) AdvertiseRoute(ctx context.Context, routes []IPRoute) error {
 	}
 	c.mu.Lock()
 	c.localRoutes = slices.Clone(routes)
+	c.publishRouteViewLocked()
 	c.mu.Unlock()
 	return c.sendCapsule(ctx, &routeAdvertisementCapsule{IPAddressRanges: routes})
 }
@@ -254,6 +275,7 @@ func (c *Conn) AdvertiseRoute(ctx context.Context, routes []IPRoute) error {
 func (c *Conn) AssignAddresses(ctx context.Context, prefixes []netip.Prefix) error {
 	c.mu.Lock()
 	c.peerAddresses = slices.Clone(prefixes)
+	c.publishRouteViewLocked()
 	c.mu.Unlock()
 	capsule := &addressAssignCapsule{AssignedAddresses: make([]AssignedAddress, 0, len(prefixes))}
 	for _, p := range prefixes {
@@ -334,6 +356,7 @@ func (c *Conn) readFromStream() error {
 			}
 			c.mu.Lock()
 			c.assignedAddresses = prefixes
+			c.publishRouteViewLocked()
 			c.mu.Unlock()
 			select {
 			case c.assignedAddressNotify <- struct{}{}:
@@ -411,7 +434,11 @@ func (c *Conn) ReadPacket(b []byte) (n int, err error) {
 			log.Printf("dropping proxied packet: %s", err)
 			continue
 		}
-		return copy(b, data[n:]), nil
+		payload := data[n:]
+		if len(payload) > len(b) {
+			return 0, fmt.Errorf("connect-ip: read buffer too short (need %d bytes)", len(payload))
+		}
+		return copy(b, payload), nil
 	}
 }
 
@@ -424,11 +451,15 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 		return err
 	}
 
-	c.mu.RLock()
-	assignedAddresses := c.assignedAddresses
-	localRoutes := c.localRoutes
-	peerAddresses := c.peerAddresses
-	c.mu.RUnlock()
+	view := c.routeView.Load()
+	var assignedAddresses []netip.Prefix
+	var localRoutes []IPRoute
+	var peerAddresses []netip.Prefix
+	if view != nil {
+		assignedAddresses = view.assignedAddresses
+		localRoutes = view.localRoutes
+		peerAddresses = view.peerAddresses
+	}
 
 	// We don't necessarily assign any addresses to the peer.
 	// For example, in the Remote Access VPN use case (RFC 9484, section 8.1),
@@ -580,11 +611,15 @@ func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 }
 
 func (c *Conn) validateOutgoingProxiedPacket(packet []byte) error {
-	c.mu.RLock()
-	assignedAddresses := c.assignedAddresses
-	localRoutes := c.localRoutes
-	peerAddresses := c.peerAddresses
-	c.mu.RUnlock()
+	view := c.routeView.Load()
+	var assignedAddresses []netip.Prefix
+	var localRoutes []IPRoute
+	var peerAddresses []netip.Prefix
+	if view != nil {
+		assignedAddresses = view.assignedAddresses
+		localRoutes = view.localRoutes
+		peerAddresses = view.peerAddresses
+	}
 	if len(assignedAddresses) == 0 && len(localRoutes) == 0 && peerAddresses == nil {
 		return nil
 	}
