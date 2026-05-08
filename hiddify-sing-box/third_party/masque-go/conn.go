@@ -113,21 +113,17 @@ func (c *proxiedConn) extendPrefetchFromTry() {
 	if !ok {
 		return
 	}
-	for {
-		c.prefetchMu.Lock()
-		if c.prefetchCount >= proxiedConnPrefetchMax {
-			c.prefetchMu.Unlock()
-			return
-		}
+	// Batch drain under one prefetchMu (avoids lock/unlock per datagram).
+	c.prefetchMu.Lock()
+	defer c.prefetchMu.Unlock()
+	for c.prefetchCount < proxiedConnPrefetchMax {
 		raw, ok := dr.TryReceiveDatagram()
 		if !ok {
-			c.prefetchMu.Unlock()
 			return
 		}
 		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
 		c.prefetchSlots[tail] = raw
 		c.prefetchCount++
-		c.prefetchMu.Unlock()
 	}
 }
 

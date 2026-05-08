@@ -290,21 +290,17 @@ func (c *Conn) extendPrefetchFromTry() {
 	if !ok {
 		return
 	}
-	for {
-		c.prefetchMu.Lock()
-		if c.prefetchCount >= connReadPrefetchMax {
-			c.prefetchMu.Unlock()
-			return
-		}
+	// Batch drain under one prefetchMu (CONNECT-IP hot path).
+	c.prefetchMu.Lock()
+	defer c.prefetchMu.Unlock()
+	for c.prefetchCount < connReadPrefetchMax {
 		raw, ok := dr.TryReceiveDatagram()
 		if !ok {
-			c.prefetchMu.Unlock()
 			return
 		}
 		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
 		c.prefetchSlots[tail] = raw
 		c.prefetchCount++
-		c.prefetchMu.Unlock()
 	}
 }
 
