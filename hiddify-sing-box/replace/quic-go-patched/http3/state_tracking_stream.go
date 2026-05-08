@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -19,10 +20,39 @@ func StreamDatagramQueueDropTotal() uint64 {
 	return streamDatagramQueueDropTotal.Load()
 }
 
+// streamDatagramRecvClosedDropTotal counts DATAGRAM frames dropped because ReceiveDatagram
+// side already failed/closed (enqueueDatagram silent drop).
+var streamDatagramRecvClosedDropTotal atomic.Uint64
+
+// StreamDatagramRecvClosedDropTotal returns enqueueDatagram drops after recv-side close (process-wide).
+func StreamDatagramRecvClosedDropTotal() uint64 {
+	return streamDatagramRecvClosedDropTotal.Load()
+}
+
+const defaultStreamDatagramQueueLen = 4096
+
 // Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
-// CONNECT-IP / MASQUE bulk can exceed transient drain headroom when this is tiny (e.g. 128
-// fills in sub-millisecond bursts at high MB/s with ~1.2KiB QUIC payloads).
-const streamDatagramQueueLen = 1024
+// CONNECT-IP / MASQUE bulk can exceed transient drain headroom when queue is too small.
+// Keep it configurable for constrained hosts while defaulting to a safer high-rate headroom.
+var streamDatagramQueueLen = loadStreamDatagramQueueLen()
+
+func loadStreamDatagramQueueLen() int {
+	raw := os.Getenv("HIDDIFY_HTTP3_STREAM_DATAGRAM_QUEUE_LEN")
+	if raw == "" {
+		return defaultStreamDatagramQueueLen
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultStreamDatagramQueueLen
+	}
+	if v < 128 {
+		return 128
+	}
+	if v > 65536 {
+		return 65536
+	}
+	return v
+}
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -149,6 +179,7 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	defer s.mx.Unlock()
 
 	if s.recvErr != nil {
+		streamDatagramRecvClosedDropTotal.Add(1)
 		return
 	}
 	if len(s.queue) >= streamDatagramQueueLen {

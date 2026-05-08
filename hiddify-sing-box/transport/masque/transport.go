@@ -43,6 +43,7 @@ var connectIPUDPWriteBufPool = sync.Pool{
 }
 
 const defaultConnectIPDatagramCeilingMax = 1500
+const connectIPUDPWriteHardCap = 1152
 
 // connectIPDatagramCeilingMax is the inclusive upper bound for ConnectIPDatagramCeiling (full IP datagram bytes).
 // Default 1500 for typical QUIC interoperability; override with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535] for lab jumbo.
@@ -341,6 +342,9 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 	if initialPayload < 512 {
 		initialPayload = 512
 	}
+	if initialPayload > connectIPUDPWriteHardCap {
+		initialPayload = connectIPUDPWriteHardCap
+	}
 	masqueUDPWriteMax := effectiveCeiling - 120
 	if masqueUDPWriteMax < 512 {
 		masqueUDPWriteMax = 512
@@ -605,6 +609,9 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 	if maxUDPPayload <= 0 {
 		maxUDPPayload = 512
 	}
+	if maxUDPPayload > connectIPUDPWriteHardCap {
+		maxUDPPayload = connectIPUDPWriteHardCap
+	}
 	pmtuState.mu.Lock()
 	pmtuState.maxPayload.Store(int64(maxUDPPayload))
 	cur := pmtuState.currentPayload.Load()
@@ -698,39 +705,61 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 		if end > len(p) {
 			end = len(p)
 		}
-		packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(writeBuf, headerTemplate, p[offset:end])
-		if buildErr != nil {
-			connectIPCounters.bridgeWriteErrTotal.Add(1)
-			connectIPCounters.mu.Lock()
-			connectIPCounters.bridgeWriteErrByReason["build_packet"]++
-			connectIPCounters.mu.Unlock()
-			return 0, buildErr
-		}
-		connectIPCounters.bridgeBuildTotal.Add(1)
-		writeBuf = packet[:0]
-		*bufPtr = writeBuf
-		icmp, writeErr := c.session.WritePacket(packet)
-		err = writeErr
-		if err != nil {
+		// MTU/oversize spikes can happen on high-rate bursts. Shrink payload and retry
+		// locally before failing the whole WriteTo to reduce avoidable packet loss.
+		const localMTURetryMax = 3
+		localRetries := 0
+		for {
+			packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(writeBuf, headerTemplate, p[offset:end])
+			if buildErr != nil {
+				connectIPCounters.bridgeWriteErrTotal.Add(1)
+				connectIPCounters.mu.Lock()
+				connectIPCounters.bridgeWriteErrByReason["build_packet"]++
+				connectIPCounters.mu.Unlock()
+				return 0, buildErr
+			}
+			connectIPCounters.bridgeBuildTotal.Add(1)
+			writeBuf = packet[:0]
+			*bufPtr = writeBuf
+			icmp, writeErr := c.session.WritePacket(packet)
+			err = writeErr
+			if err == nil {
+				connectIPCounters.bridgeWriteOkTotal.Add(1)
+				connectIPCounters.engineClassifiedTotal.Add(1)
+				// Active snapshot cadence runs in connectIPPacketSession.WritePacket (below);
+				// avoid duplicate maybeEmit per datagram (syscalls + atomic contention).
+				if len(icmp) > 0 {
+					connectIPCounters.engineICMPFeedbackTotal.Add(1)
+					if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
+						maxPayload = c.applyPTBToUDPPayload(ipMTU, isV6)
+					} else {
+						maxPayload = c.decreasePayloadCeiling("ptb_feedback")
+					}
+				} else {
+					maxPayload = c.maybeRecoverPayloadCeiling()
+				}
+				break
+			}
+			if classifyConnectIPErrorReason(err) == "mtu" && localRetries < localMTURetryMax {
+				nextPayload := c.decreasePayloadCeiling("local_mtu_error")
+				if nextPayload > 0 {
+					nextEnd := offset + nextPayload
+					if nextEnd > len(p) {
+						nextEnd = len(p)
+					}
+					// Retry only when chunk size can shrink (otherwise would spin).
+					if nextEnd > offset && nextEnd < end {
+						end = nextEnd
+						localRetries++
+						continue
+					}
+				}
+			}
 			connectIPCounters.bridgeWriteErrTotal.Add(1)
 			connectIPCounters.mu.Lock()
 			connectIPCounters.bridgeWriteErrByReason["session_write_packet"]++
 			connectIPCounters.mu.Unlock()
 			return 0, err
-		}
-		connectIPCounters.bridgeWriteOkTotal.Add(1)
-		connectIPCounters.engineClassifiedTotal.Add(1)
-		// Active snapshot cadence runs in connectIPPacketSession.WritePacket (below);
-		// avoid duplicate maybeEmit per datagram (syscalls + atomic contention).
-		if len(icmp) > 0 {
-			connectIPCounters.engineICMPFeedbackTotal.Add(1)
-			if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
-				maxPayload = c.applyPTBToUDPPayload(ipMTU, isV6)
-			} else {
-				maxPayload = c.decreasePayloadCeiling("ptb_feedback")
-			}
-		} else {
-			maxPayload = c.maybeRecoverPayloadCeiling()
 		}
 		offset = end
 	}
@@ -2083,7 +2112,11 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_policy_drop_icmp_attempt_total":   connectip.PolicyDropICMPAttemptTotal(),
 		"connect_ip_policy_drop_icmp_reason_total":    policyDropICMPReasonSnapshot(),
 		// Process-wide HTTP/3 per-stream DATAGRAM queue drops (patched quic-go http3); correlates with bulk/burst loss.
-		"http3_stream_datagram_queue_drop_total": http3.StreamDatagramQueueDropTotal(),
+		"http3_stream_datagram_queue_drop_total":     http3.StreamDatagramQueueDropTotal(),
+		"http3_stream_datagram_recv_closed_drop_total": http3.StreamDatagramRecvClosedDropTotal(),
+		// Process-wide drops for DATAGRAM frames mapped to unknown HTTP/3 stream IDs.
+		// Indicates mapping/lifecycle mismatches without stopping the receive loop.
+		"http3_datagram_unknown_stream_drop_total": http3.UnknownStreamDatagramDropTotal(),
 		// QUIC conn-level DATAGRAM receive-queue overflow (patched quic-go datagram_queue.go).
 		"quic_datagram_rcv_queue_drop_total": quic.DatagramReceiveQueueDropTotal(),
 		// QUIC packet-packer DATAGRAM oversize drops (frame too large for remaining packet budget AND no co-packed ACK).

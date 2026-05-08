@@ -22,6 +22,17 @@ const maxQuarterStreamID = 1<<60 - 1
 // invalidStreamID is a stream ID that is invalid. The first valid stream ID in QUIC is 0.
 const invalidStreamID = quic.StreamID(-1)
 
+var unknownStreamDatagramDropTotal atomic.Uint64
+
+// UnknownStreamDatagramDropTotal returns process-wide count of DATAGRAM frames
+// dropped because they referenced an unknown HTTP/3 stream mapping.
+func UnknownStreamDatagramDropTotal() uint64 {
+	return unknownStreamDatagramDropTotal.Load()
+}
+
+const unknownStreamPendingQueuePerStream = 64
+const unknownStreamPendingQueueGlobal = 4096
+
 // rawConn is an HTTP/3 connection.
 // It provides HTTP/3 specific functionality by wrapping a quic.Conn,
 // in particular handling of unidirectional HTTP/3 streams, SETTINGS and datagrams.
@@ -34,6 +45,10 @@ type rawConn struct {
 
 	streamMx sync.Mutex
 	streams  map[quic.StreamID]*stateTrackingStream
+	// pendingDatagrams buffers DATAGRAM payloads that arrived before TrackStream mapping.
+	// This narrows setup-race loss for high-rate MASQUE traffic.
+	pendingDatagrams map[quic.StreamID][][]byte
+	pendingCount     int
 
 	rcvdControlStr      atomic.Bool
 	rcvdQPACKEncoderStr atomic.Bool
@@ -63,6 +78,7 @@ func newRawConn(
 		enableDatagrams:   enableDatagrams,
 		receivedSettings:  make(chan struct{}),
 		streams:           make(map[quic.StreamID]*stateTrackingStream),
+		pendingDatagrams:  make(map[quic.StreamID][][]byte),
 		qlogger:           qlogger,
 		onStreamsEmpty:    onStreamsEmpty,
 		controlStrHandler: controlStrHandler,
@@ -116,10 +132,19 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream, 
 func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
 	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
 
+	var pending [][]byte
 	c.streamMx.Lock()
 	c.streams[str.StreamID()] = hstr
+	if queued, ok := c.pendingDatagrams[str.StreamID()]; ok {
+		pending = queued
+		c.pendingCount -= len(queued)
+		delete(c.pendingDatagrams, str.StreamID())
+	}
 	c.qloggerWG.Add(1)
 	c.streamMx.Unlock()
+	for _, d := range pending {
+		hstr.enqueueDatagram(d)
+	}
 	return hstr
 }
 
@@ -139,9 +164,55 @@ func (c *rawConn) clearStream(id quic.StreamID) {
 		delete(c.streams, id)
 		c.qloggerWG.Done()
 	}
+	if pending, ok := c.pendingDatagrams[id]; ok {
+		c.pendingCount -= len(pending)
+		delete(c.pendingDatagrams, id)
+	}
 	if len(c.streams) == 0 {
 		c.onStreamsEmpty()
 	}
+}
+
+func (c *rawConn) evictOnePendingDatagramLocked() bool {
+	for sid, q := range c.pendingDatagrams {
+		if len(q) == 0 {
+			delete(c.pendingDatagrams, sid)
+			continue
+		}
+		if len(q) == 1 {
+			delete(c.pendingDatagrams, sid)
+		} else {
+			c.pendingDatagrams[sid] = q[1:]
+		}
+		c.pendingCount--
+		return true
+	}
+	return false
+}
+
+func (c *rawConn) enqueueUnknownStreamDatagram(streamID quic.StreamID, payload []byte) bool {
+	c.streamMx.Lock()
+	defer c.streamMx.Unlock()
+	if _, known := c.streams[streamID]; known {
+		return false
+	}
+	q := c.pendingDatagrams[streamID]
+	if len(q) >= unknownStreamPendingQueuePerStream {
+		// Keep recent datagrams for stream-setup race windows.
+		q = q[1:]
+		c.pendingCount--
+		unknownStreamDatagramDropTotal.Add(1)
+	}
+	if c.pendingCount >= unknownStreamPendingQueueGlobal {
+		if !c.evictOnePendingDatagramLocked() {
+			return false
+		}
+		unknownStreamDatagramDropTotal.Add(1)
+	}
+	cp := append([]byte(nil), payload...)
+	c.pendingDatagrams[streamID] = append(q, cp)
+	c.pendingCount++
+	return true
 }
 
 func (c *rawConn) hasActiveStreams() bool {
@@ -300,6 +371,9 @@ func (c *rawConn) receiveDatagrams() error {
 		dg, ok := c.streams[streamID]
 		c.streamMx.Unlock()
 		if !ok {
+			if !c.enqueueUnknownStreamDatagram(streamID, b[n:]) {
+				unknownStreamDatagramDropTotal.Add(1)
+			}
 			continue
 		}
 		dg.enqueueDatagram(b[n:])

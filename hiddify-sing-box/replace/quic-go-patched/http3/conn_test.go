@@ -394,13 +394,15 @@ func TestConnSendAndReceiveDatagram(t *testing.T) {
 
 	const strID = 4
 
-	// first deliver a datagram...
-	// since the stream is not open yet, it will be dropped
+	// first deliver a datagram before stream tracking.
+	// It should be buffered and delivered once TrackStream installs mapping.
 	quarterStreamID := quicvarint.Append([]byte{}, strID/4)
+	unknownDropBefore := UnknownStreamDatagramDropTotal()
 
 	datagram := append(quarterStreamID, []byte("foo")...)
 	require.NoError(t, serverConn.SendDatagram(datagram))
 	time.Sleep(scaleDuration(10 * time.Millisecond)) // give the datagram a chance to be delivered
+	require.Equal(t, unknownDropBefore, UnknownStreamDatagramDropTotal())
 
 	require.Equal(t,
 		[]qlogwriter.Event{
@@ -427,6 +429,9 @@ func TestConnSendAndReceiveDatagram(t *testing.T) {
 	require.NoError(t, serverConn.SendDatagram(append(quarterStreamID, []byte("bar")...)))
 
 	data, err := datagramStr.ReceiveDatagram(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []byte("foo"), data)
+	data, err = datagramStr.ReceiveDatagram(ctx)
 	require.NoError(t, err)
 	require.Equal(t, []byte("bar"), data)
 
