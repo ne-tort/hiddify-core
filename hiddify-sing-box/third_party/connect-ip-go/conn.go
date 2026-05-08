@@ -47,6 +47,12 @@ type http3Stream interface {
 	CancelRead(quic.StreamErrorCode)
 }
 
+// tryDrainHTTPDatagrams pulls additional READY datagrams from the HTTP/3 stream queue without blocking.
+// This reduces CONNECT-IP/MASQUE ingress drop risk when QUIC→HTTP routed faster than sing-box consumes ReadPacket().
+type tryDrainHTTPDatagrams interface {
+	TryReceiveDatagram() ([]byte, bool)
+}
+
 var (
 	_ http3Stream = &http3.Stream{}
 	_ http3Stream = &http3.RequestStream{}
@@ -180,10 +186,17 @@ type connRouteView struct {
 	assignedAddresses []netip.Prefix
 }
 
+// connReadPrefetchMax bounds how many additional HTTP DATAGRAM frames we clone between ReadPacket calls.
+// Draining TryReceiveDatagram frees ring slots promptly when the QUIC→HTTP ingress outpaces callers.
+const connReadPrefetchMax = 512
+
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
 	str    http3Stream
 	writes chan writeCapsule
+
+	prefetchMu  sync.Mutex
+	prefetchRaw [][]byte
 
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
@@ -253,6 +266,46 @@ func newProxiedConn(str http3Stream) *Conn {
 	}()
 	c.routeView.Store(&connRouteView{})
 	return c
+}
+
+func (c *Conn) takePrefetchedRaw() ([]byte, bool) {
+	c.prefetchMu.Lock()
+	defer c.prefetchMu.Unlock()
+	if len(c.prefetchRaw) == 0 {
+		return nil, false
+	}
+	d := c.prefetchRaw[0]
+	copy(c.prefetchRaw, c.prefetchRaw[1:])
+	c.prefetchRaw = c.prefetchRaw[:len(c.prefetchRaw)-1]
+	return d, true
+}
+
+func (c *Conn) extendPrefetchFromTry() {
+	dr, ok := c.str.(tryDrainHTTPDatagrams)
+	if !ok {
+		return
+	}
+	for {
+		var headroom int
+		c.prefetchMu.Lock()
+		n := len(c.prefetchRaw)
+		if n < connReadPrefetchMax {
+			headroom = connReadPrefetchMax - n
+		}
+		c.prefetchMu.Unlock()
+		if headroom <= 0 {
+			return
+		}
+		raw, ok := dr.TryReceiveDatagram()
+		if !ok {
+			return
+		}
+		c.prefetchMu.Lock()
+		if len(c.prefetchRaw) < connReadPrefetchMax {
+			c.prefetchRaw = append(c.prefetchRaw, slices.Clone(raw))
+		}
+		c.prefetchMu.Unlock()
+	}
 }
 
 // AdvertiseRoute informs the peer about available routes.
@@ -411,16 +464,24 @@ func (c *Conn) writeToStream() error {
 
 func (c *Conn) ReadPacket(b []byte) (n int, err error) {
 	for {
-		data, err := c.str.ReceiveDatagram(context.Background())
-		if err != nil {
-			select {
-			case <-c.closeChan:
-				return 0, c.closeErr
-			default:
-				return 0, err
+		var data []byte
+		var recvErr error
+
+		if raw, ok := c.takePrefetchedRaw(); ok {
+			data = raw
+		} else {
+			data, recvErr = c.str.ReceiveDatagram(context.Background())
+			if recvErr != nil {
+				select {
+				case <-c.closeChan:
+					return 0, c.closeErr
+				default:
+					return 0, recvErr
+				}
 			}
 		}
-		contextID, n, err := quicvarint.Parse(data)
+
+		contextID, prefixLen, err := quicvarint.Parse(data)
 		if err != nil {
 			malformedDatagramTotal.Add(1)
 			return 0, c.failClosed(fmt.Errorf("connect-ip: malformed datagram: %w", err))
@@ -430,15 +491,17 @@ func (c *Conn) ReadPacket(b []byte) (n int, err error) {
 			unknownContextDatagramTotal.Add(1)
 			continue
 		}
-		if err := c.handleIncomingProxiedPacket(data[n:]); err != nil {
+		if err := c.handleIncomingProxiedPacket(data[prefixLen:]); err != nil {
 			log.Printf("dropping proxied packet: %s", err)
 			continue
 		}
-		payload := data[n:]
+		payload := data[prefixLen:]
 		if len(payload) > len(b) {
 			return 0, fmt.Errorf("connect-ip: read buffer too short (need %d bytes)", len(payload))
 		}
-		return copy(b, payload), nil
+		outN := copy(b, payload)
+		c.extendPrefetchFromTry()
+		return outN, nil
 	}
 }
 

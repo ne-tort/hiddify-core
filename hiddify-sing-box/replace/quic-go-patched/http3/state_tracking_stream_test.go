@@ -300,6 +300,31 @@ func TestDatagramReceiving(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestTryReceiveDatagram(t *testing.T) {
+	client, _ := newStreamPair(t)
+
+	str := newStateTrackingStream(client, nil, func(b []byte) error { return nil })
+	_, ok := str.TryReceiveDatagram()
+	require.False(t, ok)
+
+	str.enqueueDatagram([]byte("a"))
+	data, ok := str.TryReceiveDatagram()
+	require.True(t, ok)
+	require.Equal(t, []byte("a"), data)
+
+	_, ok = str.TryReceiveDatagram()
+	require.False(t, ok)
+
+	str.enqueueDatagram([]byte("b"))
+	str.enqueueDatagram([]byte("c"))
+	d2, ok := str.TryReceiveDatagram()
+	require.True(t, ok)
+	require.Equal(t, []byte("b"), d2)
+	d3, err := str.ReceiveDatagram(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []byte("c"), d3)
+}
+
 func TestDatagramSending(t *testing.T) {
 	var sendQueue [][]byte
 	errors := []error{nil, nil, assert.AnError}

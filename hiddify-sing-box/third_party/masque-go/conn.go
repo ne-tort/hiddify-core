@@ -40,6 +40,13 @@ type http3Stream interface {
 	CancelRead(quic.StreamErrorCode)
 }
 
+// tryDrainHTTPDatagrams exposes a non-blocking datagram dequeue when using quic-go's HTTP/3 implementation.
+type tryDrainHTTPDatagrams interface {
+	TryReceiveDatagram() ([]byte, bool)
+}
+
+const proxiedConnPrefetchMax = 512
+
 var (
 	_ http3Stream = &http3.Stream{}
 	_ http3Stream = &http3.RequestStream{}
@@ -52,6 +59,9 @@ type proxiedConn struct {
 
 	closed   atomic.Bool // set when Close is called
 	readDone chan struct{}
+
+	prefetchMu sync.Mutex
+	prefetch   [][]byte
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -80,27 +90,74 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	return c
 }
 
+func (c *proxiedConn) takePrefetched() ([]byte, bool) {
+	c.prefetchMu.Lock()
+	defer c.prefetchMu.Unlock()
+	if len(c.prefetch) == 0 {
+		return nil, false
+	}
+	d := c.prefetch[0]
+	copy(c.prefetch, c.prefetch[1:])
+	c.prefetch = c.prefetch[:len(c.prefetch)-1]
+	return d, true
+}
+
+func (c *proxiedConn) extendPrefetchFromTry() {
+	dr, ok := c.str.(tryDrainHTTPDatagrams)
+	if !ok {
+		return
+	}
+	for {
+		var headroom int
+		c.prefetchMu.Lock()
+		n := len(c.prefetch)
+		if n < proxiedConnPrefetchMax {
+			headroom = proxiedConnPrefetchMax - n
+		}
+		c.prefetchMu.Unlock()
+		if headroom <= 0 {
+			return
+		}
+		raw, ok := dr.TryReceiveDatagram()
+		if !ok {
+			return
+		}
+		dup := append([]byte(nil), raw...)
+		c.prefetchMu.Lock()
+		if len(c.prefetch) < proxiedConnPrefetchMax {
+			c.prefetch = append(c.prefetch, dup)
+		}
+		c.prefetchMu.Unlock()
+	}
+}
+
 func (c *proxiedConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 start:
 	c.deadlineMx.Lock()
 	ctx := c.readCtx
 	c.deadlineMx.Unlock()
-	data, err := c.str.ReceiveDatagram(ctx)
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			return 0, nil, err
+
+	var data []byte
+	if raw, ok := c.takePrefetched(); ok {
+		data = raw
+	} else {
+		data, err = c.str.ReceiveDatagram(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				return 0, nil, err
+			}
+			// The context is cancelled asynchronously (in a Go routine spawned from time.AfterFunc).
+			// We need to check if a new deadline has already been set.
+			c.deadlineMx.Lock()
+			restart := time.Now().Before(c.deadline)
+			c.deadlineMx.Unlock()
+			if restart {
+				goto start
+			}
+			return 0, nil, os.ErrDeadlineExceeded
 		}
-		// The context is cancelled asynchronously (in a Go routine spawned from time.AfterFunc).
-		// We need to check if a new deadline has already been set.
-		c.deadlineMx.Lock()
-		restart := time.Now().Before(c.deadline)
-		c.deadlineMx.Unlock()
-		if restart {
-			goto start
-		}
-		return 0, nil, os.ErrDeadlineExceeded
 	}
-	contextID, n, err := quicvarint.Parse(data)
+	contextID, prefixLen, err := quicvarint.Parse(data)
 	if err != nil {
 		return 0, nil, fmt.Errorf("masque: malformed datagram: %w", err)
 	}
@@ -110,7 +167,9 @@ start:
 	}
 	// If b is too small, additional bytes are discarded.
 	// This mirrors the behavior of large UDP datagrams received on a UDP socket (on Linux).
-	return copy(b, data[n:]), c.remoteAddr, nil
+	n = copy(b, data[prefixLen:])
+	c.extendPrefetchFromTry()
+	return n, c.remoteAddr, nil
 }
 
 // WriteTo sends a UDP datagram to the target.

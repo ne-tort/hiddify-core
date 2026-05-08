@@ -214,6 +214,22 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	s.signalHasDatagram()
 }
 
+// TryReceiveDatagram returns immediately with the next queued HTTP DATAGRAM when one is pending.
+// Mirrors quic.Conn.TryReceiveDatagram: if no datagram is ready, reports (!ok).
+func (s *stateTrackingStream) TryReceiveDatagram() ([]byte, bool) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+	if s.dgCount > 0 {
+		idx := s.dgHead
+		data := s.dgSlots[idx]
+		s.dgSlots[idx] = nil
+		s.dgHead = (s.dgHead + 1) % len(s.dgSlots)
+		s.dgCount--
+		return data, true
+	}
+	return nil, false
+}
+
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()

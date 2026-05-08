@@ -153,6 +153,17 @@ func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	return s.datagramStream.ReceiveDatagram(ctx)
 }
 
+// TryReceiveDatagram exposes a non-blocking datagram dequeue when the underlying stream supports it.
+func (s *Stream) TryReceiveDatagram() ([]byte, bool) {
+	type tryStream interface {
+		TryReceiveDatagram() ([]byte, bool)
+	}
+	if ts, ok := s.datagramStream.(tryStream); ok {
+		return ts.TryReceiveDatagram()
+	}
+	return nil, false
+}
+
 // A RequestStream is a low-level abstraction representing an HTTP/3 request stream.
 // It decouples sending of the HTTP request from reading the HTTP response, allowing
 // the application to optimistically use the stream (and, for example, send datagrams)
@@ -278,6 +289,11 @@ func (s *RequestStream) SendDatagram(b []byte) error {
 // option on the [Transport].
 func (s *RequestStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	return s.str.ReceiveDatagram(ctx)
+}
+
+// TryReceiveDatagram exposes a non-blocking datagram dequeue (see Stream.TryReceiveDatagram).
+func (s *RequestStream) TryReceiveDatagram() ([]byte, bool) {
+	return s.str.TryReceiveDatagram()
 }
 
 // SendRequestHeader sends the HTTP request.
