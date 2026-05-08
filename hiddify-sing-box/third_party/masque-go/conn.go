@@ -60,8 +60,11 @@ type proxiedConn struct {
 	closed   atomic.Bool // set when Close is called
 	readDone chan struct{}
 
-	prefetchMu sync.Mutex
-	prefetch   [][]byte
+	// O(1) dequeue: bounded ring of datagrams drained via TryReceiveDatagram between ReadFrom calls.
+	prefetchMu    sync.Mutex
+	prefetchSlots [][]byte
+	prefetchHead  int
+	prefetchCount int
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -74,10 +77,11 @@ var _ net.PacketConn = &proxiedConn{}
 
 func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	c := &proxiedConn{
-		str:        str,
-		localAddr:  local,
-		remoteAddr: remote,
-		readDone:   make(chan struct{}),
+		str:           str,
+		localAddr:     local,
+		remoteAddr:    remote,
+		readDone:      make(chan struct{}),
+		prefetchSlots: make([][]byte, proxiedConnPrefetchMax),
 	}
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 	go func() {
@@ -93,12 +97,14 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 func (c *proxiedConn) takePrefetched() ([]byte, bool) {
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
-	if len(c.prefetch) == 0 {
+	if c.prefetchCount == 0 {
 		return nil, false
 	}
-	d := c.prefetch[0]
-	copy(c.prefetch, c.prefetch[1:])
-	c.prefetch = c.prefetch[:len(c.prefetch)-1]
+	idx := c.prefetchHead
+	d := c.prefetchSlots[idx]
+	c.prefetchSlots[idx] = nil
+	c.prefetchHead = (c.prefetchHead + 1) % len(c.prefetchSlots)
+	c.prefetchCount--
 	return d, true
 }
 
@@ -108,12 +114,8 @@ func (c *proxiedConn) extendPrefetchFromTry() {
 		return
 	}
 	for {
-		var headroom int
 		c.prefetchMu.Lock()
-		n := len(c.prefetch)
-		if n < proxiedConnPrefetchMax {
-			headroom = proxiedConnPrefetchMax - n
-		}
+		headroom := proxiedConnPrefetchMax - c.prefetchCount
 		c.prefetchMu.Unlock()
 		if headroom <= 0 {
 			return
@@ -122,10 +124,11 @@ func (c *proxiedConn) extendPrefetchFromTry() {
 		if !ok {
 			return
 		}
-		dup := append([]byte(nil), raw...)
 		c.prefetchMu.Lock()
-		if len(c.prefetch) < proxiedConnPrefetchMax {
-			c.prefetch = append(c.prefetch, dup)
+		if c.prefetchCount < proxiedConnPrefetchMax {
+			tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+			c.prefetchSlots[tail] = raw
+			c.prefetchCount++
 		}
 		c.prefetchMu.Unlock()
 	}

@@ -186,8 +186,8 @@ type connRouteView struct {
 	assignedAddresses []netip.Prefix
 }
 
-// connReadPrefetchMax bounds how many additional HTTP DATAGRAM frames we clone between ReadPacket calls.
-// Draining TryReceiveDatagram frees ring slots promptly when the QUIC→HTTP ingress outpaces callers.
+// connReadPrefetchMax bounds how many additional HTTP DATAGRAM frames we buffer between ReadPacket calls.
+// Draining TryReceiveDatagram frees HTTP/3 ring slots promptly when QUIC→HTTP ingress outpaces callers.
 const connReadPrefetchMax = 512
 
 // Conn is a connection that proxies IP packets over HTTP/3.
@@ -195,8 +195,10 @@ type Conn struct {
 	str    http3Stream
 	writes chan writeCapsule
 
-	prefetchMu  sync.Mutex
-	prefetchRaw [][]byte
+	prefetchMu     sync.Mutex
+	prefetchSlots  [][]byte
+	prefetchHead   int
+	prefetchCount  int
 
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
@@ -241,6 +243,7 @@ func newProxiedConn(str http3Stream) *Conn {
 		assignedAddressNotify: make(chan struct{}, 1),
 		availableRoutesNotify: make(chan struct{}, 1),
 		closeChan:             make(chan struct{}),
+		prefetchSlots:         make([][]byte, connReadPrefetchMax),
 	}
 	go func() {
 		if err := c.readFromStream(); err != nil {
@@ -271,12 +274,14 @@ func newProxiedConn(str http3Stream) *Conn {
 func (c *Conn) takePrefetchedRaw() ([]byte, bool) {
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
-	if len(c.prefetchRaw) == 0 {
+	if c.prefetchCount == 0 {
 		return nil, false
 	}
-	d := c.prefetchRaw[0]
-	copy(c.prefetchRaw, c.prefetchRaw[1:])
-	c.prefetchRaw = c.prefetchRaw[:len(c.prefetchRaw)-1]
+	idx := c.prefetchHead
+	d := c.prefetchSlots[idx]
+	c.prefetchSlots[idx] = nil
+	c.prefetchHead = (c.prefetchHead + 1) % len(c.prefetchSlots)
+	c.prefetchCount--
 	return d, true
 }
 
@@ -286,12 +291,8 @@ func (c *Conn) extendPrefetchFromTry() {
 		return
 	}
 	for {
-		var headroom int
 		c.prefetchMu.Lock()
-		n := len(c.prefetchRaw)
-		if n < connReadPrefetchMax {
-			headroom = connReadPrefetchMax - n
-		}
+		headroom := connReadPrefetchMax - c.prefetchCount
 		c.prefetchMu.Unlock()
 		if headroom <= 0 {
 			return
@@ -301,8 +302,10 @@ func (c *Conn) extendPrefetchFromTry() {
 			return
 		}
 		c.prefetchMu.Lock()
-		if len(c.prefetchRaw) < connReadPrefetchMax {
-			c.prefetchRaw = append(c.prefetchRaw, slices.Clone(raw))
+		if c.prefetchCount < connReadPrefetchMax {
+			tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+			c.prefetchSlots[tail] = raw
+			c.prefetchCount++
 		}
 		c.prefetchMu.Unlock()
 	}
