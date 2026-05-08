@@ -2021,16 +2021,26 @@ var connectIPActiveObsSampleCounter atomic.Uint64
 const connectIPActiveObsSampleMask = uint64(127)
 
 func maybeEmitConnectIPActiveSnapshot() {
-	n := connectIPActiveObsSampleCounter.Add(1)
+	// Steady-state path (already emitted once): bump sampler only here so the
+	// first packets of a session avoid an atomic.Add on every datagram until
+	// CAS transitions lastActiveEmit from 0.
 	last := connectIPCounters.lastActiveEmitUnixMilli.Load()
-	if last != 0 && (n&connectIPActiveObsSampleMask) != 0 {
+	if last != 0 {
+		if (connectIPActiveObsSampleCounter.Add(1) & connectIPActiveObsSampleMask) != 0 {
+			return
+		}
+		now := time.Now().UnixMilli()
+		if now-last < 1000 {
+			return
+		}
+		if !connectIPCounters.lastActiveEmitUnixMilli.CompareAndSwap(last, now) {
+			return
+		}
+		emitConnectIPObservabilityEvent("periodic_active")
 		return
 	}
 	now := time.Now().UnixMilli()
-	if last != 0 && now-last < 1000 {
-		return
-	}
-	if !connectIPCounters.lastActiveEmitUnixMilli.CompareAndSwap(last, now) {
+	if !connectIPCounters.lastActiveEmitUnixMilli.CompareAndSwap(0, now) {
 		return
 	}
 	emitConnectIPObservabilityEvent("periodic_active")
