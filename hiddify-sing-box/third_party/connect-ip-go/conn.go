@@ -292,21 +292,18 @@ func (c *Conn) extendPrefetchFromTry() {
 	}
 	for {
 		c.prefetchMu.Lock()
-		headroom := connReadPrefetchMax - c.prefetchCount
-		c.prefetchMu.Unlock()
-		if headroom <= 0 {
+		if c.prefetchCount >= connReadPrefetchMax {
+			c.prefetchMu.Unlock()
 			return
 		}
 		raw, ok := dr.TryReceiveDatagram()
 		if !ok {
+			c.prefetchMu.Unlock()
 			return
 		}
-		c.prefetchMu.Lock()
-		if c.prefetchCount < connReadPrefetchMax {
-			tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
-			c.prefetchSlots[tail] = raw
-			c.prefetchCount++
-		}
+		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+		c.prefetchSlots[tail] = raw
+		c.prefetchCount++
 		c.prefetchMu.Unlock()
 	}
 }
@@ -492,10 +489,12 @@ func (c *Conn) ReadPacket(b []byte) (n int, err error) {
 		if contextID != 0 {
 			// RFC 9484 allows silently dropping unknown context IDs.
 			unknownContextDatagramTotal.Add(1)
+			c.extendPrefetchFromTry()
 			continue
 		}
 		if err := c.handleIncomingProxiedPacket(data[prefixLen:]); err != nil {
 			log.Printf("dropping proxied packet: %s", err)
+			c.extendPrefetchFromTry()
 			continue
 		}
 		payload := data[prefixLen:]

@@ -115,21 +115,18 @@ func (c *proxiedConn) extendPrefetchFromTry() {
 	}
 	for {
 		c.prefetchMu.Lock()
-		headroom := proxiedConnPrefetchMax - c.prefetchCount
-		c.prefetchMu.Unlock()
-		if headroom <= 0 {
+		if c.prefetchCount >= proxiedConnPrefetchMax {
+			c.prefetchMu.Unlock()
 			return
 		}
 		raw, ok := dr.TryReceiveDatagram()
 		if !ok {
+			c.prefetchMu.Unlock()
 			return
 		}
-		c.prefetchMu.Lock()
-		if c.prefetchCount < proxiedConnPrefetchMax {
-			tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
-			c.prefetchSlots[tail] = raw
-			c.prefetchCount++
-		}
+		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+		c.prefetchSlots[tail] = raw
+		c.prefetchCount++
 		c.prefetchMu.Unlock()
 	}
 }
@@ -166,6 +163,7 @@ start:
 	}
 	if contextID != 0 {
 		// Drop this datagram. We currently only support proxying of UDP payloads.
+		c.extendPrefetchFromTry()
 		goto start
 	}
 	// If b is too small, additional bytes are discarded.
