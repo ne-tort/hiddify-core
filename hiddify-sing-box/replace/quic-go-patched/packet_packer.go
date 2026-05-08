@@ -674,7 +674,21 @@ func (p *packetPacker) composeNextPacket(
 				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
 				pl.length += size
 				p.datagramQueue.Pop()
-			} else if pl.ack == nil {
+			} else {
+				// Prioritize DATAGRAM payload when ACK co-packing is the only thing
+				// preventing progress. ACKs can still be emitted in subsequent packets.
+				// This avoids repeated DATAGRAM deferral under sustained ACK pressure.
+				if pl.ack != nil && size <= maxPayloadSize {
+					pl.length -= pl.ack.Length(v)
+					pl.ack = nil
+					pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
+					pl.length += size
+					p.datagramQueue.Pop()
+					goto datagramDone
+				}
+				if pl.ack != nil {
+					goto datagramDone
+				}
 				// The head DATAGRAM frame doesn't fit an otherwise empty payload.
 				// Try to avoid HOL blocking by rotating the queue once and packing the next frame.
 				if p.datagramQueue.Rotate() {
@@ -704,7 +718,8 @@ func (p *packetPacker) composeNextPacket(
 					p.datagramQueue.Pop()
 				}
 			}
-			// If the DATAGRAM frame was too large and the packet contained an ACK, we'll try to send it out later.
+		datagramDone:
+			// If frame still doesn't fit, it remains queued for a future packet (or is dropped by oversized-head logic).
 		}
 	}
 

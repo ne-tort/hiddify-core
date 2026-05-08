@@ -669,29 +669,32 @@ func TestPackDatagramFrames(t *testing.T) {
 }
 
 func TestPackLargeDatagramFrame(t *testing.T) {
-	// If a packet contains an ACK, and doesn't have enough space for the DATAGRAM frame,
-	// it should be skipped. It will be packed in the next packet.
+	// If ACK co-packing is the only reason a DATAGRAM doesn't fit, the packeter
+	// should prioritize DATAGRAM and defer ACK to a later packet.
 	const maxPacketSize = 1000
 	mockCtrl := gomock.NewController(t)
 	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
-	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Return(&wire.AckFrame{AckRanges: []wire.AckRange{{Largest: 100}}})
+	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true).Return(generateLargeACKFrame(t, 220))
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
 	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
-	f := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize-10)}
+	f := &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, 780)}
 	tp.datagramQueue.Add(f)
 	tp.framer.EXPECT().HasData()
 	buffer := getPacketBuffer()
 	p, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
 	require.NoError(t, err)
-	require.NotNil(t, p.Ack)
-	require.Empty(t, p.Frames)
+	require.Nil(t, p.Ack)
+	require.Len(t, p.Frames, 1)
+	require.Equal(t, f, p.Frames[0].Frame)
 	require.NotEmpty(t, buffer.Data)
-	require.Equal(t, f, tp.datagramQueue.Peek()) // make sure the frame is still there
+	require.Nil(t, tp.datagramQueue.Peek()) // make sure the frame was sent
 
-	// Now try packing again, but with a smaller packet size.
-	// The DATAGRAM frame should now be dropped, as we can't expect to ever be able tosend it out.
+	// Now try an oversized DATAGRAM that doesn't fit even without ACK.
+	// It should still be dropped to avoid permanent no-progress loops.
 	const newMaxPacketSize = maxPacketSize - 10
+	f = &wire.DatagramFrame{DataLenPresent: true, Data: make([]byte, maxPacketSize)}
+	require.NoError(t, tp.datagramQueue.Add(f))
 	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
 	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x43), protocol.PacketNumberLen2)
 	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)

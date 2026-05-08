@@ -179,7 +179,7 @@ type Conn struct {
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
 
-	mu                sync.Mutex
+	mu                sync.RWMutex
 	peerAddresses     []netip.Prefix // IP prefixes that we assigned to the peer
 	localRoutes       []IPRoute      // IP routes that we advertised to the peer
 	assignedAddresses []netip.Prefix
@@ -424,11 +424,11 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 		return err
 	}
 
-	c.mu.Lock()
+	c.mu.RLock()
 	assignedAddresses := c.assignedAddresses
 	localRoutes := c.localRoutes
 	peerAddresses := c.peerAddresses
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	// We don't necessarily assign any addresses to the peer.
 	// For example, in the Remote Access VPN use case (RFC 9484, section 8.1),
@@ -580,11 +580,11 @@ func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 }
 
 func (c *Conn) validateOutgoingProxiedPacket(packet []byte) error {
-	c.mu.Lock()
+	c.mu.RLock()
 	assignedAddresses := c.assignedAddresses
 	localRoutes := c.localRoutes
 	peerAddresses := c.peerAddresses
-	c.mu.Unlock()
+	c.mu.RUnlock()
 	if len(assignedAddresses) == 0 && len(localRoutes) == 0 && peerAddresses == nil {
 		return nil
 	}

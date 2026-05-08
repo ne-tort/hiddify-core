@@ -30,8 +30,11 @@ func UnknownStreamDatagramDropTotal() uint64 {
 	return unknownStreamDatagramDropTotal.Load()
 }
 
-const unknownStreamPendingQueuePerStream = 64
-const unknownStreamPendingQueueGlobal = 4096
+// Under high-rate CONNECT-UDP / CONNECT-IP startup bursts, DATAGRAMs can arrive
+// before TrackStream() wiring completes. Keep a larger bounded backlog to avoid
+// dropping a few initial packets and then stalling payload-integrity receivers.
+const unknownStreamPendingQueuePerStream = 512
+const unknownStreamPendingQueueGlobal = 65536
 
 // rawConn is an HTTP/3 connection.
 // It provides HTTP/3 specific functionality by wrapping a quic.Conn,
@@ -43,7 +46,7 @@ type rawConn struct {
 
 	enableDatagrams bool
 
-	streamMx sync.Mutex
+	streamMx sync.RWMutex
 	streams  map[quic.StreamID]*stateTrackingStream
 	// pendingDatagrams buffers DATAGRAM payloads that arrived before TrackStream mapping.
 	// This narrows setup-race loss for high-rate MASQUE traffic.
@@ -216,8 +219,8 @@ func (c *rawConn) enqueueUnknownStreamDatagram(streamID quic.StreamID, payload [
 }
 
 func (c *rawConn) hasActiveStreams() bool {
-	c.streamMx.Lock()
-	defer c.streamMx.Unlock()
+	c.streamMx.RLock()
+	defer c.streamMx.RUnlock()
 
 	return len(c.streams) > 0
 }
@@ -367,9 +370,9 @@ func (c *rawConn) receiveDatagrams() error {
 			return fmt.Errorf("invalid quarter stream id: %w", err)
 		}
 		streamID := quic.StreamID(4 * quarterStreamID)
-		c.streamMx.Lock()
+		c.streamMx.RLock()
 		dg, ok := c.streams[streamID]
-		c.streamMx.Unlock()
+		c.streamMx.RUnlock()
 		if !ok {
 			if !c.enqueueUnknownStreamDatagram(streamID, b[n:]) {
 				unknownStreamDatagramDropTotal.Add(1)
