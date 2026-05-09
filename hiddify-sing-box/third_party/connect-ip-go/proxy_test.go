@@ -65,7 +65,7 @@ func setupConns(t *testing.T) (client, server *Conn) {
 	tr := &http3.Transport{EnableDatagrams: true}
 	t.Cleanup(func() { tr.Close() })
 
-	client, rsp, err := Dial(ctx, tr.NewClientConn(cconn), template)
+	client, rsp, err := Dial(ctx, tr.NewClientConn(cconn), template, "")
 	require.NoError(t, err)
 	require.Equal(t, rsp.StatusCode, http.StatusOK)
 
@@ -380,7 +380,7 @@ func TestDialScopedTemplateCarriesDefaultFlowScopeToServer(t *testing.T) {
 	tr := &http3.Transport{EnableDatagrams: true}
 	t.Cleanup(func() { tr.Close() })
 
-	client, rsp, err := Dial(ctx, tr.NewClientConn(cconn), template)
+	client, rsp, err := Dial(ctx, tr.NewClientConn(cconn), template, "")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rsp.StatusCode)
 	t.Cleanup(func() { client.Close() })

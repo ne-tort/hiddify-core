@@ -12,8 +12,8 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
-// Dial dials a proxied connection to a target server.
-func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Template) (*Conn, *http.Response, error) {
+// Dial dials a proxied CONNECT-IP session. bearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
+func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Template, bearerToken string) (*Conn, *http.Response, error) {
 	if err := validateFlowForwardingTemplateVars(template); err != nil {
 		return nil, nil, err
 	}
@@ -45,11 +45,15 @@ func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Tem
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect-ip: failed to open request stream: %w", err)
 	}
+	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
+	if t := strings.TrimSpace(bearerToken); t != "" {
+		hdr.Set("Authorization", "Bearer "+t)
+	}
 	if err := rstr.SendRequestHeader(&http.Request{
 		Method: http.MethodConnect,
 		Proto:  requestProtocol,
 		Host:   u.Host,
-		Header: http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}},
+		Header: hdr,
 		URL:    u,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("connect-ip: failed to send request: %w", err)

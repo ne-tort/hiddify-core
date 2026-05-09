@@ -104,6 +104,13 @@ func TestResolveHopOrderBranchingGraphFallsBackToInputOrder(t *testing.T) {
 	}
 }
 
+func TestMasqueDialTargetPreservesHostname(t *testing.T) {
+	target := masqueDialTarget("engage.cloudflareclient.com", 443)
+	if target != "engage.cloudflareclient.com:443" {
+		t.Fatalf("unexpected target: %s", target)
+	}
+}
+
 func TestResolveEntryHopNoEntryRejected(t *testing.T) {
 	_, _, err := resolveEntryHop([]HopOptions{
 		{Tag: "a", Via: "b", Server: "a.example", Port: 443},
@@ -751,7 +758,8 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 		requested       uint32
 		expectedCeiling int
 	}{
-		{name: "zero requested uses lower bound", envCeilingMax: "4096", requested: 0, expectedCeiling: 1280},
+		{name: "zero requested uses default ceiling max", envCeilingMax: "4096", requested: 0, expectedCeiling: defaultConnectIPDatagramCeilingMax},
+		{name: "zero requested clamps to env max below default", envCeilingMax: "1400", requested: 0, expectedCeiling: 1400},
 		{name: "below lower bound clamps to 1280", envCeilingMax: "4096", requested: 1200, expectedCeiling: 1280},
 		{name: "within bounds preserved", envCeilingMax: "4096", requested: 1400, expectedCeiling: 1400},
 		{name: "above env max clamps down", envCeilingMax: "4096", requested: 5000, expectedCeiling: 4096},
@@ -1816,6 +1824,61 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableApplicationErrorKeepsBudgetAnd
 		t.Fatalf("expected deterministic retry budget attempts=3 before success, got: %d", got)
 	}
 }
+
+func TestValidateQUICTransportPacketConnTierAUDPConnPasses(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen packet: %v", err)
+	}
+	defer pc.Close()
+	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
+	if err := ValidateQUICTransportPacketConn(pc, "test_server"); err != nil {
+		t.Fatalf("expected TierA udp conn to pass strict policy, got: %v", err)
+	}
+}
+
+func TestValidateQUICTransportPacketConnTierBStrictRejects(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
+	pc := &tierBPacketConnStub{}
+	err := ValidateQUICTransportPacketConn(pc, "test_custom")
+	if err == nil {
+		t.Fatal("expected strict policy to reject TierB packet conn")
+	}
+	if !errors.Is(err, ErrQUICPacketConnContract) {
+		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
+	}
+}
+
+func TestCustomQUICDialStrictPolicyRejects(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
+	session := &coreSession{
+		options: ClientOptions{
+			QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+				t.Fatal("custom QUICDial must not run in strict mode")
+				return nil, nil
+			},
+		},
+	}
+	_, err := session.quicDialWithPolicy("client_connect_stream")(context.Background(), "127.0.0.1:443", &tls.Config{}, &quic.Config{})
+	if err == nil {
+		t.Fatal("expected strict policy reject error")
+	}
+	if !errors.Is(err, ErrQUICPacketConnContract) {
+		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
+	}
+}
+
+type tierBPacketConnStub struct{}
+
+func (s *tierBPacketConnStub) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	return 0, &net.UDPAddr{}, io.EOF
+}
+func (s *tierBPacketConnStub) WriteTo(p []byte, addr net.Addr) (n int, err error) { return len(p), nil }
+func (s *tierBPacketConnStub) Close() error                                        { return nil }
+func (s *tierBPacketConnStub) LocalAddr() net.Addr                                 { return &net.UDPAddr{} }
+func (s *tierBPacketConnStub) SetDeadline(t time.Time) error                       { return nil }
+func (s *tierBPacketConnStub) SetReadDeadline(t time.Time) error                   { return nil }
+func (s *tierBPacketConnStub) SetWriteDeadline(t time.Time) error                  { return nil }
 
 func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivityKeepsBudgetAndDialClass(t *testing.T) {
 	retryableErrors := map[string]error{

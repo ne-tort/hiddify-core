@@ -160,8 +160,12 @@ func TestEndpointReadinessAfterStart(t *testing.T) {
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start endpoint: %v", err)
 	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !ep.IsReady() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if !ep.IsReady() {
-		t.Fatal("endpoint must be ready after successful Start")
+		t.Fatal("endpoint must be ready after successful async Start")
 	}
 }
 

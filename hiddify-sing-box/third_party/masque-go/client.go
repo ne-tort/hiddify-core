@@ -35,6 +35,8 @@ type Client struct {
 	QUICConfig *quic.Config
 	// QUICDial optionally overrides QUIC dial behavior.
 	QUICDial func(ctx context.Context, address string, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error)
+	// BearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer on each CONNECT-UDP request.
+	BearerToken string
 
 	mu         sync.Mutex
 	conn       *quic.Conn
@@ -99,11 +101,15 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 	if err != nil {
 		return nil, nil, err
 	}
+	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
+	if t := strings.TrimSpace(c.BearerToken); t != "" {
+		hdr.Set("Authorization", "Bearer "+t)
+	}
 	if err := rstr.SendRequestHeader(&http.Request{
 		Method: http.MethodConnect,
 		Proto:  requestProtocol,
 		Host:   u.Host,
-		Header: http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}},
+		Header: hdr,
 		URL:    u,
 	}); err != nil {
 		return nil, nil, fmt.Errorf("masque: failed to send request: %w", err)

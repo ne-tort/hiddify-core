@@ -92,9 +92,16 @@ type startErrorState struct {
 }
 
 func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
+	o := options
+	if normalizeMode(o.Mode) != option.MasqueModeServer {
+		o.Mode = option.MasqueModeServer
+	}
+	if err := validateMasqueOptions(o); err != nil {
+		return nil, err
+	}
 	return &ServerEndpoint{
-		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
-		options: options,
+		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, o.DialerOptions),
+		options: o,
 		router:  router,
 		logger:  logger,
 	}, nil
@@ -244,6 +251,10 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	packetConn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return E.Cause(err, "listen udp for masque server")
+	}
+	if err := TM.ValidateQUICTransportPacketConn(packetConn, "server_http3_listen"); err != nil {
+		_ = packetConn.Close()
+		return E.Cause(err, "validate quic transport packetconn")
 	}
 	e.packetConn = packetConn
 	server := e.server

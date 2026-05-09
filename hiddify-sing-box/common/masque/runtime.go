@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -162,7 +163,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 		return err
 	}
 	r.session = session
-	if r.options.TransportMode == transportModeConnectIP {
+	if strings.EqualFold(strings.TrimSpace(r.options.TransportMode), transportModeConnectIP) {
 		ipPlane, err := session.OpenIPSession(ctx)
 		if err != nil {
 			_ = session.Close()

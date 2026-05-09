@@ -3,6 +3,7 @@ package masque
 import (
 	"context"
 	"errors"
+	stdlog "log"
 	"math/rand/v2"
 	"net"
 	"strings"
@@ -199,11 +200,40 @@ func (e *WarpEndpoint) startRuntime() {
 		e.startErr.Store(E.New("warp_masque endpoint closed before startup"))
 		return
 	}
+	// Single deadline for bootstrap (device API) + CM.Runtime.Start (QUIC/MASQUE). If this
+	// is routinely exceeded, the deployment/network is unusable for warp_masque — fail fast.
+	const (
+		defaultWarpMasqueStartupDeadline = 25 * time.Second
+		minWarpMasqueStartupDeadline     = 12 * time.Second
+		maxWarpMasqueStartupDeadline     = 45 * time.Second
+	)
+	runDeadline := defaultWarpMasqueStartupDeadline
+	if d := time.Duration(e.options.ConnectTimeout); d > 0 {
+		runDeadline = d * 2
+	}
+	if runDeadline < minWarpMasqueStartupDeadline {
+		runDeadline = minWarpMasqueStartupDeadline
+	}
+	if runDeadline > maxWarpMasqueStartupDeadline {
+		runDeadline = maxWarpMasqueStartupDeadline
+	}
+	runCtx, cancelRun := context.WithTimeout(baseCtx, runDeadline)
+	defer cancelRun()
+
 	bootstrap := e.bootstrapF
 	if bootstrap == nil {
 		bootstrap = e.bootstrapProfile
 	}
-	const warpBootstrapMaxAttempts = 4
+	// Cloudflare device API uses http.Client.Timeout (30s) per call; without per-attempt
+	// caps, several retries can burn the whole runCtx budget and still look like "hang".
+	const warpBootstrapMaxAttempts = 2
+	perBootstrapAttempt := runDeadline / time.Duration(warpBootstrapMaxAttempts+1)
+	if perBootstrapAttempt < 8*time.Second {
+		perBootstrapAttempt = 8 * time.Second
+	}
+	if perBootstrapAttempt > 14*time.Second {
+		perBootstrapAttempt = 14 * time.Second
+	}
 	var server string
 	var port uint16
 	var bootstrapErr error
@@ -211,13 +241,15 @@ func (e *WarpEndpoint) startRuntime() {
 		if attempt > 0 {
 			backoff := time.Duration(120+attempt*80+rand.IntN(160)) * time.Millisecond
 			select {
-			case <-baseCtx.Done():
-				e.startErr.Store(baseCtx.Err())
+			case <-runCtx.Done():
+				e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque bootstrap timed out"))
 				return
 			case <-time.After(backoff):
 			}
 		}
-		s, p, err := bootstrap(baseCtx)
+		attemptCtx, cancelAttempt := context.WithTimeout(runCtx, perBootstrapAttempt)
+		s, p, err := bootstrap(attemptCtx)
+		cancelAttempt()
 		if err == nil {
 			server, port = s, p
 			bootstrapErr = nil
@@ -234,15 +266,21 @@ func (e *WarpEndpoint) startRuntime() {
 		e.startErr.Store(err)
 		return
 	}
-	quicDial, err := buildQUICDialFunc(baseCtx, e.options.DialerOptions, true)
+	// Align entry Server/Port with generic `masque`: when hop_policy is chain and hops are configured,
+	// QUIC/H3 dial target must match the chain entry hop, not only the bootstrap host (which may differ).
+	rtServer, rtPort := server, port
+	if strings.TrimSpace(e.options.HopPolicy) == option.MasqueHopPolicyChain && len(e.options.Hops) > 0 {
+		rtServer, rtPort = resolveMasqueEntryServerPort(chain, server, port)
+	}
+	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, true)
 	if err != nil {
 		e.startErr.Store(err)
 		return
 	}
 	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 		Tag:                      e.Tag(),
-		Server:                   server,
-		ServerPort:               port,
+		Server:                   rtServer,
+		ServerPort:               rtPort,
 		TransportMode:            normalizeTransportMode(e.options.TransportMode),
 		TemplateUDP:              e.options.TemplateUDP,
 		TemplateIP:               e.options.TemplateIP,
@@ -270,15 +308,23 @@ func (e *WarpEndpoint) startRuntime() {
 				e.startErr.Store(baseCtx.Err())
 				_ = rt.Close()
 				return
+			case <-runCtx.Done():
+				e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"))
+				_ = rt.Close()
+				return
 			case <-time.After(backoff):
 			}
 		}
-		startErr = rt.Start(baseCtx)
+		startErr = rt.Start(runCtx)
 		if startErr == nil {
 			break
 		}
 	}
 	if startErr != nil {
+		if key := ClassifyMasqueFailure(startErr); key != "" {
+			// One-line triage aid for control-plane vs data-plane debugging (see AGENTS.md).
+			stdlog.Printf("warp_masque runtime start failed class=%s err=%v", key, startErr)
+		}
 		e.startErr.Store(startErr)
 		_ = rt.Close()
 		return

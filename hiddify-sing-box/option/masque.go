@@ -76,6 +76,7 @@ type MasqueEndpointOptions struct {
 	Hops                  []MasqueChainHopOptions `json:"hops,omitempty"`
 
 	UDPTimeout       badoption.Duration             `json:"udp_timeout,omitempty"`
+	// MTU sets the CONNECT-IP datagram ceiling (max full IPv4/IPv6 packet bytes) on the client; see CoreClientFactory / ConnectIPDatagramCeiling in transport/masque.
 	MTU              uint32                         `json:"mtu,omitempty"`
 	Workers          int                            `json:"workers,omitempty"`
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
@@ -94,13 +95,15 @@ type MasqueQUICExperimentalOptions struct {
 }
 
 type WarpMasqueProfileOptions struct {
-	ID            string `json:"id,omitempty"`
-	AuthToken     string `json:"auth_token,omitempty"`
-	License       string `json:"license,omitempty"`
-	PrivateKey    string `json:"private_key,omitempty"`
-	Recreate      bool   `json:"recreate,omitempty"`
-	Detour        string `json:"detour,omitempty"`
-	Compatibility string `json:"compatibility,omitempty"`
+	ID             string `json:"id,omitempty"`
+	AuthToken      string `json:"auth_token,omitempty"`
+	License        string `json:"license,omitempty"`
+	PrivateKey     string `json:"private_key,omitempty"`
+	Recreate       bool   `json:"recreate,omitempty"`
+	Detour         string `json:"detour,omitempty"`
+	Compatibility  string `json:"compatibility,omitempty"`
+	// DataplanePort overrides UDP/QUIC hop port from Cloudflare device profile (e.g. try 443 when API still returns WG port).
+	DataplanePort uint16 `json:"dataplane_port,omitempty"`
 }
 
 type WarpMasqueEndpointOptions struct {

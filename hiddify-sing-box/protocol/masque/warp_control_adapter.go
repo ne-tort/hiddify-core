@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -68,6 +69,12 @@ func (a CloudflareWarpControlAdapter) ResolveServer(ctx context.Context, options
 		return "", 0, E.New("missing peers in cloudflare profile")
 	}
 	peer := cfProfile.Config.Peers[0]
+	log.Printf("warp_masque control profile endpoint host=%s v4=%s v6=%s ports=%v tunnel_protocol=%s",
+		peer.Endpoint.Host, peer.Endpoint.V4, peer.Endpoint.V6, peer.Endpoint.Ports, cfProfile.Policy.TunnelProtocol)
+	tunnelProto := strings.ToLower(strings.TrimSpace(cfProfile.Policy.TunnelProtocol))
+	if strings.Contains(tunnelProto, "masque") && tunnelProto != "" {
+		log.Printf("warp_masque: tunnel_protocol suggests MASQUE dataplane; if QUIC fails on current port try profile.dataplane_port or explicit server_port (e.g. 443)")
+	}
 	server := options.Server
 	serverPort := options.ServerPort
 	if strings.TrimSpace(server) == "" {
@@ -93,6 +100,9 @@ func (a CloudflareWarpControlAdapter) ResolveServer(ctx context.Context, options
 	}
 	if serverPort == 0 {
 		return "", 0, E.New("failed to resolve warp_masque server port")
+	}
+	if options.Profile.DataplanePort != 0 {
+		serverPort = options.Profile.DataplanePort
 	}
 	if !explicitServer {
 		writeWarpCache(cacheKey, server, serverPort)

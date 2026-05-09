@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"log"
 	"net"
 	"reflect"
 	"time"
@@ -75,10 +76,12 @@ func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	if err != nil {
 		return 0, nil, err
 	}
+	log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
 	return n, c.remoteAddr, nil
 }
 
 func (c *connectedPacketConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
+	log.Printf("masque quic_dialer write_to bytes=%d remote=%v", len(p), c.remoteAddr)
 	return c.Conn.Write(p)
 }
 

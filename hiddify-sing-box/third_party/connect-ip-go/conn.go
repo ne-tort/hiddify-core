@@ -63,8 +63,12 @@ var (
 	unknownCapsuleByType        sync.Map // map[uint64]*atomic.Uint64
 	unknownContextDatagramTotal atomic.Uint64
 	malformedDatagramTotal      atomic.Uint64
+	validationDropTotal         atomic.Uint64
+	outgoingComposeDropTotal    atomic.Uint64
 	policyDropICMPTotal         atomic.Uint64
 	policyDropICMPAttemptTotal  atomic.Uint64
+	policyDropICMPComposeFail   atomic.Uint64
+	policyDropICMPSendFail      atomic.Uint64
 	policyDropICMPByReason      sync.Map // map[string]*atomic.Uint64
 )
 
@@ -182,23 +186,84 @@ var datagramPool = sync.Pool{
 // with sync.RWMutex on Conn for each packet while route state is mutated rarely.
 type connRouteView struct {
 	peerAddresses     []netip.Prefix
+	peerAddressesV4   []netip.Prefix
+	peerAddressesV6   []netip.Prefix
 	localRoutes       []IPRoute
+	localRoutesV4     []IPRoute
+	localRoutesV6     []IPRoute
 	assignedAddresses []netip.Prefix
+	assignedV4        []netip.Prefix
+	assignedV6        []netip.Prefix
+	hasPolicyV4       bool
+	hasPolicyV6       bool
 }
 
 // connReadPrefetchMax bounds how many additional HTTP DATAGRAM frames we buffer between ReadPacket calls.
 // Draining TryReceiveDatagram frees HTTP/3 ring slots promptly when QUIC→HTTP ingress outpaces callers.
 const connReadPrefetchMax = 512
+const connReadPrefetchMask = connReadPrefetchMax - 1
+const sampledDropLogEvery = 1024
+const connDropCounterFlushThreshold = 256
+const connDrainProbeMaxSkip = 64
+const connExpiredPrefetchDropBudget = 64
+
+type adaptivePrefetchProbeGate struct {
+	skipBudget       atomic.Int32
+	emptyProbeStreak atomic.Int32
+}
+
+func (g *adaptivePrefetchProbeGate) shouldProbe() bool {
+	for {
+		budget := g.skipBudget.Load()
+		if budget <= 0 {
+			return true
+		}
+		if g.skipBudget.CompareAndSwap(budget, budget-1) {
+			return false
+		}
+	}
+}
+
+func (g *adaptivePrefetchProbeGate) observeDrain(drained int) {
+	if drained > 0 {
+		g.skipBudget.Store(0)
+		g.emptyProbeStreak.Store(0)
+		return
+	}
+	for {
+		streak := g.emptyProbeStreak.Load()
+		nextStreak := streak
+		if nextStreak < 16 {
+			nextStreak++
+		}
+		if g.emptyProbeStreak.CompareAndSwap(streak, nextStreak) {
+			nextSkip := int32(1 << (nextStreak - 1))
+			if nextSkip > int32(connDrainProbeMaxSkip) {
+				nextSkip = int32(connDrainProbeMaxSkip)
+			}
+			g.skipBudget.Store(nextSkip)
+			return
+		}
+	}
+}
+
+func (g *adaptivePrefetchProbeGate) skipBudgetValue() int {
+	return int(g.skipBudget.Load())
+}
 
 // Conn is a connection that proxies IP packets over HTTP/3.
 type Conn struct {
 	str    http3Stream
+	drain  tryDrainHTTPDatagrams
 	writes chan writeCapsule
 
-	prefetchMu     sync.Mutex
-	prefetchSlots  [][]byte
-	prefetchHead   int
-	prefetchCount  int
+	prefetchMu    sync.Mutex
+	prefetchSlots [][]byte
+	prefetchHead  int
+	prefetchCount int
+	// Lock-free empty-queue check for hot ReadPacket path.
+	prefetchCountAtomic atomic.Int32
+	prefetchGate        adaptivePrefetchProbeGate
 
 	assignedAddressNotify chan struct{}
 	availableRoutesNotify chan struct{}
@@ -216,10 +281,21 @@ type Conn struct {
 }
 
 func (c *Conn) publishRouteViewLocked() {
+	peerV4, peerV6 := splitPrefixesByFamily(c.peerAddresses)
+	assignedV4, assignedV6 := splitPrefixesByFamily(c.assignedAddresses)
+	localV4, localV6 := splitRoutesByFamily(c.localRoutes)
 	c.routeView.Store(&connRouteView{
 		peerAddresses:     slices.Clone(c.peerAddresses),
+		peerAddressesV4:   peerV4,
+		peerAddressesV6:   peerV6,
 		localRoutes:       slices.Clone(c.localRoutes),
+		localRoutesV4:     localV4,
+		localRoutesV6:     localV6,
 		assignedAddresses: slices.Clone(c.assignedAddresses),
+		assignedV4:        assignedV4,
+		assignedV6:        assignedV6,
+		hasPolicyV4:       len(peerV4) > 0 || len(assignedV4) > 0 || len(localV4) > 0,
+		hasPolicyV6:       len(peerV6) > 0 || len(assignedV6) > 0 || len(localV6) > 0,
 	})
 }
 
@@ -239,11 +315,15 @@ func (c *Conn) failClosed(err error) error {
 func newProxiedConn(str http3Stream) *Conn {
 	c := &Conn{
 		str:                   str,
+		drain:                 nil,
 		writes:                make(chan writeCapsule),
 		assignedAddressNotify: make(chan struct{}, 1),
 		availableRoutesNotify: make(chan struct{}, 1),
 		closeChan:             make(chan struct{}),
 		prefetchSlots:         make([][]byte, connReadPrefetchMax),
+	}
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
+		c.drain = dr
 	}
 	go func() {
 		if err := c.readFromStream(); err != nil {
@@ -271,37 +351,49 @@ func newProxiedConn(str http3Stream) *Conn {
 	return c
 }
 
-func (c *Conn) takePrefetchedRaw() ([]byte, bool) {
+func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
+	if c.prefetchCountAtomic.Load() == 0 {
+		return nil, false, false
+	}
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
 	if c.prefetchCount == 0 {
-		return nil, false
+		c.prefetchCountAtomic.Store(0)
+		return nil, false, false
 	}
 	idx := c.prefetchHead
 	d := c.prefetchSlots[idx]
 	c.prefetchSlots[idx] = nil
-	c.prefetchHead = (c.prefetchHead + 1) % len(c.prefetchSlots)
+	c.prefetchHead = (c.prefetchHead + 1) & connReadPrefetchMask
 	c.prefetchCount--
-	return d, true
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	return d, true, c.prefetchCount > 0
 }
 
 func (c *Conn) extendPrefetchFromTry() {
-	dr, ok := c.str.(tryDrainHTTPDatagrams)
-	if !ok {
+	if c.drain == nil {
+		return
+	}
+	// Cheap lock-free probe budget check before taking prefetchMu.
+	if !c.prefetchGate.shouldProbe() {
 		return
 	}
 	// Batch drain under one prefetchMu (CONNECT-IP hot path).
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
+	drained := 0
 	for c.prefetchCount < connReadPrefetchMax {
-		raw, ok := dr.TryReceiveDatagram()
+		raw, ok := c.drain.TryReceiveDatagram()
 		if !ok {
-			return
+			break
 		}
-		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+		tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
 		c.prefetchSlots[tail] = raw
 		c.prefetchCount++
+		drained++
 	}
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	c.prefetchGate.observeDrain(drained)
 }
 
 // AdvertiseRoute informs the peer about available routes.
@@ -323,7 +415,7 @@ func (c *Conn) AdvertiseRoute(ctx context.Context, routes []IPRoute) error {
 // Previous address assignments are overwritten by each new call to this function.
 func (c *Conn) AssignAddresses(ctx context.Context, prefixes []netip.Prefix) error {
 	c.mu.Lock()
-	c.peerAddresses = slices.Clone(prefixes)
+	c.peerAddresses = cloneOrNilPrefixes(prefixes)
 	c.publishRouteViewLocked()
 	c.mu.Unlock()
 	capsule := &addressAssignCapsule{AssignedAddresses: make([]AssignedAddress, 0, len(prefixes))}
@@ -459,74 +551,331 @@ func (c *Conn) writeToStream() error {
 }
 
 func (c *Conn) ReadPacket(b []byte) (n int, err error) {
+	return c.ReadPacketWithContext(context.Background(), b)
+}
+
+func (c *Conn) ReadPacketWithContext(ctx context.Context, b []byte) (n int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctxDone := ctx.Done()
+	ctxCancelled := func() (error, bool) {
+		if ctxDone == nil {
+			return nil, false
+		}
+		select {
+		case <-ctxDone:
+			return ctx.Err(), true
+		default:
+			return nil, false
+		}
+	}
+	expiredPrefetchDrops := 0
+	pendingMalformedDrops := uint64(0)
+	pendingUnknownContextDrops := uint64(0)
+	pendingValidationDrops := uint64(0)
+	var lastValidationErr error
+	flushDropCounters := func() {
+		if pendingMalformedDrops > 0 {
+			malformedDatagramTotal.Add(pendingMalformedDrops)
+			pendingMalformedDrops = 0
+		}
+		if pendingUnknownContextDrops > 0 {
+			unknownContextDatagramTotal.Add(pendingUnknownContextDrops)
+			pendingUnknownContextDrops = 0
+		}
+		if pendingValidationDrops > 0 {
+			total := validationDropTotal.Add(pendingValidationDrops)
+			if shouldLogSampledBatch(total-pendingValidationDrops, total) && lastValidationErr != nil {
+				log.Printf("connect-ip: dropping invalid incoming proxied packets: batch_drop=%d total=%d last_error=%v", pendingValidationDrops, total, lastValidationErr)
+			}
+			pendingValidationDrops = 0
+			lastValidationErr = nil
+		}
+	}
+	flushDropCountersIfNeeded := func() {
+		if pendingMalformedDrops+pendingUnknownContextDrops+pendingValidationDrops >= connDropCounterFlushThreshold {
+			flushDropCounters()
+		}
+	}
 	for {
 		var data []byte
 		var recvErr error
 
-		if raw, ok := c.takePrefetchedRaw(); ok {
+		fromPrefetch := false
+		hasBufferedPrefetch := false
+		if raw, ok, hasMore := c.takePrefetchedRaw(); ok {
 			data = raw
+			fromPrefetch = true
+			hasBufferedPrefetch = hasMore
 		} else {
-			data, recvErr = c.str.ReceiveDatagram(context.Background())
+			// Respect deadline/cancellation before entering blocking receive path.
+			if err, cancelled := ctxCancelled(); cancelled {
+				return 0, err
+			}
+			data, recvErr = c.str.ReceiveDatagram(ctx)
 			if recvErr != nil {
-				select {
-				case <-c.closeChan:
-					return 0, c.closeErr
-				default:
-					return 0, recvErr
+				if err, cancelled := ctxCancelled(); cancelled {
+					flushDropCounters()
+					return 0, err
 				}
+				if c.closeChan != nil {
+					select {
+					case <-c.closeChan:
+						flushDropCounters()
+						return 0, c.closeErr
+					default:
+						flushDropCounters()
+						return 0, recvErr
+					}
+				}
+				flushDropCounters()
+				return 0, recvErr
 			}
 		}
 
-		contextID, prefixLen, err := quicvarint.Parse(data)
+		contextID, prefixLen, err := parseDatagramContextID(data)
 		if err != nil {
-			malformedDatagramTotal.Add(1)
-			return 0, c.failClosed(fmt.Errorf("connect-ip: malformed datagram: %w", err))
+			pendingMalformedDrops++
+			flushDropCountersIfNeeded()
+			cancelErr, cancelled := ctxCancelled()
+			if cancelled {
+				flushDropCounters()
+				if fromPrefetch {
+					expiredPrefetchDrops++
+					if expiredPrefetchDrops >= connExpiredPrefetchDropBudget {
+						flushDropCounters()
+						return 0, cancelErr
+					}
+				} else {
+					flushDropCounters()
+					return 0, cancelErr
+				}
+			}
+			if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+				c.extendPrefetchFromTry()
+			}
+			continue
 		}
 		if contextID != 0 {
 			// RFC 9484 allows silently dropping unknown context IDs.
-			unknownContextDatagramTotal.Add(1)
-			c.extendPrefetchFromTry()
+			pendingUnknownContextDrops++
+			flushDropCountersIfNeeded()
+			cancelErr, cancelled := ctxCancelled()
+			if cancelled {
+				flushDropCounters()
+				if fromPrefetch {
+					expiredPrefetchDrops++
+					if expiredPrefetchDrops >= connExpiredPrefetchDropBudget {
+						flushDropCounters()
+						return 0, cancelErr
+					}
+				} else {
+					flushDropCounters()
+					return 0, cancelErr
+				}
+			}
+			if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+				c.extendPrefetchFromTry()
+			}
 			continue
 		}
-		if err := c.handleIncomingProxiedPacket(data[prefixLen:]); err != nil {
-			log.Printf("dropping proxied packet: %s", err)
-			c.extendPrefetchFromTry()
+		view := c.routeView.Load()
+		if err := c.validateIncomingProxiedPacketWithView(data[prefixLen:], view); err != nil {
+			pendingValidationDrops++
+			lastValidationErr = err
+			flushDropCountersIfNeeded()
+			cancelErr, cancelled := ctxCancelled()
+			if cancelled {
+				if fromPrefetch {
+					expiredPrefetchDrops++
+					if expiredPrefetchDrops >= connExpiredPrefetchDropBudget {
+						flushDropCounters()
+						return 0, cancelErr
+					}
+				} else {
+					flushDropCounters()
+					return 0, cancelErr
+				}
+			}
+			if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+				c.extendPrefetchFromTry()
+			}
 			continue
 		}
 		payload := data[prefixLen:]
 		if len(payload) > len(b) {
+			flushDropCounters()
 			return 0, fmt.Errorf("connect-ip: read buffer too short (need %d bytes)", len(payload))
 		}
 		outN := copy(b, payload)
-		c.extendPrefetchFromTry()
+		if !fromPrefetch || !hasBufferedPrefetch {
+			c.extendPrefetchFromTry()
+		}
+		flushDropCounters()
 		return outN, nil
 	}
 }
 
+func shouldValidatePolicy(view *connRouteView) bool {
+	if view == nil {
+		return false
+	}
+	return view.hasPolicyV4 || view.hasPolicyV6
+}
+
+func shouldValidatePolicyByVersion(view *connRouteView, version uint8) bool {
+	if view == nil {
+		return false
+	}
+	switch version {
+	case 4:
+		return view.hasPolicyV4
+	case 6:
+		return view.hasPolicyV6
+	default:
+		return shouldValidatePolicy(view)
+	}
+}
+
+func (c *Conn) validateIncomingProxiedPacket(packet []byte) error {
+	return c.validateIncomingProxiedPacketWithView(packet, c.routeView.Load())
+}
+
+func (c *Conn) validateIncomingProxiedPacketWithView(packet []byte, view *connRouteView) error {
+	// CONNECT-IP hot path: in default unrestricted mode (no assigned/local/peer policy),
+	// skip tuple parsing and route scans entirely.
+	if !shouldValidatePolicy(view) {
+		return nil
+	}
+	version := uint8(0)
+	if len(packet) > 0 {
+		version = ipVersion(packet)
+	}
+	if !shouldValidatePolicyByVersion(view, version) {
+		return nil
+	}
+	return c.handleIncomingProxiedPacketWithViewAndVersion(packet, view, version)
+}
+
+func parseDatagramContextID(data []byte) (uint64, int, error) {
+	if len(data) == 0 {
+		return 0, 0, io.EOF
+	}
+	// CONNECT-IP hot path: context ID is expected to be zero for proxied payload.
+	// The varint encoding for zero is a single 0x00 byte, so avoid quicvarint.Parse
+	// in the common case to reduce per-packet CPU overhead.
+	if data[0] == 0 {
+		return 0, 1, nil
+	}
+	// Fast-path one-byte non-zero context IDs (1..63), which are encoded with
+	// QUIC varint prefix 00xxxxxx. This keeps non-zero tolerant-drop path
+	// out of quicvarint.Parse under high-rate noisy ingress.
+	if data[0]&0xc0 == 0 {
+		return uint64(data[0]), 1, nil
+	}
+	// Fast-reject multi-byte non-zero context IDs when the high-order 6 bits
+	// of QUIC varint are already non-zero. Prefix length is irrelevant for
+	// non-zero path (caller only checks contextID != 0), so avoid varint parse.
+	if data[0]&0x3f != 0 {
+		return 1, 1, nil
+	}
+	// Fast-path multi-byte varint with zero high-order bits:
+	// - accept context-id=0 for canonical 2/4/8-byte zero encodings,
+	// - fast-reject non-zero without invoking quicvarint.Parse.
+	//
+	// This keeps noisy ingress tolerant-drop path away from generic varint parsing.
+	switch data[0] >> 6 {
+	case 1:
+		if len(data) < 2 {
+			return 0, 0, io.EOF
+		}
+		if data[1] == 0 {
+			return 0, 2, nil
+		}
+		return 1, 1, nil
+	case 2:
+		if len(data) < 4 {
+			return 0, 0, io.EOF
+		}
+		if data[1] == 0 && data[2] == 0 && data[3] == 0 {
+			return 0, 4, nil
+		}
+		return 1, 1, nil
+	case 3:
+		if len(data) < 8 {
+			return 0, 0, io.EOF
+		}
+		if data[1] == 0 && data[2] == 0 && data[3] == 0 && data[4] == 0 && data[5] == 0 && data[6] == 0 && data[7] == 0 {
+			return 0, 8, nil
+		}
+		return 1, 1, nil
+	}
+	// Unreachable after the prefix checks above, but keep a safe malformed fallback.
+	return 0, 0, io.EOF
+}
+
 func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
+	return c.handleIncomingProxiedPacketWithView(data, c.routeView.Load())
+}
+
+func (c *Conn) handleIncomingProxiedPacketWithView(data []byte, view *connRouteView) error {
+	if len(data) == 0 {
+		return c.handleIncomingProxiedPacketWithViewAndVersion(data, view, 0)
+	}
+	return c.handleIncomingProxiedPacketWithViewAndVersion(data, view, ipVersion(data))
+}
+
+func (c *Conn) handleIncomingProxiedPacketWithViewAndVersion(data []byte, view *connRouteView, version uint8) error {
 	if len(data) == 0 {
 		return errors.New("connect-ip: empty packet")
 	}
-	src, dst, ipProto, version, err := packetTuple(data)
-	if err != nil {
-		return err
+	var src, dst netip.Addr
+	var ipProto uint8
+	switch version {
+	case 4:
+		if len(data) < ipv4.HeaderLen {
+			return fmt.Errorf("connect-ip: malformed datagram: too short")
+		}
+		src = netip.AddrFrom4([4]byte(data[12:16]))
+		dst = netip.AddrFrom4([4]byte(data[16:20]))
+		ipProto = data[9]
+	case 6:
+		// Parse only src/dst addresses up front. Upper-layer protocol parsing from
+		// IPv6 extension chain can be deferred and skipped when policy doesn't
+		// depend on it (e.g. HopLimit/TTL checks with header-only datagrams).
+		if len(data) < ipv6.HeaderLen {
+			return fmt.Errorf("connect-ip: malformed datagram: too short")
+		}
+		src = netip.AddrFrom16([16]byte(data[8:24]))
+		dst = netip.AddrFrom16([16]byte(data[24:40]))
+		// Default to IPv6 Next Header value and only parse full extension chain
+		// when policy decisions require the upper-layer protocol.
+		ipProto = data[6]
+	default:
+		return fmt.Errorf("connect-ip: unknown IP versions: %d", version)
 	}
 
-	view := c.routeView.Load()
 	var assignedAddresses []netip.Prefix
 	var localRoutes []IPRoute
 	var peerAddresses []netip.Prefix
 	if view != nil {
-		assignedAddresses = view.assignedAddresses
-		localRoutes = view.localRoutes
-		peerAddresses = view.peerAddresses
+		if src.Is4() {
+			assignedAddresses = view.assignedV4
+			localRoutes = view.localRoutesV4
+			peerAddresses = view.peerAddressesV4
+		} else {
+			assignedAddresses = view.assignedV6
+			localRoutes = view.localRoutesV6
+			peerAddresses = view.peerAddressesV6
+		}
 	}
 
 	// We don't necessarily assign any addresses to the peer.
 	// For example, in the Remote Access VPN use case (RFC 9484, section 8.1),
 	// the client accepts incoming traffic from all IPs.
 	if peerAddresses != nil {
-		if !slices.ContainsFunc(peerAddresses, func(p netip.Prefix) bool { return p.Contains(src) }) {
+		if !prefixesContainAddrSameFamily(peerAddresses, src) {
 			c.emitPolicyDropICMP(data, "src_not_allowed")
 			return fmt.Errorf("connect-ip: datagram source address not allowed: %s", src)
 		}
@@ -537,23 +886,32 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	// 2. is within one of the ranges that we advertised to the peer.
 	var isAllowedDst bool
 	if len(assignedAddresses) > 0 {
-		isAllowedDst = slices.ContainsFunc(assignedAddresses, func(p netip.Prefix) bool { return p.Contains(dst) })
+		isAllowedDst = prefixesContainAddr(assignedAddresses, dst)
+	}
+	dstPolicyDecision := routePolicyRejectAddress
+	dstRouteIdx := -1
+	if len(localRoutes) > 0 {
+		dstRouteIdx = routeContainingAddrIndex(localRoutes, dst)
 	}
 	if !isAllowedDst {
-		isAllowedDst = slices.ContainsFunc(localRoutes, func(r IPRoute) bool {
-			if r.StartIP.Compare(dst) > 0 || dst.Compare(r.EndIP) > 0 {
-				return false
+		// For IPv6, parse extension chain only when route policy needs upper-layer
+		// protocol and Next Header points to an extension header.
+		if version == 6 &&
+			dstRouteIdx >= 0 &&
+			localRoutes[dstRouteIdx].IPProtocol != 0 &&
+			isIPv6ExtensionHeaderProtocol(ipProto) {
+			proto, err := ipv6UpperLayerProtocol(data)
+			if err != nil {
+				return err
 			}
-			// ICMP is always allowed
-			if isICMPProtocol(version, ipProto) {
-				return true
-			}
-			return r.IPProtocol == 0 || r.IPProtocol == ipProto
-		})
+			ipProto = proto
+		}
+		dstPolicyDecision = evaluateRouteDestinationPolicyAtIndex(localRoutes, dstRouteIdx, version, ipProto)
+		isAllowedDst = dstPolicyDecision == routePolicyAllow
 	}
 	if !isAllowedDst {
 		reason := "dst_not_allowed"
-		if routeAllowsDestinationButNotProtocol(localRoutes, dst, version, ipProto) {
+		if dstPolicyDecision == routePolicyRejectProtocol {
 			reason = "proto_not_allowed"
 		}
 		c.emitPolicyDropICMP(data, reason)
@@ -562,31 +920,38 @@ func (c *Conn) handleIncomingProxiedPacket(data []byte) error {
 	return nil
 }
 
-func routeAllowsDestinationButNotProtocol(routes []IPRoute, dst netip.Addr, version uint8, ipProto uint8) bool {
-	if isICMPProtocol(version, ipProto) {
-		return false
-	}
-	for _, r := range routes {
-		if r.StartIP.Compare(dst) > 0 || dst.Compare(r.EndIP) > 0 {
-			continue
-		}
-		if r.IPProtocol != 0 && r.IPProtocol != ipProto {
-			return true
-		}
-	}
-	return false
-}
+type routePolicyDecision uint8
+
+const (
+	routePolicyRejectAddress routePolicyDecision = iota
+	routePolicyRejectProtocol
+	routePolicyAllow
+)
 
 func (c *Conn) emitPolicyDropICMP(original []byte, reason string) {
-	policyDropICMPAttemptTotal.Add(1)
 	incrementPolicyDropICMPReason(reason)
-	icmpPacket, err := composeICMPPolicyDropPacket(original)
-	if err != nil {
-		log.Printf("connect-ip: failed to compose policy-drop ICMP: %v", err)
+	// For source-policy violations, replying with ICMP to the untrusted source
+	// is both low-value and frequently blocked by the same peer policy.
+	// Skip emission to avoid self-inflicted compose/send pressure in noisy ingress.
+	if reason == "src_not_allowed" {
 		return
 	}
+	policyDropICMPAttemptTotal.Add(1)
+	icmpPacket, err := composeICMPPolicyDropPacket(original)
+	if err != nil {
+		logSampledDrop(&policyDropICMPComposeFail, "connect-ip: failed to compose policy-drop ICMP: %v", err)
+		return
+	}
+	// If policy is enabled and the generated ICMP packet itself can't pass
+	// outgoing policy checks, skip before entering WritePacket compose path.
+	if c.shouldValidateOutgoingPolicy() {
+		if err := c.validateOutgoingProxiedPacket(icmpPacket); err != nil {
+			logSampledDrop(&policyDropICMPSendFail, "connect-ip: skipping policy-drop ICMP by outgoing policy: %v", err)
+			return
+		}
+	}
 	if _, err := c.WritePacket(icmpPacket); err != nil {
-		log.Printf("connect-ip: failed to send policy-drop ICMP: %v", err)
+		logSampledDrop(&policyDropICMPSendFail, "connect-ip: failed to send policy-drop ICMP: %v", err)
 		return
 	}
 	policyDropICMPTotal.Add(1)
@@ -599,10 +964,19 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	if len(b) == 0 {
 		return nil, fmt.Errorf("connect-ip: empty packet")
 	}
+	// If the connection is already closed, prefer returning the stable closed
+	// error instead of surfacing packet composition/policy failures.
+	if c.closeChan != nil {
+		select {
+		case <-c.closeChan:
+			return nil, c.closeErr
+		default:
+		}
+	}
 	buf := datagramPool.Get().(*[]byte)
 	defer datagramPool.Put(buf)
 	if err := c.composeDatagram(buf, b); err != nil {
-		log.Printf("dropping proxied packet (%d bytes) that can't be proxied: %s", len(b), err)
+		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
 		return nil, fmt.Errorf("connect-ip: compose datagram: %w", err)
 	}
 	if err := c.str.SendDatagram(*buf); err != nil {
@@ -629,6 +1003,10 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 }
 
 func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
+	return c.composeDatagramWithView(dst, src, c.routeView.Load())
+}
+
+func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteView) error {
 	if len(src) == 0 {
 		return errors.New("connect-ip: empty packet")
 	}
@@ -665,74 +1043,255 @@ func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 		}
 		packet[7]-- // Decrement Hop Limit
 	}
-	if err := c.validateOutgoingProxiedPacket(packet); err != nil {
-		return err
+	if !shouldValidatePolicyByVersion(view, ipVersion(packet)) {
+		return nil
 	}
-	return nil
+
+	// Outgoing policy checks frequently depend only on addresses and may not
+	// require parsing IPv6 upper-layer protocol from an extension chain.
+	// Avoid failing packet composition when extension-chain parsing errors
+	// happen in cases like HopLimit/TTL checks (RFC9484/IPv6 packets can be
+	// header-only with Next Header pointing at an extension type).
+	pktVersion := ipVersion(packet)
+	switch pktVersion {
+	case 4:
+		if len(packet) < ipv4.HeaderLen {
+			return fmt.Errorf("connect-ip: IPv4 packet too short")
+		}
+		pktSrc := netip.AddrFrom4([4]byte(packet[12:16]))
+		pktDst := netip.AddrFrom4([4]byte(packet[16:20]))
+		pktProto := packet[9]
+		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
+			return err
+		}
+		return nil
+	case 6:
+		if len(packet) < ipv6.HeaderLen {
+			return fmt.Errorf("connect-ip: IPv6 packet too short")
+		}
+		pktSrc := netip.AddrFrom16([16]byte(packet[8:24]))
+		pktDst := netip.AddrFrom16([16]byte(packet[24:40]))
+
+		// Decide whether upper-layer protocol parsing is required.
+		// If source is already allowed by assignedAddresses or the local route
+		// entry matches with wildcard IPProtocol=0, we can safely skip protocol parsing.
+		assignedV6 := view.assignedV6
+		localRoutesV6 := view.localRoutesV6
+		needProto := false
+		if len(assignedV6) > 0 {
+			if !prefixesContainAddrSameFamily(assignedV6, pktSrc) && len(localRoutesV6) > 0 {
+				if idx := routeContainingAddrIndex(localRoutesV6, pktSrc); idx >= 0 && localRoutesV6[idx].IPProtocol != 0 {
+					needProto = true
+				}
+			}
+		} else if len(localRoutesV6) > 0 {
+			if idx := routeContainingAddrIndex(localRoutesV6, pktSrc); idx >= 0 && localRoutesV6[idx].IPProtocol != 0 {
+				needProto = true
+			}
+		}
+
+		var pktProto uint8
+		if needProto {
+			proto, err := ipv6UpperLayerProtocol(packet)
+			if err != nil {
+				return err
+			}
+			pktProto = proto
+		}
+		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return fmt.Errorf("connect-ip: unknown IP versions: %d", pktVersion)
+	}
+}
+
+func (c *Conn) shouldValidateOutgoingPolicy() bool {
+	return shouldValidatePolicy(c.routeView.Load())
 }
 
 func (c *Conn) validateOutgoingProxiedPacket(packet []byte) error {
-	view := c.routeView.Load()
-	var assignedAddresses []netip.Prefix
-	var localRoutes []IPRoute
-	var peerAddresses []netip.Prefix
-	if view != nil {
-		assignedAddresses = view.assignedAddresses
-		localRoutes = view.localRoutes
-		peerAddresses = view.peerAddresses
-	}
-	if len(assignedAddresses) == 0 && len(localRoutes) == 0 && peerAddresses == nil {
-		return nil
-	}
 	src, dst, ipProto, version, err := packetTuple(packet)
 	if err != nil {
 		return err
+	}
+	return c.validateOutgoingPacketTupleWithView(src, dst, ipProto, version, c.routeView.Load())
+}
+
+func (c *Conn) validateOutgoingPacketTuple(src netip.Addr, dst netip.Addr, ipProto uint8, version uint8) error {
+	return c.validateOutgoingPacketTupleWithView(src, dst, ipProto, version, c.routeView.Load())
+}
+
+func (c *Conn) validateOutgoingPacketTupleWithView(src netip.Addr, dst netip.Addr, ipProto uint8, version uint8, view *connRouteView) error {
+	if view == nil {
+		return nil
+	}
+	if len(view.assignedAddresses) == 0 && len(view.localRoutes) == 0 && view.peerAddresses == nil {
+		return nil
+	}
+	var assignedAddresses []netip.Prefix
+	var localRoutes []IPRoute
+	var peerAddresses []netip.Prefix
+	if src.Is4() {
+		assignedAddresses = view.assignedV4
+		localRoutes = view.localRoutesV4
+		peerAddresses = view.peerAddressesV4
+	} else {
+		assignedAddresses = view.assignedV6
+		localRoutes = view.localRoutesV6
+		peerAddresses = view.peerAddressesV6
 	}
 
 	isAllowedSrc := false
 	hasSameFamilySourcePolicy := false
 	if len(assignedAddresses) > 0 {
-		isAllowedSrc = slices.ContainsFunc(assignedAddresses, func(p netip.Prefix) bool {
-			if p.Addr().BitLen() != src.BitLen() {
-				return false
-			}
-			hasSameFamilySourcePolicy = true
-			return p.Contains(src)
-		})
+		isAllowedSrc = prefixesContainAddrSameFamily(assignedAddresses, src)
+		hasSameFamilySourcePolicy = len(assignedAddresses) > 0
 	}
 	if !isAllowedSrc {
-		isAllowedSrc = slices.ContainsFunc(localRoutes, func(r IPRoute) bool {
-			if r.StartIP.BitLen() != src.BitLen() || r.EndIP.BitLen() != src.BitLen() {
-				return false
-			}
+		if len(localRoutes) > 0 {
+			isAllowedSrc = routesAllowSourceAndProtocolSameFamily(localRoutes, src, version, ipProto)
 			hasSameFamilySourcePolicy = true
-			if r.StartIP.Compare(src) > 0 || src.Compare(r.EndIP) > 0 {
-				return false
-			}
-			if isICMPProtocol(version, ipProto) {
-				return true
-			}
-			return r.IPProtocol == 0 || r.IPProtocol == ipProto
-		})
+		}
 	}
 	if hasSameFamilySourcePolicy && !isAllowedSrc {
 		return fmt.Errorf("connect-ip: datagram source address / protocol not allowed: %s (protocol: %d)", src, ipProto)
 	}
 
 	if peerAddresses != nil {
-		hasSameFamilyDestinationPolicy := false
-		isAllowedDst := slices.ContainsFunc(peerAddresses, func(p netip.Prefix) bool {
-			if p.Addr().BitLen() != dst.BitLen() {
-				return false
-			}
-			hasSameFamilyDestinationPolicy = true
-			return p.Contains(dst)
-		})
-		if hasSameFamilyDestinationPolicy && !isAllowedDst {
+		if !prefixesContainAddrSameFamily(peerAddresses, dst) {
 			return fmt.Errorf("connect-ip: datagram destination address not allowed: %s", dst)
 		}
 	}
 	return nil
+}
+
+func prefixesContainAddr(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixesContainAddrSameFamily(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateRouteDestinationPolicySameFamily(routes []IPRoute, dst netip.Addr, version uint8, ipProto uint8) routePolicyDecision {
+	idx := routeContainingAddrIndex(routes, dst)
+	return evaluateRouteDestinationPolicyAtIndex(routes, idx, version, ipProto)
+}
+
+func evaluateRouteDestinationPolicyAtIndex(routes []IPRoute, idx int, version uint8, ipProto uint8) routePolicyDecision {
+	if idx < 0 {
+		return routePolicyRejectAddress
+	}
+	r := routes[idx]
+	if isICMPProtocol(version, ipProto) {
+		return routePolicyAllow
+	}
+	if r.IPProtocol == 0 || r.IPProtocol == ipProto {
+		return routePolicyAllow
+	}
+	return routePolicyRejectProtocol
+}
+
+func routesAllowSourceAndProtocolSameFamily(routes []IPRoute, src netip.Addr, version uint8, ipProto uint8) bool {
+	idx := routeContainingAddrIndex(routes, src)
+	if idx < 0 {
+		return false
+	}
+	r := routes[idx]
+	if isICMPProtocol(version, ipProto) {
+		return true
+	}
+	return r.IPProtocol == 0 || r.IPProtocol == ipProto
+}
+
+func splitPrefixesByFamily(prefixes []netip.Prefix) (v4 []netip.Prefix, v6 []netip.Prefix) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	v4 = make([]netip.Prefix, 0, len(prefixes))
+	v6 = make([]netip.Prefix, 0, len(prefixes))
+	for _, p := range prefixes {
+		if p.Addr().Is4() {
+			v4 = append(v4, p)
+		} else {
+			v6 = append(v6, p)
+		}
+	}
+	return v4, v6
+}
+
+func cloneOrNilPrefixes(prefixes []netip.Prefix) []netip.Prefix {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	return slices.Clone(prefixes)
+}
+
+func splitRoutesByFamily(routes []IPRoute) (v4 []IPRoute, v6 []IPRoute) {
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	v4 = make([]IPRoute, 0, len(routes))
+	v6 = make([]IPRoute, 0, len(routes))
+	for _, r := range routes {
+		if r.StartIP.Is4() {
+			v4 = append(v4, r)
+		} else {
+			v6 = append(v6, r)
+		}
+	}
+	return v4, v6
+}
+
+func routeContainingAddr(routes []IPRoute, addr netip.Addr) (IPRoute, bool) {
+	idx := routeContainingAddrIndex(routes, addr)
+	if idx < 0 {
+		return IPRoute{}, false
+	}
+	return routes[idx], true
+}
+
+func routeContainingAddrIndex(routes []IPRoute, addr netip.Addr) int {
+	const linearScanThreshold = 8
+	if len(routes) <= linearScanThreshold {
+		for i, r := range routes {
+			if r.StartIP.Compare(addr) > 0 || addr.Compare(r.EndIP) > 0 {
+				continue
+			}
+			return i
+		}
+		return -1
+	}
+	// Route advertisements are validated as sorted and non-overlapping.
+	// Binary search keeps policy checks stable under large route sets.
+	low := 0
+	high := len(routes)
+	for low < high {
+		mid := low + (high-low)/2
+		r := routes[mid]
+		if addr.Compare(r.StartIP) < 0 {
+			high = mid
+			continue
+		}
+		if addr.Compare(r.EndIP) > 0 {
+			low = mid + 1
+			continue
+		}
+		return mid
+	}
+	return -1
 }
 
 func packetTuple(packet []byte) (src netip.Addr, dst netip.Addr, ipProto uint8, version uint8, err error) {
@@ -777,6 +1336,32 @@ func (c *Conn) Close() error {
 }
 
 func ipVersion(b []byte) uint8 { return b[0] >> 4 }
+
+func isIPv6ExtensionHeaderProtocol(proto uint8) bool {
+	switch proto {
+	case 0, 43, 44, 60, 135, 139, 140, 253, 254:
+		return true
+	default:
+		return false
+	}
+}
+
+func logSampledDrop(counter *atomic.Uint64, format string, args ...any) {
+	if counter == nil {
+		return
+	}
+	count := counter.Add(1)
+	if count == 1 || count%sampledDropLogEvery == 0 {
+		log.Printf(format, args...)
+	}
+}
+
+func shouldLogSampledBatch(before uint64, after uint64) bool {
+	if after == 0 {
+		return false
+	}
+	return before == 0 || before/sampledDropLogEvery != after/sampledDropLogEvery
+}
 
 func ipv6UpperLayerProtocol(packet []byte) (uint8, error) {
 	if len(packet) < ipv6.HeaderLen {

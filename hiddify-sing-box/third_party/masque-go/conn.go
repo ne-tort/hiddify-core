@@ -3,7 +3,6 @@ package masque
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -46,6 +45,8 @@ type tryDrainHTTPDatagrams interface {
 }
 
 const proxiedConnPrefetchMax = 512
+const proxiedConnPrefetchMask = proxiedConnPrefetchMax - 1
+const proxiedConnExpiredPrefetchDropBudget = 64
 
 var (
 	_ http3Stream = &http3.Stream{}
@@ -54,6 +55,7 @@ var (
 
 type proxiedConn struct {
 	str        http3Stream
+	drain      tryDrainHTTPDatagrams
 	localAddr  net.Addr
 	remoteAddr net.Addr
 
@@ -65,6 +67,9 @@ type proxiedConn struct {
 	prefetchSlots [][]byte
 	prefetchHead  int
 	prefetchCount int
+	// Lock-free empty-queue check for hot ReadFrom path.
+	prefetchCountAtomic atomic.Int32
+	prefetchGate  adaptiveTryDrainGate
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -78,10 +83,14 @@ var _ net.PacketConn = &proxiedConn{}
 func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	c := &proxiedConn{
 		str:           str,
+		drain:         nil,
 		localAddr:     local,
 		remoteAddr:    remote,
 		readDone:      make(chan struct{}),
 		prefetchSlots: make([][]byte, proxiedConnPrefetchMax),
+	}
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
+		c.drain = dr
 	}
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 	go func() {
@@ -94,48 +103,77 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	return c
 }
 
-func (c *proxiedConn) takePrefetched() ([]byte, bool) {
+func (c *proxiedConn) takePrefetched() ([]byte, bool, bool) {
+	if c.prefetchCountAtomic.Load() == 0 {
+		return nil, false, false
+	}
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
 	if c.prefetchCount == 0 {
-		return nil, false
+		c.prefetchCountAtomic.Store(0)
+		return nil, false, false
 	}
 	idx := c.prefetchHead
 	d := c.prefetchSlots[idx]
 	c.prefetchSlots[idx] = nil
-	c.prefetchHead = (c.prefetchHead + 1) % len(c.prefetchSlots)
+	c.prefetchHead = (c.prefetchHead + 1) & proxiedConnPrefetchMask
 	c.prefetchCount--
-	return d, true
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	return d, true, c.prefetchCount > 0
 }
 
 func (c *proxiedConn) extendPrefetchFromTry() {
-	dr, ok := c.str.(tryDrainHTTPDatagrams)
-	if !ok {
+	if c.drain == nil {
+		return
+	}
+	// Cheap lock-free probe budget check before taking prefetchMu.
+	if !c.prefetchGate.shouldProbe() {
 		return
 	}
 	// Batch drain under one prefetchMu (avoids lock/unlock per datagram).
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
+	drained := 0
 	for c.prefetchCount < proxiedConnPrefetchMax {
-		raw, ok := dr.TryReceiveDatagram()
+		raw, ok := c.drain.TryReceiveDatagram()
 		if !ok {
-			return
+			break
 		}
-		tail := (c.prefetchHead + c.prefetchCount) % len(c.prefetchSlots)
+		tail := (c.prefetchHead + c.prefetchCount) & proxiedConnPrefetchMask
 		c.prefetchSlots[tail] = raw
 		c.prefetchCount++
+		drained++
 	}
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	c.prefetchGate.observeDrain(drained)
 }
 
 func (c *proxiedConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
+	expiredPrefetchDrops := 0
 start:
 	c.deadlineMx.Lock()
 	ctx := c.readCtx
 	c.deadlineMx.Unlock()
+	ctxDone := ctx.Done()
+	ctxCancelled := func() (error, bool) {
+		if ctxDone == nil {
+			return nil, false
+		}
+		select {
+		case <-ctxDone:
+			return ctx.Err(), true
+		default:
+			return nil, false
+		}
+	}
 
 	var data []byte
-	if raw, ok := c.takePrefetched(); ok {
+	fromPrefetch := false
+	hasBufferedPrefetch := false
+	if raw, ok, hasMore := c.takePrefetched(); ok {
 		data = raw
+		fromPrefetch = true
+		hasBufferedPrefetch = hasMore
 	} else {
 		data, err = c.str.ReceiveDatagram(ctx)
 		if err != nil {
@@ -153,19 +191,57 @@ start:
 			return 0, nil, os.ErrDeadlineExceeded
 		}
 	}
-	contextID, prefixLen, err := quicvarint.Parse(data)
+	payload, ok, err := parseProxiedDatagramPayload(data)
 	if err != nil {
-		return 0, nil, fmt.Errorf("masque: malformed datagram: %w", err)
+		// CONNECT-UDP uses unreliable DATAGRAMs: malformed frames must not tear down the flow.
+		cancelErr, cancelled := ctxCancelled()
+		if cancelled {
+			c.deadlineMx.Lock()
+			deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
+			c.deadlineMx.Unlock()
+			if deadlineExceeded {
+				expiredPrefetchDrops++
+				if expiredPrefetchDrops >= proxiedConnExpiredPrefetchDropBudget {
+					return 0, nil, os.ErrDeadlineExceeded
+				}
+			}
+			if cancelErr != nil && !errors.Is(cancelErr, context.Canceled) {
+				return 0, nil, cancelErr
+			}
+		}
+		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+			c.extendPrefetchFromTry()
+		}
+		goto start
 	}
-	if contextID != 0 {
+	if !ok {
 		// Drop this datagram. We currently only support proxying of UDP payloads.
-		c.extendPrefetchFromTry()
+		cancelErr, cancelled := ctxCancelled()
+		if cancelled {
+			c.deadlineMx.Lock()
+			deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
+			c.deadlineMx.Unlock()
+			if deadlineExceeded {
+				expiredPrefetchDrops++
+				if expiredPrefetchDrops >= proxiedConnExpiredPrefetchDropBudget {
+					return 0, nil, os.ErrDeadlineExceeded
+				}
+			}
+			if cancelErr != nil && !errors.Is(cancelErr, context.Canceled) {
+				return 0, nil, cancelErr
+			}
+		}
+		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+			c.extendPrefetchFromTry()
+		}
 		goto start
 	}
 	// If b is too small, additional bytes are discarded.
 	// This mirrors the behavior of large UDP datagrams received on a UDP socket (on Linux).
-	n = copy(b, data[prefixLen:])
-	c.extendPrefetchFromTry()
+	n = copy(b, payload)
+	if !fromPrefetch || !hasBufferedPrefetch {
+		c.extendPrefetchFromTry()
+	}
 	return n, c.remoteAddr, nil
 }
 
@@ -177,9 +253,9 @@ func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 	bufPtr := proxiedConnWriteBufPool.Get().(*[]byte)
 	data := *bufPtr
 	if cap(data) >= minCap {
-		data = data[:0]
-		data = append(data, contextIDZero...)
-		data = append(data, p...)
+		data = data[:minCap]
+		data[0] = 0
+		copy(data[len(contextIDZero):], p)
 		err = c.str.SendDatagram(data)
 		*bufPtr = data[:0]
 		proxiedConnWriteBufPool.Put(bufPtr)
@@ -187,11 +263,62 @@ func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 	}
 	*bufPtr = data[:0]
 	proxiedConnWriteBufPool.Put(bufPtr)
-	b := make([]byte, 0, minCap)
-	b = append(b, contextIDZero...)
-	b = append(b, p...)
+	b := make([]byte, minCap)
+	b[0] = 0
+	copy(b[len(contextIDZero):], p)
 	err = c.str.SendDatagram(b)
 	return n, err
+}
+
+func parseProxiedDatagramPayload(data []byte) (payload []byte, ok bool, err error) {
+	if len(data) == 0 {
+		return nil, false, io.EOF
+	}
+	// CONNECT-UDP hot path: context ID 0 is encoded as one byte 0x00.
+	if data[0] == 0 {
+		return data[1:], true, nil
+	}
+	// Fast-reject one-byte non-zero context IDs without quicvarint.Parse.
+	// QUIC varint prefixes with 00 use a single byte encoding (0..63).
+	if data[0]&0xc0 == 0 {
+		return nil, false, nil
+	}
+	// Fast-reject multi-byte non-zero contexts when high-order varint bits are
+	// already non-zero. Context ID 0 can only use this prefix if those bits are zero.
+	if data[0]&0x3f != 0 {
+		return nil, false, nil
+	}
+	// Fast-path multi-byte varint with zero high-order bits:
+	// - accept canonical 2/4/8-byte zero context-id,
+	// - fast-reject non-zero values directly for tolerant-drop path.
+	switch data[0] >> 6 {
+	case 1:
+		if len(data) < 2 {
+			return nil, false, io.EOF
+		}
+		if data[1] == 0 {
+			return data[2:], true, nil
+		}
+		return nil, false, nil
+	case 2:
+		if len(data) < 4 {
+			return nil, false, io.EOF
+		}
+		if data[1] == 0 && data[2] == 0 && data[3] == 0 {
+			return data[4:], true, nil
+		}
+		return nil, false, nil
+	case 3:
+		if len(data) < 8 {
+			return nil, false, io.EOF
+		}
+		if data[1] == 0 && data[2] == 0 && data[3] == 0 && data[4] == 0 && data[5] == 0 && data[6] == 0 && data[7] == 0 {
+			return data[8:], true, nil
+		}
+		return nil, false, nil
+	}
+	// Unreachable after the prefix checks above, but keep a safe malformed fallback.
+	return nil, false, io.EOF
 }
 
 func (c *proxiedConn) Close() error {

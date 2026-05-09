@@ -73,6 +73,7 @@ require (
 	github.com/dgraph-io/ristretto v0.0.3-0.20200630154024-f66de99634de // indirect
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
+	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/enfein/mieru/v3 v3.30.0 // indirect
@@ -127,6 +128,9 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus-community/pro-bing v0.4.0 // indirect
+	github.com/quic-go/connect-ip-go v0.2.0 // indirect
+	github.com/quic-go/masque-go v0.3.0 // indirect
+	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/refraction-networking/conjure v0.7.11-0.20240130155008-c8df96195ab2 // indirect
 	github.com/refraction-networking/ed25519 v0.1.2 // indirect
 	github.com/refraction-networking/gotapdance v1.7.10 // indirect
@@ -190,6 +194,7 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xtaci/kcp-go/v5 v5.6.70 // indirect
 	github.com/xtaci/smux v1.5.50 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/goptlib v1.5.0 // indirect
 	go.etcd.io/bbolt v1.3.11 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
@@ -301,3 +306,10 @@ replace github.com/sagernet/cronet-go => ./hiddify-sing-box/replace/cronet-go
 replace github.com/sagernet/cronet-go/all => ./hiddify-sing-box/replace/cronet-go-all
 
 replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401180616-890dc987a6a9
+
+// sing-box replace for quic-go/* is not applied when sing-box is only a dependency — mirror paths here.
+replace github.com/quic-go/masque-go => ./hiddify-sing-box/third_party/masque-go
+
+replace github.com/quic-go/connect-ip-go => ./hiddify-sing-box/third_party/connect-ip-go
+
+replace github.com/quic-go/quic-go => ./hiddify-sing-box/replace/quic-go-patched

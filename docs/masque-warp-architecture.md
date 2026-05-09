@@ -191,22 +191,27 @@ Result: **embedded registration is required** for `warp_masque` in core, because
   - `server_port`
   - `transport_mode`: `connect_udp | connect_ip | auto`
   - `tcp_mode`: `strict_masque | masque_or_direct`
-  - `tcp_transport`: `connect_ip | connect_stream | auto`
+  - `tcp_transport`: on **client**, must be **`connect_stream` explicitly** (empty/`auto`/`connect_ip` rejected at `validateMasqueOptions`; TCP over IP plane uses `transport_mode: connect_ip` + netstack, not this key)
   - `template_tcp`
   - `chain`: optional hop list and selection policy
-  - `detour`
+  - `detour` (data-plane / router detour for the endpoint)
+  - `server_token` (optional Bearer for CONNECT-UDP / CONNECT-IP / TCP stream)
   - `mtu` (`connect_ip` datagram ceiling, validated in `[1280, 65535]`)
   - `udp_timeout` / `workers` (not supported; fail-fast)
 
 ## Endpoint `warp_masque`
-- WARP-focused fields:
+- Inherits the full **`MasqueEndpointOptions`** surface from `type: masque` (same `transport_mode`, `server_token`, `template_*`, `hop_policy`/`hops`, `detour` at endpoint root, etc.).
+- WARP **control-plane** profile:
   - `profile.id`
   - `profile.auth_token`
   - `profile.license`
-  - `profile.private_key` (if required by control-plane flavor)
-  - `detour`
-  - optional explicit server override
-  - `transport_mode` with safe defaults for Cloudflare compatibility
+  - `profile.private_key` (when required by consumer flow)
+  - `profile.compatibility`: `auto` | `consumer` | `zero_trust` | `both`
+  - `profile.recreate` (bypass / refresh cache semantics in adapter)
+  - `profile.detour` (detour used when calling Cloudflare profile APIs, distinct from endpoint `detour` when both are set)
+  - optional explicit server override (`server` / hops) atop bootstrap
+  - `profile.dataplane_port`: override UDP/QUIC port after device API resolution (e.g. try 443 when API still exposes a WG-style port).
+  - `transport_mode`: use **`connect_udp` for softer live-edge smoke** when CONNECT-IP is not yet viable; CONNECT-IP when peer and policy allow (`validateMasqueOptions` applies unchanged).
 
 ## Chaining Model
 - First-class chain graph in config and core.

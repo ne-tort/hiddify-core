@@ -1,7 +1,6 @@
 package quic
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"syscall"
@@ -14,7 +13,7 @@ import (
 func setReceiveBuffer(c net.PacketConn) error {
 	conn, ok := c.(interface{ SetReadBuffer(int) error })
 	if !ok {
-		return errors.New("connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?")
+		return fmt.Errorf("connection doesn't allow setting of receive buffer size. Not a *net.UDPConn? conn_type=%T", c)
 	}
 
 	var syscallConn syscall.RawConn

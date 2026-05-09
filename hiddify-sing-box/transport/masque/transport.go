@@ -31,7 +31,9 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
-const defaultUDPInitialPacketSize uint16 = 1350
+// Above 1200: room for CONNECT-IP (context id + full IPv4/UDP datagram @ 1152 B payload)
+// inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
+const defaultUDPInitialPacketSize uint16 = 1420
 
 // connectIPUDPWriteBufPool backs CONNECT-IP UDP bridge egress builds (IPv4+UDP+payload).
 // Avoids a process-global mutex on connectIPUDPPacketConn for buffer reuse; WritePacket copies before return.
@@ -43,6 +45,8 @@ var connectIPUDPWriteBufPool = sync.Pool{
 }
 
 const defaultConnectIPDatagramCeilingMax = 1500
+// CONNECT-IP UDP bridge: max application UDP payload per IPv4 datagram before WritePacket.
+// 1152 matches conventional MASQUE CONNECT-IP max UDP payload (aligned with sing-box CONNECT-IP path).
 const connectIPUDPWriteHardCap = 1152
 
 // connectIPUDPDirectReadMin is the minimum caller buffer size for CONNECT-IP UDP ReadFrom to
@@ -152,6 +156,7 @@ var (
 	ErrUnsupportedNetwork     = errors.New("masque session unsupported network")
 	ErrPolicyFallbackDenied   = errors.New("masque tcp fallback policy denied")
 	ErrTCPConnectStreamFailed = errors.New("masque tcp connect-stream failed")
+	ErrQUICPacketConnContract = errors.New("quic transport packetconn contract violation")
 )
 
 func unsupportedNetworkError(network string) error {
@@ -197,6 +202,10 @@ type connectIPObservabilityCounters struct {
 	engineDropByReason           map[string]uint64
 	enginePMTUUpdateByReason     map[string]uint64
 	bridgeWriteErrByReason       map[string]uint64
+	quicTransportTierByPath      map[string]uint64
+	quicTransportTypeByPath      map[string]string
+	quicTransportBufferTuningOK  uint64
+	quicTransportBufferTuningNOK uint64
 	currentSessionID             string
 	currentScopeTarget           string
 	currentScopeIPProto          uint8
@@ -210,6 +219,8 @@ var connectIPCounters = connectIPObservabilityCounters{
 	engineDropByReason:       make(map[string]uint64),
 	enginePMTUUpdateByReason: make(map[string]uint64),
 	bridgeWriteErrByReason:   make(map[string]uint64),
+	quicTransportTierByPath:  make(map[string]uint64),
+	quicTransportTypeByPath:  make(map[string]string),
 }
 
 func policyDropICMPReasonSnapshot() map[string]uint64 {
@@ -260,6 +271,80 @@ type QUICExperimentalOptions struct {
 
 type QUICDialFunc func(ctx context.Context, address string, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error)
 
+type quicPacketConnPolicy string
+
+const (
+	quicPacketConnPolicyStrict     quicPacketConnPolicy = "strict"
+	quicPacketConnPolicyPermissive quicPacketConnPolicy = "permissive"
+)
+
+type quicTransportPacketConnTier string
+
+const (
+	quicTransportPacketConnTierA quicTransportPacketConnTier = "TierA"
+	quicTransportPacketConnTierB quicTransportPacketConnTier = "TierB"
+)
+
+func masqueQUICPacketConnPolicy() quicPacketConnPolicy {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MASQUE_QUIC_PACKET_CONN_POLICY"))) {
+	case "":
+		return quicPacketConnPolicyPermissive
+	case string(quicPacketConnPolicyPermissive):
+		return quicPacketConnPolicyPermissive
+	default:
+		return quicPacketConnPolicyStrict
+	}
+}
+
+func quicPacketConnHasTierACapabilities(c net.PacketConn) (ok bool, connType string, missing []string) {
+	connType = fmt.Sprintf("%T", c)
+	if c == nil {
+		return false, connType, []string{"packet_conn_nil"}
+	}
+	if _, yes := c.(interface{ SetReadBuffer(bytes int) error }); !yes {
+		missing = append(missing, "SetReadBuffer")
+	}
+	if _, yes := c.(interface{ SetWriteBuffer(bytes int) error }); !yes {
+		missing = append(missing, "SetWriteBuffer")
+	}
+	if _, yes := c.(interface{ SyscallConn() (syscall.RawConn, error) }); !yes {
+		missing = append(missing, "SyscallConn")
+	}
+	return len(missing) == 0, connType, missing
+}
+
+func ValidateQUICTransportPacketConn(c net.PacketConn, path string) error {
+	ok, connType, missing := quicPacketConnHasTierACapabilities(c)
+	if ok {
+		recordQUICTransportPacketConn(path, quicTransportPacketConnTierA, connType, true)
+		return nil
+	}
+	recordQUICTransportPacketConn(path, quicTransportPacketConnTierB, connType, false)
+	details := strings.Join(missing, ",")
+	policy := masqueQUICPacketConnPolicy()
+	if policy == quicPacketConnPolicyPermissive {
+		log.Printf("masque quic packetconn degraded mode path=%s policy=%s conn_type=%s missing=%s", path, policy, connType, details)
+		return nil
+	}
+	return errors.Join(
+		ErrQUICPacketConnContract,
+		fmt.Errorf("path=%s policy=%s conn_type=%s missing=%s", path, policy, connType, details),
+	)
+}
+
+func recordQUICTransportPacketConn(path string, tier quicTransportPacketConnTier, connType string, bufferTuningOK bool) {
+	connectIPCounters.mu.Lock()
+	defer connectIPCounters.mu.Unlock()
+	key := fmt.Sprintf("%s|%s", path, tier)
+	connectIPCounters.quicTransportTierByPath[key]++
+	connectIPCounters.quicTransportTypeByPath[path] = connType
+	if bufferTuningOK {
+		connectIPCounters.quicTransportBufferTuningOK++
+	} else {
+		connectIPCounters.quicTransportBufferTuningNOK++
+	}
+}
+
 type HopOptions struct {
 	Tag    string
 	Via    string
@@ -271,6 +356,12 @@ type IPPacketSession interface {
 	ReadPacket(buffer []byte) (int, error)
 	WritePacket(buffer []byte) (icmp []byte, err error)
 	Close() error
+}
+
+// Optional context-aware reader to propagate packet-plane read deadlines.
+// This avoids blocking reads that cannot be cancelled from higher layers.
+type IPPacketSessionWithContext interface {
+	ReadPacketWithContext(ctx context.Context, buffer []byte) (int, error)
 }
 
 type DirectClientFactory struct{}
@@ -341,7 +432,7 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 	tcpCapable := tcpTransport == "connect_stream"
 	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
 	if effectiveCeiling <= 0 {
-		effectiveCeiling = 1280
+		effectiveCeiling = defaultConnectIPDatagramCeilingMax
 	}
 	if effectiveCeiling < 1280 {
 		effectiveCeiling = 1280
@@ -655,12 +746,34 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	if c.deadlines.readTimeoutExceeded() {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
+
+	// Propagate read deadlines into connect-ip-go's blocking ReceiveDatagram().
+	ctx := context.Background()
+	if v := c.deadlines.read.Load(); v != 0 {
+		// readTimeoutExceeded() already checks against time.Now(), but keep it
+		// consistent with the same semantics for context-based cancellation.
+		if time.Now().UnixNano() > v {
+			return 0, nil, os.ErrDeadlineExceeded
+		}
+		deadline := time.Unix(0, v)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(context.Background(), deadline)
+		defer cancel()
+	}
+
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
+
+	var sctx IPPacketSessionWithContext
+	sctx, _ = c.session.(IPPacketSessionWithContext)
 	for {
 		var raw []byte
 		if len(p) >= connectIPUDPDirectReadMin {
-			n, err = c.session.ReadPacket(p)
+			if sctx != nil {
+				n, err = sctx.ReadPacketWithContext(ctx, p)
+			} else {
+				n, err = c.session.ReadPacket(p)
+			}
 			raw = p[:n]
 		} else {
 			rb := c.readBuffer
@@ -668,10 +781,17 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 				rb = make([]byte, 64*1024)
 				c.readBuffer = rb
 			}
-			n, err = c.session.ReadPacket(rb)
+			if sctx != nil {
+				n, err = sctx.ReadPacketWithContext(ctx, rb)
+			} else {
+				n, err = c.session.ReadPacket(rb)
+			}
 			raw = rb[:n]
 		}
 		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return 0, nil, os.ErrDeadlineExceeded
+			}
 			return 0, nil, err
 		}
 		connectIPCounters.engineIngressTotal.Add(1)
@@ -1113,8 +1233,29 @@ func (s *coreSession) newUDPClient() *qmasque.Client {
 			InsecureSkipVerify: s.options.Insecure,
 			ServerName:         resolveTLSServerName(s.options),
 		},
-		QUICConfig: applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental),
-		QUICDial:   s.options.QUICDial,
+		QUICConfig:  applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental),
+		QUICDial:    s.quicDialWithPolicy("client_connect_udp"),
+		BearerToken: strings.TrimSpace(s.options.ServerToken),
+	}
+}
+
+func (s *coreSession) quicDialWithPolicy(path string) QUICDialFunc {
+	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		if s.options.QUICDial != nil {
+			policy := masqueQUICPacketConnPolicy()
+			if policy == quicPacketConnPolicyStrict {
+				recordQUICTransportPacketConn(path, quicTransportPacketConnTierB, "custom_quic_dial", false)
+				return nil, errors.Join(
+					ErrQUICPacketConnContract,
+					fmt.Errorf("path=%s policy=%s custom_quic_dial requires explicit degraded-mode opt-in", path, policy),
+				)
+			}
+			recordQUICTransportPacketConn(path, quicTransportPacketConnTierB, "custom_quic_dial", false)
+			log.Printf("masque quic packetconn degraded mode path=%s policy=%s conn_type=%s", path, policy, "custom_quic_dial")
+			return s.options.QUICDial(ctx, addr, tlsCfg, cfg)
+		}
+		recordQUICTransportPacketConn(path, quicTransportPacketConnTierA, "*net.UDPConn (quic.DialAddr)", true)
+		return quic.DialAddr(ctx, addr, tlsCfg, cfg)
 	}
 }
 
@@ -1150,8 +1291,10 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, err
 	}
-	conn, _, err := connectip.Dial(ctx, clientConn, s.templateIP)
+	token := strings.TrimSpace(s.options.ServerToken)
+	conn, _, err := connectip.Dial(ctx, clientConn, s.templateIP, token)
 	if err != nil {
+		log.Printf("masque connectip dial failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, token != "", err)
 		for s.advanceHop() {
 			if resetErr := s.resetHopTemplates(); resetErr != nil {
 				return nil, resetErr
@@ -1160,7 +1303,7 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 			if err != nil {
 				continue
 			}
-			conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP)
+			conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
 			if err == nil {
 				s.ipConn = conn
 				connectIPCounters.openSessionTotal.Add(1)
@@ -1172,6 +1315,7 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 					pmtuState:       s.connectIPPMTUState,
 				}, nil
 			}
+			log.Printf("masque connectip dial retry failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, token != "", err)
 		}
 		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
 		emitConnectIPObservabilityEvent("open_ip_session_fail")
@@ -1228,11 +1372,23 @@ func resolveDestinationHost(destination M.Socksaddr) (string, error) {
 	return "", errors.Join(ErrCapability, E.New("invalid destination"))
 }
 
+// masqueDialTarget keeps hostname-based dial target intact so DNS resolution strategy is delegated
+// to the configured dial path (custom QUIC dialer / sing-box routing DNS), instead of forcing a
+// system-level IPv4 lookup here.
+func masqueDialTarget(host string, port int) string {
+	host = strings.TrimSpace(host)
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
 func (s *coreSession) openHTTP3ClientConn(ctx context.Context) (*http3.ClientConn, error) {
 	if s.ipHTTPConn != nil {
 		return s.ipHTTPConn, nil
 	}
-	target := net.JoinHostPort(s.options.Server, strconv.Itoa(int(s.options.ServerPort)))
+	port := int(s.options.ServerPort)
+	if port <= 0 {
+		port = 443
+	}
+	target := masqueDialTarget(s.options.Server, port)
 	tlsConf := &tls.Config{
 		NextProtos:         []string{http3.NextProtoH3},
 		InsecureSkipVerify: s.options.Insecure,
@@ -1243,14 +1399,12 @@ func (s *coreSession) openHTTP3ClientConn(ctx context.Context) (*http3.ClientCon
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			cfg = masquePacketPlaneQUICConfig(cfg)
 			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
-			if s.options.QUICDial != nil {
-				return s.options.QUICDial(ctx, addr, tlsCfg, cfg)
-			}
-			return quic.DialAddr(ctx, addr, tlsCfg, cfg)
+			return s.quicDialWithPolicy("client_connect_ip")(ctx, addr, tlsCfg, cfg)
 		},
 	}
 	conn, err := transport.Dial(ctx, target, tlsConf, applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental))
 	if err != nil {
+		log.Printf("masque openHTTP3ClientConn failed target=%s sni=%s err=%v", target, tlsConf.ServerName, err)
 		return nil, err
 	}
 	s.ipHTTP = transport
@@ -1527,10 +1681,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 			Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 				cfg = masquePacketPlaneQUICConfig(cfg)
 				cfg = applyQUICExperimentalOptions(cfg, options.QUICExperimental)
-				if options.QUICDial != nil {
-					return options.QUICDial(ctx, addr, tlsCfg, cfg)
-				}
-				return quic.DialAddr(ctx, addr, tlsCfg, cfg)
+				return s.quicDialWithPolicy("client_connect_stream")(ctx, addr, tlsCfg, cfg)
 			},
 		}
 	}
@@ -1662,10 +1813,7 @@ func (s *coreSession) resetTCPHTTPTransport() {
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			cfg = masquePacketPlaneQUICConfig(cfg)
 			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
-			if s.options.QUICDial != nil {
-				return s.options.QUICDial(ctx, addr, tlsCfg, cfg)
-			}
-			return quic.DialAddr(ctx, addr, tlsCfg, cfg)
+			return s.quicDialWithPolicy("client_connect_stream")(ctx, addr, tlsCfg, cfg)
 		},
 	}
 }
@@ -1854,6 +2002,25 @@ type connectIPPacketSession struct {
 
 func (s *connectIPPacketSession) ReadPacket(buffer []byte) (int, error) {
 	n, err := s.conn.ReadPacket(buffer)
+	if err != nil {
+		connectIPCounters.packetReadExitTotal.Add(1)
+		incConnectIPReadDropReason(classifyConnectIPErrorReason(err))
+		emitConnectIPObservabilityEvent("packet_read_exit")
+		return n, err
+	}
+	if n > 0 {
+		rxSeq := connectIPCounters.packetRxTotal.Add(1)
+		connectIPCounters.bytesRxTotal.Add(uint64(n))
+		if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
+			emitConnectIPObservabilityEvent("first_packet_rx")
+		}
+		maybeEmitConnectIPActiveSnapshot(rxSeq)
+	}
+	return n, err
+}
+
+func (s *connectIPPacketSession) ReadPacketWithContext(ctx context.Context, buffer []byte) (int, error) {
+	n, err := s.conn.ReadPacketWithContext(ctx, buffer)
 	if err != nil {
 		connectIPCounters.packetReadExitTotal.Add(1)
 		incConnectIPReadDropReason(classifyConnectIPErrorReason(err))
@@ -2124,6 +2291,16 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 	for k, v := range connectIPCounters.bridgeWriteErrByReason {
 		bridgeWriteErrReasons[k] = v
 	}
+	quicConnTier := make(map[string]uint64, len(connectIPCounters.quicTransportTierByPath))
+	for k, v := range connectIPCounters.quicTransportTierByPath {
+		quicConnTier[k] = v
+	}
+	quicConnType := make(map[string]string, len(connectIPCounters.quicTransportTypeByPath))
+	for k, v := range connectIPCounters.quicTransportTypeByPath {
+		quicConnType[k] = v
+	}
+	bufferTuningOK := connectIPCounters.quicTransportBufferTuningOK
+	bufferTuningNOK := connectIPCounters.quicTransportBufferTuningNOK
 	sessionID := connectIPCounters.currentSessionID
 	scopeTarget := connectIPCounters.currentScopeTarget
 	scopeIPProto := connectIPCounters.currentScopeIPProto
@@ -2165,6 +2342,10 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_bridge_write_ok_total":            connectIPCounters.bridgeWriteOkTotal.Load(),
 		"connect_ip_bridge_write_err_total":           connectIPCounters.bridgeWriteErrTotal.Load(),
 		"connect_ip_bridge_write_err_reason_total":    bridgeWriteErrReasons,
+		"quic_transport_packet_conn_tier":             quicConnTier,
+		"quic_transport_packet_conn_type":             quicConnType,
+		"quic_transport_buffer_tuning_ok":             bufferTuningOK,
+		"quic_transport_buffer_tuning_not_ok":         bufferTuningNOK,
 		"connect_ip_session_reset_total":              reasons,
 		"connect_ip_capsule_unknown_total":            connectip.UnknownCapsuleTotal(),
 		"connect_ip_datagram_context_unknown_total":   connectip.UnknownContextDatagramTotal(),

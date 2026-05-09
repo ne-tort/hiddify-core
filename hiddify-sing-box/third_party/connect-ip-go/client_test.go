@@ -18,6 +18,7 @@ func TestClientInvalidTemplate(t *testing.T) {
 		context.Background(),
 		nil,
 		uritemplate.MustNew("https://example.org/.well-known/masque/ip/{unknown}/"),
+		"",
 	)
 	require.ErrorIs(t, err, ErrFlowForwardingUnsupported)
 }
@@ -53,6 +54,7 @@ func TestClientWaitForSettings(t *testing.T) {
 		ctx,
 		tr.NewClientConn(cconn),
 		uritemplate.MustNew("https://example.org/.well-known/masque/ip/"),
+		"",
 	)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
@@ -87,6 +89,7 @@ func TestClientDatagramCheck(t *testing.T) {
 		context.Background(),
 		tr.NewClientConn(cconn),
 		uritemplate.MustNew("https://example.org/.well-known/masque/ip/"),
+		"",
 	)
 	require.ErrorContains(t, err, "connect-ip: server didn't enable datagrams")
 }
