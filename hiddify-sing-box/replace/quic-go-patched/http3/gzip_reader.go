@@ -6,7 +6,9 @@ package http3
 // call gzip.NewReader on the first call to Read
 import (
 	"compress/gzip"
+	"errors"
 	"io"
+	"time"
 )
 
 // call gzip.NewReader on the first call to Read
@@ -36,4 +38,13 @@ func (gz *gzipReader) Read(p []byte) (n int, err error) {
 
 func (gz *gzipReader) Close() error {
 	return gz.body.Close()
+}
+
+func (gz *gzipReader) SetReadDeadline(t time.Time) error {
+	if d, ok := gz.body.(interface {
+		SetReadDeadline(time.Time) error
+	}); ok {
+		return d.SetReadDeadline(t)
+	}
+	return errors.New("http3 gzipReader: underlying body does not support SetReadDeadline")
 }

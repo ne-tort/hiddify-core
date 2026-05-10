@@ -23,6 +23,46 @@ import (
 
 var newQUICOutboundDialer = dialer.New
 
+// buildMasqueTCPDialFunc wires sing-box TCP dialing (detour, routing) for MASQUE HTTP/2 overlay paths.
+func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, remoteIsDomain bool) (TM.MasqueTCPDialFunc, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var (
+		outboundDialer N.Dialer
+		err            error
+	)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				outboundDialer = nil
+				err = E.New("dialer.New panic: ", r)
+			}
+		}()
+		outboundDialer, err = newQUICOutboundDialer(ctx, options, remoteIsDomain)
+	}()
+	if err != nil {
+		if !reflect.DeepEqual(options, option.DialerOptions{}) {
+			return nil, E.Cause(err, "initialize MASQUE TCP dialer")
+		}
+		outboundDialer = nil
+		err = nil
+	}
+	if outboundDialer == nil {
+		return func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{}
+			return d.DialContext(ctx, network, address)
+		}, nil
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		destination := M.ParseSocksaddr(address)
+		if !destination.IsValid() {
+			return nil, E.New("invalid MASQUE TCP address: ", address)
+		}
+		return outboundDialer.DialContext(ctx, network, destination)
+	}, nil
+}
+
 func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remoteIsDomain bool) (TM.QUICDialFunc, error) {
 	if ctx == nil {
 		ctx = context.Background()

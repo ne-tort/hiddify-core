@@ -70,6 +70,11 @@ type RuntimeOptions struct {
 	WarpMasqueLegacyH3Extras    bool
 	WarpConnectIPProtocol       string
 	WarpMasqueDeviceBearerToken string
+
+	TCPDial                  T.MasqueTCPDialFunc
+	MasqueEffectiveHTTPLayer string
+	HTTPLayerFallback        bool
+	HTTPLayerSuccess         func(layer string, id T.HTTPLayerCacheDialIdentity)
 }
 
 type RuntimeFactory interface {
@@ -142,8 +147,8 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 		}
 		session, err = r.factory.NewSession(ctx, T.ClientOptions{
 			Tag:                         r.options.Tag,
-			Server:                      r.options.Server,
-			DialPeer:                    r.options.DialPeer,
+			Server:                      strings.TrimSpace(r.options.Server),
+			DialPeer:                    strings.TrimSpace(r.options.DialPeer),
 			ServerPort:                  r.options.ServerPort,
 			TransportMode:               r.options.TransportMode,
 			TemplateUDP:                 r.options.TemplateUDP,
@@ -154,13 +159,17 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			FallbackPolicy:              r.options.FallbackPolicy,
 			TCPMode:                     r.options.TCPMode,
 			TCPTransport:                r.options.TCPTransport,
-			ServerToken:                 r.options.ServerToken,
-			TLSServerName:               r.options.TLSServerName,
+			ServerToken:                 strings.TrimSpace(r.options.ServerToken),
+			TLSServerName:               strings.TrimSpace(r.options.TLSServerName),
 			Insecure:                    r.options.Insecure,
 			QUICExperimental:            r.options.QUICExperimental,
 			ConnectIPDatagramCeiling:    r.options.ConnectIPDatagramCeiling,
 			Hops:                        toTransportHops(r.options.Chain),
 			QUICDial:                    r.options.QUICDial,
+			TCPDial:                     r.options.TCPDial,
+			MasqueEffectiveHTTPLayer:    r.options.MasqueEffectiveHTTPLayer,
+			HTTPLayerFallback:           r.options.HTTPLayerFallback,
+			HTTPLayerSuccess:            r.options.HTTPLayerSuccess,
 			WarpMasqueClientCert:        r.options.WarpMasqueClientCert,
 			WarpMasquePinnedPubKey:      r.options.WarpMasquePinnedPubKey,
 			WarpMasqueLegacyH3Extras:    r.options.WarpMasqueLegacyH3Extras,
@@ -304,6 +313,11 @@ func (r *runtimeImpl) OpenIPSession(ctx context.Context) (T.IPPacketSession, err
 		return nil, r.notReadyDialErr()
 	}
 	if ipPlane != nil {
+		// CONNECT-IP pre-opened during Start. If ctx is canceled, delegate to ClientSession.OpenIPSession
+		// so transport/masque coreSession clears http_layer_fallback latch (parity with direct reuse of ipConn).
+		if ctx.Err() != nil {
+			return session.OpenIPSession(ctx)
+		}
 		return ipPlane, nil
 	}
 	return session.OpenIPSession(ctx)

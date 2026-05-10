@@ -47,6 +47,24 @@ func TestConnectIPRequestParsing(t *testing.T) {
 		require.Equal(t, uint8(17), r.IPProto)
 	})
 
+	t.Run("parse scoped flow forwarding variables from path-only request URI", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{target}/{ipproto}")
+		req := newRequest("https://localhost:1234/masque/ip/198.18.0.0%2F15/17")
+		req.URL.Scheme = ""
+		req.URL.Host = ""
+		req.URL.Path = "/masque/ip/198.18.0.0%2F15/17"
+		req.URL.RawPath = ""
+		req.URL.RawQuery = ""
+		req.URL.ForceQuery = false
+		req.RequestURI = "/masque/ip/198.18.0.0%2F15/17"
+		r, err := ParseRequest(req, template)
+		require.NoError(t, err)
+		require.True(t, r.HasTarget)
+		require.Equal(t, netip.MustParsePrefix("198.18.0.0/15"), r.Target)
+		require.True(t, r.HasIPProto)
+		require.Equal(t, uint8(17), r.IPProto)
+	})
+
 	t.Run("reject unknown flow forwarding variable", func(t *testing.T) {
 		template := uritemplate.MustNew("https://localhost:1234/masque/ip/{foo}")
 		req := newRequest("https://localhost:1234/masque/ip/bar")
@@ -73,12 +91,34 @@ func TestConnectIPRequestParsing(t *testing.T) {
 
 	template := uritemplate.MustNew("https://localhost:1234/masque/")
 
+	t.Run("nil template", func(t *testing.T) {
+		req := newRequest("https://localhost:1234/masque/ip")
+		_, err := ParseRequest(req, nil)
+		require.Error(t, err)
+		var pe *RequestParseError
+		require.ErrorAs(t, err, &pe)
+		require.EqualError(t, pe.Err, "connect-ip: URI template is nil")
+		require.Equal(t, http.StatusNotImplemented, pe.HTTPStatus)
+	})
+
 	t.Run("wrong protocol", func(t *testing.T) {
 		req := newRequest("https://localhost:1234/masque")
 		req.Proto = "not-connect-ip"
 		_, err := ParseRequest(req, template)
-		require.EqualError(t, err, "unexpected protocol: not-connect-ip")
+		require.EqualError(t, err, `unexpected protocol: "not-connect-ip"`)
 		require.Equal(t, http.StatusNotImplemented, err.(*RequestParseError).HTTPStatus)
+	})
+
+	t.Run("valid HTTP/2 extended connect (:protocol header)", func(t *testing.T) {
+		template := uritemplate.MustNew("https://localhost:1234/masque/ip")
+		req := newRequest("https://localhost:1234/masque/ip")
+		req.Proto = "HTTP/2.0"
+		req.ProtoMajor = 2
+		req.ProtoMinor = 0
+		req.Header.Set(":protocol", "connect-ip")
+		r, err := ParseRequest(req, template)
+		require.NoError(t, err)
+		require.Equal(t, &Request{}, r)
 	})
 
 	t.Run("wrong request method", func(t *testing.T) {

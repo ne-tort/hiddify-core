@@ -20,6 +20,14 @@ const (
 )
 
 var (
+	// ErrConnectUDPTemplateNotConfigured is a configuration fault (missing CONNECT-UDP template).
+	// Intentionally not prefixed with "masque h2:" so http_layer_fallback does not spend a pivot on it.
+	ErrConnectUDPTemplateNotConfigured = errors.New("masque: CONNECT-UDP URI template is not configured")
+
+	// ErrConnectIPTemplateNotConfigured is a configuration fault (missing CONNECT-IP template).
+	// Same rationale as ErrConnectUDPTemplateNotConfigured: must not match "masque connect-ip h2:" handshake heuristics.
+	ErrConnectIPTemplateNotConfigured = errors.New("masque: CONNECT-IP URI template is not configured")
+
 	ErrMisconfig           = errors.New("masque misconfiguration")
 	ErrCapability          = errors.New("masque capability mismatch")
 	ErrTransportInit       = errors.New("masque transport init failed")

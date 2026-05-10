@@ -3,15 +3,15 @@ package masque
 import "sync/atomic"
 
 var (
-	masqueTCPDialTotal           atomic.Uint64
-	masqueTCPDialFailTotal       atomic.Uint64
-	masqueTCPFallbackTotal       atomic.Uint64
-	masqueConnectIPStackReady    atomic.Uint64
-	masqueConnectIPStackNotReady atomic.Uint64
-	masqueTCPErrorClassDial      atomic.Uint64
-	masqueTCPErrorClassPolicy    atomic.Uint64
+	masqueTCPDialTotal            atomic.Uint64
+	masqueTCPDialFailTotal        atomic.Uint64
+	masqueTCPFallbackTotal        atomic.Uint64
+	masqueConnectIPStackReady     atomic.Uint64
+	masqueConnectIPStackNotReady  atomic.Uint64
+	masqueTCPErrorClassDial       atomic.Uint64
+	masqueTCPErrorClassPolicy     atomic.Uint64
 	masqueTCPErrorClassCapability atomic.Uint64
-	masqueTCPErrorClassOther     atomic.Uint64
+	masqueTCPErrorClassOther      atomic.Uint64
 )
 
 func recordTCPDialSuccess() {

@@ -192,7 +192,7 @@ func run(bindTo netip.AddrPort, remoteAddr netip.Addr, route netip.Prefix, ipPro
 			return
 		}
 
-		conn, err := p.Proxy(w, req)
+		conn, err := p.Proxy(w, r, req)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return

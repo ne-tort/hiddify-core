@@ -12,6 +12,10 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// dialConnectIPH3TestAfterSuccessfulCONNECTResponse is set by tests after HTTP/3 CONNECT-IP
+// succeeds (2xx) and before handing out *Conn (nil in non-test binaries).
+var dialConnectIPH3TestAfterSuccessfulCONNECTResponse func(ctx context.Context)
+
 // DialOptions configures Extended CONNECT semantics for CONNECT-IP.
 type DialOptions struct {
 	// BearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
@@ -80,7 +84,6 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	}); err != nil {
 		return nil, nil, fmt.Errorf("connect-ip: failed to send request: %w", err)
 	}
-	// TODO: optimistically return the connection
 	rsp, err := rstr.ReadResponse()
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect-ip: failed to read response: %w", err)
@@ -88,7 +91,16 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
 		return nil, rsp, fmt.Errorf("connect-ip: server responded with %d", rsp.StatusCode)
 	}
-	return newProxiedConn(rstr), rsp, nil
+	if dialConnectIPH3TestAfterSuccessfulCONNECTResponse != nil {
+		dialConnectIPH3TestAfterSuccessfulCONNECTResponse(ctx)
+	}
+	// Post-handshake cancel gate: do not hand out CONNECT-IP if the dial ctx was canceled
+	// during ReadResponse (parity with DialHTTP2, masque-go HTTP/3 CONNECT-UDP dial).
+	if ctxErr := context.Cause(ctx); ctxErr != nil {
+		_ = rstr.Close()
+		return nil, rsp, ctxErr
+	}
+	return newProxiedConn(rstr, false), rsp, nil
 }
 
 func buildConnectIPRequestURL(template *uritemplate.Template) (string, error) {

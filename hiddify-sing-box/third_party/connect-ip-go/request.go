@@ -17,6 +17,25 @@ import (
 
 const requestProtocol = "connect-ip"
 
+// extendedConnectProtocol returns the RFC 8441 Extended CONNECT tunnel protocol (:protocol pseudo-header).
+// net/http HTTP/2 server sets Req.Proto to "HTTP/2.0"; the tunnel protocol is Header[":protocol"].
+func extendedConnectProtocol(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(r.Header.Get(":protocol")); v != "" {
+		return v
+	}
+	p := strings.TrimSpace(r.Proto)
+	if p == "" {
+		return ""
+	}
+	if len(p) >= 5 && strings.EqualFold(p[:5], "http/") {
+		return ""
+	}
+	return p
+}
+
 var capsuleProtocolHeaderValue string
 var ErrFlowForwardingUnsupported = errors.New("connect-ip: flow forwarding template variables (target/ipproto) are not supported")
 var ErrInvalidFlowForwardingTarget = errors.New("connect-ip: invalid flow forwarding target")
@@ -38,9 +57,9 @@ const (
 // Request is the parsed CONNECT-IP request returned from ParseRequest.
 // Empty fields mean unscoped flow forwarding (full proxy scope).
 type Request struct {
-	Target   netip.Prefix
-	HasTarget bool
-	IPProto  uint8
+	Target     netip.Prefix
+	HasTarget  bool
+	IPProto    uint8
 	HasIPProto bool
 }
 
@@ -77,10 +96,11 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("expected CONNECT request, got %s", r.Method),
 		}
 	}
-	if r.Proto != requestProtocol {
+	proto := extendedConnectProtocol(r)
+	if !strings.EqualFold(proto, requestProtocol) {
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusNotImplemented,
-			Err:        fmt.Errorf("unexpected protocol: %s", r.Proto),
+			Err:        fmt.Errorf("unexpected protocol: %q", proto),
 		}
 	}
 	if r.Host != u.Host {
@@ -154,6 +174,9 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 }
 
 func validateFlowForwardingTemplateVars(template *uritemplate.Template) error {
+	if template == nil {
+		return errors.New("connect-ip: URI template is nil")
+	}
 	for _, variable := range template.Varnames() {
 		switch variable {
 		case flowVarTarget, flowVarIPProto:
@@ -165,10 +188,25 @@ func validateFlowForwardingTemplateVars(template *uritemplate.Template) error {
 }
 
 func matchTemplateRequestValues(r *http.Request, template *uritemplate.Template) *uritemplate.Values {
+	requestURIWithAuthority := ""
+	if host := strings.TrimSpace(r.Host); host != "" {
+		switch requestURI := strings.TrimSpace(r.RequestURI); {
+		case requestURI == "":
+		case strings.HasPrefix(requestURI, "https://"), strings.HasPrefix(requestURI, "http://"):
+			requestURIWithAuthority = requestURI
+		default:
+			if !strings.HasPrefix(requestURI, "/") {
+				requestURI = "/" + requestURI
+			}
+			requestURIWithAuthority = "https://" + host + requestURI
+		}
+	}
+
 	candidates := []string{
 		strings.TrimSpace(r.URL.String()),
 		strings.TrimSpace(r.URL.Path),
 		strings.TrimSpace(r.RequestURI),
+		requestURIWithAuthority,
 	}
 	for _, candidate := range candidates {
 		if candidate == "" {

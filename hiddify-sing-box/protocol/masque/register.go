@@ -13,4 +13,3 @@ func RegisterEndpoint(registry *endpoint.Registry) {
 func RegisterWarpMasqueEndpoint(registry *endpoint.Registry) {
 	endpoint.Register[option.WarpMasqueEndpointOptions](registry, C.TypeWarpMasque, NewWarpEndpoint)
 }
-

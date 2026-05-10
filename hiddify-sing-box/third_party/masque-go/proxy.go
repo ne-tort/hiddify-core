@@ -802,9 +802,14 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *Request, conn *ne
 		}
 		str.Close()
 	}()
-	// discard all capsules sent on the request stream
-	if err := skipCapsules(quicvarint.NewReader(str)); err == io.EOF {
-		log.Printf("reading from request stream failed: %v", err)
+	// Discard all capsules sent on the request stream (parity with proxiedConn goroutine).
+	if err := skipCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) {
+		s.mx.Lock()
+		closed := s.closed
+		s.mx.Unlock()
+		if !closed {
+			log.Printf("reading from request stream failed: %v", err)
+		}
 	}
 	str.Close()
 	conn.Close()

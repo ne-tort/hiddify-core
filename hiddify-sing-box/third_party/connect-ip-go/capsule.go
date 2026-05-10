@@ -12,10 +12,101 @@ import (
 )
 
 const (
+	capsuleTypeHTTPDatagram       http3.CapsuleType = 0 // RFC 9297 DATAGRAM
 	capsuleTypeAddressAssign      http3.CapsuleType = 1
 	capsuleTypeAddressRequest     http3.CapsuleType = 2
 	capsuleTypeRouteAdvertisement http3.CapsuleType = 3
+	// maxHTTPDatagramCapsulePayload bounds RFC 9297 DATAGRAM capsule value reads on the CONNECT-IP
+	// stream (HTTP/2 capsule dataplane; also caps work when H3 delivers type-0 capsules on stream).
+	// IPv4/IPv6 tunnel MTU is bounded by sing-box connect_ip_datagram_ceiling (up to 65535) plus
+	// CONTEXT_ID prefix (≤8 bytes in quic varint); extra slack matches masque H2 CONNECT-UDP parity.
+	maxHTTPDatagramCapsulePayload = 65535 + 128
+	// maxConnectIPNondatagramCapsulePayload caps declared length for non-DATAGRAM capsules on the
+	// CONNECT-IP stream (known control + unknown), matching masque transport H2 CONNECT-UDP
+	// (h2ConnectUDPNondatagramMaxCapsulePayload) so a hostile varint cannot force huge reads.
+	maxConnectIPNondatagramCapsulePayload = 65536
 )
+
+// capsuleExactReader matches quic-go http3.exactReader: premature EOF on a capsule body is an error.
+type capsuleExactReader struct {
+	R io.LimitedReader
+}
+
+func (r *capsuleExactReader) Read(b []byte) (int, error) {
+	n, err := r.R.Read(b)
+	if err == io.EOF && r.R.N > 0 {
+		return n, io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+// capsuleCountingVarintReader matches http3.countingByteReader / masque parseH2ConnectUDPCapsule:
+// truncated varint prefixes must yield io.ErrUnexpectedEOF (not naked io.EOF mid-frame).
+type capsuleCountingVarintReader struct {
+	wrapped quicvarint.Reader
+	num     int
+}
+
+func (w *capsuleCountingVarintReader) ReadByte() (byte, error) {
+	b, err := w.wrapped.ReadByte()
+	if err == nil {
+		w.num++
+	}
+	return b, err
+}
+
+func (w *capsuleCountingVarintReader) Read(p []byte) (int, error) {
+	n, err := w.wrapped.Read(p)
+	w.num += n
+	return n, err
+}
+
+// parseConnectIPStreamCapsule is like http3.ParseCapsule but rejects an oversized declared capsule
+// length before any body I/O (parity with sing-box masque H2 CONNECT-UDP capsule policy).
+func parseConnectIPStreamCapsule(r quicvarint.Reader) (http3.CapsuleType, io.Reader, error) {
+	cr := &capsuleCountingVarintReader{wrapped: r}
+	ctUint, err := quicvarint.Read(cr)
+	if err != nil {
+		if err == io.EOF && cr.num > 0 {
+			return 0, nil, io.ErrUnexpectedEOF
+		}
+		return 0, nil, err
+	}
+	length, err := quicvarint.Read(cr)
+	if err != nil {
+		if err == io.EOF && cr.num > 0 {
+			return 0, nil, io.ErrUnexpectedEOF
+		}
+		return 0, nil, err
+	}
+	ct := http3.CapsuleType(ctUint)
+	maxLen := uint64(maxConnectIPNondatagramCapsulePayload)
+	if ct == capsuleTypeHTTPDatagram {
+		maxLen = maxHTTPDatagramCapsulePayload
+	}
+	if length > maxLen {
+		return 0, nil, fmt.Errorf("connect-ip: capsule type %d declared length %d exceeds max %d", ctUint, length, maxLen)
+	}
+	return ct, &capsuleExactReader{R: io.LimitedReader{R: r, N: int64(length)}}, nil
+}
+
+// readRFC9297HTTPDatagramCapsulePayload reads the body of a DATAGRAM (type 0) capsule with a hard cap.
+func readRFC9297HTTPDatagramCapsulePayload(r io.Reader) ([]byte, error) {
+	const max = maxHTTPDatagramCapsulePayload
+	payload, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > max {
+		// Production callers pass the bounded capsule body from parseConnectIPStreamCapsule.
+		// Tests may pass an unbounded reader — do not drain without a cap (avoids hostile work on oversize).
+		if _, copyErr := io.Copy(io.Discard, io.LimitReader(r, int64(maxConnectIPNondatagramCapsulePayload))); copyErr != nil {
+			return nil, fmt.Errorf("connect-ip: DATAGRAM oversize drain: %w", copyErr)
+		}
+		return nil, fmt.Errorf("connect-ip: DATAGRAM capsule payload exceeds %d bytes", max)
+	}
+	return payload, nil
+}
 
 // addressAssignCapsule represents an ADDRESS_ASSIGN capsule
 type addressAssignCapsule struct {

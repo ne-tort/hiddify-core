@@ -251,11 +251,12 @@ func (g *adaptivePrefetchProbeGate) skipBudgetValue() int {
 	return int(g.skipBudget.Load())
 }
 
-// Conn is a connection that proxies IP packets over HTTP/3.
+// Conn proxies IP packets over CONNECT-IP (HTTP/3 datagrams or HTTP/2 DATAGRAM capsules per RFC9297).
 type Conn struct {
-	str    http3Stream
-	drain  tryDrainHTTPDatagrams
-	writes chan writeCapsule
+	str                    http3Stream
+	drain                  tryDrainHTTPDatagrams
+	datagramCapsuleIngress chan []byte // CONNECT-IP over HTTP/2: IP HTTP Datagram payloads from RFC9297 capsules on stream
+	writes                 chan writeCapsule
 
 	prefetchMu    sync.Mutex
 	prefetchSlots [][]byte
@@ -312,7 +313,17 @@ func (c *Conn) failClosed(err error) error {
 	return c.closeErr
 }
 
-func newProxiedConn(str http3Stream) *Conn {
+// errAfterClose returns the first close error recorded for the tunnel, or net.ErrClosed when the
+// channel is closed but closeErr is unset. Callers must not return a nil error from read/write
+// paths just because teardown raced without populating closeErr.
+func (c *Conn) errAfterClose() error {
+	if c.closeErr != nil {
+		return c.closeErr
+	}
+	return net.ErrClosed
+}
+
+func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 	c := &Conn{
 		str:                   str,
 		drain:                 nil,
@@ -322,12 +333,20 @@ func newProxiedConn(str http3Stream) *Conn {
 		closeChan:             make(chan struct{}),
 		prefetchSlots:         make([][]byte, connReadPrefetchMax),
 	}
-	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
+	if http2CapsuleDatagramDataplane {
+		c.datagramCapsuleIngress = make(chan []byte, connReadPrefetchMax)
+	}
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok && c.datagramCapsuleIngress == nil {
 		c.drain = dr
 	}
 	go func() {
-		if err := c.readFromStream(); err != nil {
-			log.Printf("handling stream failed: %v", err)
+		err := c.readFromStream()
+		if err != nil {
+			// Normal end of CONNECT-IP request body: parity with masque H2 CONNECT-UDP ReadFrom /
+			// streamConn (do not wrap io.EOF in dataplane text or spam "handling stream failed").
+			if !errors.Is(err, io.EOF) {
+				log.Printf("handling stream failed: %v", err)
+			}
 			c.mu.Lock()
 			if c.closeErr == nil {
 				c.closeErr = &CloseError{Remote: true}
@@ -338,7 +357,9 @@ func newProxiedConn(str http3Stream) *Conn {
 	}()
 	go func() {
 		if err := c.writeToStream(); err != nil {
-			log.Printf("writing to stream failed: %v", err)
+			if !connectIPH2CapsulePipeCleanUploadTermination(err) {
+				log.Printf("writing to stream failed: %v", err)
+			}
 			c.mu.Lock()
 			if c.closeErr == nil {
 				c.closeErr = &CloseError{Remote: true}
@@ -371,6 +392,29 @@ func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
 }
 
 func (c *Conn) extendPrefetchFromTry() {
+	if c.datagramCapsuleIngress != nil {
+		if !c.prefetchGate.shouldProbe() {
+			return
+		}
+		c.prefetchMu.Lock()
+		defer c.prefetchMu.Unlock()
+		drained := 0
+	capsDrain:
+		for c.prefetchCount < connReadPrefetchMax {
+			select {
+			case raw := <-c.datagramCapsuleIngress:
+				tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
+				c.prefetchSlots[tail] = slices.Clone(raw)
+				c.prefetchCount++
+				drained++
+			default:
+				break capsDrain
+			}
+		}
+		c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+		c.prefetchGate.observeDrain(drained)
+		return
+	}
 	if c.drain == nil {
 		return
 	}
@@ -439,7 +483,7 @@ func (c *Conn) sendCapsule(ctx context.Context, capsule appendable) error {
 			return err
 		}
 	case <-c.closeChan:
-		return c.closeErr
+		return c.errAfterClose()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -461,7 +505,7 @@ func (c *Conn) LocalPrefixes(ctx context.Context) ([]netip.Prefix, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.closeChan:
-		return nil, c.closeErr
+		return nil, c.errAfterClose()
 	case <-c.assignedAddressNotify:
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -477,27 +521,87 @@ func (c *Conn) Routes(ctx context.Context) ([]IPRoute, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.closeChan:
-		return nil, c.closeErr
+		return nil, c.errAfterClose()
 	case <-c.availableRoutesNotify:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return c.availableRoutes, nil
+		return slices.Clone(c.availableRoutes), nil
 	}
 }
 
+// wrapConnectIPStreamDataplaneErr tags control/data capsule handling on the CONNECT-IP request
+// stream (HTTP/3 QUIC stream or HTTP/2 capsule pipe) so MASQUE classification matches CONNECT-UDP
+// dataplane markers: nested "extended connect" / QUIC text must not imply http_layer_fallback.
+func wrapConnectIPStreamDataplaneErr(c *Conn, err error) error {
+	if err == nil || c == nil {
+		return err
+	}
+	if c.datagramCapsuleIngress != nil {
+		return fmt.Errorf("masque connect-ip h2 dataplane: %w", err)
+	}
+	return fmt.Errorf("masque connect-ip h3 dataplane: %w", err)
+}
+
+// wrapConnectIPIngressDatagramErr tags proxied-IP datagram send/receive faults (QUIC HTTP
+// DATAGRAM frames on H3, or H2 DATAGRAM capsules via SendDatagram on the capsule stream).
+func wrapConnectIPIngressDatagramErr(c *Conn, err error) error {
+	if err == nil || c == nil {
+		return err
+	}
+	if c.datagramCapsuleIngress != nil {
+		return fmt.Errorf("masque connect-ip h2 dataplane: %w", err)
+	}
+	return fmt.Errorf("masque connect-ip h3 dataplane: %w", err)
+}
+
+// connectIPH2CapsulePipeCleanUploadTermination matches transport/masque (*h2ConnectUDPPacketConn).WriteTo:
+// HTTP/2 CONNECT request bodies often use io.Pipe; peer half-close yields io.ErrClosedPipe on write,
+// and some Writer implementations signal stream end as io.EOF. Those must not gain the dataplane prefix
+// (http_layer_fallback / ClassifyMasqueFailure treat prefixed mid-tunnel faults differently).
+func connectIPH2CapsulePipeCleanUploadTermination(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe)
+}
+
 func (c *Conn) readFromStream() error {
-	defer c.str.Close()
+	defer func() {
+		// HTTP/2 CONNECT-IP: closing the response io.ReadCloser here races x/net/http2
+		// transport teardown of RoundTrip.body (bufPipe) while writeRequestBody is still
+		// draining the upload PipeReader. Tear ingress down from Conn.Close only.
+		if _, ok := c.str.(*h2CapsulePipeStream); ok {
+			return
+		}
+		_ = c.str.Close()
+	}()
 	r := quicvarint.NewReader(c.str)
 	for {
-		t, cr, err := http3.ParseCapsule(r)
+		t, cr, err := parseConnectIPStreamCapsule(r)
 		if err != nil {
-			return err
+			if errors.Is(err, io.EOF) {
+				return err
+			}
+			return wrapConnectIPStreamDataplaneErr(c, err)
 		}
 		switch t {
+		case capsuleTypeHTTPDatagram:
+			payload, err := readRFC9297HTTPDatagramCapsulePayload(cr)
+			if err != nil {
+				return wrapConnectIPStreamDataplaneErr(c, err)
+			}
+			if c.datagramCapsuleIngress == nil {
+				continue
+			}
+			select {
+			case <-c.closeChan:
+				return c.errAfterClose()
+			case c.datagramCapsuleIngress <- slices.Clone(payload):
+			}
 		case capsuleTypeAddressAssign:
 			capsule, err := parseAddressAssignCapsule(cr)
 			if err != nil {
-				return err
+				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
 			prefixes := make([]netip.Prefix, 0, len(capsule.AssignedAddresses))
 			for _, assigned := range capsule.AssignedAddresses {
@@ -513,13 +617,13 @@ func (c *Conn) readFromStream() error {
 			}
 		case capsuleTypeAddressRequest:
 			if _, err := parseAddressRequestCapsule(cr); err != nil {
-				return err
+				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
-			return errors.New("connect-ip: address request not yet supported")
+			return wrapConnectIPStreamDataplaneErr(c, errors.New("connect-ip: address request not yet supported"))
 		case capsuleTypeRouteAdvertisement:
 			capsule, err := parseRouteAdvertisementCapsule(cr)
 			if err != nil {
-				return err
+				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
 			c.mu.Lock()
 			c.availableRoutes = capsule.IPAddressRanges
@@ -531,7 +635,9 @@ func (c *Conn) readFromStream() error {
 		default:
 			unknownCapsuleTotal.Add(1)
 			incrementUnknownCapsuleType(t)
-			_, _ = io.Copy(io.Discard, cr)
+			if _, copyErr := io.Copy(io.Discard, cr); copyErr != nil {
+				return wrapConnectIPStreamDataplaneErr(c, copyErr)
+			}
 			log.Printf("connect-ip: ignoring unknown capsule type=%d", t)
 			continue
 		}
@@ -543,18 +649,39 @@ func (c *Conn) writeToStream() error {
 	for {
 		select {
 		case <-c.closeChan:
-			return c.closeErr
+			return c.errAfterClose()
 		case req, ok := <-c.writes:
 			if !ok {
 				return nil
 			}
 			buf = req.capsule.append(buf[:0])
-			_, err := c.str.Write(buf)
+			_, err := writeAllWriter(c.str, buf)
+			if err != nil && !connectIPH2CapsulePipeCleanUploadTermination(err) {
+				err = wrapConnectIPStreamDataplaneErr(c, err)
+			}
 			req.result <- err
 			if err != nil {
 				return err
 			}
 		}
+	}
+}
+
+func (c *Conn) receiveProxiedDatagram(ctx context.Context) ([]byte, error) {
+	if c.datagramCapsuleIngress == nil {
+		data, err := c.str.ReceiveDatagram(ctx)
+		if err != nil {
+			return nil, wrapConnectIPIngressDatagramErr(c, err)
+		}
+		return data, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	case <-c.closeChan:
+		return nil, c.errAfterClose()
+	case d := <-c.datagramCapsuleIngress:
+		return d, nil
 	}
 }
 
@@ -621,7 +748,7 @@ func (c *Conn) ReadPacketWithContext(ctx context.Context, b []byte) (n int, err 
 			if err, cancelled := ctxCancelled(); cancelled {
 				return 0, err
 			}
-			data, recvErr = c.str.ReceiveDatagram(ctx)
+			data, recvErr = c.receiveProxiedDatagram(ctx)
 			if recvErr != nil {
 				if err, cancelled := ctxCancelled(); cancelled {
 					flushDropCounters()
@@ -631,7 +758,7 @@ func (c *Conn) ReadPacketWithContext(ctx context.Context, b []byte) (n int, err 
 					select {
 					case <-c.closeChan:
 						flushDropCounters()
-						return 0, c.closeErr
+						return 0, c.errAfterClose()
 					default:
 						flushDropCounters()
 						return 0, recvErr
@@ -977,7 +1104,7 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	if c.closeChan != nil {
 		select {
 		case <-c.closeChan:
-			return nil, c.closeErr
+			return nil, c.errAfterClose()
 		default:
 		}
 	}
@@ -985,7 +1112,9 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	defer datagramPool.Put(buf)
 	if err := c.composeDatagram(buf, b); err != nil {
 		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
-		return nil, fmt.Errorf("connect-ip: compose datagram: %w", err)
+		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
+		err = wrapConnectIPStreamDataplaneErr(c, err)
+		return nil, err
 	}
 	if err := c.str.SendDatagram(*buf); err != nil {
 		var errDTL *quic.DatagramTooLargeError
@@ -1002,8 +1131,12 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 		}
 		select {
 		case <-c.closeChan:
-			return nil, c.closeErr
+			return nil, c.errAfterClose()
 		default:
+			if connectIPH2CapsulePipeCleanUploadTermination(err) {
+				return nil, err
+			}
+			err = wrapConnectIPIngressDatagramErr(c, err)
 			return nil, err
 		}
 	}
@@ -1332,15 +1465,38 @@ func isICMPProtocol(version uint8, proto uint8) bool {
 }
 
 func (c *Conn) Close() error {
+	if c == nil {
+		return nil
+	}
 	c.mu.Lock()
 	if c.closeErr == nil {
 		c.closeErr = &CloseError{Remote: false}
-		close(c.closeChan)
+		if c.closeChan != nil {
+			close(c.closeChan)
+		}
 	}
 	c.mu.Unlock()
+	if c.str == nil {
+		return nil
+	}
 	c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
-	err := c.str.Close()
-	return err
+	if h2srv, ok := c.str.(*h2ServerCapsuleStream); ok {
+		return h2srv.closeMasqueH2RequestBody()
+	}
+	if h2x, ok := c.str.(*h2CapsulePipeStream); ok {
+		var errs []error
+		if err := h2x.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := h2x.closePipeWriter(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := h2x.closePipeReader(); err != nil {
+			errs = append(errs, err)
+		}
+		return errors.Join(errs...)
+	}
+	return c.str.Close()
 }
 
 func ipVersion(b []byte) uint8 { return b[0] >> 4 }

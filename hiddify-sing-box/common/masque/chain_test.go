@@ -114,6 +114,32 @@ func TestBuildChainRejectsUnknownViaAfterNormalization(t *testing.T) {
 	}
 }
 
+func TestBuildChainTrimsServerWhitespace(t *testing.T) {
+	chain, err := BuildChain(option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{Server: "  example.com\t ", ServerPort: 443},
+		HopPolicy:     option.MasqueHopPolicySingle,
+	})
+	if err != nil {
+		t.Fatalf("build chain: %v", err)
+	}
+	if len(chain) != 1 || chain[0].Server != "example.com" {
+		t.Fatalf("expected trimmed server, got %+v", chain)
+	}
+	chain2, err := BuildChain(option.MasqueEndpointOptions{
+		HopPolicy: option.MasqueHopPolicyChain,
+		Hops: []option.MasqueChainHopOptions{
+			{Tag: "a", ServerOptions: option.ServerOptions{Server: "  a.example ", ServerPort: 443}},
+			{Tag: "b", ServerOptions: option.ServerOptions{Server: "\tb.example\n", ServerPort: 8443}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build chain: %v", err)
+	}
+	if len(chain2) != 2 || chain2[0].Server != "a.example" || chain2[1].Server != "b.example" {
+		t.Fatalf("expected trimmed multi-hop servers, got %+v", chain2)
+	}
+}
+
 func TestBuildChainNormalizesTagAndViaToLowerTrimmed(t *testing.T) {
 	chain, err := BuildChain(option.MasqueEndpointOptions{
 		HopPolicy: option.MasqueHopPolicyChain,
@@ -138,4 +164,3 @@ func TestBuildChainNormalizesTagAndViaToLowerTrimmed(t *testing.T) {
 		t.Fatalf("expected normalized via tag, got %q", chain[1].Via)
 	}
 }
-

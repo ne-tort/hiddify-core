@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -119,6 +120,12 @@ func (r *hijackableBody) Read(b []byte) (int, error) {
 		r.requestDone()
 	}
 	return n, maybeReplaceError(err)
+}
+
+// SetReadDeadline forwards to the QUIC stream so net.Conn wrappers (e.g. MASQUE
+// CONNECT-stream in sing-box transport/masque streamConn) can bound download reads.
+func (r *hijackableBody) SetReadDeadline(t time.Time) error {
+	return r.body.str.SetReadDeadline(t)
 }
 
 func (r *hijackableBody) requestDone() {

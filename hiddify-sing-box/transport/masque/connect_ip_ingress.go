@@ -25,6 +25,28 @@ const (
 	protoIPv4UDPIngress         = 17
 )
 
+// classifyIPv4UDPBridgeCandidate reports whether pkt is IPv4 UDP that structurally matches
+// parseIPv4UDPPacketOffsets (suitable for the CONNECT-IP UDP bridge). When the IPv4 protocol
+// field is UDP but headers are inconsistent (corrupt tunnel / buggy peer), malformed is true;
+// callers should drop without enqueueing clones to subscribers or mis-routing to netstack.
+func classifyIPv4UDPBridgeCandidate(pkt []byte) (bridgeable bool, malformed bool) {
+	if len(pkt) < 20 {
+		return false, false
+	}
+	if pkt[0]>>4 != 4 || pkt[9] != protoIPv4UDPIngress {
+		return false, false
+	}
+	if len(pkt) >= 8 && ipv4HeaderIndicatesFragmentation(pkt) {
+		// Not atomic IPv4 payloads: defer to CONNECT-IP netstack ingress (or drop) rather than slicing
+		// a bogus "UDP payload" from a first MF-only fragment.
+		return false, false
+	}
+	if _, _, _, _, err := parseIPv4UDPPacketOffsets(pkt); err != nil {
+		return false, true
+	}
+	return true, false
+}
+
 func (s *coreSession) registerUDPIngressSubscriber() *udpIngressSubscriber {
 	sub := &udpIngressSubscriber{
 		ch: make(chan []byte, ingressUDPDeliverQueueDepth),
@@ -194,8 +216,10 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			continue
 		}
 		pkt := readBuffer[:n]
-		version := pkt[0] >> 4
-		if version == 4 && len(pkt) >= 20 && pkt[9] == protoIPv4UDPIngress {
+		if bridgeable, malformed := classifyIPv4UDPBridgeCandidate(pkt); malformed {
+			incConnectIPEngineDropReason("ingress_udp_malformed")
+			continue
+		} else if bridgeable {
 			if s.deliverIPv4UDPBridgedIngress(pkt) {
 				continue
 			}

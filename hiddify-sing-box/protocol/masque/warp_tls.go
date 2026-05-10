@@ -91,7 +91,8 @@ func NewWarpMasqueClientTLSCertificate(priv *ecdsa.PrivateKey) (tls.Certificate,
 	}, nil
 }
 
-// WarpMasqueTLSPackage holds optional client cert + ECDSA pubkey pin parsed from warp profile / options.
+// WarpMasqueTLSPackageFromProfile returns the optional WARP client TLS certificate and ECDSA peer pin
+// derived from profile options and the bootstrap peer public key PEM.
 func WarpMasqueTLSPackageFromProfile(options option.WarpMasqueEndpointOptions, bootstrapPeerPubPEM string) (cert tls.Certificate, pin *ecdsa.PublicKey, err error) {
 	peerBlob := strings.TrimSpace(options.Profile.EndpointPublicKey)
 	if peerBlob == "" {

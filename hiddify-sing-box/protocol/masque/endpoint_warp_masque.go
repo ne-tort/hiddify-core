@@ -254,7 +254,7 @@ func (e *WarpEndpoint) startRuntime() {
 	var logicalServer string
 	var quicDialPeer string
 	var dataplanePorts []uint16
-	var bootstrapTlsName string
+	var bootstrapTLSName string
 	var bootstrapTunnelProto string
 	var bootstrapEndpointPub string
 	var bootstrapErr error
@@ -274,7 +274,7 @@ func (e *WarpEndpoint) startRuntime() {
 		if err == nil {
 			logicalServer, dataplanePorts = tgt.LogicalServer, tgt.Ports
 			quicDialPeer = tgt.DialPeer
-			bootstrapTlsName = tgt.TLSServerName
+			bootstrapTLSName = tgt.TLSServerName
 			bootstrapTunnelProto = tgt.TunnelProtocol
 			bootstrapEndpointPub = tgt.EndpointPublicKey
 			bootstrapErr = nil
@@ -306,7 +306,7 @@ func (e *WarpEndpoint) startRuntime() {
 	}
 	warpTLSServerName := strings.TrimSpace(e.options.TLSServerName)
 	if warpTLSServerName == "" {
-		warpTLSServerName = strings.TrimSpace(bootstrapTlsName)
+		warpTLSServerName = strings.TrimSpace(bootstrapTLSName)
 	}
 	chain, err := CM.BuildChain(e.options.MasqueEndpointOptions)
 	if err != nil {
@@ -314,6 +314,11 @@ func (e *WarpEndpoint) startRuntime() {
 		return
 	}
 	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, true)
+	if err != nil {
+		e.startErr.Store(err)
+		return
+	}
+	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, true)
 	if err != nil {
 		e.startErr.Store(err)
 		return
@@ -346,8 +351,20 @@ func (e *WarpEndpoint) startRuntime() {
 		if strings.TrimSpace(e.options.HopPolicy) == option.MasqueHopPolicyChain && len(e.options.Hops) > 0 {
 			rtDialPeer = ""
 		}
+		cacheDialPort := rtPort
+		effectiveMasqueHL := EffectiveMasqueClientHTTPLayer(e.Tag(), e.options.MasqueEndpointOptions, chain, cacheDialPort)
 		if len(portTries) > 1 {
-			stdlog.Printf("warp_masque dataplane try port=%d (order %d/%d host=%s quic_peer=%q)", candPort, pi+1, len(portTries), rtServer, rtDialPeer)
+			overlay := "masque_udp_h3_quic"
+			if strings.EqualFold(effectiveMasqueHL, option.MasqueHTTPLayerH2) {
+				overlay = "masque_tcp_h2_tls"
+			}
+			stdlog.Printf("warp_masque dataplane try port=%d (order %d/%d host=%s quic_dial_peer=%q masque_overlay=%s)", candPort, pi+1, len(portTries), rtServer, rtDialPeer, overlay)
+		}
+		recordMasqueHL := func(layer string, id TM.HTTPLayerCacheDialIdentity) {
+			if cacheDialPort != 0 {
+				id.DialPortOverride = cacheDialPort
+			}
+			RecordMasqueHTTPLayerSuccess(e.Tag(), e.options.MasqueEndpointOptions, layer, id)
 		}
 		rt = CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 			Tag:                         e.Tag(),
@@ -375,6 +392,10 @@ func (e *WarpEndpoint) startRuntime() {
 			WarpMasqueLegacyH3Extras:    useWarpParityExtras,
 			WarpConnectIPProtocol:       warpConnectProto,
 			WarpMasqueDeviceBearerToken: strings.TrimSpace(e.options.Profile.AuthToken),
+			TCPDial:                     tcpDial,
+			MasqueEffectiveHTTPLayer:    effectiveMasqueHL,
+			HTTPLayerFallback:           e.options.HTTPLayerFallback,
+			HTTPLayerSuccess:            recordMasqueHL,
 		})
 		startErr = nil
 		for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {

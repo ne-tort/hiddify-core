@@ -3,6 +3,7 @@ package masque_test
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -59,8 +60,35 @@ func TestRequestParsing(t *testing.T) {
 		req := newRequest("https://localhost:1234/masque")
 		req.Proto = "not-connect-udp"
 		_, err := masque.ParseRequest(req, template)
-		require.EqualError(t, err, "unexpected protocol: not-connect-udp")
+		require.EqualError(t, err, `unexpected protocol: "not-connect-udp"`)
 		require.Equal(t, http.StatusNotImplemented, err.(*masque.RequestParseError).HTTPStatus)
+	})
+
+	t.Run("valid HTTP/2 extended connect (:protocol header, Proto is HTTP version)", func(t *testing.T) {
+		req := newRequest("https://localhost:1234/masque?h=localhost&p=1337")
+		req.Proto = "HTTP/2.0"
+		req.ProtoMajor = 2
+		req.ProtoMinor = 0
+		req.Header.Set(":protocol", "connect-udp")
+		r, err := masque.ParseRequest(req, template)
+		require.NoError(t, err)
+		require.Equal(t, "localhost:1337", r.Target)
+	})
+
+	t.Run("path-only URL (match via RequestURI when URL.String empty)", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodConnect, "", http.NoBody)
+		require.NoError(t, err)
+		req.Host = "localhost:1234"
+		req.Proto = "HTTP/2.0"
+		req.ProtoMajor = 2
+		req.ProtoMinor = 0
+		req.Header.Set(":protocol", "connect-udp")
+		req.Header.Set(http3.CapsuleProtocolHeader, "?1")
+		req.URL = &url.URL{}
+		req.RequestURI = "/masque?h=localhost&p=1337"
+		r2, err := masque.ParseRequest(req, template)
+		require.NoError(t, err)
+		require.Equal(t, "localhost:1337", r2.Target)
 	})
 
 	t.Run("wrong :authority", func(t *testing.T) {
@@ -109,4 +137,22 @@ func TestRequestParsing(t *testing.T) {
 		require.ErrorContains(t, err, "failed to decode target_port")
 		require.Equal(t, http.StatusBadRequest, err.(*masque.RequestParseError).HTTPStatus)
 	})
+}
+
+func TestConnectUDPRequestPathTemplateSchemelessRequestURIWithoutLeadingSlash(t *testing.T) {
+	pathTmpl := uritemplate.MustNew("https://localhost:1234/masque/tcp/{target_host}/{target_port}")
+	req, err := http.NewRequest(http.MethodConnect, "", http.NoBody)
+	require.NoError(t, err)
+	req.Host = "localhost:1234"
+	req.Proto = "HTTP/2.0"
+	req.ProtoMajor = 2
+	req.ProtoMinor = 0
+	req.Header.Set(":protocol", "connect-udp")
+	req.Header.Set(http3.CapsuleProtocolHeader, "?1")
+	req.URL = &url.URL{}
+	req.RequestURI = "masque/tcp/host.example/9443"
+
+	r2, err := masque.ParseRequest(req, pathTmpl)
+	require.NoError(t, err)
+	require.Equal(t, "host.example:9443", r2.Target)
 }

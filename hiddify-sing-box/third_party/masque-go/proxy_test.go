@@ -59,7 +59,8 @@ func TestProxyCloseProxiedConn(t *testing.T) {
 	go server.ServeQUICConn(serverConn)
 
 	tr := &http3.Transport{
-		EnableDatagrams: true,
+		EnableDatagrams:    true,
+		DisableCompression: true, // parity Client.ensureConnected; CONNECT/datagram planes are not gzip bodies
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

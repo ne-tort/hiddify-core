@@ -47,6 +47,13 @@ const (
 	WarpMasqueDataplanePortStrategyAPIFirst = "api_first"
 )
 
+// Client-only MASQUE HTTP overlay: QUIC+H3 vs TLS+TCP+H2 Extended CONNECT (+Capsule UDP).
+const (
+	MasqueHTTPLayerH3   = "h3"
+	MasqueHTTPLayerH2   = "h2"
+	MasqueHTTPLayerAuto = "auto"
+)
+
 type MasqueChainHopOptions struct {
 	ServerOptions
 	DialerOptions
@@ -89,6 +96,11 @@ type MasqueEndpointOptions struct {
 	MTU              uint32                         `json:"mtu,omitempty"`
 	Workers          int                            `json:"workers,omitempty"`
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
+	// HTTPLayer selects the outer CONNECT-UDP/control plane: h3 (QUIC/H3 default), h2 (TLS+H2 RFC 8441), auto (effective order at runtime).
+	HTTPLayer         string             `json:"http_layer,omitempty"`
+	HTTPLayerFallback bool `json:"http_layer_fallback,omitempty"`
+	// HTTPLayerCacheTTL is read only when HTTPLayer is auto (in-memory TTL for last chosen h2/h3).
+	HTTPLayerCacheTTL badoption.Duration `json:"http_layer_cache_ttl,omitempty"`
 }
 
 type MasqueQUICExperimentalOptions struct {

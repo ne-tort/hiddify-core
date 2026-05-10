@@ -14,9 +14,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/dunglas/httpsfv"
 	connectip "github.com/quic-go/connect-ip-go"
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go"
@@ -80,11 +82,14 @@ type ServerEndpoint struct {
 	logger     log.ContextLogger
 	server     *http3.Server
 	packetConn net.PacketConn
-	udpProxy   *qmasque.Proxy
-	ready      atomic.Bool
-	closing    atomic.Bool
-	startErr   atomic.Value
-	dialer     net.Dialer
+	// tcpTLSListener is the TLS listener (HTTP/2 ALPN) dual-stacked with QUIC on the same host:port.
+	tcpTLSListener net.Listener
+	http2Server    *http.Server
+	udpProxy       *qmasque.Proxy
+	ready          atomic.Bool
+	closing        atomic.Bool
+	startErr       atomic.Value
+	dialer         net.Dialer
 }
 
 type startErrorState struct {
@@ -167,10 +172,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if err := udpProxy.Proxy(w, req); err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
+		e.handleMasqueConnectUDP(w, r, req, udpProxy)
 	})
 	mux.HandleFunc(ipPath, func(w http.ResponseWriter, r *http.Request) {
 		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip request method=%s remote=%s uri=%s", r.Method, r.RemoteAddr, r.URL.String()))
@@ -186,7 +188,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 			w.WriteHeader(status)
 			return
 		}
-		conn, err := ipProxy.Proxy(w, req)
+		conn, err := ipProxy.Proxy(w, r, req)
 		if err != nil {
 			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip proxy failed status=502 err=%v", err))
 			w.WriteHeader(http.StatusBadGateway)
@@ -226,12 +228,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route dispatch router_type=%T destination=dynamic", e.router))
 		// TUN-only hard switch: CONNECT-IP runs as packet-plane forwarding only.
 		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
-		routePacketConnectionExBypassTunnelWrapper(e.router, r.Context(), packetConn, metadata, func(err error) {
-			if err != nil && !errors.Is(err, context.Canceled) {
-				e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route closed err=%v", err))
-			}
-			_ = packetConn.Close()
-		})
+		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger)
 	})
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
 		e.handleTCPConnectRequest(w, r, tcpTemplate)
@@ -248,15 +245,85 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		EnableDatagrams: true,
 		QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
 	}
-	packetConn, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return E.Cause(err, "listen udp for masque server")
+	// Align UDP/QUIC listener port with collateral TCP+H2 TLS must succeed for both transports.
+	// Windows (and similar) may reserve wide excluded ephemeral ranges where UDP bind succeeds but
+	// sibling TCP bind on the same port returns WSAEACCESS / "access permissions"; retries must be
+	// generous enough that listen_port:0 converges outside those ranges without user tuning.
+	const masqueDynPortBindAttempts = 512
+	ephemeralPorts := int(e.options.ListenPort) == 0
+	maxAttempts := 1
+	if ephemeralPorts {
+		maxAttempts = masqueDynPortBindAttempts
 	}
-	if err := TM.ValidateQUICTransportPacketConn(packetConn, "server_http3_listen"); err != nil {
-		_ = packetConn.Close()
-		return E.Cause(err, "validate quic transport packetconn")
+	var packetConn net.PacketConn
+	var tcpRaw net.Listener
+	var lastTCPListenErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		pc, udpErr := net.ListenPacket("udp", addr)
+		if udpErr != nil {
+			return E.Cause(udpErr, "listen udp for masque server")
+		}
+		if err := TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen"); err != nil {
+			_ = pc.Close()
+			return E.Cause(err, "validate quic transport packetconn")
+		}
+		us := pc.LocalAddr()
+		uaddr, uok := us.(*net.UDPAddr)
+		if !uok || uaddr == nil {
+			_ = pc.Close()
+			e.server = nil
+			return E.New("masque server: UDP listener has unexpected address type ", us)
+		}
+		tcpBind := net.JoinHostPort(listenHost, strconv.Itoa(uaddr.Port))
+		tr, tcpErr := net.Listen("tcp", tcpBind)
+		if tcpErr == nil {
+			packetConn = pc
+			tcpRaw = tr
+			break
+		}
+		_ = pc.Close()
+		lastTCPListenErr = tcpErr
+		if ephemeralPorts && masqueTCPBindFailureRetryable(tcpErr) {
+			continue
+		}
+		e.server = nil
+		return E.Cause(tcpErr, "listen tcp for masque server (http2 extended connect)")
+	}
+	if packetConn == nil || tcpRaw == nil {
+		e.server = nil
+		err := lastTCPListenErr
+		if err == nil {
+			err = errors.New("masque server: UDP/TCP dual listen exhausted retries")
+		}
+		return E.Cause(err, "listen tcp for masque server (http2 extended connect)")
 	}
 	e.packetConn = packetConn
+
+	tcpTLS := tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"h2", "http/1.1"},
+	}
+	tcpLn := tls.NewListener(tcpRaw, &tcpTLS)
+	e.tcpTLSListener = tcpLn
+	http2Srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+	}
+	e.http2Server = http2Srv
+	go func() {
+		err := http2Srv.Serve(tcpLn)
+		if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
+			e.startErr.Store(startErrorState{err: err})
+			if e.logger != nil {
+				e.logger.Error("masque HTTP/2 server stopped: ", err)
+			}
+		}
+		e.ready.Store(false)
+	}()
+
 	server := e.server
 	go func() {
 		err := server.Serve(packetConn)
@@ -275,6 +342,26 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 
 func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+}
+
+// routeMasqueConnectIPBlocked keeps this HTTP handler alive until the CONNECT-IP packet-plane
+// relay ends. On HTTP/3 the stream is hijacked via http3.HTTPStreamer inside connect-ip Proxy,
+// so ending the handler does not close the QUIC stream. On HTTP/2 Extended CONNECT there is no
+// hijack; if the handler returned immediately, net/http would finalize the response and tear down
+// the CONNECT stream while RoutePacketConnectionEx goroutines were still running.
+func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *connectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger) {
+	done := make(chan struct{})
+	var once sync.Once
+	notify := func() { once.Do(func() { close(done) }) }
+	onClose := func(err error) {
+		if err != nil && !errors.Is(err, context.Canceled) && logger != nil {
+			logger.DebugContext(reqCtx, fmt.Sprintf("masque connect-ip route closed err=%v", err))
+		}
+		_ = packetConn.Close()
+		notify()
+	}
+	routePacketConnectionExBypassTunnelWrapper(router, reqCtx, packetConn, metadata, onClose)
+	<-done
 }
 
 func pathFromTemplate(raw string) string {
@@ -306,16 +393,26 @@ func (e *ServerEndpoint) Close() error {
 		e.udpProxy.Close()
 		e.udpProxy = nil
 	}
+	if e.http2Server != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_ = e.http2Server.Shutdown(shutdownCtx)
+		cancel()
+		e.http2Server = nil
+	}
+	if e.tcpTLSListener != nil {
+		_ = e.tcpTLSListener.Close()
+		e.tcpTLSListener = nil
+	}
 	if e.server != nil {
 		_ = e.server.Close()
 		e.server = nil
 	}
+	var err error
 	if e.packetConn != nil {
-		err := e.packetConn.Close()
+		err = e.packetConn.Close()
 		e.packetConn = nil
-		return err
 	}
-	return nil
+	return err
 }
 
 func (e *ServerEndpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -359,6 +456,117 @@ func (e *ServerEndpoint) authorizeRequest(r *http.Request) bool {
 	return false
 }
 
+const masqueRequestProtocolConnectUDP = "connect-udp"
+
+// extendedMasqueTunnelProtocol returns the CONNECT tunnel pseudo-protocol (:protocol header on H2 or Proto on H3).
+func extendedMasqueTunnelProtocol(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(r.Header.Get(":protocol")); v != "" {
+		return v
+	}
+	p := strings.TrimSpace(r.Proto)
+	if p == "" {
+		return ""
+	}
+	if len(p) >= 5 && strings.EqualFold(p[:5], "http/") {
+		return ""
+	}
+	return p
+}
+
+func dnsErrorToMasqueProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
+	if dnsError.Timeout() {
+		proxyStatus.Params.Add("error", "dns_timeout")
+		return
+	}
+	proxyStatus.Params.Add("error", "dns_error")
+	if dnsError.IsNotFound {
+		proxyStatus.Params.Add("rcode", "Negative response")
+	} else {
+		proxyStatus.Params.Add("rcode", "SERVFAIL")
+	}
+}
+
+func masqueUDPResolveDialToHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return http.StatusGatewayTimeout
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return http.StatusBadGateway
+	}
+	var addrErr *net.AddrError
+	var parseError *net.ParseError
+	if errors.As(err, &addrErr) || errors.As(err, &parseError) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
+func (e *ServerEndpoint) handleMasqueConnectUDP(w http.ResponseWriter, r *http.Request, parsed *qmasque.Request, udpProxy *qmasque.Proxy) {
+	if _, ok := w.(http3.HTTPStreamer); ok {
+		if err := udpProxy.Proxy(w, parsed); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+		return
+	}
+	if !strings.EqualFold(extendedMasqueTunnelProtocol(r), masqueRequestProtocolConnectUDP) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	proxyStatus := httpsfv.NewItem(parsed.Host)
+	writeProxyStatus := func(err error) error {
+		if err != nil {
+			proxyStatus.Params.Add("details", err.Error())
+		}
+		val, marshalErr := httpsfv.Marshal(proxyStatus)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		w.Header().Add("Proxy-Status", val)
+		return err
+	}
+
+	addr, err := net.ResolveUDPAddr("udp", parsed.Target)
+	if err != nil {
+		var dnsError *net.DNSError
+		if errors.As(err, &dnsError) {
+			dnsErrorToMasqueProxyStatus(&proxyStatus, dnsError)
+		}
+		_ = writeProxyStatus(err)
+		w.WriteHeader(masqueUDPResolveDialToHTTPStatus(err))
+		return
+	}
+	proxyStatus.Params.Add("next-hop", addr.String())
+
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		proxyStatus.Params.Add("error", "destination_ip_unroutable")
+		_ = writeProxyStatus(err)
+		w.WriteHeader(masqueUDPResolveDialToHTTPStatus(err))
+		return
+	}
+
+	if err := writeProxyStatus(nil); err != nil {
+		_ = conn.Close()
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set(http3.CapsuleProtocolHeader, TM.CapsuleProtocolHeaderValueH2())
+	w.WriteHeader(http.StatusOK)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	_ = TM.ServeH2ConnectUDP(w, r, conn)
+}
+
 func (e *ServerEndpoint) lastStartError() error {
 	value := e.startErr.Load()
 	if value == nil {
@@ -369,6 +577,19 @@ func (e *ServerEndpoint) lastStartError() error {
 		return nil
 	}
 	return state.err
+}
+
+// masqueTCPBindFailureRetryable matches OS-level bind denials where the kernel picked an ephemeral
+// UDP port that cannot be shared with a collocated TCP listener (observed on Windows excluded ranges).
+func masqueTCPBindFailureRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "forbidden") ||
+		strings.Contains(text, "permission denied") ||
+		strings.Contains(text, "access is denied") ||
+		strings.Contains(text, "wsaeaccess")
 }
 
 func isExpectedServerShutdownError(err error) bool {
@@ -398,6 +619,15 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 	if !e.authorizeRequest(r) {
 		debugf("masque tcp connect auth denied status=401")
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	// RFC 8441 Extended CONNECT over HTTP/2 sets :protocol. Our CONNECT-stream client uses HTTP/2
+	// (see transport/masque/h2_connect_stream.go). HTTP/3 CONNECT-stream peers typically omit
+	// :protocol while Proto carries HTTP/3 — treat empty header as compat. Reject misuse such
+	// as connect-udp/connect-ip targeting the tcp template early (400), before policy/dial work.
+	if p := strings.TrimSpace(r.Header.Get(":protocol")); p != "" && !strings.EqualFold(p, "HTTP/2") {
+		debugf("masque tcp connect denied status=400 error_class=bad_extended_protocol proto=%q", p)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	targetHost, targetPort, parseErr := parseTCPTargetFromRequest(r, tcpTemplate)
@@ -511,10 +741,12 @@ func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.
 		uploadErrCh <- err
 	}()
 	go func() {
-		out := io.Writer(responseWriter)
-		if flusher, ok := responseWriter.(http.Flusher); ok {
-			out = &flushWriter{w: responseWriter, f: flusher}
+		// Complete partial writes regardless of Flush support — same hazard as Flush-wrapped path.
+		var flusher http.Flusher
+		if f, ok := responseWriter.(http.Flusher); ok {
+			flusher = f
 		}
+		out := &flushWriter{w: responseWriter, f: flusher}
 		_, err := io.Copy(out, targetConn)
 		downloadErrCh <- err
 	}()
@@ -538,15 +770,29 @@ func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.
 
 type flushWriter struct {
 	w io.Writer
+	// Optional; CONNECT responses often implement http.Flusher for incremental frames.
 	f http.Flusher
 }
 
 func (w *flushWriter) Write(p []byte) (int, error) {
-	n, err := w.w.Write(p)
-	if n > 0 {
-		w.f.Flush()
+	// Underlying ResponseWriter implementations may legally return partial progress
+	// with a nil error; io.Copy rejects that (ErrShortWrite). Drain the full slice
+	// (parity transport/masque writeAllIOWriter on stream bodies).
+	nn := 0
+	for nn < len(p) {
+		n, err := w.w.Write(p[nn:])
+		if n > 0 && w.f != nil {
+			w.f.Flush()
+		}
+		nn += n
+		if err != nil {
+			return nn, err
+		}
+		if n == 0 {
+			return nn, io.ErrShortWrite
+		}
 	}
-	return n, err
+	return nn, nil
 }
 
 type connectIPNetPacketConn struct {
@@ -694,18 +940,6 @@ func (d *connDeadlines) setWriteDeadline(t time.Time) {
 	d.write.Store(deadlineNanos(t))
 }
 
-func (d *connDeadlines) readTimeout() (time.Duration, bool) {
-	v := d.read.Load()
-	if v == 0 {
-		return 0, false
-	}
-	timeout := time.Until(time.Unix(0, v))
-	if timeout <= 0 {
-		return 0, true
-	}
-	return timeout, true
-}
-
 func (d *connDeadlines) readTimeoutExceeded() bool {
 	v := d.read.Load()
 	return v != 0 && time.Now().UnixNano() > v
@@ -727,11 +961,43 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) 
 	if templateURL.Host != "" && !strings.EqualFold(strings.TrimSpace(r.Host), strings.TrimSpace(templateURL.Host)) {
 		return "", "", E.New("CONNECT authority does not match TCP template host")
 	}
-	candidates := []string{
-		strings.TrimSpace(r.URL.String()),
-		strings.TrimSpace(r.URL.Path),
-		strings.TrimSpace(r.RequestURI),
+	var candidates []string
+	appendCandidate := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			candidates = append(candidates, s)
+		}
 	}
+	appendCandidate(r.URL.String())
+	if path := strings.TrimSpace(r.URL.Path); path != "" {
+		if q := strings.TrimSpace(r.URL.RawQuery); q != "" {
+			appendCandidate(path + "?" + q)
+		} else {
+			appendCandidate(path)
+		}
+	}
+	appendCandidate(r.RequestURI)
+	// Parity with connect-ip-go matchTemplateRequestValues: some HTTP/2 stacks surface
+	// path-only RequestURI; absolute URI templates need https://authority + normalized path.
+	requestURIWithAuthority := ""
+	if auth := strings.TrimSpace(r.Host); auth != "" {
+		switch requestURI := strings.TrimSpace(r.RequestURI); {
+		case requestURI == "":
+		case strings.HasPrefix(strings.ToLower(requestURI), "http://"),
+			strings.HasPrefix(strings.ToLower(requestURI), "https://"):
+			requestURIWithAuthority = requestURI
+		default:
+			if !strings.HasPrefix(requestURI, "/") {
+				requestURI = "/" + requestURI
+			}
+			scheme := strings.TrimSpace(templateURL.Scheme)
+			if scheme == "" {
+				scheme = "https"
+			}
+			requestURIWithAuthority = scheme + "://" + auth + requestURI
+		}
+	}
+	appendCandidate(requestURIWithAuthority)
 	var host, port string
 	for _, candidate := range candidates {
 		if candidate == "" {
@@ -751,11 +1017,6 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) 
 		return "", "", E.New("invalid tcp target port")
 	}
 	return host, port, nil
-}
-
-func parseIPDestination(packet []byte) (M.Socksaddr, error) {
-	destination, _, _, err := parseIPDestinationAndPayload(packet)
-	return destination, err
 }
 
 func parseIPDestinationAndPayload(packet []byte) (M.Socksaddr, int, int, error) {

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"net"
 	"os"
-	"sync/atomic"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,9 +25,10 @@ func (s *testIPSession) WritePacket(buffer []byte) ([]byte, error) {
 func (s *testIPSession) Close() error { return nil }
 
 type testSession struct {
-	ip      T.IPPacketSession
-	dialErr error
-	ipErr   error
+	ip          T.IPPacketSession
+	dialErr     error
+	ipErr       error
+	openIPCalls atomic.Int32
 }
 
 func (s *testSession) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -40,6 +41,10 @@ func (s *testSession) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	return nil, nil
 }
 func (s *testSession) OpenIPSession(ctx context.Context) (T.IPPacketSession, error) {
+	s.openIPCalls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return nil, context.Cause(ctx)
+	}
 	if s.ipErr != nil {
 		return nil, s.ipErr
 	}
@@ -54,6 +59,16 @@ type testFactory struct {
 
 func (f testFactory) NewSession(ctx context.Context, options T.ClientOptions) (T.ClientSession, error) {
 	return f.session, nil
+}
+
+// captureOptsFactory records the last ClientOptions passed to NewSession (for dial-identity normalization tests).
+type captureOptsFactory struct {
+	last T.ClientOptions
+}
+
+func (f *captureOptsFactory) NewSession(ctx context.Context, options T.ClientOptions) (T.ClientSession, error) {
+	f.last = options
+	return &testSession{}, nil
 }
 
 type errSessionFactory struct {
@@ -86,6 +101,32 @@ func (cancelProbeFactory) NewSession(ctx context.Context, options T.ClientOption
 		return nil, err
 	}
 	return &testSession{}, nil
+}
+
+func TestRuntimeNewSessionTrimsDialIdentityStrings(t *testing.T) {
+	f := &captureOptsFactory{}
+	rt := NewRuntime(f, RuntimeOptions{
+		Server:        "  edge.example \t",
+		DialPeer:      "  192.0.2.1 ",
+		ServerPort:    443,
+		ServerToken:   "  tok  ",
+		TLSServerName: " sni.example ",
+	})
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if f.last.Server != "edge.example" {
+		t.Fatalf("server: got %q", f.last.Server)
+	}
+	if f.last.DialPeer != "192.0.2.1" {
+		t.Fatalf("dial peer: got %q", f.last.DialPeer)
+	}
+	if f.last.ServerToken != "tok" {
+		t.Fatalf("token: got %q", f.last.ServerToken)
+	}
+	if f.last.TLSServerName != "sni.example" {
+		t.Fatalf("sni: got %q", f.last.TLSServerName)
+	}
 }
 
 func TestRuntimeStartUsesCancelledRouterContext(t *testing.T) {
@@ -384,6 +425,49 @@ func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {
 	}
 	if ip == nil {
 		t.Fatal("expected non-nil ip session")
+	}
+}
+
+func TestRuntimeOpenIPCanceledBeforeCachedIPPlaneReturn(t *testing.T) {
+	ts := &testSession{ip: &testIPSession{}}
+	rt := NewRuntime(testFactory{session: ts}, RuntimeOptions{
+		TransportMode: "connect_ip",
+	})
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	openCallsAfterStart := ts.openIPCalls.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := rt.OpenIPSession(ctx)
+	if err == nil {
+		t.Fatal("expected error when OpenIPSession ctx is already canceled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	// One delegated OpenIPSession on cancel so transport/masque can clear HTTP-layer fallback bookkeeping.
+	if got := ts.openIPCalls.Load(); got != openCallsAfterStart+1 {
+		t.Fatalf("cached-plane cancel must invoke ClientSession.OpenIPSession once for latch parity (was %d, now %d)", openCallsAfterStart, got)
+	}
+}
+
+// When there is no ipPlane cache (modes other than connect_ip bootstrap), cancellation must reach
+// transport/masque so http_layer_fallback latch bookkeeping matches coreSession.OpenIPSession.
+func TestRuntimeOpenIPCanceledStillCallsSessionWhenNoCachedPlane(t *testing.T) {
+	ts := &testSession{ip: &testIPSession{}}
+	rt := NewRuntime(testFactory{session: ts}, RuntimeOptions{})
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := rt.OpenIPSession(ctx)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if ts.openIPCalls.Load() != 1 {
+		t.Fatalf("expected one OpenIPSession call for latch parity, got %d", ts.openIPCalls.Load())
 	}
 }
 
@@ -829,4 +913,3 @@ func writeMalformedScopedLifecycleArtifactIfRequested(t *testing.T, actualClass,
 		t.Fatalf("write malformed-scoped artifact: %v", err)
 	}
 }
-

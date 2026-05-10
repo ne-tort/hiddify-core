@@ -3,6 +3,7 @@ package masque
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -48,6 +49,15 @@ const proxiedConnPrefetchMax = 512
 const proxiedConnPrefetchMask = proxiedConnPrefetchMax - 1
 const proxiedConnExpiredPrefetchDropBudget = 64
 
+// Bounds for draining ignored capsules on the HTTP/3 CONNECT-UDP request stream (skipCapsules).
+// Parity with sing-box transport/masque h2_connect_udp.go: hostile varints must not drive
+// unbounded reads through io.Copy(io.Discard, capsuleBody).
+const (
+	skipCapsuleDatagramMaxPayload                      = 1500 + 128
+	skipCapsuleNondatagramMaxPayload                   = 65536
+	capsuleTypeDatagram              http3.CapsuleType = 0
+)
+
 var (
 	_ http3Stream = &http3.Stream{}
 	_ http3Stream = &http3.RequestStream{}
@@ -69,7 +79,7 @@ type proxiedConn struct {
 	prefetchCount int
 	// Lock-free empty-queue check for hot ReadFrom path.
 	prefetchCountAtomic atomic.Int32
-	prefetchGate  adaptiveTryDrainGate
+	prefetchGate        adaptiveTryDrainGate
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -95,7 +105,7 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 	go func() {
 		defer close(c.readDone)
-		if err := skipCapsules(quicvarint.NewReader(str)); err != io.EOF && !c.closed.Load() {
+		if err := skipCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) && !c.closed.Load() {
 			log.Printf("reading from request stream failed: %v", err)
 		}
 		str.Close()
@@ -349,8 +359,13 @@ func (c *proxiedConn) SetDeadline(t time.Time) error {
 }
 
 func (c *proxiedConn) SetReadDeadline(t time.Time) error {
+	var (
+		cancelOutside  context.CancelFunc
+		timerNeedDrain bool
+		drainTimer     *time.Timer
+	)
+
 	c.deadlineMx.Lock()
-	defer c.deadlineMx.Unlock()
 
 	oldDeadline := c.deadline
 	c.deadline = t
@@ -358,33 +373,51 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 	// Stop the timer.
 	if t.IsZero() {
 		if c.readDeadlineTimer != nil && !c.readDeadlineTimer.Stop() {
-			<-c.readDeadlineTimer.C
+			timerNeedDrain = true
+			drainTimer = c.readDeadlineTimer
 		}
-
+		c.deadlineMx.Unlock()
+		if timerNeedDrain && drainTimer != nil {
+			<-drainTimer.C
+		}
 		return nil
 	}
 	// If the deadline already expired, cancel immediately.
 	if !t.After(now) {
-		c.readCtxCancel()
+		cancelOutside = c.readCtxCancel
+		c.deadlineMx.Unlock()
+		cancelOutside()
 		return nil
 	}
 	deadline := t.Sub(now)
 	// if we already have a timer, reset it
 	if c.readDeadlineTimer != nil {
-		// if that timer expired, create a new one
-		if now.Before(oldDeadline) {
-			c.readCtxCancel() // the old context might already have been cancelled, but that's not guaranteed
+		// Within the previous window: replace ctx so ReceiveDatagram abandons the old timer window.
+		// After the previous instant has passed, the timer may already have fired and canceled readCtx;
+		// if we only Reset without a fresh ctx, ReadFrom can spin (canceled ctx + restart GOTO).
+		replaceReadCtx := now.Before(oldDeadline)
+		if !replaceReadCtx && c.readCtx.Err() != nil {
+			replaceReadCtx = true
+		}
+		if replaceReadCtx {
+			cancelOutside = c.readCtxCancel
 			c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 		}
 		c.readDeadlineTimer.Reset(deadline)
 	} else { // this is the first time the timer is set
 		c.readDeadlineTimer = time.AfterFunc(deadline, func() {
 			c.deadlineMx.Lock()
-			defer c.deadlineMx.Unlock()
-			if !c.deadline.IsZero() && c.deadline.Before(time.Now()) {
-				c.readCtxCancel()
+			shouldCancel := !c.deadline.IsZero() && c.deadline.Before(time.Now())
+			cancelFn := c.readCtxCancel
+			c.deadlineMx.Unlock()
+			if shouldCancel && cancelFn != nil {
+				cancelFn()
 			}
 		})
+	}
+	c.deadlineMx.Unlock()
+	if cancelOutside != nil {
+		cancelOutside()
 	}
 	return nil
 }
@@ -400,9 +433,16 @@ func skipCapsules(str quicvarint.Reader) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("skipping capsule of type %d", ct)
-		if _, err := io.Copy(io.Discard, r); err != nil {
+		max := int64(skipCapsuleNondatagramMaxPayload)
+		if ct == capsuleTypeDatagram {
+			max = int64(skipCapsuleDatagramMaxPayload)
+		}
+		n, err := io.Copy(io.Discard, io.LimitReader(r, max+1))
+		if err != nil {
 			return err
+		}
+		if n > max {
+			return fmt.Errorf("masque connect-udp h3 skip-capsules: type=%d capsule exceeds %d bytes", ct, max)
 		}
 	}
 }

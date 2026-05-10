@@ -19,6 +19,74 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+func TestFlushWriterCompletesPartialUnderlyingWrites(t *testing.T) {
+	buf := &bytes.Buffer{}
+	partial := &partialChunkWriter{b: buf, chunk: 2}
+	fw := &flushWriter{w: partial, f: nopFlusher{}}
+	payload := []byte("hello-world")
+	n, err := fw.Write(payload)
+	if err != nil || n != len(payload) {
+		t.Fatalf("Write: got n=%d err=%v want n=%d err=nil", n, err, len(payload))
+	}
+	if got := buf.String(); got != string(payload) {
+		t.Fatalf("underlying buf: got %q want %q", got, payload)
+	}
+	if partial.calls < 2 {
+		t.Fatalf("expected multiple underlying Write calls for partial writer, got %d", partial.calls)
+	}
+}
+
+func TestFlushWriterCompletesPartialWritesWithoutFlusher(t *testing.T) {
+	buf := &bytes.Buffer{}
+	partial := &partialChunkWriter{b: buf, chunk: 2}
+	fw := &flushWriter{w: partial, f: nil}
+	payload := []byte("hello-world")
+	n, err := fw.Write(payload)
+	if err != nil || n != len(payload) {
+		t.Fatalf("Write: got n=%d err=%v want n=%d err=nil", n, err, len(payload))
+	}
+	if got := buf.String(); got != string(payload) {
+		t.Fatalf("underlying buf: got %q want %q", got, payload)
+	}
+}
+
+func TestRelayTCPBidirectionalDownloadUsesCompletingWriterWithoutFlusher(t *testing.T) {
+	target := &relayTargetConn{readData: []byte("down")}
+	reqBody := io.NopCloser(strings.NewReader(""))
+	partial := &partialChunkWriter{b: &bytes.Buffer{}, chunk: 1}
+
+	err := relayTCPBidirectional(context.Background(), target, reqBody, partial)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("relay: %v", err)
+	}
+	if got := partial.b.String(); got != "down" {
+		t.Fatalf("response relay: got %q want down", got)
+	}
+}
+
+type partialChunkWriter struct {
+	b      *bytes.Buffer
+	chunk  int
+	calls int
+}
+
+func (w *partialChunkWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := w.chunk
+	if n > len(p) {
+		n = len(p)
+	}
+	w.b.Write(p[:n])
+	return n, nil
+}
+
+type nopFlusher struct{}
+
+func (nopFlusher) Flush() {}
+
 func TestRelayTCPBidirectionalHalfClose(t *testing.T) {
 	target := &relayTargetConn{
 		readData: []byte("server-reply"),
@@ -119,6 +187,27 @@ func TestServerHandleTCPConnectRequestSuccess(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("target side did not receive client payload")
+	}
+}
+
+func TestServerHandleTCPConnectRequestRejectsMisusedExtendedProtocol(t *testing.T) {
+	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	ep := &ServerEndpoint{
+		options: option.MasqueEndpointOptions{
+			AllowPrivateTargets: true,
+		},
+	}
+	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	req.Header.Set(":protocol", "connect-udp")
+	rec := httptest.NewRecorder()
+
+	ep.handleTCPConnectRequest(rec, req, template)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status want %d got %d", http.StatusBadRequest, rec.Code)
 	}
 }
 

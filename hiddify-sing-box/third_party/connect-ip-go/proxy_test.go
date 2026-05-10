@@ -36,7 +36,7 @@ func setupConns(t *testing.T) (client, server *Conn) {
 		mreq, err := ParseRequest(r, template)
 		require.NoError(t, err)
 
-		conn, err := p.Proxy(w, mreq)
+		conn, err := p.Proxy(w, r, mreq)
 		require.NoError(t, err)
 		connChan <- conn
 	})
@@ -201,6 +201,7 @@ func TestTTLs(t *testing.T) {
 		require.NoError(t, err)
 		icmp, err := client.WritePacket(packetTTL1)
 		require.Error(t, err)
+		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
 		require.ErrorContains(t, err, "compose datagram")
 		require.Nil(t, icmp)
 
@@ -248,6 +249,7 @@ func TestTTLs(t *testing.T) {
 		}
 		icmp, err := client.WritePacket(packetHopLimit1)
 		require.Error(t, err)
+		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
 		require.ErrorContains(t, err, "compose datagram")
 		require.Nil(t, icmp)
 
@@ -352,7 +354,7 @@ func TestDialScopedTemplateCarriesDefaultFlowScopeToServer(t *testing.T) {
 		mreq, err := ParseRequest(r, template)
 		require.NoError(t, err)
 		reqChan <- mreq
-		_, err = p.Proxy(w, mreq)
+		_, err = p.Proxy(w, r, mreq)
 		require.NoError(t, err)
 	})
 	s := http3.Server{
@@ -415,7 +417,7 @@ func TestScopedTemplateMalformedTargetFailsClosed(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		_, err = p.Proxy(w, mreq)
+		_, err = p.Proxy(w, r, mreq)
 		require.NoError(t, err)
 	})
 	s := http3.Server{

@@ -47,12 +47,6 @@ type TCPNetstackFactory interface {
 	New(ctx context.Context, session IPPacketSession) (TCPNetstack, error)
 }
 
-type unavailableTCPNetstackFactory struct{}
-
-func (f unavailableTCPNetstackFactory) New(ctx context.Context, session IPPacketSession) (TCPNetstack, error) {
-	return nil, errors.Join(ErrTCPStackInit, ErrTCPOverConnectIP)
-}
-
 type connectIPTCPNetstackFactory struct{}
 
 // connectIPTCPNetstackLocalPrefixWait bounds LocalPrefixes on the CONNECT-IP conn before falling back
@@ -387,7 +381,7 @@ func isRetryablePacketWriteError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if ne, ok := err.(net.Error); ok && (ne.Timeout() || ne.Temporary()) {
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
 		return true
 	}
 	text := strings.ToLower(err.Error())

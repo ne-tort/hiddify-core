@@ -77,6 +77,17 @@ func normalizeTCPTransport(mode string) string {
 	}
 }
 
+func normalizeHTTPLayer(layer string) string {
+	switch strings.ToLower(strings.TrimSpace(layer)) {
+	case "":
+		return option.MasqueHTTPLayerH3
+	case option.MasqueHTTPLayerH3, option.MasqueHTTPLayerH2, option.MasqueHTTPLayerAuto:
+		return strings.ToLower(strings.TrimSpace(layer))
+	default:
+		return strings.TrimSpace(layer)
+	}
+}
+
 func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUICExperimentalOptions {
 	if o == nil {
 		return TM.QUICExperimentalOptions{}
@@ -109,6 +120,18 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	tcpMode := normalizeTCPMode(o.TCPMode)
 	tcpTransport := normalizeTCPTransport(o.TCPTransport)
 	hopPolicy := normalizeHopPolicy(o.HopPolicy)
+	httpLayerNorm := normalizeHTTPLayer(o.HTTPLayer)
+	rawHTTPLayer := strings.TrimSpace(o.HTTPLayer)
+	if rawHTTPLayer != "" && httpLayerNorm != option.MasqueHTTPLayerH3 &&
+		httpLayerNorm != option.MasqueHTTPLayerH2 && httpLayerNorm != option.MasqueHTTPLayerAuto {
+		return E.New("masque: invalid http_layer: ", rawHTTPLayer)
+	}
+	if httpLayerNorm == option.MasqueHTTPLayerH2 && o.QUICExperimental != nil && o.QUICExperimental.Enabled {
+		return E.New("masque: http_layer h2 is incompatible with quic_experimental.enabled")
+	}
+	if o.HTTPLayerCacheTTL.Build() > 0 && httpLayerNorm != option.MasqueHTTPLayerAuto {
+		return E.New("masque: http_layer_cache_ttl is only used when http_layer is auto (remove it or switch to auto)")
+	}
 
 	if o.UDPTimeout.Build() != 0 {
 		return E.New("masque: udp_timeout is not supported on this client path")
@@ -138,7 +161,7 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	}
 	switch tcpTransport {
 	case option.MasqueTCPTransportConnectStream:
-		// CONNECT-stream over HTTP/3.
+		// CONNECT-stream over outer HTTP/3 or HTTP/2 (effective http_layer).
 	case option.MasqueTCPTransportConnectIP:
 		if tm != option.MasqueTransportModeConnectIP {
 			return E.New("masque: tcp_transport connect_ip requires transport_mode connect_ip (userspace TCP over CONNECT-IP tunnel)")
@@ -242,6 +265,15 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 }
 
 func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
+	if strings.TrimSpace(o.HTTPLayer) != "" {
+		return E.New("masque server: http_layer is client-only")
+	}
+	if o.HTTPLayerFallback {
+		return E.New("masque server: http_layer_fallback is client-only")
+	}
+	if o.HTTPLayerCacheTTL.Build() != 0 {
+		return E.New("masque server: http_layer_cache_ttl is client-only")
+	}
 	if o.UDPTimeout.Build() != 0 {
 		return E.New("masque: udp_timeout is not supported on server path")
 	}

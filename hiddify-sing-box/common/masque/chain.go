@@ -21,7 +21,7 @@ func BuildChain(options option.MasqueEndpointOptions) ([]ChainHop, error) {
 			{
 				Tag:    "hop-1",
 				Via:    "",
-				Server: options.Server,
+				Server: strings.TrimSpace(options.Server),
 				Port:   options.ServerPort,
 			},
 		}, nil
@@ -40,7 +40,7 @@ func BuildChain(options option.MasqueEndpointOptions) ([]ChainHop, error) {
 		out = append(out, ChainHop{
 			Tag:    tag,
 			Via:    strings.ToLower(strings.TrimSpace(hop.Via)),
-			Server: hop.Server,
+			Server: strings.TrimSpace(hop.Server),
 			Port:   hop.ServerPort,
 		})
 	}
@@ -82,4 +82,3 @@ func BuildChain(options option.MasqueEndpointOptions) ([]ChainHop, error) {
 	}
 	return out, nil
 }
-

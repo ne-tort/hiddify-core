@@ -3,6 +3,7 @@ package connectip
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -39,6 +40,13 @@ func unknownCapsuleFrame(t http3.CapsuleType, payload []byte) []byte {
 	return frame
 }
 
+func TestConnCloseNilReceiverAndZeroValue(t *testing.T) {
+	require.NoError(t, (*Conn)(nil).Close())
+	var c Conn
+	require.NoError(t, c.Close())
+	require.NoError(t, c.Close()) // idempotent
+}
+
 func TestEmitPolicyDropICMPIncrementsAttemptOnComposeFailure(t *testing.T) {
 	var c Conn
 	beforeA := PolicyDropICMPAttemptTotal()
@@ -67,7 +75,7 @@ func TestPolicyDropICMPReasonBreakdownSrcDstProto(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
 	require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
 		{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.1.2.3"), IPProtocol: 42},
@@ -118,7 +126,7 @@ func TestPolicyDropICMPReasonBreakdownSrcDstProto(t *testing.T) {
 }
 
 func TestAdvertiseRouteRejectsUnorderedOrOverlappingRanges(t *testing.T) {
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -135,6 +143,17 @@ func TestAdvertiseRouteRejectsUnorderedOrOverlappingRanges(t *testing.T) {
 	})
 	require.ErrorIs(t, err, ErrInvalidRouteAdvertisement)
 	require.ErrorContains(t, err, "must not overlap")
+}
+
+func TestReadFromStreamCapsuleBoundaryEOFWithoutDataplaneWrap(t *testing.T) {
+	// Empty CONNECT-IP stream body: EOF before first capsule prefix — normal close, not dataplane-framing error.
+	conn := &Conn{
+		str:       &bytesStream{reader: bytes.NewReader(nil)},
+		closeChan: make(chan struct{}),
+	}
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, io.EOF)
+	require.NotContains(t, err.Error(), "dataplane")
 }
 
 func TestReadFromStreamUnknownCapsuleSilentSkipWithBreakdown(t *testing.T) {
@@ -168,6 +187,51 @@ func TestReadFromStreamUnknownCapsuleSilentSkipWithBreakdown(t *testing.T) {
 	require.Equal(t, beforeType+1, breakdown[uint64(unknownType)])
 }
 
+func TestReadFromStreamUnknownCapsuleDrainErrorWrapsDataplane(t *testing.T) {
+	unknownType := http3.CapsuleType(0xface)
+	// Declared length 10 but stream ends after 4 payload bytes → LimitedReader cannot finish capsule.
+	streamBytes := quicvarint.Append(nil, uint64(unknownType))
+	streamBytes = quicvarint.Append(streamBytes, 10)
+	streamBytes = append(streamBytes, []byte{1, 2, 3, 4}...)
+
+	conn := &Conn{
+		str:                    &bytesStream{reader: bytes.NewReader(streamBytes)},
+		closeChan:              make(chan struct{}),
+		datagramCapsuleIngress: make(chan []byte, 1),
+	}
+	err := conn.readFromStream()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "masque connect-ip h2 dataplane")
+}
+
+func TestReadFromStreamRejectsOversizedUnknownCapsuleDeclaredLength(t *testing.T) {
+	unknownType := http3.CapsuleType(0xface)
+	streamBytes := quicvarint.Append(nil, uint64(unknownType))
+	streamBytes = quicvarint.Append(streamBytes, uint64(maxConnectIPNondatagramCapsulePayload+1))
+	conn := &Conn{
+		str:       &bytesStream{reader: bytes.NewReader(streamBytes)},
+		closeChan: make(chan struct{}),
+	}
+	err := conn.readFromStream()
+	require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
+	require.ErrorContains(t, err, "declared length")
+	require.ErrorContains(t, err, "exceeds max")
+}
+
+func TestReadFromStreamRejectsOversizedAddressAssignDeclaredLength(t *testing.T) {
+	streamBytes := quicvarint.Append(nil, uint64(capsuleTypeAddressAssign))
+	streamBytes = quicvarint.Append(streamBytes, uint64(maxConnectIPNondatagramCapsulePayload+1))
+	streamBytes = append(streamBytes, 0x00)
+	conn := &Conn{
+		str:       &bytesStream{reader: bytes.NewReader(streamBytes)},
+		closeChan: make(chan struct{}),
+	}
+	err := conn.readFromStream()
+	require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
+	require.ErrorContains(t, err, "declared length")
+	require.ErrorContains(t, err, "exceeds max")
+}
+
 var ipv6Header = []byte{
 	0x60, 0x00, 0x00, 0x00, // Version, Traffic Class, Flow Label
 	0x00, 0x20, 59, 64, // Payload Length, Next Header, Hop Limit
@@ -179,6 +243,7 @@ type mockStream struct {
 	reading         []byte
 	toRead          <-chan []byte
 	sendDatagramErr error
+	writeErr        error
 }
 
 var _ http3Stream = &mockStream{}
@@ -193,7 +258,12 @@ func (m *mockStream) Read(p []byte) (int, error) {
 	return n, nil
 }
 func (m *mockStream) CancelRead(quic.StreamErrorCode)   {}
-func (m *mockStream) Write(p []byte) (n int, err error) { return len(p), nil }
+func (m *mockStream) Write(p []byte) (n int, err error) {
+	if m.writeErr != nil {
+		return 0, m.writeErr
+	}
+	return len(p), nil
+}
 func (m *mockStream) Close() error                      { return nil }
 func (m *mockStream) CancelWrite(quic.StreamErrorCode)  {}
 func (m *mockStream) Context() context.Context          { return context.Background() }
@@ -242,7 +312,7 @@ func TestIncomingDatagrams(t *testing.T) {
 			mockStream: &mockStream{toRead: capsules},
 			datagrams:  make(chan []byte, 3),
 		}
-		conn := newProxiedConn(ds)
+		conn := newProxiedConn(ds, false)
 
 		packet, err := (&ipv4.Header{
 			Version:  4,
@@ -275,7 +345,7 @@ func TestIncomingDatagrams(t *testing.T) {
 			mockStream: &mockStream{toRead: capsules},
 			datagrams:  make(chan []byte, 2),
 		}
-		conn := newProxiedConn(ds)
+		conn := newProxiedConn(ds, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
@@ -320,7 +390,7 @@ func TestIncomingDatagrams(t *testing.T) {
 			mockStream: &mockStream{toRead: capsules},
 			datagrams:  make(chan []byte, 2),
 		}
-		conn := newProxiedConn(ds)
+		conn := newProxiedConn(ds, false)
 
 		packet, err := (&ipv4.Header{
 			Version:  4,
@@ -345,7 +415,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("empty packets", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		require.ErrorContains(t,
 			conn.handleIncomingProxiedPacket([]byte{}),
 			"connect-ip: empty packet",
@@ -353,7 +423,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("invalid IP version", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data := make([]byte, 20)
 		data[0] = 5 << 4 // IPv5
 		require.ErrorContains(t,
@@ -363,7 +433,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("IPv4 packet too short", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data, err := (&ipv4.Header{
 			Src:      net.IPv4(1, 2, 3, 4),
 			Dst:      net.IPv4(159, 70, 42, 98),
@@ -378,7 +448,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("IPv6 packet too short", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		require.ErrorContains(t,
 			conn.handleIncomingProxiedPacket(ipv6Header[:ipv6.HeaderLen-1]),
 			"connect-ip: malformed datagram: too short",
@@ -386,7 +456,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("invalid source address", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
@@ -405,7 +475,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("invalid destination address", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
@@ -433,7 +503,7 @@ func TestIncomingDatagrams(t *testing.T) {
 	})
 
 	t.Run("invalid IP protocol", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
@@ -468,7 +538,7 @@ func TestIncomingDatagrams(t *testing.T) {
 
 	t.Run("packet from assigned address", func(t *testing.T) {
 		readChan := make(chan []byte, 1)
-		conn := newProxiedConn(&mockStream{toRead: readChan})
+		conn := newProxiedConn(&mockStream{toRead: readChan}, false)
 
 		hdr := &ipv4.Header{
 			Src:      net.IPv4(159, 70, 42, 98),
@@ -495,7 +565,7 @@ func TestIncomingDatagrams(t *testing.T) {
 }
 
 func FuzzIncomingDatagram(f *testing.F) {
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(f, conn.AssignAddresses(ctx, []netip.Prefix{
@@ -525,7 +595,7 @@ func FuzzIncomingDatagram(f *testing.F) {
 
 func TestSendingDatagrams(t *testing.T) {
 	t.Run("invalid IP version", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data := make([]byte, 20)
 		data[0] = 5 << 4 // IPv5
 		var datagram []byte
@@ -534,7 +604,7 @@ func TestSendingDatagrams(t *testing.T) {
 	})
 
 	t.Run("IPv4 packet too short", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data, err := (&ipv4.Header{
 			Src:      net.IPv4(1, 2, 3, 4),
 			Dst:      net.IPv4(159, 70, 42, 98),
@@ -548,21 +618,21 @@ func TestSendingDatagrams(t *testing.T) {
 	})
 
 	t.Run("IPv6 packet too short", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		var datagram []byte
 		err := conn.composeDatagram(&datagram, ipv6Header[:ipv6.HeaderLen-1])
 		require.ErrorContains(t, err, "connect-ip: IPv6 packet too short")
 	})
 
 	t.Run("composeDatagram rejects empty packet", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		var datagram []byte
 		err := conn.composeDatagram(&datagram, []byte{})
 		require.ErrorContains(t, err, "empty packet")
 	})
 
 	t.Run("composeDatagram rejects egress source outside assigned and routes", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
@@ -584,7 +654,7 @@ func TestSendingDatagrams(t *testing.T) {
 	})
 
 	t.Run("composeDatagram rejects egress destination outside peer prefix", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("10.200.0.2/32")}))
@@ -607,7 +677,7 @@ func TestSendingDatagrams(t *testing.T) {
 	})
 
 	t.Run("composeDatagram allows unrestricted egress after empty AssignAddresses", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{}))
@@ -628,23 +698,24 @@ func TestSendingDatagrams(t *testing.T) {
 
 func TestWritePacketFailures(t *testing.T) {
 	t.Run("empty payload returns error", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		icmp, err := conn.WritePacket([]byte{})
 		require.ErrorContains(t, err, "empty packet")
 		require.Nil(t, icmp)
 	})
 
 	t.Run("invalid IP version returns error", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data := make([]byte, 20)
 		data[0] = 5 << 4 // IPv5
 		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
 		require.ErrorContains(t, err, "compose datagram")
 		require.Nil(t, icmp)
 	})
 
 	t.Run("TTL too small returns error", func(t *testing.T) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		data, err := (&ipv4.Header{
 			Version:  4,
 			Len:      20,
@@ -655,8 +726,102 @@ func TestWritePacketFailures(t *testing.T) {
 		}).Marshal()
 		require.NoError(t, err)
 		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
 		require.ErrorContains(t, err, "compose datagram")
 		require.Nil(t, icmp)
+	})
+
+	t.Run("HTTP/3 SendDatagram failure wraps dataplane", func(t *testing.T) {
+		str := &mockStream{sendDatagramErr: errors.New("QUIC: handshake token rejected")}
+		conn := newProxiedConn(str, false)
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
+		require.ErrorContains(t, err, "handshake")
+		require.Nil(t, icmp)
+		_ = conn.Close()
+	})
+
+	t.Run("HTTP/2 capsule dataplane wraps compose error", func(t *testing.T) {
+		conn := newProxiedConn(&mockStream{}, true)
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      1,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		icmp, err := conn.WritePacket(data)
+		require.ErrorContains(t, err, "masque connect-ip h2 dataplane:")
+		require.ErrorContains(t, err, "compose datagram")
+		require.Nil(t, icmp)
+		_ = conn.Close()
+	})
+
+	t.Run("HTTP/2 SendDatagram EOF is unwrapped (parity CONNECT-UDP WriteTo)", func(t *testing.T) {
+		str := &mockStream{sendDatagramErr: io.EOF}
+		conn := newProxiedConn(str, true)
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		icmp, err := conn.WritePacket(data)
+		require.ErrorIs(t, err, io.EOF)
+		require.Nil(t, icmp)
+		require.NotContains(t, err.Error(), "masque connect-ip h2 dataplane")
+		_ = conn.Close()
+	})
+
+	t.Run("HTTP/2 SendDatagram ErrClosedPipe is unwrapped", func(t *testing.T) {
+		str := &mockStream{sendDatagramErr: io.ErrClosedPipe}
+		conn := newProxiedConn(str, true)
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      64,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		icmp, err := conn.WritePacket(data)
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+		require.Nil(t, icmp)
+		require.NotContains(t, err.Error(), "masque connect-ip h2 dataplane")
+		_ = conn.Close()
+	})
+
+	t.Run("HTTP/2 control capsule Write EOF is unwrapped", func(t *testing.T) {
+		str := &mockStream{writeErr: io.EOF}
+		conn := newProxiedConn(str, true)
+		t.Cleanup(func() { _ = conn.Close() })
+		err := conn.sendCapsule(context.Background(), &routeAdvertisementCapsule{})
+		require.ErrorIs(t, err, io.EOF)
+		require.NotContains(t, err.Error(), "masque connect-ip h2 dataplane")
+	})
+
+	t.Run("HTTP/2 control capsule Write ErrClosedPipe is unwrapped", func(t *testing.T) {
+		str := &mockStream{writeErr: io.ErrClosedPipe}
+		conn := newProxiedConn(str, true)
+		t.Cleanup(func() { _ = conn.Close() })
+		err := conn.sendCapsule(context.Background(), &routeAdvertisementCapsule{})
+		require.ErrorIs(t, err, io.ErrClosedPipe)
+		require.NotContains(t, err.Error(), "masque connect-ip h2 dataplane")
 	})
 }
 
@@ -670,7 +835,7 @@ func TestPTBMTUFromDatagramTooLarge(t *testing.T) {
 
 func TestSendLargeDatagramsICMPMTUReflectsQuicHint(t *testing.T) {
 	str := &mockStream{sendDatagramErr: &quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1350}}
-	conn := newProxiedConn(str)
+	conn := newProxiedConn(str, false)
 	data, err := (&ipv4.Header{
 		Version:  4,
 		Len:      20,
@@ -796,14 +961,14 @@ func TestIsIPv6ExtensionHeaderProtocol(t *testing.T) {
 }
 
 func TestValidateIncomingProxiedPacketBypassesWhenPolicyDisabled(t *testing.T) {
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	// No ingress policy configured: ReadPacket path should bypass tuple parsing / policy checks.
 	require.NoError(t, conn.validateIncomingProxiedPacket([]byte{}))
 	require.NoError(t, conn.validateIncomingProxiedPacket([]byte{0x50}))
 }
 
 func TestValidateIncomingProxiedPacketBypassesWhenOnlyOtherFamilyPolicyConfigured(t *testing.T) {
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
@@ -814,7 +979,7 @@ func TestValidateIncomingProxiedPacketBypassesWhenOnlyOtherFamilyPolicyConfigure
 }
 
 func TestAssignAddressesEmptyKeepsPolicyBypassed(t *testing.T) {
-	conn := newProxiedConn(&mockStream{})
+	conn := newProxiedConn(&mockStream{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{}))
@@ -968,7 +1133,7 @@ func BenchmarkValidateIncomingProxiedPacket(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Run("policy_disabled_bypass", func(b *testing.B) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
@@ -978,7 +1143,7 @@ func BenchmarkValidateIncomingProxiedPacket(b *testing.B) {
 		}
 	})
 	b.Run("policy_enabled_validate", func(b *testing.B) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		if err := conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}); err != nil {
@@ -998,7 +1163,7 @@ func BenchmarkValidateIncomingProxiedPacket(b *testing.B) {
 		}
 	})
 	b.Run("ipv6_policy_enabled_no_extension_header", func(b *testing.B) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		if err := conn.AdvertiseRoute(ctx, []IPRoute{
@@ -1022,7 +1187,7 @@ func BenchmarkValidateIncomingProxiedPacket(b *testing.B) {
 		}
 	})
 	b.Run("ipv6_policy_enabled_ipv4_bypass", func(b *testing.B) {
-		conn := newProxiedConn(&mockStream{})
+		conn := newProxiedConn(&mockStream{}, false)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		if err := conn.AdvertiseRoute(ctx, []IPRoute{
@@ -1205,4 +1370,45 @@ func TestAdaptivePrefetchProbeGate(t *testing.T) {
 		}
 		require.Equal(t, connDrainProbeMaxSkip, gate.skipBudgetValue())
 	})
+}
+
+func TestErrAfterCloseNeverNilWhenSignaled(t *testing.T) {
+	ch := make(chan struct{})
+	close(ch)
+	c := &Conn{closeChan: ch}
+	require.True(t, errors.Is(c.errAfterClose(), net.ErrClosed))
+
+	c.closeErr = &CloseError{Remote: true}
+	got := c.errAfterClose()
+	require.True(t, errors.Is(got, net.ErrClosed))
+	var ce *CloseError
+	require.True(t, errors.As(got, &ce))
+	require.True(t, ce.Remote)
+}
+
+func TestRoutesReturnsClonedSlice(t *testing.T) {
+	conn := &Conn{
+		closeChan:            make(chan struct{}),
+		availableRoutesNotify: make(chan struct{}, 1),
+	}
+	conn.availableRoutes = []IPRoute{
+		{
+			StartIP:    netip.MustParseAddr("10.0.0.1"),
+			EndIP:      netip.MustParseAddr("10.0.0.10"),
+			IPProtocol: 17,
+		},
+	}
+	conn.availableRoutesNotify <- struct{}{}
+
+	got, err := conn.Routes(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	// Mutating the caller view must not alter Conn internal route policy state.
+	got[0].IPProtocol = 6
+
+	conn.mu.Lock()
+	internalProto := conn.availableRoutes[0].IPProtocol
+	conn.mu.Unlock()
+	require.Equal(t, uint8(17), internalProto)
 }

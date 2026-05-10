@@ -24,6 +24,10 @@ import (
 // This allows tunneling QUIC connections, which themselves have a minimum MTU requirement of 1200 bytes.
 const defaultInitialPacketSize = 1350
 
+// dialUDPTestAfterSuccessfulCONNECTResponse is set by package-internal tests after a successful
+// CONNECT-UDP HTTP status, before handing out PacketConn (nil in non-test binaries).
+var dialUDPTestAfterSuccessfulCONNECTResponse func(ctx context.Context)
+
 // A Client establishes proxied connections to remote hosts, using a UDP proxy.
 // Multiple flows can be proxied via the same connection to the proxy.
 type Client struct {
@@ -49,6 +53,9 @@ type Client struct {
 // The target address is sent to the proxy, and the DNS resolution is left to the proxy.
 // The target must be given as a host:port.
 func (c *Client) DialAddr(ctx context.Context, proxyTemplate *uritemplate.Template, target string) (net.PacketConn, *http.Response, error) {
+	if proxyTemplate == nil {
+		return nil, nil, errors.New("masque: CONNECT-UDP URI template is not configured")
+	}
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse target: %w", err)
@@ -65,6 +72,9 @@ func (c *Client) DialAddr(ctx context.Context, proxyTemplate *uritemplate.Templa
 
 // Dial dials a proxied connection to a target server.
 func (c *Client) Dial(ctx context.Context, proxyTemplate *uritemplate.Template, raddr *net.UDPAddr) (net.PacketConn, *http.Response, error) {
+	if proxyTemplate == nil {
+		return nil, nil, errors.New("masque: CONNECT-UDP URI template is not configured")
+	}
 	str, err := proxyTemplate.Expand(uritemplate.Values{
 		uriTemplateTargetHost: uritemplate.String(escape(raddr.IP.String())),
 		uriTemplateTargetPort: uritemplate.String(strconv.Itoa(raddr.Port)),
@@ -116,13 +126,23 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 	}); err != nil {
 		return nil, nil, fmt.Errorf("masque: failed to send request: %w", err)
 	}
-	// TODO: optimistically return the connection
 	rsp, err := rstr.ReadResponse()
 	if err != nil {
 		return nil, nil, fmt.Errorf("masque: failed to read response: %w", err)
 	}
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
 		return nil, rsp, fmt.Errorf("masque: server responded with %d", rsp.StatusCode)
+	}
+
+	if dialUDPTestAfterSuccessfulCONNECTResponse != nil {
+		dialUDPTestAfterSuccessfulCONNECTResponse(ctx)
+	}
+	// Post-handshake cancel gate: do not hand out CONNECT-UDP if the dial ctx was canceled
+	// during ReadResponse/handshake (parity with HTTP/2 CONNECT-UDP/connect-ip DialHTTP2 and
+	// connect-ip Dial over HTTP/3).
+	if ctxErr := context.Cause(ctx); ctxErr != nil {
+		_ = rstr.Close()
+		return nil, rsp, ctxErr
 	}
 
 	if _, udp := raddr.(*net.UDPAddr); !udp {
@@ -219,10 +239,12 @@ func (c *Client) ensureConnected(ctx context.Context, host string) error {
 		return fmt.Errorf("masque: dialing QUIC connection failed: %w", err)
 	}
 	c.conn = conn
-	tr := &http3.Transport{EnableDatagrams: true}
+	tr := &http3.Transport{
+		EnableDatagrams:    true,
+		DisableCompression: true, // CONNECT-UDP is not a gzip HTTP response body
+	}
 	if c.LegacyH3Extras {
 		tr.AdditionalSettings = map[uint64]uint64{0x276: 1}
-		tr.DisableCompression = true
 	}
 	c.clientConn = tr.NewClientConn(conn)
 	return nil

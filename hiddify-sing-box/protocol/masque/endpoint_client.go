@@ -26,14 +26,14 @@ import (
 // Endpoint is the generic MASQUE client (non-WARP bootstrap) behind `type: masque`.
 type Endpoint struct {
 	endpoint.Adapter
-	options   option.MasqueEndpointOptions
-	baseCtx context.Context
-	runtime CM.Runtime
-	startOnce sync.Once
-	mu        sync.RWMutex
-	startErr  atomic.Value
-	closed    atomic.Bool
-	startCtx  context.Context
+	options     option.MasqueEndpointOptions
+	baseCtx     context.Context
+	runtime     CM.Runtime
+	startOnce   sync.Once
+	mu          sync.RWMutex
+	startErr    atomic.Value
+	closed      atomic.Bool
+	startCtx    context.Context
 	startCancel context.CancelFunc
 }
 
@@ -59,7 +59,9 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 func resolveMasqueEntryServerPort(chain []CM.ChainHop, fallbackServer string, fallbackPort uint16) (string, uint16) {
 	for _, h := range chain {
 		if strings.TrimSpace(h.Via) == "" {
-			return h.Server, h.Port
+			// Align with masqueHTTPLayerCacheIdentity / dial identity (trimmed host) so http_layer TTL keys
+			// match the live Runtime.Server and TLS/SNI callers are not sensitive to JSON whitespace.
+			return strings.TrimSpace(h.Server), h.Port
 		}
 	}
 	return strings.TrimSpace(fallbackServer), fallbackPort
@@ -185,6 +187,18 @@ func (e *Endpoint) startRuntime() {
 		e.startErr.Store(err)
 		return
 	}
+	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, true)
+	if err != nil {
+		e.startErr.Store(err)
+		return
+	}
+	// Mirror warp_masque: TTL cache keys must use the same dial port as CM.Runtime (entry hop / defaults).
+	effectiveHL := EffectiveMasqueClientHTTPLayer(e.Tag(), e.options, chain, port)
+	recordHL := func(layer string, id TM.HTTPLayerCacheDialIdentity) {
+		// port is normalized above (0→443); always align Record with EffectiveMasqueClientHTTPLayer(..., dialPortOverride: port).
+		id.DialPortOverride = port
+		RecordMasqueHTTPLayerSuccess(e.Tag(), e.options, layer, id)
+	}
 	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 		Tag:                      e.Tag(),
 		Server:                   server,
@@ -205,6 +219,10 @@ func (e *Endpoint) startRuntime() {
 		QUICExperimental:         toTransportQUICExperimental(e.options.QUICExperimental),
 		Chain:                    chain,
 		QUICDial:                 quicDial,
+		TCPDial:                  tcpDial,
+		MasqueEffectiveHTTPLayer: effectiveHL,
+		HTTPLayerFallback:        e.options.HTTPLayerFallback,
+		HTTPLayerSuccess:         recordHL,
 	})
 	const masqueRuntimeStartMaxAttempts = 3
 	var startErr error

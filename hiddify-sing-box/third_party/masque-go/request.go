@@ -15,6 +15,75 @@ import (
 
 const requestProtocol = "connect-udp"
 
+// extendedConnectProtocol returns the RFC 8441 Extended CONNECT protocol name (:protocol pseudo-header).
+// net/http on HTTP/2 sets req.Proto to the wire HTTP version ("HTTP/2.0"); the tunnel protocol appears
+// in Header[":protocol"]. HTTP/3 clients often set Req.Proto alone (without :protocol header).
+func extendedConnectProtocol(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(r.Header.Get(":protocol")); v != "" {
+		return v
+	}
+	p := strings.TrimSpace(r.Proto)
+	if p == "" {
+		return ""
+	}
+	if len(p) >= 5 && strings.EqualFold(p[:5], "http/") {
+		return ""
+	}
+	return p
+}
+
+// connectUDPTemplateMatchCandidates builds URIs for uritemplate matching.
+// Extended CONNECT over HTTP/2 may expose path+query via RequestURI with an empty/absent parsed URL,
+// or Path without RawQuery split in separate fields; mirroring TCP parsing in endpoint_server.
+func connectUDPTemplateMatchCandidates(r *http.Request, tmpl *url.URL) []string {
+	if r == nil || tmpl == nil {
+		return nil
+	}
+	var out []string
+	appendNonEmpty := func(s string) {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+
+	appendNonEmpty(r.URL.String())
+	if path := strings.TrimSpace(r.URL.Path); path != "" {
+		if q := strings.TrimSpace(r.URL.RawQuery); q != "" {
+			appendNonEmpty(path + "?" + q)
+		} else {
+			appendNonEmpty(path)
+		}
+	}
+	appendNonEmpty(r.RequestURI)
+
+	// Parity with connect-ip-go matchTemplateRequestValues / protocol/masque parseTCPTargetFromRequest:
+	// path-only or scheme-less RequestURI may omit a leading slash; still match absolute templates.
+	requestURIWithAuthority := ""
+	if auth := strings.TrimSpace(r.Host); auth != "" {
+		switch requestURI := strings.TrimSpace(r.RequestURI); {
+		case requestURI == "":
+		case strings.HasPrefix(strings.ToLower(requestURI), "http://"),
+			strings.HasPrefix(strings.ToLower(requestURI), "https://"):
+			requestURIWithAuthority = requestURI
+		default:
+			if !strings.HasPrefix(requestURI, "/") {
+				requestURI = "/" + requestURI
+			}
+			scheme := strings.TrimSpace(tmpl.Scheme)
+			if scheme == "" {
+				scheme = "https"
+			}
+			requestURIWithAuthority = scheme + "://" + auth + requestURI
+		}
+	}
+	appendNonEmpty(requestURIWithAuthority)
+	return out
+}
+
 var capsuleProtocolHeaderValue string
 
 func init() {
@@ -60,10 +129,11 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("expected CONNECT request, got %s", r.Method),
 		}
 	}
-	if r.Proto != requestProtocol {
+	proto := extendedConnectProtocol(r)
+	if !strings.EqualFold(proto, requestProtocol) {
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusNotImplemented,
-			Err:        fmt.Errorf("unexpected protocol: %s", r.Proto),
+			Err:        fmt.Errorf("unexpected protocol: %q", proto),
 		}
 	}
 	if r.Host != u.Host {
@@ -96,15 +166,27 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 		}
 	}
 
-	match := template.Match(r.URL.String())
-	targetHost := unescape(match.Get(uriTemplateTargetHost).String())
-	targetPortStr := match.Get(uriTemplateTargetPort).String()
+	var targetHost string
+	var targetPortStr string
+	candidates := connectUDPTemplateMatchCandidates(r, u)
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		match := template.Match(candidate)
+		targetHost = strings.TrimSpace(match.Get(uriTemplateTargetHost).String())
+		targetPortStr = strings.TrimSpace(match.Get(uriTemplateTargetPort).String())
+		if targetHost != "" && targetPortStr != "" {
+			break
+		}
+	}
 	if targetHost == "" || targetPortStr == "" {
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusBadRequest,
 			Err:        fmt.Errorf("expected target_host and target_port"),
 		}
 	}
+	targetHost = unescape(targetHost)
 	// IPv6 addresses need to be enclosed in [], otherwise resolving the address will fail.
 	if strings.Contains(targetHost, ":") {
 		targetHost = "[" + targetHost + "]"

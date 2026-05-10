@@ -12,6 +12,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseConnectIPStreamCapsuleCleanEOF(t *testing.T) {
+	_, _, err := parseConnectIPStreamCapsule(quicvarint.NewReader(bytes.NewReader(nil)))
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestParseConnectIPStreamCapsuleTruncatedTypeVarint(t *testing.T) {
+	// Single byte starting a 2-byte QUIC varint (RFC 9000: prefix 01 → 14-bit, 2 bytes on wire).
+	_, _, err := parseConnectIPStreamCapsule(quicvarint.NewReader(bytes.NewReader([]byte{0x40})))
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+func TestParseConnectIPStreamCapsuleTruncatedLengthVarint(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(quicvarint.Append(nil, uint64(capsuleTypeHTTPDatagram)))
+	// Complete type, no length prefix — parity with masque parseH2ConnectUDPCapsule / H2 CONNECT-UDP tests.
+	_, _, err := parseConnectIPStreamCapsule(quicvarint.NewReader(bytes.NewReader(buf.Bytes())))
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
 func TestParseAddressAssignCapsule(t *testing.T) {
 	addr1 := quicvarint.Append(nil, 1337) // Request ID
 	addr1 = append(addr1, 4)              // IPv4
@@ -364,4 +383,46 @@ func TestParseRouteAdvertisementCapsuleInvalid(t *testing.T) {
 			require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 		}
 	})
+}
+
+func TestReadRFC9297HTTPDatagramCapsulePayloadBoundary(t *testing.T) {
+	t.Parallel()
+	maxB := make([]byte, maxHTTPDatagramCapsulePayload)
+	for i := range maxB {
+		maxB[i] = 0xaa
+	}
+	got, err := readRFC9297HTTPDatagramCapsulePayload(bytes.NewReader(maxB))
+	require.NoError(t, err)
+	require.Equal(t, maxB, got)
+}
+
+func TestReadRFC9297HTTPDatagramCapsulePayloadRejectsOversized(t *testing.T) {
+	t.Parallel()
+	over := make([]byte, maxHTTPDatagramCapsulePayload+1)
+	_, err := readRFC9297HTTPDatagramCapsulePayload(bytes.NewReader(over))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds")
+}
+
+type countReadReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReadReader) Read(p []byte) (int, error) {
+	nn, err := c.r.Read(p)
+	c.n += int64(nn)
+	return nn, err
+}
+
+func TestReadRFC9297HTTPDatagramOversizeBoundedDrain(t *testing.T) {
+	t.Parallel()
+	const huge = 4 * 1024 * 1024
+	big := make([]byte, huge)
+	cr := &countReadReader{r: bytes.NewReader(big)}
+	_, err := readRFC9297HTTPDatagramCapsulePayload(cr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "exceeds")
+	const maxSlack = int64(maxHTTPDatagramCapsulePayload) + int64(maxConnectIPNondatagramCapsulePayload) + 1024
+	require.LessOrEqual(t, cr.n, maxSlack, "expected bounded drain, got %d bytes read", cr.n)
 }

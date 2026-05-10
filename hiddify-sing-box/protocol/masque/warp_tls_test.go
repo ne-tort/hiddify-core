@@ -45,8 +45,8 @@ func TestWarpMasqueTLSPackageFromProfile_PinDisabled(t *testing.T) {
 	}
 	opts := option.WarpMasqueEndpointOptions{
 		Profile: option.WarpMasqueProfileOptions{
-			MasqueECDSAPrivateKey:           base64.StdEncoding.EncodeToString(sec1DER),
-			DisableMasquePeerPublicKeyPin:  true,
+			MasqueECDSAPrivateKey:         base64.StdEncoding.EncodeToString(sec1DER),
+			DisableMasquePeerPublicKeyPin: true,
 		},
 	}
 	cert, pin, err := WarpMasqueTLSPackageFromProfile(opts, "")
@@ -57,4 +57,3 @@ func TestWarpMasqueTLSPackageFromProfile_PinDisabled(t *testing.T) {
 		t.Fatalf("expected leaf cert without pin, got pin=%v", pin)
 	}
 }
-

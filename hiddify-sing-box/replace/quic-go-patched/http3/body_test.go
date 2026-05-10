@@ -13,6 +13,24 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+func TestHijackableBodySetReadDeadlineForwardsToStream(t *testing.T) {
+	mockCtrl := gomock.NewController(t)
+	str := NewMockDatagramStream(mockCtrl)
+	str.EXPECT().StreamID().Return(quic.StreamID(42)).AnyTimes()
+	deadline := time.Now().Add(time.Second)
+	str.EXPECT().SetReadDeadline(deadline).Return(nil)
+	rb := newResponseBody(
+		newStream(str, nil, nil, func(io.Reader, *headersFrame) error { return nil }, nil),
+		-1,
+		make(chan struct{}),
+	)
+	dlr, ok := any(rb).(interface {
+		SetReadDeadline(time.Time) error
+	})
+	require.True(t, ok)
+	require.NoError(t, dlr.SetReadDeadline(deadline))
+}
+
 func TestResponseBodyReading(t *testing.T) {
 	mockCtrl := gomock.NewController(t)
 	var buf bytes.Buffer

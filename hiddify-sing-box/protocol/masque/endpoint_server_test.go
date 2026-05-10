@@ -27,6 +27,17 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+func TestMasqueTCPBindFailureRetryable(t *testing.T) {
+	t.Parallel()
+	win := errors.New("listen tcp 127.0.0.1:65058: bind: An attempt was made to access a socket in a way forbidden by its access permissions.")
+	if !masqueTCPBindFailureRetryable(win) {
+		t.Fatalf("expected Windows-style bind denial to be retryable")
+	}
+	if masqueTCPBindFailureRetryable(errors.New("address already in use")) {
+		t.Fatalf("conflict error must not be classified as ephemeral-port retry")
+	}
+}
+
 func TestParseIPDestinationAndPayloadIPv4UDP(t *testing.T) {
 	payload := []byte{1, 2, 3, 4, 5}
 	packet := makeIPv4UDPPacket(
@@ -508,7 +519,7 @@ func TestServerEndpointStartNonStartStageNoOpThenRegularStartWorks(t *testing.T)
 	if ep.IsReady() {
 		t.Fatal("server endpoint must stay not ready after non-start stage no-op")
 	}
-	if ep.server != nil || ep.packetConn != nil {
+	if ep.server != nil || ep.packetConn != nil || ep.tcpTLSListener != nil || ep.http2Server != nil {
 		t.Fatal("non-start stage must not initialize server listener resources")
 	}
 	if err := ep.Start(adapter.StartStateStart); err != nil {
@@ -542,7 +553,7 @@ func TestServerEndpointStartNonStartStagesAreIdempotentAndDoNotContaminateStartE
 			t.Fatalf("expected non-start stage %v to be no-op, got: %v", stage, err)
 		}
 	}
-	if ep.server != nil || ep.packetConn != nil {
+	if ep.server != nil || ep.packetConn != nil || ep.tcpTLSListener != nil || ep.http2Server != nil {
 		t.Fatal("non-start stages must not initialize server listener resources")
 	}
 	if err := ep.Start(adapter.StartStateStart); err != nil {
