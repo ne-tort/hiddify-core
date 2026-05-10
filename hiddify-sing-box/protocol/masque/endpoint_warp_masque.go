@@ -28,7 +28,7 @@ type WarpEndpoint struct {
 	options        option.WarpMasqueEndpointOptions
 	baseCtx        context.Context
 	runtime        CM.Runtime
-	bootstrapF     func(ctx context.Context) (string, uint16, error)
+	bootstrapF     func(ctx context.Context) (WarpMasqueDataplaneTarget, error)
 	controlAdapter WarpControlAdapter
 	startOnce      sync.Once
 	mu             sync.RWMutex
@@ -103,17 +103,34 @@ func validateWarpMasqueOptions(options option.WarpMasqueEndpointOptions) error {
 	if mode == option.WarpMasqueCompatibilityZeroTrust && strings.TrimSpace(options.Profile.ID) == "" {
 		return E.New("profile.id is required for profile.compatibility=zero_trust")
 	}
-	if mode == option.WarpMasqueCompatibilityConsumer && strings.TrimSpace(options.Profile.AuthToken) != "" {
-		return E.New("profile.auth_token is not applicable for profile.compatibility=consumer")
+	rawStrategy := strings.ToLower(strings.TrimSpace(options.Profile.DataplanePortStrategy))
+	if rawStrategy != "" &&
+		rawStrategy != option.WarpMasqueDataplanePortStrategyAuto &&
+		rawStrategy != option.WarpMasqueDataplanePortStrategyAPIFirst {
+		return E.New("invalid profile.dataplane_port_strategy")
 	}
-	if mode == option.WarpMasqueCompatibilityConsumer && strings.TrimSpace(options.Profile.ID) != "" {
-		return E.New("profile.id is not applicable for profile.compatibility=consumer")
+	if mode == option.WarpMasqueCompatibilityConsumer {
+		hasTok := strings.TrimSpace(options.Profile.AuthToken) != ""
+		hasID := strings.TrimSpace(options.Profile.ID) != ""
+		if hasTok != hasID {
+			return E.New("profile.compatibility=consumer requires profile.auth_token and profile.id together, or omit both")
+		}
 	}
 	if mode == option.WarpMasqueCompatibilityBoth {
 		hasZeroTrustCreds := strings.TrimSpace(options.Profile.AuthToken) != "" && strings.TrimSpace(options.Profile.ID) != ""
 		hasConsumerCreds := strings.TrimSpace(options.Profile.PrivateKey) != "" || strings.TrimSpace(options.Profile.License) != ""
 		if !hasZeroTrustCreds && !hasConsumerCreds {
 			return E.New("profile.compatibility=both requires zero_trust credentials (auth_token+id) or consumer credentials (private_key/license)")
+		}
+	}
+	if strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey) != "" {
+		if _, err := ParseWarpMasqueECDSAPrivateKey(options.Profile.MasqueECDSAPrivateKey); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(options.Profile.EndpointPublicKey) != "" {
+		if _, err := ParseWarpMasquePeerPublicKey(options.Profile.EndpointPublicKey); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -181,11 +198,11 @@ func (e *WarpEndpoint) ListenPacket(ctx context.Context, destination M.Socksaddr
 	return runtime.ListenPacket(ctx, destination)
 }
 
-func (e *WarpEndpoint) bootstrapProfile(ctx context.Context) (string, uint16, error) {
+func (e *WarpEndpoint) bootstrapProfile(ctx context.Context) (WarpMasqueDataplaneTarget, error) {
 	if e.controlAdapter == nil {
 		e.controlAdapter = CloudflareWarpControlAdapter{}
 	}
-	return e.controlAdapter.ResolveServer(ctx, e.options)
+	return e.controlAdapter.ResolveDataplaneCandidates(ctx, e.options)
 }
 
 func (e *WarpEndpoint) startRuntime() {
@@ -234,8 +251,12 @@ func (e *WarpEndpoint) startRuntime() {
 	if perBootstrapAttempt > 14*time.Second {
 		perBootstrapAttempt = 14 * time.Second
 	}
-	var server string
-	var port uint16
+	var logicalServer string
+	var quicDialPeer string
+	var dataplanePorts []uint16
+	var bootstrapTlsName string
+	var bootstrapTunnelProto string
+	var bootstrapEndpointPub string
 	var bootstrapErr error
 	for attempt := 0; attempt < warpBootstrapMaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -248,10 +269,14 @@ func (e *WarpEndpoint) startRuntime() {
 			}
 		}
 		attemptCtx, cancelAttempt := context.WithTimeout(runCtx, perBootstrapAttempt)
-		s, p, err := bootstrap(attemptCtx)
+		tgt, err := bootstrap(attemptCtx)
 		cancelAttempt()
 		if err == nil {
-			server, port = s, p
+			logicalServer, dataplanePorts = tgt.LogicalServer, tgt.Ports
+			quicDialPeer = tgt.DialPeer
+			bootstrapTlsName = tgt.TLSServerName
+			bootstrapTunnelProto = tgt.TunnelProtocol
+			bootstrapEndpointPub = tgt.EndpointPublicKey
 			bootstrapErr = nil
 			break
 		}
@@ -261,72 +286,134 @@ func (e *WarpEndpoint) startRuntime() {
 		e.startErr.Store(bootstrapErr)
 		return
 	}
+	if len(dataplanePorts) == 0 {
+		e.startErr.Store(E.New("warp_masque bootstrap returned no dataplane ports"))
+		return
+	}
+	if tunnelProtocolSuggestsMasque(bootstrapTunnelProto) && strings.TrimSpace(e.options.Profile.MasqueECDSAPrivateKey) == "" {
+		e.startErr.Store(E.New("warp_masque: profile.masque_ecdsa_private_key is required when device tunnel is MASQUE (same field as config.json private_key after `usque register`, base64 EC SEC1 DER); WireGuard-only private_key alone is insufficient for TLS client auth"))
+		return
+	}
+	warpCert, warpPin, tlsPackErr := WarpMasqueTLSPackageFromProfile(e.options, bootstrapEndpointPub)
+	if tlsPackErr != nil {
+		e.startErr.Store(tlsPackErr)
+		return
+	}
+	useWarpParityExtras := tunnelProtocolSuggestsMasque(bootstrapTunnelProto) || strings.TrimSpace(e.options.Profile.MasqueECDSAPrivateKey) != ""
+	warpConnectProto := ""
+	if useWarpParityExtras {
+		warpConnectProto = "cf-connect-ip"
+	}
+	warpTLSServerName := strings.TrimSpace(e.options.TLSServerName)
+	if warpTLSServerName == "" {
+		warpTLSServerName = strings.TrimSpace(bootstrapTlsName)
+	}
 	chain, err := CM.BuildChain(e.options.MasqueEndpointOptions)
 	if err != nil {
 		e.startErr.Store(err)
 		return
-	}
-	// Align entry Server/Port with generic `masque`: when hop_policy is chain and hops are configured,
-	// QUIC/H3 dial target must match the chain entry hop, not only the bootstrap host (which may differ).
-	rtServer, rtPort := server, port
-	if strings.TrimSpace(e.options.HopPolicy) == option.MasqueHopPolicyChain && len(e.options.Hops) > 0 {
-		rtServer, rtPort = resolveMasqueEntryServerPort(chain, server, port)
 	}
 	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, true)
 	if err != nil {
 		e.startErr.Store(err)
 		return
 	}
-	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
-		Tag:                      e.Tag(),
-		Server:                   rtServer,
-		ServerPort:               rtPort,
-		TransportMode:            normalizeTransportMode(e.options.TransportMode),
-		TemplateUDP:              e.options.TemplateUDP,
-		TemplateIP:               e.options.TemplateIP,
-		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
-		ConnectIPScopeIPProto:    e.options.ConnectIPScopeIPProto,
-		TemplateTCP:              e.options.TemplateTCP,
-		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
-		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
-		TCPTransport:             normalizeTCPTransport(e.options.TCPTransport),
-		ServerToken:              e.options.ServerToken,
-		TLSServerName:            e.options.TLSServerName,
-		Insecure:                 e.options.Insecure,
-		ConnectIPDatagramCeiling: e.options.MasqueEndpointOptions.MTU,
-		QUICExperimental:         toTransportQUICExperimental(e.options.QUICExperimental),
-		Chain:                    chain,
-		QUICDial:                 quicDial,
-	})
 	const warpRuntimeStartMaxAttempts = 3
+	const maxDataplanePortTries = 12
+	portTries := dataplanePorts
+	if len(portTries) > maxDataplanePortTries {
+		portTries = portTries[:maxDataplanePortTries]
+	}
+	var rt CM.Runtime
 	var startErr error
-	for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(180+attempt*120+rand.IntN(120)) * time.Millisecond
+	for pi, candPort := range portTries {
+		if pi > 0 {
+			// Yield briefly between UDP port candidates under the shared startup deadline.
 			select {
-			case <-baseCtx.Done():
-				e.startErr.Store(baseCtx.Err())
-				_ = rt.Close()
-				return
 			case <-runCtx.Done():
 				e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"))
-				_ = rt.Close()
 				return
-			case <-time.After(backoff):
+			case <-time.After(time.Duration(80+rand.IntN(180)) * time.Millisecond):
 			}
 		}
-		startErr = rt.Start(runCtx)
+		// Align entry Server/Port with generic `masque`: when hop_policy is chain and hops are configured,
+		// QUIC/H3 dial target must match the chain entry hop, not only the bootstrap host (which may differ).
+		rtServer, rtPort := logicalServer, candPort
+		if strings.TrimSpace(e.options.HopPolicy) == option.MasqueHopPolicyChain && len(e.options.Hops) > 0 {
+			rtServer, rtPort = resolveMasqueEntryServerPort(chain, logicalServer, candPort)
+		}
+		rtDialPeer := strings.TrimSpace(quicDialPeer)
+		if strings.TrimSpace(e.options.HopPolicy) == option.MasqueHopPolicyChain && len(e.options.Hops) > 0 {
+			rtDialPeer = ""
+		}
+		if len(portTries) > 1 {
+			stdlog.Printf("warp_masque dataplane try port=%d (order %d/%d host=%s quic_peer=%q)", candPort, pi+1, len(portTries), rtServer, rtDialPeer)
+		}
+		rt = CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
+			Tag:                         e.Tag(),
+			Server:                      rtServer,
+			DialPeer:                    rtDialPeer,
+			ServerPort:                  rtPort,
+			TransportMode:               normalizeTransportMode(e.options.TransportMode),
+			TemplateUDP:                 e.options.TemplateUDP,
+			TemplateIP:                  e.options.TemplateIP,
+			ConnectIPScopeTarget:        e.options.ConnectIPScopeTarget,
+			ConnectIPScopeIPProto:       e.options.ConnectIPScopeIPProto,
+			TemplateTCP:                 e.options.TemplateTCP,
+			FallbackPolicy:              normalizeFallbackPolicy(e.options.FallbackPolicy),
+			TCPMode:                     normalizeTCPMode(e.options.TCPMode),
+			TCPTransport:                normalizeTCPTransport(e.options.TCPTransport),
+			ServerToken:                 e.options.ServerToken,
+			TLSServerName:               warpTLSServerName,
+			Insecure:                    e.options.Insecure,
+			ConnectIPDatagramCeiling:    e.options.MasqueEndpointOptions.MTU,
+			QUICExperimental:            toTransportQUICExperimental(e.options.QUICExperimental),
+			Chain:                       chain,
+			QUICDial:                    quicDial,
+			WarpMasqueClientCert:        warpCert,
+			WarpMasquePinnedPubKey:      warpPin,
+			WarpMasqueLegacyH3Extras:    useWarpParityExtras,
+			WarpConnectIPProtocol:       warpConnectProto,
+			WarpMasqueDeviceBearerToken: strings.TrimSpace(e.options.Profile.AuthToken),
+		})
+		startErr = nil
+		for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {
+			if attempt > 0 {
+				backoff := time.Duration(180+attempt*120+rand.IntN(120)) * time.Millisecond
+				select {
+				case <-baseCtx.Done():
+					e.startErr.Store(baseCtx.Err())
+					_ = rt.Close()
+					return
+				case <-runCtx.Done():
+					e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"))
+					_ = rt.Close()
+					return
+				case <-time.After(backoff):
+				}
+			}
+			startErr = rt.Start(runCtx)
+			if startErr == nil {
+				break
+			}
+		}
 		if startErr == nil {
+			RecordWarpMasqueDataplaneSuccess(e.options, logicalServer, rtDialPeer, warpTLSServerName, bootstrapTunnelProto, bootstrapEndpointPub, rtPort)
 			break
 		}
+		if key := ClassifyMasqueFailure(startErr); key != "" {
+			stdlog.Printf("warp_masque runtime start failed class=%s port=%d err=%v", key, candPort, startErr)
+		}
+		_ = rt.Close()
+		rt = nil
+		if pi == len(portTries)-1 || !IsRetryableWarpMasqueDataplanePort(startErr) {
+			e.startErr.Store(startErr)
+			return
+		}
+		continue
 	}
 	if startErr != nil {
-		if key := ClassifyMasqueFailure(startErr); key != "" {
-			// One-line triage aid for control-plane vs data-plane debugging (see AGENTS.md).
-			stdlog.Printf("warp_masque runtime start failed class=%s err=%v", key, startErr)
-		}
 		e.startErr.Store(startErr)
-		_ = rt.Close()
 		return
 	}
 	if e.closed.Load() {

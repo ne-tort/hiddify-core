@@ -134,12 +134,16 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	}
 
 	if tcpTransport == "" || tcpTransport == option.MasqueTCPTransportAuto {
-		return E.New("masque: tcp_transport must be set explicitly to connect_stream for client mode")
+		return E.New("masque: tcp_transport must be set explicitly (connect_stream, or connect_ip when transport_mode is connect_ip)")
 	}
-	if tcpTransport == option.MasqueTCPTransportConnectIP {
-		return E.New("masque: tcp_transport connect_ip is TUN-only; use connect_stream for MASQUE TCP relay")
-	}
-	if tcpTransport != option.MasqueTCPTransportConnectStream {
+	switch tcpTransport {
+	case option.MasqueTCPTransportConnectStream:
+		// CONNECT-stream over HTTP/3.
+	case option.MasqueTCPTransportConnectIP:
+		if tm != option.MasqueTransportModeConnectIP {
+			return E.New("masque: tcp_transport connect_ip requires transport_mode connect_ip (userspace TCP over CONNECT-IP tunnel)")
+		}
+	default:
 		return E.New("masque: invalid tcp_transport: ", tcpTransport)
 	}
 

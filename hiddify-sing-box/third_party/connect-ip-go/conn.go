@@ -445,6 +445,14 @@ func (c *Conn) sendCapsule(ctx context.Context, capsule appendable) error {
 	}
 }
 
+// CurrentAssignedPrefixes returns a snapshot of prefixes the peer already assigned.
+// It does not block; when empty, use LocalPrefixes to wait for the next assignment capsule.
+func (c *Conn) CurrentAssignedPrefixes() []netip.Prefix {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.assignedAddresses)
+}
+
 // LocalPrefixes returns the prefixes that the peer currently assigned.
 // Note that at any point during the connection, the peer can change the assignment.
 // It is therefore recommended to call this function in a loop.
@@ -457,7 +465,7 @@ func (c *Conn) LocalPrefixes(ctx context.Context) ([]netip.Prefix, error) {
 	case <-c.assignedAddressNotify:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return c.assignedAddresses, nil
+		return slices.Clone(c.assignedAddresses), nil
 	}
 }
 

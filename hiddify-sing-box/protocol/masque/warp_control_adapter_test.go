@@ -16,13 +16,34 @@ func TestWarpCacheReadWrite(t *testing.T) {
 			ID: "abc",
 		},
 	})
-	writeWarpCache(key, "engage.cloudflareclient.com", 443)
-	server, port, ok := readWarpCache(key)
+	writeWarpCache(key, warpMasqueCacheEntry{LogicalServer: "engage.cloudflareclient.com", Port: 443})
+	tgt, ok := readWarpCache(key)
 	if !ok {
 		t.Fatal("expected cache entry to exist")
 	}
-	if server != "engage.cloudflareclient.com" || port != 443 {
-		t.Fatalf("unexpected cache value: %s:%d", server, port)
+	if tgt.LogicalServer != "engage.cloudflareclient.com" || len(tgt.Ports) != 1 || tgt.Ports[0] != 443 {
+		t.Fatalf("unexpected cache value: %+v", tgt)
+	}
+}
+
+func TestWarpCloudflareMasqueTLSHostnameZeroTrustVsConsumer(t *testing.T) {
+	optsZT := option.WarpMasqueEndpointOptions{
+		Profile: option.WarpMasqueProfileOptions{
+			Compatibility: option.WarpMasqueCompatibilityZeroTrust,
+		},
+	}
+	if g, w := warpCloudflareMasqueTLSHostname(optsZT, "masque"), "zt-masque.cloudflareclient.com"; g != w {
+		t.Fatalf("want %q got %q", w, g)
+	}
+	optsConsumerWithDeviceCreds := option.WarpMasqueEndpointOptions{
+		Profile: option.WarpMasqueProfileOptions{
+			Compatibility: option.WarpMasqueCompatibilityAuto,
+			AuthToken:     "device-bearer-is-not-zt-signal",
+			ID:            "00000000-0000-0000-0000-000000000000",
+		},
+	}
+	if g, w := warpCloudflareMasqueTLSHostname(optsConsumerWithDeviceCreds, "masque"), "consumer-masque.cloudflareclient.com"; g != w {
+		t.Fatalf("auto+device creds must keep consumer SNI: want %q got %q", w, g)
 	}
 }
 

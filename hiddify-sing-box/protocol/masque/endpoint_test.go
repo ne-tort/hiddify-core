@@ -106,7 +106,21 @@ func TestWarpEndpointCompatibilityValidation(t *testing.T) {
 }
 
 func (a testControlAdapter) ResolveServer(ctx context.Context, options option.WarpMasqueEndpointOptions) (string, uint16, error) {
-	return a.server, a.port, a.err
+	t, err := a.ResolveDataplaneCandidates(ctx, options)
+	if err != nil || len(t.Ports) == 0 {
+		return t.LogicalServer, 0, err
+	}
+	return t.LogicalServer, t.Ports[0], nil
+}
+
+func (a testControlAdapter) ResolveDataplaneCandidates(ctx context.Context, options option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
+	if a.err != nil {
+		return WarpMasqueDataplaneTarget{}, a.err
+	}
+	if a.port != 0 {
+		return WarpMasqueDataplaneTarget{LogicalServer: a.server, Ports: []uint16{a.port}}, nil
+	}
+	return WarpMasqueDataplaneTarget{LogicalServer: a.server}, a.err
 }
 
 func TestNewEndpointValidation(t *testing.T) {
@@ -518,14 +532,30 @@ func TestEndpointRejectsServerTemplatePathCollisions(t *testing.T) {
 	}
 }
 
-func TestEndpointRejectsConnectIPTCPTransportInTunOnlyMode(t *testing.T) {
-	_, err := NewEndpoint(nil, nil, nil, "connect-ip-tcp-transport", option.MasqueEndpointOptions{
+func TestEndpointRejectsConnectIPTCPTransportWithoutConnectIPTransportMode(t *testing.T) {
+	_, err := NewEndpoint(nil, nil, nil, "connect-ip-tcp-no-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
+		TransportMode: option.MasqueTransportModeConnectUDP,
 		TCPTransport:  option.MasqueTCPTransportConnectIP,
 	})
 	if err == nil {
-		t.Fatal("expected connect_ip tcp transport to be rejected in TUN-only mode")
+		t.Fatal("expected tcp_transport connect_ip to require transport_mode connect_ip")
+	}
+}
+
+func TestEndpointAllowsConnectIPTCPTransportWithConnectIPTransportMode(t *testing.T) {
+	ep, err := NewEndpoint(nil, nil, nil, "connect-ip-tcp-ok", option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
+		HopPolicy:     option.MasqueHopPolicySingle,
+		TransportMode: option.MasqueTransportModeConnectIP,
+		TCPTransport:  option.MasqueTCPTransportConnectIP,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ep == nil {
+		t.Fatal("nil endpoint")
 	}
 }
 
@@ -641,9 +671,9 @@ func TestWarpEndpointCloseBeforeAsyncStartCompletes(t *testing.T) {
 		t.Fatalf("new warp endpoint: %v", err)
 	}
 	ep := epRaw.(*WarpEndpoint)
-	ep.bootstrapF = func(ctx context.Context) (string, uint16, error) {
+	ep.bootstrapF = func(ctx context.Context) (WarpMasqueDataplaneTarget, error) {
 		time.Sleep(80 * time.Millisecond)
-		return "engage.cloudflareclient.com", 443, nil
+		return WarpMasqueDataplaneTarget{LogicalServer: "engage.cloudflareclient.com", Ports: []uint16{443}}, nil
 	}
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start warp endpoint: %v", err)
@@ -668,9 +698,9 @@ func TestWarpEndpointStartupInProgressIsTransportInit(t *testing.T) {
 		t.Fatalf("new warp endpoint: %v", err)
 	}
 	ep := epRaw.(*WarpEndpoint)
-	ep.bootstrapF = func(ctx context.Context) (string, uint16, error) {
+	ep.bootstrapF = func(ctx context.Context) (WarpMasqueDataplaneTarget, error) {
 		<-ctx.Done()
-		return "", 0, ctx.Err()
+		return WarpMasqueDataplaneTarget{}, ctx.Err()
 	}
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start warp endpoint: %v", err)
@@ -695,9 +725,9 @@ func TestWarpEndpointListenPacketStartupInProgressIsTransportInit(t *testing.T) 
 		t.Fatalf("new warp endpoint: %v", err)
 	}
 	ep := epRaw.(*WarpEndpoint)
-	ep.bootstrapF = func(ctx context.Context) (string, uint16, error) {
+	ep.bootstrapF = func(ctx context.Context) (WarpMasqueDataplaneTarget, error) {
 		<-ctx.Done()
-		return "", 0, ctx.Err()
+		return WarpMasqueDataplaneTarget{}, ctx.Err()
 	}
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start warp endpoint: %v", err)

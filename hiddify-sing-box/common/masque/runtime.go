@@ -2,6 +2,8 @@ package masque
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/tls"
 	"errors"
 	"net"
 	"strings"
@@ -42,25 +44,32 @@ type Runtime interface {
 }
 
 type RuntimeOptions struct {
-	Tag                      string
-	Server                   string
-	ServerPort               uint16
-	TransportMode            string
-	TemplateUDP              string
-	TemplateIP               string
-	ConnectIPScopeTarget     string
-	ConnectIPScopeIPProto    uint8
-	TemplateTCP              string
-	FallbackPolicy           string
-	TCPMode                  string
-	TCPTransport             string
-	ServerToken              string
-	TLSServerName            string
-	Insecure                 bool
-	QUICExperimental         T.QUICExperimentalOptions
-	ConnectIPDatagramCeiling uint32
-	Chain                    []ChainHop
-	QUICDial                 T.QUICDialFunc
+	Tag    string
+	Server string
+	// DialPeer overrides the QUIC/UDP dial host when non-empty (see transport/masque.ClientOptions.DialPeer).
+	DialPeer                    string
+	ServerPort                  uint16
+	TransportMode               string
+	TemplateUDP                 string
+	TemplateIP                  string
+	ConnectIPScopeTarget        string
+	ConnectIPScopeIPProto       uint8
+	TemplateTCP                 string
+	FallbackPolicy              string
+	TCPMode                     string
+	TCPTransport                string
+	ServerToken                 string
+	TLSServerName               string
+	Insecure                    bool
+	QUICExperimental            T.QUICExperimentalOptions
+	ConnectIPDatagramCeiling    uint32
+	Chain                       []ChainHop
+	QUICDial                    T.QUICDialFunc
+	WarpMasqueClientCert        tls.Certificate
+	WarpMasquePinnedPubKey      *ecdsa.PublicKey
+	WarpMasqueLegacyH3Extras    bool
+	WarpConnectIPProtocol       string
+	WarpMasqueDeviceBearerToken string
 }
 
 type RuntimeFactory interface {
@@ -132,25 +141,31 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			}
 		}
 		session, err = r.factory.NewSession(ctx, T.ClientOptions{
-			Tag:                      r.options.Tag,
-			Server:                   r.options.Server,
-			ServerPort:               r.options.ServerPort,
-			TransportMode:            r.options.TransportMode,
-			TemplateUDP:              r.options.TemplateUDP,
-			TemplateIP:               r.options.TemplateIP,
-			ConnectIPScopeTarget:     r.options.ConnectIPScopeTarget,
-			ConnectIPScopeIPProto:    r.options.ConnectIPScopeIPProto,
-			TemplateTCP:              r.options.TemplateTCP,
-			FallbackPolicy:           r.options.FallbackPolicy,
-			TCPMode:                  r.options.TCPMode,
-			TCPTransport:             r.options.TCPTransport,
-			ServerToken:              r.options.ServerToken,
-			TLSServerName:            r.options.TLSServerName,
-			Insecure:                 r.options.Insecure,
-			QUICExperimental:         r.options.QUICExperimental,
-			ConnectIPDatagramCeiling: r.options.ConnectIPDatagramCeiling,
-			Hops:                     toTransportHops(r.options.Chain),
-			QUICDial:                 r.options.QUICDial,
+			Tag:                         r.options.Tag,
+			Server:                      r.options.Server,
+			DialPeer:                    r.options.DialPeer,
+			ServerPort:                  r.options.ServerPort,
+			TransportMode:               r.options.TransportMode,
+			TemplateUDP:                 r.options.TemplateUDP,
+			TemplateIP:                  r.options.TemplateIP,
+			ConnectIPScopeTarget:        r.options.ConnectIPScopeTarget,
+			ConnectIPScopeIPProto:       r.options.ConnectIPScopeIPProto,
+			TemplateTCP:                 r.options.TemplateTCP,
+			FallbackPolicy:              r.options.FallbackPolicy,
+			TCPMode:                     r.options.TCPMode,
+			TCPTransport:                r.options.TCPTransport,
+			ServerToken:                 r.options.ServerToken,
+			TLSServerName:               r.options.TLSServerName,
+			Insecure:                    r.options.Insecure,
+			QUICExperimental:            r.options.QUICExperimental,
+			ConnectIPDatagramCeiling:    r.options.ConnectIPDatagramCeiling,
+			Hops:                        toTransportHops(r.options.Chain),
+			QUICDial:                    r.options.QUICDial,
+			WarpMasqueClientCert:        r.options.WarpMasqueClientCert,
+			WarpMasquePinnedPubKey:      r.options.WarpMasquePinnedPubKey,
+			WarpMasqueLegacyH3Extras:    r.options.WarpMasqueLegacyH3Extras,
+			WarpConnectIPProtocol:       r.options.WarpConnectIPProtocol,
+			WarpMasqueDeviceBearerToken: r.options.WarpMasqueDeviceBearerToken,
 		})
 		if err == nil {
 			break

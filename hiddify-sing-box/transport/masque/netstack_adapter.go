@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,9 +55,26 @@ func (f unavailableTCPNetstackFactory) New(ctx context.Context, session IPPacket
 
 type connectIPTCPNetstackFactory struct{}
 
+// connectIPTCPNetstackLocalPrefixWait bounds LocalPrefixes on the CONNECT-IP conn before falling back
+// to synthetic 198.18.0.1. Too short a window on slow Docker/QUIC yields stranded TCP dials (SOCKS rep=1).
+func connectIPTCPNetstackLocalPrefixWait() time.Duration {
+	const defaultWait = 8 * time.Second
+	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC"))
+	if raw == "" {
+		return defaultWait
+	}
+	sec, err := strconv.Atoi(raw)
+	if err != nil || sec < 0 || sec > 60 {
+		return defaultWait
+	}
+	return time.Duration(sec) * time.Second
+}
+
 func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSession) (TCPNetstack, error) {
-	localV4 := netip.MustParseAddr("198.18.0.2")
-	localV6 := netip.MustParseAddr("fd00::2")
+	// Align with masque server route advertisements (LocalPrefixes) so CONNECT-IP TCP works when
+	// lookup is empty/timed-out; mismatched synthetic locals (198.18.0.1) strand TCP (SOCKS rep=1).
+	localV4 := netip.MustParseAddr("198.18.0.1")
+	localV6 := netip.MustParseAddr("fd00::1")
 	mtu := 1500
 	ceilingMax := connectIPDatagramCeilingMax()
 	foundV4 := false
@@ -71,11 +89,16 @@ func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSe
 				mtu = connectIPSession.datagramCeiling
 			}
 		}
-		// Under stress, CONNECT-IP route advertisement can arrive with noticeable jitter.
-		// Keep this bounded, but long enough to avoid silently falling back to synthetic locals.
-		prefixCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		prefixes, err := connectIPSession.conn.LocalPrefixes(prefixCtx)
-		cancel()
+		// Prefer a non-blocking snapshot: LocalPrefixes waits for the next notify; if the server
+		// already sent ADDRESS_ASSIGN before we subscribe, blocking would miss the signal and
+		// time out into a wrong synthetic source (SOCKS rep=1).
+		prefixes := connectIPSession.conn.CurrentAssignedPrefixes()
+		var err error
+		if len(prefixes) == 0 {
+			prefixCtx, cancel := context.WithTimeout(ctx, connectIPTCPNetstackLocalPrefixWait())
+			prefixes, err = connectIPSession.conn.LocalPrefixes(prefixCtx)
+			cancel()
+		}
 		if err == nil {
 			for _, prefix := range prefixes {
 				if !prefix.IsValid() {
@@ -142,10 +165,10 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 		opts.MTU = 1500
 	}
 	if !opts.LocalIPv4.IsValid() {
-		opts.LocalIPv4 = netip.MustParseAddr("198.18.0.2")
+		opts.LocalIPv4 = netip.MustParseAddr("198.18.0.1")
 	}
 	if !opts.LocalIPv6.IsValid() {
-		opts.LocalIPv6 = netip.MustParseAddr("fd00::2")
+		opts.LocalIPv6 = netip.MustParseAddr("fd00::1")
 	}
 	gStack := stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
@@ -172,8 +195,34 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 		done:     make(chan struct{}),
 	}
 	s.notifyHandle = endpoint.AddNotify(s)
-	go s.readLoop()
 	return s, nil
+}
+
+func (s *connectIPTCPNetstack) injectInboundClone(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	if s.closed.Load() {
+		return
+	}
+	if err, ok := s.terminalErr.Load().(error); ok && err != nil {
+		return
+	}
+	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(bytes.Clone(data)),
+	})
+	switch data[0] >> 4 {
+	case 4:
+		connectIPCounters.netstackReadInjectTotal.Add(1)
+		s.endpoint.InjectInbound(ipv4.ProtocolNumber, packet)
+	case 6:
+		connectIPCounters.netstackReadInjectTotal.Add(1)
+		s.endpoint.InjectInbound(ipv6.ProtocolNumber, packet)
+	default:
+		connectIPCounters.netstackReadDropInvalidTotal.Add(1)
+		incConnectIPReadDropReason("invalid_ip_version")
+		packet.DecRef()
+	}
 }
 
 func addStackAddress(gStack *stack.Stack, nic int, addr netip.Addr) error {
@@ -222,6 +271,26 @@ func (s *connectIPTCPNetstack) DialContext(ctx context.Context, destination M.So
 		case <-dialCtx.Done():
 		}
 	}()
+	// WriteNotify may set terminalErr while gonet is blocked in SYN retransmits; cancel the dial
+	// so DialContextTCP returns instead of waiting for the full TCP timeout.
+	go func() {
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-dialCtx.Done():
+				return
+			case <-s.done:
+				dialCancel()
+				return
+			case <-tick.C:
+				if _, ok := s.terminalErr.Load().(error); ok {
+					dialCancel()
+					return
+				}
+			}
+		}
+	}()
 	conn, err := gonet.DialContextTCP(dialCtx, s.gStack, fa, pn)
 	if err != nil {
 		if err2, ok := s.terminalErr.Load().(error); ok && err2 != nil {
@@ -246,55 +315,6 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 		Addr: tcpip.AddrFrom16(a.As16()),
 		Port: endpoint.Port(),
 	}, ipv6.ProtocolNumber
-}
-
-func (s *connectIPTCPNetstack) readLoop() {
-	defer close(s.done)
-	readBuffer := make([]byte, 64*1024)
-	consecutiveRetryableFailures := 0
-	const retryableReadFailureLimit = 32
-	for {
-		n, err := s.session.ReadPacket(readBuffer)
-		if err != nil {
-			if s.closed.Load() || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) {
-				return
-			}
-			if isRetryablePacketReadError(err) {
-				consecutiveRetryableFailures++
-				incConnectIPReadDropReason("retryable_read_error")
-				if consecutiveRetryableFailures < retryableReadFailureLimit {
-					time.Sleep(2 * time.Millisecond)
-					continue
-				}
-				incConnectIPReadDropReason("retryable_read_exhausted")
-				incConnectIPSessionReset("read_retry_exhausted")
-			} else {
-				incConnectIPReadDropReason("fatal_read_error")
-				incConnectIPSessionReset("read_exit")
-			}
-			s.failWithError(errors.Join(ErrTransportInit, err))
-			return
-		}
-		consecutiveRetryableFailures = 0
-		if n <= 0 {
-			continue
-		}
-		packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buffer.MakeWithData(bytes.Clone(readBuffer[:n])),
-		})
-		switch readBuffer[0] >> 4 {
-		case 4:
-			connectIPCounters.netstackReadInjectTotal.Add(1)
-			s.endpoint.InjectInbound(ipv4.ProtocolNumber, packet)
-		case 6:
-			connectIPCounters.netstackReadInjectTotal.Add(1)
-			s.endpoint.InjectInbound(ipv6.ProtocolNumber, packet)
-		default:
-			connectIPCounters.netstackReadDropInvalidTotal.Add(1)
-			incConnectIPReadDropReason("invalid_ip_version")
-			packet.DecRef()
-		}
-	}
 }
 
 func (s *connectIPTCPNetstack) WriteNotify() {
@@ -412,12 +432,12 @@ func (s *connectIPTCPNetstack) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
 		incConnectIPSessionReset("lifecycle_close")
+		close(s.done)
 		s.endpoint.RemoveNotify(s.notifyHandle)
 		s.endpoint.Close()
 		s.gStack.RemoveNIC(1)
 		s.gStack.Close()
 		closeErr = s.session.Close()
-		<-s.done
 	})
 	return closeErr
 }

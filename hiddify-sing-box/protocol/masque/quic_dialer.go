@@ -3,10 +3,13 @@ package masque
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"io"
 	"log"
 	"net"
+	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -55,6 +58,9 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 		if err != nil {
 			return nil, err
 		}
+		// sing-box UDP dial returns a *connected* UDP socket. quic.Transport uses WriteTo on its
+		// PacketConn, which panics/fails on connected *net.UDPConn ("use of WriteTo with pre-connected connection").
+		// Tier A (raw *net.UDPConn) is only valid for an *unconnected* datagram socket — not this path.
 		packetConn := &connectedPacketConn{Conn: conn, remoteAddr: conn.RemoteAddr()}
 		transport := &quic.Transport{Conn: packetConn}
 		earlyConn, err := transport.Dial(ctx, conn.RemoteAddr(), tlsConf, quicConf)
@@ -77,6 +83,9 @@ func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 		return 0, nil, err
 	}
 	log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
+	if os.Getenv("HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS") == "1" && n > 0 && n <= 64 {
+		log.Printf("masque quic_dialer small_read hex=%s", strings.ToUpper(hex.EncodeToString(p[:n])))
+	}
 	return n, c.remoteAddr, nil
 }
 

@@ -37,6 +37,8 @@ type Client struct {
 	QUICDial func(ctx context.Context, address string, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error)
 	// BearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer on each CONNECT-UDP request.
 	BearerToken string
+	// LegacyH3Extras enables SETTINGS_H3_DATAGRAM legacy id 0x276 + DisableCompression on the internal HTTP/3 client (Cloudflare WARP CONNECT-UDP parity).
+	LegacyH3Extras bool
 
 	mu         sync.Mutex
 	conn       *quic.Conn
@@ -218,6 +220,10 @@ func (c *Client) ensureConnected(ctx context.Context, host string) error {
 	}
 	c.conn = conn
 	tr := &http3.Transport{EnableDatagrams: true}
+	if c.LegacyH3Extras {
+		tr.AdditionalSettings = map[uint64]uint64{0x276: 1}
+		tr.DisableCompression = true
+	}
 	c.clientConn = tr.NewClientConn(conn)
 	return nil
 }

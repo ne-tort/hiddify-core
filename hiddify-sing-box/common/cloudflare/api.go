@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,13 +100,15 @@ func (api *CloudflareApi) GetProfile(ctx context.Context, authToken string, id s
 func (api *CloudflareApi) UpdateAccount(ctx context.Context, profile *CloudflareProfile, license string) (*CloudflareProfile, error) {
 	deviceId := profile.ID
 	authToken := profile.Token
-	request, err := http.NewRequest("POST", fmt.Sprint(baseUrl, "reg/", deviceId, "/account"), strings.NewReader(
-		fmt.Sprintf("{\"license\":\"%s\"}", license),
+	// Consumer WARP+ license attach: PUT /reg/{id}/account with Bearer (POST returns 405 on current API edge).
+	request, err := http.NewRequest("PUT", fmt.Sprint(baseUrl, "reg/", deviceId, "/account"), strings.NewReader(
+		fmt.Sprintf(`{"license":%s}`, strconv.Quote(license)),
 	))
-	request.Header.Set("Authorization", "Bearer "+authToken)
 	if err != nil {
 		return nil, err
 	}
+	request.Header.Set("Authorization", "Bearer "+authToken)
+	request.Header.Set("Content-Type", "application/json")
 	response, err := api.client.Do(request.WithContext(ctx))
 	if err != nil {
 		return nil, err

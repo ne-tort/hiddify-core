@@ -12,8 +12,22 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// DialOptions configures Extended CONNECT semantics for CONNECT-IP.
+type DialOptions struct {
+	// BearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
+	BearerToken string
+	// ExtendedConnectProtocol is the HTTP/3 :protocol pseudo-header (Extended CONNECT).
+	// Empty defaults to RFC 9298 "connect-ip". Cloudflare WARP MASQUE uses "cf-connect-ip".
+	ExtendedConnectProtocol string
+}
+
 // Dial dials a proxied CONNECT-IP session. bearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
 func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Template, bearerToken string) (*Conn, *http.Response, error) {
+	return DialWithOptions(ctx, conn, template, DialOptions{BearerToken: bearerToken})
+}
+
+// DialWithOptions is like Dial but allows overriding the Extended CONNECT protocol name (e.g. cf-connect-ip for Cloudflare).
+func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Template, opts DialOptions) (*Conn, *http.Response, error) {
 	if err := validateFlowForwardingTemplateVars(template); err != nil {
 		return nil, nil, err
 	}
@@ -45,13 +59,21 @@ func Dial(ctx context.Context, conn *http3.ClientConn, template *uritemplate.Tem
 	if err != nil {
 		return nil, nil, fmt.Errorf("connect-ip: failed to open request stream: %w", err)
 	}
+	proto := strings.TrimSpace(opts.ExtendedConnectProtocol)
+	if proto == "" {
+		proto = requestProtocol
+	}
 	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
+	bearerToken := opts.BearerToken
 	if t := strings.TrimSpace(bearerToken); t != "" {
 		hdr.Set("Authorization", "Bearer "+t)
 	}
+	if proto == "cf-connect-ip" {
+		hdr.Set("User-Agent", "")
+	}
 	if err := rstr.SendRequestHeader(&http.Request{
 		Method: http.MethodConnect,
-		Proto:  requestProtocol,
+		Proto:  proto,
 		Host:   u.Host,
 		Header: hdr,
 		URL:    u,

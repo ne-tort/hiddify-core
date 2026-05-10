@@ -102,6 +102,49 @@ func (s *packetPipeSession) Close() error {
 	return nil
 }
 
+// runIngressRelay feeds ingress IP frames from a packet-plane session into the local
+// CONNECT-IP userspace TCP stack. Production uses coreSession.connectIPIngressLoop; unit
+// tests with packet pipes use this shim instead.
+func runIngressRelay(sess IPPacketSession, ns *connectIPTCPNetstack) func() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		readBuffer := make([]byte, 64*1024)
+		consecutiveRetryableFailures := 0
+		const retryableReadFailureLimit = 32
+		for {
+			n, err := sess.ReadPacket(readBuffer)
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+					return
+				}
+				if isRetryablePacketReadError(err) {
+					consecutiveRetryableFailures++
+					incConnectIPReadDropReason("retryable_read_error")
+					if consecutiveRetryableFailures < retryableReadFailureLimit {
+						time.Sleep(2 * time.Millisecond)
+						continue
+					}
+					incConnectIPReadDropReason("retryable_read_exhausted")
+					incConnectIPSessionReset("read_retry_exhausted")
+				} else {
+					incConnectIPReadDropReason("fatal_read_error")
+					incConnectIPSessionReset("read_exit")
+				}
+				ns.failWithError(errors.Join(ErrTransportInit, err))
+				return
+			}
+			consecutiveRetryableFailures = 0
+			if n <= 0 {
+				continue
+			}
+			ns.injectInboundClone(readBuffer[:n])
+		}
+	}()
+	return wg.Wait
+}
+
 func TestConnectIPTCPNetstackDialBasic(t *testing.T) {
 	clientSession, serverSession := newPacketPipePair()
 	clientStack, err := newConnectIPTCPNetstack(context.Background(), clientSession, connectIPTCPNetstackOptions{
@@ -111,7 +154,6 @@ func TestConnectIPTCPNetstackDialBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client stack: %v", err)
 	}
-	defer clientStack.Close()
 
 	serverStack, err := newConnectIPTCPNetstack(context.Background(), serverSession, connectIPTCPNetstackOptions{
 		LocalIPv4: netip.MustParseAddr("198.18.0.1"),
@@ -120,7 +162,17 @@ func TestConnectIPTCPNetstackDialBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create server stack: %v", err)
 	}
-	defer serverStack.Close()
+
+	waitClientIngress := runIngressRelay(clientSession, clientStack)
+	waitServerIngress := runIngressRelay(serverSession, serverStack)
+	defer func() {
+		_ = clientStack.Close()
+		_ = serverStack.Close()
+		_ = clientSession.Close()
+		_ = serverSession.Close()
+		waitClientIngress()
+		waitServerIngress()
+	}()
 
 	serverAddr := netip.MustParseAddrPort("198.18.0.1:18080")
 	listener, err := gonet.ListenTCP(serverStack.gStack, tcpipFullAddress(serverAddr), ipv4Protocol(serverAddr))
@@ -245,27 +297,28 @@ func TestPrefixPreferredAddressRejectsUnspecified(t *testing.T) {
 }
 
 func TestConnectIPTCPNetstackDialFailsAfterReadLoopError(t *testing.T) {
-	stack, err := newConnectIPTCPNetstack(context.Background(), &failingReadSession{}, connectIPTCPNetstackOptions{
+	sess := &failingReadSession{}
+	stack, err := newConnectIPTCPNetstack(context.Background(), sess, connectIPTCPNetstackOptions{
 		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
 		LocalIPv6: netip.MustParseAddr("fd00::2"),
 	})
 	if err != nil {
 		t.Fatalf("create stack: %v", err)
 	}
-	defer stack.Close()
+	waitIngress := runIngressRelay(sess, stack)
+	defer func() {
+		_ = stack.Close()
+		waitIngress()
+	}()
 
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		_, dialErr := stack.DialContext(context.Background(), socksaddrFromAddrPort(netip.MustParseAddrPort("198.18.0.1:443")))
-		if dialErr != nil {
-			if !errors.Is(dialErr, ErrTCPDial) {
-				t.Fatalf("expected typed tcp dial error, got: %v", dialErr)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	_, dialErr := stack.DialContext(context.Background(), socksaddrFromAddrPort(netip.MustParseAddrPort("198.18.0.1:443")))
+	if dialErr == nil {
+		t.Fatal("expected dial error after packet-plane read failure in ingress feeder")
 	}
-	t.Fatal("expected dial to fail after packet-plane read error")
+	if !errors.Is(dialErr, ErrTCPDial) {
+		t.Fatalf("expected typed tcp dial error, got: %v", dialErr)
+	}
 }
 
 func TestConnectIPTCPNetstackDialFailsAfterWriteNotifyFatalError(t *testing.T) {

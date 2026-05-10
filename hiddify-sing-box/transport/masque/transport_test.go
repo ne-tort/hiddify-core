@@ -111,6 +111,18 @@ func TestMasqueDialTargetPreservesHostname(t *testing.T) {
 	}
 }
 
+func TestWarpMasqueConnectStreamBearerToken(t *testing.T) {
+	if got := warpMasqueConnectStreamBearerToken(ClientOptions{ServerToken: "  s  "}); got != "s" {
+		t.Fatalf("server token trim: got %q", got)
+	}
+	if got := warpMasqueConnectStreamBearerToken(ClientOptions{WarpMasqueDeviceBearerToken: " d "}); got != "d" {
+		t.Fatalf("device bearer fallback: got %q", got)
+	}
+	if got := warpMasqueConnectStreamBearerToken(ClientOptions{ServerToken: "a", WarpMasqueDeviceBearerToken: "b"}); got != "a" {
+		t.Fatalf("prefer server_token: got %q", got)
+	}
+}
+
 func TestResolveEntryHopNoEntryRejected(t *testing.T) {
 	_, _, err := resolveEntryHop([]HopOptions{
 		{Tag: "a", Via: "b", Server: "a.example", Port: 443},
@@ -371,7 +383,20 @@ func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 		t.Fatalf("new connect_ip session: %v", err)
 	}
 	if ipSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_ip session to disable ConnectTCP in TUN-only mode")
+		t.Fatal("expected connect_ip tcp without transport_mode=connect_ip to disable ConnectTCP")
+	}
+
+	tcpOverIPSession, err := (CoreClientFactory{}).NewSession(nil, ClientOptions{
+		Server:        "example.com",
+		ServerPort:    443,
+		TransportMode: "connect_ip",
+		TCPTransport:  "connect_ip",
+	})
+	if err != nil {
+		t.Fatalf("new tcp connect_ip session: %v", err)
+	}
+	if !tcpOverIPSession.Capabilities().ConnectTCP {
+		t.Fatal("expected connect_ip+transport connect_ip session to advertise ConnectTCP")
 	}
 }
 
@@ -832,7 +857,7 @@ func TestBuildIPv4UDPPacketInplaceReusesBuffer(t *testing.T) {
 
 func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
 	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
 	n, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
 	if err != nil {
 		t.Fatalf("write to: %v", err)
@@ -855,7 +880,7 @@ func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
 
 func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
 	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
 	_, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5601})
 	if err == nil {
 		t.Fatal("expected IPv6 destination rejection for temporary IPv4-only UDP bridge contract")
@@ -864,7 +889,7 @@ func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
 
 func TestConnectIPUDPPacketConnWriteToSplitsLargePayload(t *testing.T) {
 	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
 	payload := bytes.Repeat([]byte{0xab}, 2500)
 	n, err := conn.WriteTo(payload, &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
 	if err != nil {
@@ -900,7 +925,7 @@ func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
 		t.Fatalf("build packet: %v", err)
 	}
 	rec := &recordingIPPacketSession{readPacket: packet}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec)
+	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
 	buf := make([]byte, 16)
 	n, addr, err := conn.ReadFrom(buf)
 	if err != nil {
@@ -930,7 +955,7 @@ func TestConnectIPUDPPacketConnReadFromDirectBufferNoStaging(t *testing.T) {
 		t.Fatalf("build packet: %v", err)
 	}
 	rec := &recordingIPPacketSession{readPacket: packet}
-	pc := newConnectIPUDPPacketConn(context.Background(), rec)
+	pc := newConnectIPUDPPacketConn(context.Background(), rec, nil)
 	c := pc.(*connectIPUDPPacketConn)
 	if c.readBuffer != nil {
 		t.Fatal("expected lazy read buffer to be unset before first small-buffer read is skipped")
@@ -1071,12 +1096,12 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", uint16(addr.Port))
 	session := &coreSession{
 		options: ClientOptions{
-			Server:           "masque.local",
-			ServerPort:       443,
-			TemplateTCP:      "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:     "connect_stream",
-			TCPMode:          option.MasqueTCPModeMasqueOrDirect,
-			FallbackPolicy:   option.MasqueFallbackPolicyDirectExplicit,
+			Server:         "masque.local",
+			ServerPort:     443,
+			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			TCPTransport:   "connect_stream",
+			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
+			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
 		capabilities: CapabilitySet{ConnectTCP: true},
 		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -1101,12 +1126,12 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
 	session := &coreSession{
 		options: ClientOptions{
-			Server:           "masque.local",
-			ServerPort:       443,
-			TemplateTCP:      "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:     "connect_stream",
-			TCPMode:          option.MasqueTCPModeMasqueOrDirect,
-			FallbackPolicy:   option.MasqueFallbackPolicyDirectExplicit,
+			Server:         "masque.local",
+			ServerPort:     443,
+			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			TCPTransport:   "connect_stream",
+			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
+			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
 		capabilities: CapabilitySet{ConnectTCP: true},
 		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -1126,11 +1151,11 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
 	session := &coreSession{
 		options: ClientOptions{
-			Server:        "masque.local",
-			ServerPort:    443,
-			TemplateTCP:   "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:  "connect_stream",
-			TCPMode:       option.MasqueTCPModeStrictMasque,
+			Server:         "masque.local",
+			ServerPort:     443,
+			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			TCPTransport:   "connect_stream",
+			TCPMode:        option.MasqueTCPModeStrictMasque,
 			FallbackPolicy: option.MasqueFallbackPolicyStrict,
 		},
 		capabilities: CapabilitySet{ConnectTCP: true},
@@ -1207,10 +1232,10 @@ func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
 
 func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.T) {
 	retryableErrors := map[string]error{
-		"timeout_while_connecting":      timeoutNetError{msg: "timeout while connecting"},
-		"no_recent_network_activity":   &quic.IdleTimeoutError{},
-		"idle_timeout_reached":         timeoutNetError{msg: "idle timeout reached"},
-		"application_error_0x100":      &quic.ApplicationError{ErrorCode: 0x100, Remote: true},
+		"timeout_while_connecting":   timeoutNetError{msg: "timeout while connecting"},
+		"no_recent_network_activity": &quic.IdleTimeoutError{},
+		"idle_timeout_reached":       timeoutNetError{msg: "idle timeout reached"},
+		"application_error_0x100":    &quic.ApplicationError{ErrorCode: 0x100, Remote: true},
 	}
 	for name, retryErr := range retryableErrors {
 		t.Run(name, func(t *testing.T) {
@@ -1570,9 +1595,9 @@ func TestDialTCPStreamInProcessHTTP3ProxySuccess(t *testing.T) {
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:     "127.0.0.1",
-		ServerPort: uint16(proxyPort),
-		Insecure:   true,
+		Server:       "127.0.0.1",
+		ServerPort:   uint16(proxyPort),
+		Insecure:     true,
 		TCPTransport: "connect_stream",
 	})
 	if err != nil {
@@ -1874,11 +1899,11 @@ func (s *tierBPacketConnStub) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	return 0, &net.UDPAddr{}, io.EOF
 }
 func (s *tierBPacketConnStub) WriteTo(p []byte, addr net.Addr) (n int, err error) { return len(p), nil }
-func (s *tierBPacketConnStub) Close() error                                        { return nil }
-func (s *tierBPacketConnStub) LocalAddr() net.Addr                                 { return &net.UDPAddr{} }
-func (s *tierBPacketConnStub) SetDeadline(t time.Time) error                       { return nil }
-func (s *tierBPacketConnStub) SetReadDeadline(t time.Time) error                   { return nil }
-func (s *tierBPacketConnStub) SetWriteDeadline(t time.Time) error                  { return nil }
+func (s *tierBPacketConnStub) Close() error                                       { return nil }
+func (s *tierBPacketConnStub) LocalAddr() net.Addr                                { return &net.UDPAddr{} }
+func (s *tierBPacketConnStub) SetDeadline(t time.Time) error                      { return nil }
+func (s *tierBPacketConnStub) SetReadDeadline(t time.Time) error                  { return nil }
+func (s *tierBPacketConnStub) SetWriteDeadline(t time.Time) error                 { return nil }
 
 func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivityKeepsBudgetAndDialClass(t *testing.T) {
 	retryableErrors := map[string]error{

@@ -31,3 +31,17 @@ func ClassifyMasqueFailure(err error) string {
 func ClassifyWarpMasqueFailure(err error) string {
 	return ClassifyMasqueFailure(err)
 }
+
+// IsRetryableWarpMasqueDataplanePort rotates to another UDP port candidate (e.g. 443 vs 2408).
+// Errors that imply wrong host/SNI/policy should not spin ports.
+func IsRetryableWarpMasqueDataplanePort(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch ClassifyMasqueFailure(err) {
+	case "connect_http_auth", "h3_extended_connect", "h3_datagrams":
+		return false
+	default:
+		return true
+	}
+}

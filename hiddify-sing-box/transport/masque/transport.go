@@ -2,7 +2,9 @@ package masque
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -31,6 +33,9 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// cloudflareLegacyH3DatagramSettingID is the SETTINGS identifier quiche/Cloudflare WARP still ship for legacy H3 datagrams (see usque).
+const cloudflareLegacyH3DatagramSettingID uint64 = 0x276
+
 // Above 1200: room for CONNECT-IP (context id + full IPv4/UDP datagram @ 1152 B payload)
 // inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
 const defaultUDPInitialPacketSize uint16 = 1420
@@ -45,6 +50,7 @@ var connectIPUDPWriteBufPool = sync.Pool{
 }
 
 const defaultConnectIPDatagramCeilingMax = 1500
+
 // CONNECT-IP UDP bridge: max application UDP payload per IPv4 datagram before WritePacket.
 // 1152 matches conventional MASQUE CONNECT-IP max UDP payload (aligned with sing-box CONNECT-IP path).
 const connectIPUDPWriteHardCap = 1152
@@ -119,6 +125,24 @@ func newMasqueQUICConfig() *quic.Config {
 		EnableDatagrams:   true,
 		InitialPacketSize: defaultUDPInitialPacketSize,
 	})
+}
+
+// masqueWarpCloudflareQUICBase returns QUIC defaults aligned with Diniboy1123/usque cmd/socks:
+// default initial-packet-size 0 (quic-go default first flight + path MTU) and keepalive-period 30s.
+// Avoids forcing InitialPacketSize=1420 together with warp_masque's custom QUIC dial wrapper, which can
+// contribute to QUIC/TLS failures against real Cloudflare MASQUE edges.
+func masqueWarpCloudflareQUICBase() *quic.Config {
+	return &quic.Config{
+		EnableDatagrams: true,
+		KeepAlivePeriod: 30 * time.Second,
+	}
+}
+
+func masqueQUICConfigForDial(opts ClientOptions) *quic.Config {
+	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
+		return masquePacketPlaneQUICConfig(masqueWarpCloudflareQUICBase())
+	}
+	return newMasqueQUICConfig()
 }
 
 // MasqueHTTPServerQUICConfig returns QUIC settings aligned with the MASQUE packet-plane
@@ -236,8 +260,11 @@ func policyDropICMPReasonSnapshot() map[string]uint64 {
 }
 
 type ClientOptions struct {
-	Tag                      string
-	Server                   string
+	Tag    string
+	Server string
+	// DialPeer, when non-empty, is the UDP/QUIC packet destination host (often a literal CF edge IP).
+	// Masque HTTPS templates and default URIs continue to use Server (typically a hostname).
+	DialPeer                 string
 	ServerPort               uint16
 	TransportMode            string
 	TemplateUDP              string
@@ -255,6 +282,22 @@ type ClientOptions struct {
 	ConnectIPDatagramCeiling uint32
 	Hops                     []HopOptions
 	QUICDial                 QUICDialFunc
+	// WarpMasque fields: Cloudflare consumer MASQUE / usque dataplane parity (optional for generic masque).
+	WarpMasqueClientCert        tls.Certificate
+	WarpMasquePinnedPubKey      *ecdsa.PublicKey
+	WarpMasqueLegacyH3Extras    bool
+	WarpConnectIPProtocol       string
+	WarpMasqueDeviceBearerToken string // WARP profile auth_token; see warpMasqueConnectStreamBearerToken
+}
+
+// warpMasqueConnectStreamBearerToken chooses Authorization Bearer for CONNECT-stream only.
+// Explicit server_token wins; some Cloudflare edges expect the WARP device access token on TCP CONNECT
+// when org policy tokens are absent (CONNECT-UDP/CONNECT-IP paths may omit it via mTLS).
+func warpMasqueConnectStreamBearerToken(opts ClientOptions) string {
+	if t := strings.TrimSpace(opts.ServerToken); t != "" {
+		return t
+	}
+	return strings.TrimSpace(opts.WarpMasqueDeviceBearerToken)
 }
 
 type QUICExperimentalOptions struct {
@@ -307,7 +350,9 @@ func quicPacketConnHasTierACapabilities(c net.PacketConn) (ok bool, connType str
 	if _, yes := c.(interface{ SetWriteBuffer(bytes int) error }); !yes {
 		missing = append(missing, "SetWriteBuffer")
 	}
-	if _, yes := c.(interface{ SyscallConn() (syscall.RawConn, error) }); !yes {
+	if _, yes := c.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	}); !yes {
 		missing = append(missing, "SyscallConn")
 	}
 	return len(missing) == 0, connType, missing
@@ -429,7 +474,8 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 		return nil, err
 	}
 	tcpTransport := normalizeTCPTransport(options.TCPTransport)
-	tcpCapable := tcpTransport == "connect_stream"
+	tm := strings.ToLower(strings.TrimSpace(options.TransportMode))
+	tcpCapable := tcpTransport == "connect_stream" || (tcpTransport == "connect_ip" && tm == "connect_ip")
 	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
 	if effectiveCeiling <= 0 {
 		effectiveCeiling = defaultConnectIPDatagramCeilingMax
@@ -496,10 +542,24 @@ type coreSession struct {
 	masqueUDPWriteMax        int
 	connectIPPMTUState       *connectIPPMTUState
 	tcpRoundTripper          http.RoundTripper
+	tcpNetstack              TCPNetstack
+
+	// Single-consumer CONNECT-IP ingress (see connect_ip_ingress.go).
+	connectIPIngressSubsMu sync.Mutex
+	udpIngressSubscribers  []*udpIngressSubscriber
+	connectIPIngressLoopMu   sync.Mutex
+	connectIPIngressRunning  atomic.Bool
+	connectIPIngressCancel   context.CancelFunc
+	connectIPIngressWG       sync.WaitGroup
+	ipIngressPacketReader    atomic.Pointer[connectIPPacketSession]
+	ingressTCPNetstack       atomic.Pointer[connectIPTCPNetstack]
 }
 
 type connectIPUDPPacketConn struct {
 	session         IPPacketSession
+	core            *coreSession
+	ingressSub       *udpIngressSubscriber
+	ingressUnregOnce sync.Once
 	localV4         netip.Addr
 	localBind       *net.UDPAddr
 	pmtuState       *connectIPPMTUState
@@ -595,7 +655,17 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 		}
 		return nil, err
 	case "connect_ip":
-		return nil, errors.Join(ErrTCPOverConnectIP, errors.New("connect_ip is TUN packet-plane only"))
+		if !strings.EqualFold(strings.TrimSpace(s.options.TransportMode), "connect_ip") {
+			return nil, errors.Join(ErrTCPOverConnectIP, errors.New("tcp_transport connect_ip requires transport_mode connect_ip"))
+		}
+		conn, err := s.dialConnectIPTCP(ctx, destination)
+		if err == nil {
+			return conn, nil
+		}
+		if tcpMasqueDirectFallbackEnabled(s.options) && isTCPMasqueDirectFallbackEligible(err, ctx) {
+			return s.dialDirectTCP(ctx, network, destination)
+		}
+		return nil, err
 	default:
 		return nil, ErrTCPPathNotImplemented
 	}
@@ -615,7 +685,7 @@ func (s *coreSession) ListenPacket(ctx context.Context, destination M.Socksaddr)
 		if err != nil {
 			return nil, err
 		}
-		return newConnectIPUDPPacketConn(ctx, ipSession), nil
+		return newConnectIPUDPPacketConn(ctx, ipSession, s), nil
 	}
 	if !s.capabilities.ConnectUDP {
 		s.mu.Unlock()
@@ -681,8 +751,8 @@ func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, t
 	return conn, err
 }
 
-func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net.PacketConn {
-	localV4 := netip.MustParseAddr("198.18.0.2")
+func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession, core *coreSession) net.PacketConn {
+	localV4 := netip.MustParseAddr("198.18.0.1")
 	maxDatagram := 1200
 	pmtuState := newConnectIPPMTUState(1172, 512, 1172)
 	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
@@ -695,9 +765,13 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 		if connectIPSession.pmtuState != nil {
 			pmtuState = connectIPSession.pmtuState
 		}
-		prefixCtx, cancel := context.WithTimeout(ctx, time.Second)
-		prefixes, err := connectIPSession.conn.LocalPrefixes(prefixCtx)
-		cancel()
+		prefixes := connectIPSession.conn.CurrentAssignedPrefixes()
+		var err error
+		if len(prefixes) == 0 {
+			prefixCtx, cancel := context.WithTimeout(ctx, time.Second)
+			prefixes, err = connectIPSession.conn.LocalPrefixes(prefixCtx)
+			cancel()
+		}
 		if err == nil {
 			for _, prefix := range prefixes {
 				addr := prefixPreferredAddress(prefix)
@@ -730,13 +804,18 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession) net
 	setConnectIPEngineEffectiveUDPPayload(currentPayload, "session_init")
 	l4 := localV4.As4()
 	localIP := net.IPv4(l4[0], l4[1], l4[2], l4[3])
-	return &connectIPUDPPacketConn{
+	pc := &connectIPUDPPacketConn{
 		session:         session,
 		localV4:         localV4,
 		localBind:       &net.UDPAddr{IP: localIP, Port: 53000},
 		pmtuState:       pmtuState,
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 	}
+	if core != nil {
+		pc.core = core
+		pc.ingressSub = core.registerUDPIngressSubscriber()
+	}
+	return pc
 }
 
 func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -747,11 +826,8 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 		return 0, nil, os.ErrDeadlineExceeded
 	}
 
-	// Propagate read deadlines into connect-ip-go's blocking ReceiveDatagram().
 	ctx := context.Background()
 	if v := c.deadlines.read.Load(); v != 0 {
-		// readTimeoutExceeded() already checks against time.Now(), but keep it
-		// consistent with the same semantics for context-based cancellation.
 		if time.Now().UnixNano() > v {
 			return 0, nil, os.ErrDeadlineExceeded
 		}
@@ -763,6 +839,45 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
+
+	if c.ingressSub != nil {
+		for {
+			if c.closed.Load() {
+				return 0, nil, net.ErrClosed
+			}
+			if c.deadlines.readTimeoutExceeded() {
+				return 0, nil, os.ErrDeadlineExceeded
+			}
+			select {
+			case <-ctx.Done():
+				return 0, nil, os.ErrDeadlineExceeded
+			case raw, ok := <-c.ingressSub.ch:
+				if !ok {
+					return 0, nil, net.ErrClosed
+				}
+				connectIPCounters.engineIngressTotal.Add(1)
+				payloadOff, payloadLen, src, srcPort, parseErr := parseIPv4UDPPacketOffsets(raw)
+				if parseErr != nil {
+					incConnectIPEngineDropReason("read_parse")
+					continue
+				}
+				connectIPCounters.engineClassifiedTotal.Add(1)
+				src4 := src.As4()
+				c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], src4[:]...)
+				c.readScratchAddr.Port = int(srcPort)
+				if len(p) >= connectIPUDPDirectReadMin {
+					if payloadLen > len(p) {
+						return 0, nil, fmt.Errorf("connect-ip udp bridge: UDP payload exceeds read buffer (%d > %d)", payloadLen, len(p))
+					}
+					if payloadOff != 0 {
+						copy(p[:payloadLen], raw[payloadOff:payloadOff+payloadLen])
+					}
+					return payloadLen, &c.readScratchAddr, nil
+				}
+				return copy(p, raw[payloadOff:payloadOff+payloadLen]), &c.readScratchAddr, nil
+			}
+		}
+	}
 
 	var sctx IPPacketSessionWithContext
 	sctx, _ = c.session.(IPPacketSessionWithContext)
@@ -922,6 +1037,11 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 
 func (c *connectIPUDPPacketConn) Close() error {
 	c.closed.Store(true)
+	if c.core != nil && c.ingressSub != nil {
+		c.ingressUnregOnce.Do(func() {
+			c.core.unregisterUDPIngressSubscriber(c.ingressSub)
+		})
+	}
 	return nil
 }
 
@@ -1228,14 +1348,14 @@ func ipv4HeaderChecksum(header []byte) uint16 {
 
 func (s *coreSession) newUDPClient() *qmasque.Client {
 	return &qmasque.Client{
-		TLSClientConfig: &tls.Config{
-			NextProtos:         []string{http3.NextProtoH3},
-			InsecureSkipVerify: s.options.Insecure,
-			ServerName:         resolveTLSServerName(s.options),
-		},
-		QUICConfig:  applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental),
-		QUICDial:    s.quicDialWithPolicy("client_connect_udp"),
-		BearerToken: strings.TrimSpace(s.options.ServerToken),
+		TLSClientConfig: masqueClientTLSConfig(s.options),
+		QUICConfig: applyQUICExperimentalOptions(
+			masqueQUICConfigForDial(s.options),
+			s.options.QUICExperimental,
+		),
+		QUICDial:       s.quicDialWithPolicy("client_connect_udp"),
+		BearerToken:    strings.TrimSpace(s.options.ServerToken),
+		LegacyH3Extras: s.options.WarpMasqueLegacyH3Extras,
 	}
 }
 
@@ -1265,6 +1385,22 @@ func (s *coreSession) OpenIPSession(ctx context.Context) (IPPacketSession, error
 	return s.openIPSessionLocked(ctx)
 }
 
+func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *http3.ClientConn) (*connectip.Conn, error) {
+	token := strings.TrimSpace(s.options.ServerToken)
+	proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
+	var conn *connectip.Conn
+	var err error
+	if proto != "" {
+		conn, _, err = connectip.DialWithOptions(ctx, clientConn, s.templateIP, connectip.DialOptions{
+			BearerToken:             token,
+			ExtendedConnectProtocol: proto,
+		})
+	} else {
+		conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
+	}
+	return conn, err
+}
+
 func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession, error) {
 	// caller must hold s.mu when calling directly.
 	emitConnectIPObservabilityEvent("open_ip_session_begin")
@@ -1278,6 +1414,13 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 		return nil, E.New("masque backend does not support CONNECT-IP")
 	}
 	if s.ipConn != nil {
+		if s.ipIngressPacketReader.Load() == nil {
+			s.ipIngressPacketReader.Store(&connectIPPacketSession{
+				conn:            s.ipConn,
+				datagramCeiling: s.connectIPDatagramCeiling,
+				pmtuState:       s.connectIPPMTUState,
+			})
+		}
 		emitConnectIPObservabilityEvent("open_ip_session_success_reuse")
 		return &connectIPPacketSession{
 			conn:            s.ipConn,
@@ -1291,10 +1434,10 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, err
 	}
-	token := strings.TrimSpace(s.options.ServerToken)
-	conn, _, err := connectip.Dial(ctx, clientConn, s.templateIP, token)
+	tokenSet := strings.TrimSpace(s.options.ServerToken) != ""
+	conn, err := s.dialWarpConnectIPTunnel(ctx, clientConn)
 	if err != nil {
-		log.Printf("masque connectip dial failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, token != "", err)
+		log.Printf("masque connectip dial failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, tokenSet, err)
 		for s.advanceHop() {
 			if resetErr := s.resetHopTemplates(); resetErr != nil {
 				return nil, resetErr
@@ -1303,9 +1446,14 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 			if err != nil {
 				continue
 			}
-			conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
+			conn, err = s.dialWarpConnectIPTunnel(ctx, clientConn)
 			if err == nil {
 				s.ipConn = conn
+				s.ipIngressPacketReader.Store(&connectIPPacketSession{
+					conn:            conn,
+					datagramCeiling: s.connectIPDatagramCeiling,
+					pmtuState:       s.connectIPPMTUState,
+				})
 				connectIPCounters.openSessionTotal.Add(1)
 				setConnectIPSessionID()
 				emitConnectIPObservabilityEvent("open_ip_session_success")
@@ -1315,13 +1463,18 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 					pmtuState:       s.connectIPPMTUState,
 				}, nil
 			}
-			log.Printf("masque connectip dial retry failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, token != "", err)
+			log.Printf("masque connectip dial retry failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, tokenSet, err)
 		}
 		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
 		emitConnectIPObservabilityEvent("open_ip_session_fail")
 		return nil, err
 	}
 	s.ipConn = conn
+	s.ipIngressPacketReader.Store(&connectIPPacketSession{
+		conn:            conn,
+		datagramCeiling: s.connectIPDatagramCeiling,
+		pmtuState:       s.connectIPPMTUState,
+	})
 	connectIPCounters.openSessionTotal.Add(1)
 	setConnectIPSessionID()
 	emitConnectIPObservabilityEvent("open_ip_session_success")
@@ -1341,12 +1494,23 @@ func (s *coreSession) Close() error {
 	defer s.mu.Unlock()
 	var errs []error
 	emitConnectIPObservabilityEvent("session_close_begin")
+	s.stopConnectIPIngressForClose()
 	if s.ipConn != nil {
 		errs = append(errs, s.ipConn.Close())
 		s.ipConn = nil
 	}
+	s.ipIngressPacketReader.Store(nil)
+	s.ingressTCPNetstack.Store(nil)
+	// CONNECT-IP ingress stops before teardown; tcp netstack consumes inbound via inject path only.
+	if s.tcpNetstack != nil {
+		_ = s.tcpNetstack.Close()
+		s.tcpNetstack = nil
+	}
 	if s.ipHTTP != nil {
-		s.ipHTTP.Close()
+		errs = append(errs, s.ipHTTP.Close())
+		if s.tcpHTTP == s.ipHTTP {
+			s.tcpHTTP = nil
+		}
 		s.ipHTTP = nil
 		s.ipHTTPConn = nil
 	}
@@ -1355,7 +1519,7 @@ func (s *coreSession) Close() error {
 		s.udpClient = nil
 	}
 	if s.tcpHTTP != nil {
-		s.tcpHTTP.Close()
+		errs = append(errs, s.tcpHTTP.Close())
 		s.tcpHTTP = nil
 	}
 	emitConnectIPObservabilityEvent("session_close_end")
@@ -1388,21 +1552,24 @@ func (s *coreSession) openHTTP3ClientConn(ctx context.Context) (*http3.ClientCon
 	if port <= 0 {
 		port = 443
 	}
-	target := masqueDialTarget(s.options.Server, port)
-	tlsConf := &tls.Config{
-		NextProtos:         []string{http3.NextProtoH3},
-		InsecureSkipVerify: s.options.Insecure,
-		ServerName:         resolveTLSServerName(s.options),
-	}
+	target := masqueDialTarget(masqueQuicDialCandidateHost(s.options), port)
+	tlsConf := masqueClientTLSConfig(s.options)
 	transport := &http3.Transport{
 		EnableDatagrams: true,
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			cfg = masquePacketPlaneQUICConfig(cfg)
-			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
+		TLSClientConfig: tlsConf,
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+			cfg := applyQUICExperimentalOptions(
+				masqueQUICConfigForDial(s.options),
+				s.options.QUICExperimental,
+			)
 			return s.quicDialWithPolicy("client_connect_ip")(ctx, addr, tlsCfg, cfg)
 		},
 	}
-	conn, err := transport.Dial(ctx, target, tlsConf, applyQUICExperimentalOptions(newMasqueQUICConfig(), s.options.QUICExperimental))
+	applyWarpMasqueHTTP3TransportFields(transport, s.options)
+	conn, err := transport.Dial(ctx, target, tlsConf, applyQUICExperimentalOptions(
+		masqueQUICConfigForDial(s.options),
+		s.options.QUICExperimental,
+	))
 	if err != nil {
 		log.Printf("masque openHTTP3ClientConn failed target=%s sni=%s err=%v", target, tlsConf.ServerName, err)
 		return nil, err
@@ -1571,6 +1738,9 @@ func (s *coreSession) resetHopTemplates() error {
 	if len(s.hopOrder) == 0 {
 		return nil
 	}
+	s.stopConnectIPIngressForClose()
+	s.ipIngressPacketReader.Store(nil)
+	s.ingressTCPNetstack.Store(nil)
 	incConnectIPSessionReset("hop_advance")
 	hop := s.hopOrder[s.hopIndex]
 	s.options.Server = hop.Server
@@ -1609,6 +1779,58 @@ func resolveTLSServerName(options ClientOptions) string {
 	return options.Server
 }
 
+func masqueClientTLSConfig(opts ClientOptions) *tls.Config {
+	cfg := &tls.Config{
+		NextProtos: []string{http3.NextProtoH3},
+		ServerName: resolveTLSServerName(opts),
+	}
+	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
+		cfg.Certificates = []tls.Certificate{opts.WarpMasqueClientCert}
+		cfg.InsecureSkipVerify = true
+		if opts.WarpMasquePinnedPubKey != nil && !opts.Insecure {
+			pub := opts.WarpMasquePinnedPubKey
+			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("warp_masque: empty peer TLS certificate")
+				}
+				leaf, err := x509.ParseCertificate(rawCerts[0])
+				if err != nil {
+					return err
+				}
+				esk, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+				if !ok {
+					return fmt.Errorf("warp_masque: peer TLS certificate is not ECDSA")
+				}
+				if !esk.Equal(pub) {
+					return fmt.Errorf("warp_masque: peer TLS public key does not match Cloudflare device profile pin")
+				}
+				return nil
+			}
+		}
+		if opts.Insecure {
+			cfg.VerifyPeerCertificate = nil
+		}
+		return cfg
+	}
+	cfg.InsecureSkipVerify = opts.Insecure
+	return cfg
+}
+
+func applyWarpMasqueHTTP3TransportFields(tr *http3.Transport, opts ClientOptions) {
+	if tr == nil || !opts.WarpMasqueLegacyH3Extras {
+		return
+	}
+	tr.AdditionalSettings = map[uint64]uint64{cloudflareLegacyH3DatagramSettingID: 1}
+	tr.DisableCompression = true
+}
+
+func masqueQuicDialCandidateHost(options ClientOptions) string {
+	if h := strings.TrimSpace(options.DialPeer); h != "" {
+		return h
+	}
+	return strings.TrimSpace(options.Server)
+}
+
 func normalizeTCPTransport(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "connect_stream":
@@ -1637,7 +1859,66 @@ func isTCPMasqueDirectFallbackEligible(err error, ctx context.Context) bool {
 	if errors.Is(err, ErrAuthFailed) || errors.Is(err, ErrLifecycleClosed) || errors.Is(err, net.ErrClosed) {
 		return false
 	}
-	return errors.Is(err, ErrTCPConnectStreamFailed)
+	return errors.Is(err, ErrTCPConnectStreamFailed) || errors.Is(err, ErrTCPDial)
+}
+
+func normalizeTCPDestinationForConnectIPNetstack(ctx context.Context, destination M.Socksaddr) (M.Socksaddr, error) {
+	if destination.Port == 0 {
+		return M.Socksaddr{}, errors.Join(ErrTCPDial, E.New("missing destination port"))
+	}
+	out := destination
+	if out.Addr.IsValid() {
+		return out, nil
+	}
+	if out.IsFqdn() {
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", out.Fqdn)
+		if err != nil {
+			return M.Socksaddr{}, errors.Join(ErrTCPDial, err)
+		}
+		if len(ips) == 0 {
+			return M.Socksaddr{}, errors.Join(ErrTCPDial, E.New("DNS returned no addresses"))
+		}
+		for _, ip := range ips {
+			ip = ip.Unmap()
+			if ip.Is4() {
+				out.Addr = ip
+				out.Fqdn = ""
+				return out, nil
+			}
+		}
+		out.Addr = ips[0].Unmap()
+		out.Fqdn = ""
+		return out, nil
+	}
+	return M.Socksaddr{}, errors.Join(ErrCapability, E.New("invalid masque tcp destination"))
+}
+
+func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	dest, err := normalizeTCPDestinationForConnectIPNetstack(ctx, destination)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	ipSess, err := s.openIPSessionLocked(ctx)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if s.tcpNetstack == nil {
+		ns, nerr := DefaultTCPNetstackFactory.New(ctx, ipSess)
+		if nerr != nil {
+			s.mu.Unlock()
+			return nil, nerr
+		}
+		s.tcpNetstack = ns
+		if impl, ok := ns.(*connectIPTCPNetstack); ok {
+			s.ingressTCPNetstack.Store(impl)
+		}
+		s.maybeStartConnectIPIngressLocked()
+	}
+	ns := s.tcpNetstack
+	s.mu.Unlock()
+	return ns.DialContext(ctx, dest)
 }
 
 func (s *coreSession) dialDirectTCP(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -1671,19 +1952,27 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 	templateTCP := s.templateTCP
 	options := s.options
 	if s.tcpHTTP == nil {
+		tlsMerged := masqueClientTLSConfig(options)
 		s.tcpHTTP = &http3.Transport{
 			EnableDatagrams: true,
-			TLSClientConfig: &tls.Config{
-				NextProtos:         []string{http3.NextProtoH3},
-				InsecureSkipVerify: options.Insecure,
-				ServerName:         resolveTLSServerName(options),
-			},
-			Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-				cfg = masquePacketPlaneQUICConfig(cfg)
-				cfg = applyQUICExperimentalOptions(cfg, options.QUICExperimental)
-				return s.quicDialWithPolicy("client_connect_stream")(ctx, addr, tlsCfg, cfg)
+			TLSClientConfig: tlsMerged,
+			Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+				// http3.Transport may pass addr derived from CONNECT URL host (engage FQDN) which resolves to a
+				// different anycast POP than QUIC dial-peer IP from Warp bootstrap. CONNECT-IP already dials
+				// DialPeer|SNI; CONNECT-stream must use the same UDP socket target so mTLS/session land on one edge.
+				port := int(s.options.ServerPort)
+				if port <= 0 {
+					port = 443
+				}
+				target := masqueDialTarget(masqueQuicDialCandidateHost(s.options), port)
+				cfg := applyQUICExperimentalOptions(
+					masqueQUICConfigForDial(options),
+					options.QUICExperimental,
+				)
+				return s.quicDialWithPolicy("client_connect_stream")(ctx, target, tlsCfg, cfg)
 			},
 		}
+		applyWarpMasqueHTTP3TransportFields(s.tcpHTTP, options)
 	}
 	tcpHTTP := s.tcpHTTP
 	s.mu.Unlock()
@@ -1724,7 +2013,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		req.ProtoMajor = 3
 		req.ProtoMinor = 0
 		req.Header = make(http.Header)
-		if token := strings.TrimSpace(options.ServerToken); token != "" {
+		if token := warpMasqueConnectStreamBearerToken(options); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		pr, pw := io.Pipe()
@@ -1803,19 +2092,24 @@ func (s *coreSession) resetTCPHTTPTransport() {
 	if s.tcpHTTP != nil {
 		s.tcpHTTP.Close()
 	}
+	tcpTLS := masqueClientTLSConfig(s.options)
 	s.tcpHTTP = &http3.Transport{
 		EnableDatagrams: true,
-		TLSClientConfig: &tls.Config{
-			NextProtos:         []string{http3.NextProtoH3},
-			InsecureSkipVerify: s.options.Insecure,
-			ServerName:         resolveTLSServerName(s.options),
-		},
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-			cfg = masquePacketPlaneQUICConfig(cfg)
-			cfg = applyQUICExperimentalOptions(cfg, s.options.QUICExperimental)
-			return s.quicDialWithPolicy("client_connect_stream")(ctx, addr, tlsCfg, cfg)
+		TLSClientConfig: tcpTLS,
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+			port := int(s.options.ServerPort)
+			if port <= 0 {
+				port = 443
+			}
+			target := masqueDialTarget(masqueQuicDialCandidateHost(s.options), port)
+			cfg := applyQUICExperimentalOptions(
+				masqueQUICConfigForDial(s.options),
+				s.options.QUICExperimental,
+			)
+			return s.quicDialWithPolicy("client_connect_stream")(ctx, target, tlsCfg, cfg)
 		},
 	}
+	applyWarpMasqueHTTP3TransportFields(s.tcpHTTP, s.options)
 }
 
 func isRetryableTCPStreamError(err error) bool {
