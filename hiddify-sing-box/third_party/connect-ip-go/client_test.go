@@ -51,6 +51,36 @@ func TestBuildConnectIPRequestURLScopedDefaults(t *testing.T) {
 	require.Equal(t, "https://example.org/.well-known/masque/ip/0.0.0.0%2F0/0/", raw)
 }
 
+func TestConnectIPH3SettingsError(t *testing.T) {
+	cases := []struct {
+		name   string
+		opts   DialOptions
+		ext    bool
+		dgram  bool
+		wantSub string
+	}{
+		{"strict_missing_extended", DialOptions{}, false, true, "Extended CONNECT"},
+		{"strict_missing_datagrams", DialOptions{}, true, false, "datagrams"},
+		{"ignore_extended_without_flag", DialOptions{}, false, true, "Extended CONNECT"},
+		{"ignore_extended_ok", DialOptions{IgnoreExtendedConnect: true}, false, true, ""},
+		{"both_ok", DialOptions{}, true, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := http3.Settings{
+				EnableExtendedConnect: tc.ext,
+				EnableDatagrams:       tc.dgram,
+			}
+			err := connectIPH3SettingsError(&st, tc.opts)
+			if tc.wantSub == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.wantSub)
+			}
+		})
+	}
+}
+
 func TestClientWaitForSettings(t *testing.T) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	require.NoError(t, err)

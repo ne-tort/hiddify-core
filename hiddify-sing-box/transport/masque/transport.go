@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -344,14 +345,23 @@ type ClientOptions struct {
 	WarpMasqueLegacyH3Extras    bool
 	WarpConnectIPProtocol       string
 	WarpMasqueDeviceBearerToken string // WARP profile auth_token; see warpMasqueConnectStreamBearerToken
+	ProfileLocalIPv4            string // optional profile.config.interface.addresses.v4 fallback when ADDRESS_ASSIGN is absent
+	ProfileLocalIPv6            string // optional profile.config.interface.addresses.v6 fallback when ADDRESS_ASSIGN is absent
 }
 
 // warpMasqueConnectStreamBearerToken chooses Authorization Bearer for CONNECT-stream only.
-// Explicit server_token wins; some Cloudflare edges expect the WARP device access token on TCP CONNECT
-// when org policy tokens are absent (CONNECT-UDP/CONNECT-IP paths may omit it via mTLS).
+// Explicit server_token wins.
+//
+// Consumer WARP MASQUE dataplane matches dialWarpConnectIPTunnel / usque: CONNECT-IP authenticates via
+// mTLS (WarpMasqueClientCert) without device Bearer on the QUIC overlay. Sending profile auth_token on
+// masque/tcp CONNECT-stream triggers 403 from the edge while the same Bearer is omitted on cf-connect-ip.
+// Generic masque without WARP client cert may still attach WarpMasqueDeviceBearerToken when configured.
 func warpMasqueConnectStreamBearerToken(opts ClientOptions) string {
 	if t := strings.TrimSpace(opts.ServerToken); t != "" {
 		return t
+	}
+	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
+		return ""
 	}
 	return strings.TrimSpace(opts.WarpMasqueDeviceBearerToken)
 }
@@ -629,21 +639,21 @@ type coreSession struct {
 	listenPacketPreChainEndReturnHook func()
 	// dialTCPStreamPreAdvanceHopHook runs after ctx-alive check and before hop advance (tests only; simulates cancel before advanceHop).
 	dialTCPStreamPreAdvanceHopHook func()
-	ipConn                   *connectip.Conn
-	ipHTTPConn               *http3.ClientConn
-	ipHTTP                   *http3.Transport
-	tcpHTTP                  *http3.Transport
-	templateUDP              *uritemplate.Template
-	templateIP               *uritemplate.Template
-	templateTCP              *uritemplate.Template
-	capabilities             CapabilitySet
-	hopOrder                 []HopOptions
-	hopIndex                 int
-	connectIPDatagramCeiling int
-	masqueUDPWriteMax        int
-	connectIPPMTUState       *connectIPPMTUState
-	tcpRoundTripper          http.RoundTripper
-	tcpNetstack              TCPNetstack
+	ipConn                         *connectip.Conn
+	ipHTTPConn                     *http3.ClientConn
+	ipHTTP                         *http3.Transport
+	tcpHTTP                        *http3.Transport
+	templateUDP                    *uritemplate.Template
+	templateIP                     *uritemplate.Template
+	templateTCP                    *uritemplate.Template
+	capabilities                   CapabilitySet
+	hopOrder                       []HopOptions
+	hopIndex                       int
+	connectIPDatagramCeiling       int
+	masqueUDPWriteMax              int
+	connectIPPMTUState             *connectIPPMTUState
+	tcpRoundTripper                http.RoundTripper
+	tcpNetstack                    TCPNetstack
 
 	// Single-consumer CONNECT-IP ingress (see connect_ip_ingress.go).
 	connectIPIngressSubsMu  sync.Mutex
@@ -654,6 +664,11 @@ type coreSession struct {
 	connectIPIngressWG      sync.WaitGroup
 	ipIngressPacketReader   atomic.Pointer[connectIPPacketSession]
 	ingressTCPNetstack      atomic.Pointer[connectIPTCPNetstack]
+	// connectIPTCPInstallInflight + preTCPIngress*: while CONNECT-IP TCP netstack construction runs
+	// (LocalPrefixes wait), the ingress loop still drains ReadPacket; frames are replayed after attach.
+	connectIPTCPInstallInflight atomic.Int32
+	preTCPIngressMu             sync.Mutex
+	preTCPIngressBuf            [][]byte
 }
 
 type connectIPUDPPacketConn struct {
@@ -810,10 +825,18 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 // context canceled after Unlock). Without this, ipConn would remain attached while the caller saw
 // failure — leaking the tunnel and contradicting the next ListenPacket/OpenIPSession attempt.
 // Caller must not hold s.mu.
+//
+// Call sites: ListenPacket after openIPSessionLocked+Unlock if ctx is done (transport.go ~857–861);
+// dialConnectIPTCP if netstack factory fails (factory error path). Do not call this after Unlock
+// solely because the dial ctx expired: outbound monitoring URL tests use short deadlines; tearing
+// CONNECT-IP here would cancel a healthy session (ingress_cancel / H3_NO_ERROR). Real abandon is
+// covered when the factory fails before tcpNetstack is attached.
 func (s *coreSession) releaseOpenedConnectIPSessionIfAbandoned() {
 	s.stopConnectIPIngressForClose()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.connectIPTCPInstallInflight.Store(0)
+	s.clearPreTCPNetstackIngress()
 	s.ipIngressPacketReader.Store(nil)
 	s.ingressTCPNetstack.Store(nil)
 	if s.tcpNetstack != nil {
@@ -1247,6 +1270,11 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession, cor
 					localV4 = addr
 					break
 				}
+			}
+		}
+		if localV4 == netip.MustParseAddr("198.18.0.1") {
+			if addr := parseProfileInterfaceAddress(connectIPSession.profileLocalIPv4); addr.Is4() {
+				localV4 = addr
 			}
 		}
 	}
@@ -1881,20 +1909,190 @@ func (s *coreSession) OpenIPSession(ctx context.Context) (IPPacketSession, error
 	return s.openIPSessionLocked(ctx)
 }
 
+// logCfConnectIPHTTPResponse logs CONNECT response metadata (header names only) for consumer WARP.
+func (s *coreSession) logCfConnectIPHTTPResponse(rsp *http.Response) {
+	proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
+	if rsp == nil || !strings.EqualFold(proto, "cf-connect-ip") {
+		return
+	}
+	names := make([]string, 0, len(rsp.Header))
+	for k := range rsp.Header {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	log.Printf("masque connect_ip bootstrap: cf-connect-ip CONNECT status=%d response_header_keys=%v", rsp.StatusCode, names)
+}
+
+// connectIPAdvertiseWarpProfileLocalRoutes sends ROUTE_ADVERTISEMENT entries for WARP device profile
+// interface IPs (when present and sane). connect-ip-go outgoing policy allows sources in either
+// ADDRESS_ASSIGN prefixes or locally advertised ranges; without this, gVisor may legitimately use a
+// profile local while the edge's assigned prefix is a different /32 — composeDatagram then rejects
+// every post-handshake segment (TLS hangs, counters grow, QUIC eventually errors).
+//
+// When ADDRESS_ASSIGN already provided prefixes, usque does not send ROUTE_ADVERTISEMENT; advertising
+// a second (profile) host range here can narrow what the colo delivers on the CONNECT-IP leg while
+// incoming policy still accepts packets via assignedAddresses — avoid that path.
+func connectIPAdvertiseWarpProfileLocalRoutes(ctx context.Context, conn *connectip.Conn, s *coreSession) error {
+	if conn == nil || s == nil {
+		return nil
+	}
+	v4 := parseProfileInterfaceAddress(strings.TrimSpace(s.options.ProfileLocalIPv4))
+	v6 := parseProfileInterfaceAddress(strings.TrimSpace(s.options.ProfileLocalIPv6))
+	var routes []connectip.IPRoute
+	if v4.Is4() {
+		routes = append(routes, connectip.IPRoute{StartIP: v4, EndIP: v4, IPProtocol: 0})
+	}
+	if v6.Is6() && !v6.Is4In6() {
+		routes = append(routes, connectip.IPRoute{StartIP: v6, EndIP: v6, IPProtocol: 0})
+	}
+	if len(routes) == 0 {
+		return nil
+	}
+	return conn.AdvertiseRoute(ctx, routes)
+}
+
+func (s *coreSession) maybeAdvertiseConnectIPProfileLocalRoutes(conn *connectip.Conn) {
+	if conn == nil {
+		return
+	}
+	v4 := parseProfileInterfaceAddress(strings.TrimSpace(s.options.ProfileLocalIPv4))
+	v6 := parseProfileInterfaceAddress(strings.TrimSpace(s.options.ProfileLocalIPv6))
+	if !v4.Is4() && !(v6.Is6() && !v6.Is4In6()) {
+		return
+	}
+	advCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := connectIPAdvertiseWarpProfileLocalRoutes(advCtx, conn, s); err != nil {
+		log.Printf("masque connect_ip bootstrap: AdvertiseRoute(profile local) failed tag=%s err=%v", strings.TrimSpace(s.options.Tag), err)
+		return
+	}
+	log.Printf("masque connect_ip bootstrap: AdvertiseRoute(profile local) ok tag=%s", strings.TrimSpace(s.options.Tag))
+}
+
+// warpMasqueConnectIPBootstrap runs minimal consumer-WARP capsules after CONNECT-IP succeeds (H3/H2).
+// usque never sends catch-all AdvertiseRoute nor explicit 0.0.0.0/0 ADDRESS_REQUEST — only an empty
+// ADDRESS_REQUEST (RFC9484 peer-specific) matches connect-ip-go docs; the edge then emits ADDRESS_ASSIGN.
+func (s *coreSession) warpMasqueConnectIPBootstrap(conn *connectip.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
+	if !strings.EqualFold(proto, "cf-connect-ip") {
+		return nil
+	}
+	if !conn.ControlCapsulesSupported() {
+		log.Printf("masque connect_ip bootstrap: cf-connect-ip legacy h2 has no control capsules; using profile/local-prefix fallbacks tag=%s", strings.TrimSpace(s.options.Tag))
+		return nil
+	}
+	// MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES must not bypass bootstrap for consumer WARP: without
+	// RequestAddresses(empty) the edge often never emits ADDRESS_ASSIGN, gVisor stays on 198.18.0.1,
+	// and incoming policy/datapath breaks (TUN-smoke curl timeouts). Log once if set and continue.
+	if raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES")); raw != "" {
+		r := strings.ToLower(raw)
+		if r == "1" || r == "true" || r == "yes" || r == "on" {
+			log.Printf("masque connect_ip bootstrap: MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES=%q ignored for cf-connect-ip (bootstrap required) tag=%s", raw, strings.TrimSpace(s.options.Tag))
+		}
+	}
+	policy := newConnectIPBootstrapWaitPolicy(
+		connectIPBootstrapRequireAssignedPrefix(),
+		strings.TrimSpace(s.options.ProfileLocalIPv4),
+		strings.TrimSpace(s.options.ProfileLocalIPv6),
+		connectIPTCPNetstackLocalPrefixWait(),
+	)
+	log.Printf("masque connect_ip bootstrap: wait policy profile_local=%v require_prefix=%v first_wait=%s request_addresses=%v request_timeout=%s second_wait=%s advertise_profile_local=%v tag=%s",
+		policy.ProfileLocal,
+		policy.RequirePrefix,
+		prefixWaitLogValue(policy.FirstWait),
+		policy.SendRequestAddresses,
+		prefixWaitLogValue(policy.RequestAddressesTimeout),
+		prefixWaitLogValue(policy.SecondWait),
+		policy.AdvertiseProfileLocal,
+		strings.TrimSpace(s.options.Tag),
+	)
+	prefixes, errLP := waitForNonEmptyAssignedPrefixes(conn, policy.FirstWait)
+	if len(prefixes) == 0 && policy.SendRequestAddresses {
+		initCtx, cancel := context.WithTimeout(context.Background(), policy.RequestAddressesTimeout)
+		var requested []connectip.RequestedAddress
+		errReq := conn.RequestAddresses(initCtx, requested)
+		cancel()
+		if errReq != nil {
+			_ = conn.Close()
+			return fmt.Errorf("warp masque connect-ip initial RequestAddresses(empty): %w", errReq)
+		}
+		log.Printf("masque connect_ip bootstrap: cf-connect-ip initial RequestAddresses(empty) ok tag=%s (usque parity: empty ADDRESS_REQUEST)", strings.TrimSpace(s.options.Tag))
+		if policy.SecondWait > 0 {
+			prefixes, errLP = waitForNonEmptyAssignedPrefixes(conn, policy.SecondWait)
+		}
+	}
+
+	// Require non-empty ADDRESS_ASSIGN before dataplane so gVisor local IP matches WARP egress;
+	// synthetic 198.18.0.1 breaks return-path delivery to the TCP stack.
+	if len(prefixes) == 0 {
+		if !policy.RequirePrefix {
+			log.Printf("masque connect_ip bootstrap: no assigned prefixes after passive+request waits (continuing; edge may assign later; netstack still waits LocalPrefixes) tag=%s err=%v", strings.TrimSpace(s.options.Tag), errLP)
+			if policy.AdvertiseProfileLocal {
+				s.maybeAdvertiseConnectIPProfileLocalRoutes(conn)
+			}
+			return nil
+		}
+		_ = conn.Close()
+		if errLP != nil {
+			return fmt.Errorf("warp masque connect-ip no assigned prefixes after bootstrap (ADDRESS_ASSIGN): %w", errLP)
+		}
+		return fmt.Errorf("warp masque connect-ip no assigned prefixes after bootstrap within %s", policy.FirstWait+policy.SecondWait)
+	}
+	log.Printf("masque connect_ip bootstrap: assigned prefix count=%d tag=%s", len(prefixes), strings.TrimSpace(s.options.Tag))
+	return nil
+}
+
+func connectIPBootstrapRequireAssignedPrefix() bool {
+	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX"))
+	if raw == "" {
+		// Default relaxed: some live CF colos deliver ADDRESS_ASSIGN only after dataplane
+		// starts or with long latency; closing the QUIC stream here breaks the tunnel entirely.
+		// TCP netstack creation still waits on LocalPrefixes (see netstack_adapter.go).
+		// Opt in to fail-closed: MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX=1
+		return false
+	}
+	raw = strings.ToLower(raw)
+	return raw != "0" && raw != "false" && raw != "no" && raw != "off"
+}
+
 func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *http3.ClientConn) (*connectip.Conn, error) {
 	token := strings.TrimSpace(s.options.ServerToken)
 	proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
 	var conn *connectip.Conn
+	var rsp *http.Response
 	var err error
 	if proto != "" {
-		conn, _, err = connectip.DialWithOptions(ctx, clientConn, s.templateIP, connectip.DialOptions{
+		dopts := connectip.DialOptions{
 			BearerToken:             token,
 			ExtendedConnectProtocol: proto,
-		})
+		}
+		if strings.EqualFold(proto, "cf-connect-ip") {
+			// Parity with Diniboy1123/usque → connect-ip-go Dial(..., ignoreExtendedConnect=true).
+			dopts.IgnoreExtendedConnect = true
+		}
+		if strings.EqualFold(proto, "cf-connect-ip") && strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			if st := clientConn.Settings(); st != nil {
+				log.Printf("masque connect_ip debug: h3 peer settings extended_connect=%v datagrams=%v tag=%s",
+					st.EnableExtendedConnect, st.EnableDatagrams, strings.TrimSpace(s.options.Tag))
+			} else {
+				log.Printf("masque connect_ip debug: h3 peer settings=nil tag=%s", strings.TrimSpace(s.options.Tag))
+			}
+		}
+		conn, rsp, err = connectip.DialWithOptions(ctx, clientConn, s.templateIP, dopts)
 	} else {
-		conn, _, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
+		conn, rsp, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
 	}
-	return conn, err
+	if err != nil || conn == nil {
+		return conn, err
+	}
+	s.logCfConnectIPHTTPResponse(rsp)
+	if err := s.warpMasqueConnectIPBootstrap(conn); err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (s *coreSession) dialConnectIPAttempt(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
@@ -1982,6 +2180,26 @@ func (s *coreSession) dialConnectIPOnCurrentHopLocked(ctx context.Context, useHT
 	return conn, err
 }
 
+func (s *coreSession) registerConnectIPAssignedPrefixesListenerLocked(conn *connectip.Conn) {
+	if conn == nil {
+		return
+	}
+	conn.SetAssignedPrefixesListener(func(prefixes []netip.Prefix) {
+		s.connectIPAssignedPrefixesUpdated(prefixes)
+	})
+}
+
+func (s *coreSession) connectIPAssignedPrefixesUpdated(prefixes []netip.Prefix) {
+	if len(prefixes) == 0 {
+		return
+	}
+	ns := s.ingressTCPNetstack.Load()
+	if ns == nil {
+		return
+	}
+	ns.ReconcileLocalFromAssignedPrefixes(prefixes)
+}
+
 func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession, error) {
 	// caller must hold s.mu when calling directly.
 	emitConnectIPObservabilityEvent("open_ip_session_begin")
@@ -2002,26 +2220,34 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 		return nil, context.Cause(ctx)
 	}
 	if s.ipConn != nil {
+		s.registerConnectIPAssignedPrefixesListenerLocked(s.ipConn)
 		if s.ipIngressPacketReader.Load() == nil {
 			s.ipIngressPacketReader.Store(&connectIPPacketSession{
-				conn:            s.ipConn,
-				datagramCeiling: s.connectIPDatagramCeiling,
-				pmtuState:       s.connectIPPMTUState,
+				conn:             s.ipConn,
+				datagramCeiling:  s.connectIPDatagramCeiling,
+				pmtuState:        s.connectIPPMTUState,
+				profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+				profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+				overlayH2:        s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2,
 			})
 		}
 		emitConnectIPObservabilityEvent("open_ip_session_success_reuse")
 		s.resetHTTPFallbackBudgetAfterSuccess()
 		return &connectIPPacketSession{
-			conn:            s.ipConn,
-			datagramCeiling: s.connectIPDatagramCeiling,
-			pmtuState:       s.connectIPPMTUState,
+			conn:             s.ipConn,
+			datagramCeiling:  s.connectIPDatagramCeiling,
+			pmtuState:        s.connectIPPMTUState,
+			profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+			profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+			overlayH2:        s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2,
 		}, nil
 	}
-	tokenSet := strings.TrimSpace(s.options.ServerToken) != ""
+	serverTokenSet := strings.TrimSpace(s.options.ServerToken) != ""
+	warpMTLS := len(s.options.WarpMasqueClientCert.Certificate) > 0
 	useHTTP2 := s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2
 	conn, err := s.dialConnectIPOnCurrentHopLocked(ctx, useHTTP2)
 	if err != nil {
-		log.Printf("masque connectip dial failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, tokenSet, err)
+		log.Printf("masque connectip dial failed server=%s:%d server_token_set=%t warp_mtls=%t err=%v", s.options.Server, s.options.ServerPort, serverTokenSet, warpMTLS, err)
 		// User/context cancellation is not a hop pivot: do not burn chain entries or re-dial
 		// subsequent hops while the caller has already given up (parity with ListenPacket/DialContext).
 		if ctx.Err() != nil {
@@ -2042,21 +2268,28 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 			conn, err = s.dialConnectIPOnCurrentHopLocked(ctx, useHTTP2)
 			if err == nil {
 				s.ipConn = conn
+				s.registerConnectIPAssignedPrefixesListenerLocked(conn)
 				s.ipIngressPacketReader.Store(&connectIPPacketSession{
-					conn:            conn,
-					datagramCeiling: s.connectIPDatagramCeiling,
-					pmtuState:       s.connectIPPMTUState,
+					conn:             conn,
+					datagramCeiling:  s.connectIPDatagramCeiling,
+					pmtuState:        s.connectIPPMTUState,
+					profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+					profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+					overlayH2:        useHTTP2,
 				})
 				connectIPCounters.openSessionTotal.Add(1)
 				setConnectIPSessionID()
 				emitConnectIPObservabilityEvent("open_ip_session_success")
 				return &connectIPPacketSession{
-					conn:            conn,
-					datagramCeiling: s.connectIPDatagramCeiling,
-					pmtuState:       s.connectIPPMTUState,
+					conn:             conn,
+					datagramCeiling:  s.connectIPDatagramCeiling,
+					pmtuState:        s.connectIPPMTUState,
+					profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+					profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+					overlayH2:        useHTTP2,
 				}, nil
 			}
-			log.Printf("masque connectip dial retry failed server=%s:%d token_set=%t err=%v", s.options.Server, s.options.ServerPort, tokenSet, err)
+			log.Printf("masque connectip dial retry failed server=%s:%d server_token_set=%t warp_mtls=%t err=%v", s.options.Server, s.options.ServerPort, serverTokenSet, warpMTLS, err)
 			// Parity with hop exhaustion / dialTCPStream: cancellation after a failed inner-hop dial
 			// must not consume another hop before the next advanceHop() at loop head.
 			if ctx.Err() != nil {
@@ -2075,18 +2308,25 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 		return nil, err
 	}
 	s.ipConn = conn
+	s.registerConnectIPAssignedPrefixesListenerLocked(conn)
 	s.ipIngressPacketReader.Store(&connectIPPacketSession{
-		conn:            conn,
-		datagramCeiling: s.connectIPDatagramCeiling,
-		pmtuState:       s.connectIPPMTUState,
+		conn:             conn,
+		datagramCeiling:  s.connectIPDatagramCeiling,
+		pmtuState:        s.connectIPPMTUState,
+		profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+		profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+		overlayH2:        useHTTP2,
 	})
 	connectIPCounters.openSessionTotal.Add(1)
 	setConnectIPSessionID()
 	emitConnectIPObservabilityEvent("open_ip_session_success")
 	return &connectIPPacketSession{
-		conn:            conn,
-		datagramCeiling: s.connectIPDatagramCeiling,
-		pmtuState:       s.connectIPPMTUState,
+		conn:             conn,
+		datagramCeiling:  s.connectIPDatagramCeiling,
+		pmtuState:        s.connectIPPMTUState,
+		profileLocalIPv4: strings.TrimSpace(s.options.ProfileLocalIPv4),
+		profileLocalIPv6: strings.TrimSpace(s.options.ProfileLocalIPv6),
+		overlayH2:        useHTTP2,
 	}, nil
 }
 
@@ -2105,6 +2345,8 @@ func (s *coreSession) Close() error {
 	var errs []error
 	emitConnectIPObservabilityEvent("session_close_begin")
 	s.stopConnectIPIngressForClose()
+	s.connectIPTCPInstallInflight.Store(0)
+	s.clearPreTCPNetstackIngress()
 	if s.ipConn != nil {
 		errs = append(errs, s.ipConn.Close())
 		s.ipConn = nil
@@ -2231,21 +2473,31 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 	if options.ServerPort == 0 {
 		options.ServerPort = 443
 	}
-	udpRaw := strings.TrimSpace(options.TemplateUDP)
+	srvHost := strings.TrimSpace(options.Server)
+	httpsAuthority := net.JoinHostPort(srvHost, strconv.Itoa(int(options.ServerPort)))
+	udpRaw := ExpandMasqueHTTPSURI(options.TemplateUDP, httpsAuthority)
 	if udpRaw == "" {
-		udpRaw = fmt.Sprintf("https://%s:%d/masque/udp/{target_host}/{target_port}", options.Server, options.ServerPort)
+		udpRaw = "https://" + httpsAuthority + "/masque/udp/{target_host}/{target_port}"
 	}
-	ipRaw := strings.TrimSpace(options.TemplateIP)
+	// Consumer WARP CONNECT-IP request URL must match Diniboy1123/usque api/tunnel.go + internal/consts.go:
+	// ConnectTunnel(..., internal.ConnectURI, endpoint) with ConnectURI = "https://cloudflareaccess.com".
+	// Defaulting to https://<engage>/masque/ip breaks :authority vs what Cloudflare expects for cf-connect-ip.
+	userTemplateIP := strings.TrimSpace(options.TemplateIP)
+	ipRaw := ExpandMasqueHTTPSURI(options.TemplateIP, httpsAuthority)
 	if ipRaw == "" {
-		ipRaw = fmt.Sprintf("https://%s:%d/masque/ip", options.Server, options.ServerPort)
+		if userTemplateIP == "" && strings.EqualFold(strings.TrimSpace(options.WarpConnectIPProtocol), "cf-connect-ip") {
+			ipRaw = "https://cloudflareaccess.com"
+		} else {
+			ipRaw = "https://" + httpsAuthority + "/masque/ip"
+		}
 	}
 	ipRaw, err := applyConnectIPFlowScope(ipRaw, options.ConnectIPScopeTarget, options.ConnectIPScopeIPProto)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	tcpRaw := strings.TrimSpace(options.TemplateTCP)
+	tcpRaw := ExpandMasqueHTTPSURI(options.TemplateTCP, httpsAuthority)
 	if tcpRaw == "" {
-		tcpRaw = fmt.Sprintf("https://%s:%d/masque/tcp/{target_host}/{target_port}", options.Server, options.ServerPort)
+		tcpRaw = "https://" + httpsAuthority + "/masque/tcp/{target_host}/{target_port}"
 	}
 	udpTemplate, err := uritemplate.New(udpRaw)
 	if err != nil {
@@ -2477,7 +2729,13 @@ func masqueClientTLSConfig(opts ClientOptions) *tls.Config {
 }
 
 func applyWarpMasqueHTTP3TransportFields(tr *http3.Transport, opts ClientOptions) {
-	if tr == nil || !opts.WarpMasqueLegacyH3Extras {
+	if tr == nil {
+		return
+	}
+	// usque always sets legacy H3 datagram SETTINGS for H3 CONNECT-IP; consumer cf-connect-ip needs the same
+	// even when WarpMasqueLegacyH3Extras is false (extras still gate other WARP-only behaviors).
+	cfConnectIP := strings.EqualFold(strings.TrimSpace(opts.WarpConnectIPProtocol), "cf-connect-ip")
+	if !opts.WarpMasqueLegacyH3Extras && !cfConnectIP {
 		return
 	}
 	tr.AdditionalSettings = map[uint64]uint64{cloudflareLegacyH3DatagramSettingID: 1}
@@ -2554,6 +2812,9 @@ func normalizeTCPDestinationForConnectIPNetstack(ctx context.Context, destinatio
 }
 
 func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	if masqueConnectIPNetstackDebug() {
+		log.Printf("masque connect_ip tcp: dial request destination=%s", destination.String())
+	}
 	select {
 	case <-ctx.Done():
 		s.clearHTTPFallbackConsumedAfterGivingUp()
@@ -2573,37 +2834,58 @@ func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksa
 		s.mu.Unlock()
 		return nil, err
 	}
-	netstackCreatedThisCall := false
+	var ns TCPNetstack
 	if s.tcpNetstack == nil {
-		ns, nerr := DefaultTCPNetstackFactory.New(ctx, ipSess)
+		// DefaultTCPNetstackFactory.New may block on LocalPrefixes (see netstack_adapter). Bump
+		// connectIPTCPInstallInflight so ingress drains ReadPacket during construction; replay buffered
+		// frames after attach (inflight covers concurrent first-dial races).
+		s.connectIPTCPInstallInflight.Add(1)
+		s.maybeStartConnectIPIngressLocked()
+		s.mu.Unlock()
+		newStack, nerr := DefaultTCPNetstackFactory.New(ctx, ipSess)
+		s.mu.Lock()
 		if nerr != nil {
 			recordConnectIPStackReady(false)
+			s.clearPreTCPNetstackIngress()
+			s.connectIPTCPInstallInflight.Add(-1)
 			s.mu.Unlock()
 			s.releaseOpenedConnectIPSessionIfAbandoned()
 			return nil, nerr
 		}
-		recordConnectIPStackReady(true)
-		s.tcpNetstack = ns
-		netstackCreatedThisCall = true
-		if impl, ok := ns.(*connectIPTCPNetstack); ok {
-			s.ingressTCPNetstack.Store(impl)
+		if s.tcpNetstack == nil {
+			recordConnectIPStackReady(true)
+			s.tcpNetstack = newStack
+			if impl, ok := newStack.(*connectIPTCPNetstack); ok {
+				s.ingressTCPNetstack.Store(impl)
+				s.flushPreTCPNetstackIngress(impl)
+			}
+			s.maybeStartConnectIPIngressLocked()
+			ns = s.tcpNetstack
+		} else {
+			_ = newStack.Close()
+			ns = s.tcpNetstack
+			if impl, ok := ns.(*connectIPTCPNetstack); ok {
+				s.flushPreTCPNetstackIngress(impl)
+			}
 		}
-		s.maybeStartConnectIPIngressLocked()
+		s.connectIPTCPInstallInflight.Add(-1)
+	} else {
+		ns = s.tcpNetstack
 	}
-	ns := s.tcpNetstack
 	s.mu.Unlock()
 	select {
 	case <-ctx.Done():
 		s.clearHTTPFallbackConsumedAfterGivingUp()
-		// Only tear down the CONNECT-IP plane if this invocation created the netstack: later TCP dials
-		// reuse tcpNetstack/ipConn; cancel before DialContext must not destroy an in-service session.
-		if netstackCreatedThisCall {
-			s.releaseOpenedConnectIPSessionIfAbandoned()
-		}
+		// Do not releaseOpenedConnectIPSessionIfAbandoned here: ctx is often a monitoring URL test
+		// with a ~5s deadline while the CONNECT-IP session is shared; teardown stranded real traffic.
 		return nil, context.Cause(ctx)
 	default:
 	}
-	return ns.DialContext(ctx, dest)
+	conn, err := ns.DialContext(ctx, dest)
+	if masqueConnectIPNetstackDebug() {
+		log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), err)
+	}
+	return conn, err
 }
 
 func (s *coreSession) dialDirectTCP(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -2741,9 +3023,14 @@ func (s *coreSession) dialTCPStreamAttempt(ctx context.Context, destination M.So
 	s.mu.Lock()
 	httpLayer := s.currentUDPHTTPLayer()
 	if s.templateTCP == nil {
-		raw := strings.TrimSpace(s.options.TemplateTCP)
+		port := int(s.options.ServerPort)
+		if port <= 0 {
+			port = 443
+		}
+		auth := net.JoinHostPort(strings.TrimSpace(s.options.Server), strconv.Itoa(port))
+		raw := ExpandMasqueHTTPSURI(s.options.TemplateTCP, auth)
 		if raw == "" {
-			raw = fmt.Sprintf("https://%s:%d/masque/tcp/{target_host}/{target_port}", s.options.Server, s.options.ServerPort)
+			raw = "https://" + auth + "/masque/tcp/{target_host}/{target_port}"
 		}
 		t, err := uritemplate.New(raw)
 		if err != nil {
@@ -3106,7 +3393,7 @@ type streamConn struct {
 	reader        io.ReadCloser
 	writer        io.WriteCloser
 	h2UploadPipe  *io.PipeReader // H2 CONNECT-stream upload half; Request body uses h2ExtendedConnectUploadBody noop Close
-	h2PipeWriteDL connDeadlines // write deadlines for h2 PipeWriter path (PipeWriter lacks SetWriteDeadline)
+	h2PipeWriteDL connDeadlines  // write deadlines for h2 PipeWriter path (PipeWriter lacks SetWriteDeadline)
 	ctx           context.Context
 	local         net.Addr
 	remote        net.Addr
@@ -3302,9 +3589,13 @@ func isTCPNetwork(network string) bool {
 }
 
 type connectIPPacketSession struct {
-	conn            *connectip.Conn
-	datagramCeiling int
-	pmtuState       *connectIPPMTUState
+	conn             *connectip.Conn
+	datagramCeiling  int
+	pmtuState        *connectIPPMTUState
+	profileLocalIPv4 string
+	profileLocalIPv6 string
+	// overlayH2 is true when CONNECT-IP uses HTTP/2 DATAGRAM capsules (no QUIC unreliable datagrams).
+	overlayH2 bool
 }
 
 func (s *connectIPPacketSession) ReadPacket(buffer []byte) (int, error) {
@@ -3398,8 +3689,11 @@ func classifyConnectIPErrorReason(err error) string {
 	if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
 		return "closed"
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return "timeout"
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {

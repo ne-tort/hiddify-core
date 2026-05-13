@@ -81,8 +81,9 @@ func (s *coreSession) maybeStartConnectIPIngressLocked() {
 	s.connectIPIngressSubsMu.Unlock()
 
 	hasTCPNetstack := s.tcpNetstack != nil
+	installInflight := s.connectIPTCPInstallInflight.Load() > 0
 
-	if nSubs == 0 && !hasTCPNetstack {
+	if nSubs == 0 && !hasTCPNetstack && !installInflight {
 		return
 	}
 
@@ -128,10 +129,11 @@ func (s *coreSession) maybeStopConnectIPIngressIfIdle() {
 
 	s.mu.Lock()
 	hasTCP := s.tcpNetstack != nil
+	inflight := s.connectIPTCPInstallInflight.Load() > 0
 	ipAlive := s.ipConn != nil
 	s.mu.Unlock()
 
-	if ipAlive && nSubs == 0 && !hasTCP {
+	if ipAlive && nSubs == 0 && !hasTCP && !inflight {
 		s.stopConnectIPIngressGracefully()
 	}
 }
@@ -228,8 +230,46 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			ns.injectInboundClone(pkt)
 			continue
 		}
+		if s.connectIPTCPInstallInflight.Load() > 0 {
+			s.enqueuePreTCPNetstackIngress(pkt)
+			continue
+		}
 		incConnectIPEngineDropReason("ingress_drop_no_consumer")
 	}
+}
+
+const preTCPNetstackIngressMax = 128
+
+func (s *coreSession) enqueuePreTCPNetstackIngress(pkt []byte) {
+	if len(pkt) == 0 {
+		return
+	}
+	dup := bytes.Clone(pkt)
+	s.preTCPIngressMu.Lock()
+	defer s.preTCPIngressMu.Unlock()
+	if len(s.preTCPIngressBuf) >= preTCPNetstackIngressMax {
+		incConnectIPEngineDropReason("pre_tcp_ingress_cap")
+		return
+	}
+	s.preTCPIngressBuf = append(s.preTCPIngressBuf, dup)
+}
+
+func (s *coreSession) flushPreTCPNetstackIngress(ns *connectIPTCPNetstack) {
+	if ns == nil {
+		return
+	}
+	s.preTCPIngressMu.Lock()
+	defer s.preTCPIngressMu.Unlock()
+	for _, p := range s.preTCPIngressBuf {
+		ns.injectInboundClone(p)
+	}
+	s.preTCPIngressBuf = s.preTCPIngressBuf[:0]
+}
+
+func (s *coreSession) clearPreTCPNetstackIngress() {
+	s.preTCPIngressMu.Lock()
+	defer s.preTCPIngressMu.Unlock()
+	s.preTCPIngressBuf = s.preTCPIngressBuf[:0]
 }
 
 func (s *coreSession) deliverIPv4UDPBridgedIngress(pkt []byte) bool {

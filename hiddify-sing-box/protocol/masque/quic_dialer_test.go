@@ -1,143 +1,95 @@
 package masque
 
 import (
-	"errors"
-	"io"
-	"net"
+	"context"
+	"syscall"
 	"testing"
-	"time"
+
+	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
+	"github.com/sagernet/sing/service"
 )
 
-type stubAddr string
-
-func (a stubAddr) Network() string { return "udp" }
-func (a stubAddr) String() string  { return string(a) }
-
-type stubConn struct {
-	readData      []byte
-	readErr       error
-	writeData     []byte
-	writeErr      error
-	closeErr      error
-	closed        bool
-	deadline      time.Time
-	readDeadline  time.Time
-	writeDeadline time.Time
-	localAddr     net.Addr
-	remoteAddr    net.Addr
+// testMasqueNetworkManager is a minimal adapter.NetworkManager for dialer bootstrap tests.
+type testMasqueNetworkManager struct {
+	autoDetect bool
 }
 
-func (s *stubConn) Read(p []byte) (int, error) {
-	if s.readErr != nil {
-		return 0, s.readErr
-	}
-	n := copy(p, s.readData)
-	return n, nil
+func (testMasqueNetworkManager) Start(adapter.StartStage) error { return nil }
+func (testMasqueNetworkManager) Close() error                   { return nil }
+func (testMasqueNetworkManager) Initialize([]adapter.RuleSet)  {}
+func (testMasqueNetworkManager) InterfaceFinder() control.InterfaceFinder {
+	return control.NewDefaultInterfaceFinder()
 }
-
-func (s *stubConn) Write(p []byte) (int, error) {
-	if s.writeErr != nil {
-		return 0, s.writeErr
-	}
-	s.writeData = append([]byte(nil), p...)
-	return len(p), nil
-}
-
-func (s *stubConn) Close() error {
-	s.closed = true
-	return s.closeErr
-}
-
-func (s *stubConn) LocalAddr() net.Addr {
-	return s.localAddr
-}
-
-func (s *stubConn) RemoteAddr() net.Addr {
-	return s.remoteAddr
-}
-
-func (s *stubConn) SetDeadline(t time.Time) error {
-	s.deadline = t
+func (testMasqueNetworkManager) UpdateInterfaces() error { return nil }
+func (testMasqueNetworkManager) DefaultNetworkInterface() *adapter.NetworkInterface {
 	return nil
 }
-
-func (s *stubConn) SetReadDeadline(t time.Time) error {
-	s.readDeadline = t
+func (testMasqueNetworkManager) NetworkInterfaces() []adapter.NetworkInterface { return nil }
+func (t testMasqueNetworkManager) AutoDetectInterface() bool                   { return t.autoDetect }
+func (testMasqueNetworkManager) AutoDetectInterfaceFunc() control.Func {
+	return func(network, address string, c syscall.RawConn) error { return nil }
+}
+func (testMasqueNetworkManager) ProtectFunc() control.Func {
+	return func(network, address string, c syscall.RawConn) error { return nil }
+}
+func (testMasqueNetworkManager) DefaultOptions() adapter.NetworkOptions { return adapter.NetworkOptions{} }
+func (testMasqueNetworkManager) RegisterAutoRedirectOutputMark(uint32) error { return nil }
+func (testMasqueNetworkManager) AutoRedirectOutputMark() uint32 { return 0 }
+func (testMasqueNetworkManager) AutoRedirectOutputMarkFunc() control.Func {
+	return func(network, address string, c syscall.RawConn) error { return nil }
+}
+func (testMasqueNetworkManager) NetworkMonitor() tun.NetworkUpdateMonitor { return nil }
+func (testMasqueNetworkManager) InterfaceMonitor() tun.DefaultInterfaceMonitor {
 	return nil
 }
+func (testMasqueNetworkManager) PackageManager() tun.PackageManager { return nil }
+func (testMasqueNetworkManager) NeedWIFIState() bool                { return false }
+func (testMasqueNetworkManager) WIFIState() adapter.WIFIState       { return adapter.WIFIState{} }
+func (testMasqueNetworkManager) UpdateWIFIState()                  {}
+func (testMasqueNetworkManager) ResetNetwork()                     {}
 
-func (s *stubConn) SetWriteDeadline(t time.Time) error {
-	s.writeDeadline = t
-	return nil
-}
-
-func TestConnectedPacketConnReadWriteAndDeadlines(t *testing.T) {
-	remote := stubAddr("198.51.100.10:443")
-	local := stubAddr("127.0.0.1:12345")
-	base := &stubConn{
-		readData:   []byte("ping"),
-		localAddr:  local,
-		remoteAddr: remote,
-	}
-	conn := &connectedPacketConn{Conn: base, remoteAddr: remote}
-
-	readBuf := make([]byte, 16)
-	n, addr, err := conn.ReadFrom(readBuf)
+func TestBuildQUICDialFuncUsesSingBoxDialerWhenAutoDetectInterface(t *testing.T) {
+	t.Parallel()
+	ctx := service.ContextWith[adapter.NetworkManager](
+		context.Background(),
+		testMasqueNetworkManager{autoDetect: true},
+	)
+	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
 	if err != nil {
-		t.Fatalf("read from connectedPacketConn: %v", err)
+		t.Fatalf("build QUIC dial: %v", err)
 	}
-	if got := string(readBuf[:n]); got != "ping" {
-		t.Fatalf("unexpected read payload: %q", got)
-	}
-	if addr == nil || addr.String() != remote.String() {
-		t.Fatalf("unexpected read addr: %v", addr)
-	}
-
-	written, err := conn.WriteTo([]byte("pong"), nil)
-	if err != nil {
-		t.Fatalf("write to connectedPacketConn: %v", err)
-	}
-	if written != 4 {
-		t.Fatalf("unexpected write length: %d", written)
-	}
-	if got := string(base.writeData); got != "pong" {
-		t.Fatalf("unexpected write payload: %q", got)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	if err := conn.SetDeadline(deadline); err != nil {
-		t.Fatalf("set deadline: %v", err)
-	}
-	if err := conn.SetReadDeadline(deadline); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	if err := conn.SetWriteDeadline(deadline); err != nil {
-		t.Fatalf("set write deadline: %v", err)
-	}
-	if base.deadline.IsZero() || base.readDeadline.IsZero() || base.writeDeadline.IsZero() {
-		t.Fatal("expected all deadline calls to be forwarded to underlying conn")
-	}
-
-	if got := conn.LocalAddr(); got == nil || got.String() != local.String() {
-		t.Fatalf("unexpected local addr forwarding: %v", got)
+	if quicDial == nil {
+		t.Fatal("expected non-nil QUIC dial when NetworkManager auto-detect is enabled (protected default dialer)")
 	}
 }
 
-func TestConnectedPacketConnCloseHandlesEOFAndNil(t *testing.T) {
-	conn := &connectedPacketConn{}
-	if err := conn.Close(); err != nil {
-		t.Fatalf("nil conn close must be no-op, got %v", err)
+func TestBuildQUICDialFuncTierAWhenNoNetworkManager(t *testing.T) {
+	t.Parallel()
+	quicDial, err := buildQUICDialFunc(context.Background(), option.DialerOptions{}, false)
+	if err != nil {
+		t.Fatalf("build QUIC dial: %v", err)
 	}
-
-	eofConn := &connectedPacketConn{Conn: &stubConn{closeErr: io.EOF}}
-	if err := eofConn.Close(); err != nil {
-		t.Fatalf("io.EOF must be normalized to success, got %v", err)
+	if quicDial != nil {
+		t.Fatal("expected nil QUIC dial override without NetworkManager (Tier A quic.DialAddr)")
 	}
+}
 
-	closeErr := errors.New("close failed")
-	failConn := &connectedPacketConn{Conn: &stubConn{closeErr: closeErr}}
-	err := failConn.Close()
-	if !errors.Is(err, closeErr) {
-		t.Fatalf("expected close error propagation, got %v", err)
+func TestBuildQUICDialFuncDomainResolverOnlyStaysTierAEvenWithAutoDetect(t *testing.T) {
+	t.Parallel()
+	ctx := service.ContextWith[adapter.NetworkManager](
+		context.Background(),
+		testMasqueNetworkManager{autoDetect: true},
+	)
+	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{
+		DomainResolver: &option.DomainResolveOptions{Server: "local-dns"},
+	}, true)
+	if err != nil {
+		t.Fatalf("build QUIC dial: %v", err)
+	}
+	if quicDial != nil {
+		t.Fatal("expected nil QUIC dial for domain_resolver-only options (Tier A), even with auto-detect")
 	}
 }

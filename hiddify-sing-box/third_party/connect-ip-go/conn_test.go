@@ -257,20 +257,20 @@ func (m *mockStream) Read(p []byte) (int, error) {
 	m.reading = m.reading[n:]
 	return n, nil
 }
-func (m *mockStream) CancelRead(quic.StreamErrorCode)   {}
+func (m *mockStream) CancelRead(quic.StreamErrorCode) {}
 func (m *mockStream) Write(p []byte) (n int, err error) {
 	if m.writeErr != nil {
 		return 0, m.writeErr
 	}
 	return len(p), nil
 }
-func (m *mockStream) Close() error                      { return nil }
-func (m *mockStream) CancelWrite(quic.StreamErrorCode)  {}
-func (m *mockStream) Context() context.Context          { return context.Background() }
-func (m *mockStream) SetWriteDeadline(time.Time) error  { return nil }
-func (m *mockStream) SetReadDeadline(time.Time) error   { return nil }
-func (m *mockStream) SetDeadline(time.Time) error       { return nil }
-func (m *mockStream) SendDatagram(data []byte) error    { return m.sendDatagramErr }
+func (m *mockStream) Close() error                     { return nil }
+func (m *mockStream) CancelWrite(quic.StreamErrorCode) {}
+func (m *mockStream) Context() context.Context         { return context.Background() }
+func (m *mockStream) SetWriteDeadline(time.Time) error { return nil }
+func (m *mockStream) SetReadDeadline(time.Time) error  { return nil }
+func (m *mockStream) SetDeadline(time.Time) error      { return nil }
+func (m *mockStream) SendDatagram(data []byte) error   { return m.sendDatagramErr }
 func (m *mockStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -562,6 +562,36 @@ func TestIncomingDatagrams(t *testing.T) {
 		// after processing the address assignment, this is a valid packet
 		require.NoError(t, conn.handleIncomingProxiedPacket(data))
 	})
+}
+
+// HTTP/3 peers may send proxied IP as RFC 9297 HTTP_DATAGRAM capsules on the CONNECT stream
+// instead of QUIC DATAGRAM frames; those must be merged into the same ingress path as ReceiveDatagram.
+func TestReadPacketHTTP3StreamHTTPDatagramCapsule(t *testing.T) {
+	packet, err := (&ipv4.Header{
+		Version:  4,
+		Len:      20,
+		TTL:      64,
+		Src:      net.IPv4(192, 168, 0, 10),
+		Dst:      net.IPv4(10, 1, 2, 3),
+		Protocol: 17,
+	}).Marshal()
+	require.NoError(t, err)
+	payload := append([]byte{0x00}, packet...)
+	var wire bytes.Buffer
+	wire.Write(quicvarint.Append(nil, uint64(capsuleTypeHTTPDatagram)))
+	wire.Write(quicvarint.Append(nil, uint64(len(payload))))
+	wire.Write(payload)
+
+	readChan := make(chan []byte, 1)
+	readChan <- wire.Bytes()
+	conn := newProxiedConn(&mockStream{toRead: readChan}, false)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	buf := make([]byte, len(packet))
+	n, err := conn.ReadPacketWithContext(context.Background(), buf)
+	require.NoError(t, err)
+	require.Equal(t, len(packet), n)
+	require.Equal(t, packet, buf[:n])
 }
 
 func FuzzIncomingDatagram(f *testing.F) {
@@ -1388,7 +1418,8 @@ func TestErrAfterCloseNeverNilWhenSignaled(t *testing.T) {
 
 func TestRoutesReturnsClonedSlice(t *testing.T) {
 	conn := &Conn{
-		closeChan:            make(chan struct{}),
+		closeChan:             make(chan struct{}),
+		controlCapsules:       true,
 		availableRoutesNotify: make(chan struct{}, 1),
 	}
 	conn.availableRoutes = []IPRoute{

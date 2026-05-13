@@ -99,6 +99,27 @@ func TestEnsureH2UDPTransportSetsDisableCompression(t *testing.T) {
 	require.True(t, tr2.DisableCompression)
 }
 
+func TestWarpMasqueH2AlternateDialHostSwapsSiblingIPv4(t *testing.T) {
+	require.Equal(t, "162.159.198.2", warpMasqueH2AlternateDialHost("162.159.198.1"))
+	require.Equal(t, "162.159.198.1", warpMasqueH2AlternateDialHost("162.159.198.2"))
+}
+
+func TestWarpMasqueH2AlternateDialHostRejectsNonSiblingIPv4(t *testing.T) {
+	require.Equal(t, "", warpMasqueH2AlternateDialHost("162.159.198.3"))
+	require.Equal(t, "", warpMasqueH2AlternateDialHost("engage.cloudflareclient.com"))
+	require.Equal(t, "", warpMasqueH2AlternateDialHost("2606:4700::1111"))
+}
+
+func TestH2DialHostCandidatesCfConnectIPForcesAlternateOnly(t *testing.T) {
+	got := h2DialHostCandidates("cf-connect-ip", "162.159.198.1", "162.159.198.2")
+	require.Equal(t, []string{"162.159.198.2"}, got)
+}
+
+func TestH2DialHostCandidatesNonCfKeepsPrimaryThenAlternate(t *testing.T) {
+	got := h2DialHostCandidates("connect-ip", "162.159.198.1", "162.159.198.2")
+	require.Equal(t, []string{"162.159.198.1", "162.159.198.2"}, got)
+}
+
 func TestParseMasqueHTTPDatagramUDPZeroContext(t *testing.T) {
 	p, ok, err := ParseMasqueHTTPDatagramUDP([]byte{0, 'a', 'b'})
 	require.NoError(t, err)

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv4"
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv6"
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
+	"github.com/sagernet/gvisor/pkg/tcpip/transport/icmp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
 	M "github.com/sagernet/sing/common/metadata"
@@ -31,6 +34,13 @@ import (
 // returns tcpip.ErrNoBufferSpace and drops the packet. TCP-over-connect-ip egress can
 // burst faster than WriteNotify drains; keep headroom beyond the old 4096 default.
 const connectIPLinkOutboundQueueSlots = 65536
+
+// connectIPTCPNetstackNIC is the sole gVisor NIC for CONNECT-IP TCP (parity with sing-tun DefaultNIC).
+const connectIPTCPNetstackNIC tcpip.NICID = 1
+
+func masqueConnectIPNetstackDebug() bool {
+	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
+}
 
 var DefaultTCPNetstackFactory TCPNetstackFactory = defaultTCPNetstackFactory()
 
@@ -50,9 +60,12 @@ type TCPNetstackFactory interface {
 type connectIPTCPNetstackFactory struct{}
 
 // connectIPTCPNetstackLocalPrefixWait bounds LocalPrefixes on the CONNECT-IP conn before falling back
-// to synthetic 198.18.0.1. Too short a window on slow Docker/QUIC yields stranded TCP dials (SOCKS rep=1).
+// to synthetic 198.18.0.1. warp_masque bootstrap (transport.go) already runs passive + RequestAddresses
+// waits; repeating a long block here kept coreSession.mu held through dialConnectIPTCP's New() and
+// delayed connectIPIngress — early SYN-ACKs were dropped. Default tail wait balances cold edges
+// (late ADDRESS_ASSIGN) vs. startup latency; override with MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC.
 func connectIPTCPNetstackLocalPrefixWait() time.Duration {
-	const defaultWait = 8 * time.Second
+	const defaultWait = 6 * time.Second
 	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC"))
 	if raw == "" {
 		return defaultWait
@@ -64,15 +77,107 @@ func connectIPTCPNetstackLocalPrefixWait() time.Duration {
 	return time.Duration(sec) * time.Second
 }
 
+// connectIPNetstackLocalPrefixWaitForSession bounds LocalPrefixes blocking when the CONNECT-IP
+// snapshot is empty. warp_masque bootstrap may already have waited tens of seconds for
+// ADDRESS_ASSIGN; repeating the full env-tuned wait here only defers gVisor attach while ingress
+// buffers early TCP segments (first-dial races, monitoring "not ready"). When the device profile
+// carries a sane tunnel-local (same fields as parseProfileInterfaceAddress), prefer a short tail
+// wait: late ADDRESS_ASSIGN is still merged below and via ReconcileLocalFromAssignedPrefixes.
+func connectIPNetstackLocalPrefixWaitForSession(profileV4, profileV6 netip.Addr) time.Duration {
+	wait := connectIPTCPNetstackLocalPrefixWait()
+	hasProfile := profileV4.Is4() || (profileV6.Is6() && !profileV6.Is4In6())
+	if !hasProfile {
+		return wait
+	}
+	const capWhenProfileTrusted = 2 * time.Second
+	if wait > capWhenProfileTrusted {
+		return capWhenProfileTrusted
+	}
+	return wait
+}
+
+// bogusProfileMasqueIfaceAddr reports addresses that must not be used as the gVisor
+// CONNECT-IP "client" source: they match well-known Cloudflare edge/dataplane anycast ranges,
+// not WARP tunnel interface IPs from device profile (mis-filled JSON / confused fields).
+func bogusProfileMasqueIfaceAddr(addr netip.Addr) bool {
+	if !addr.IsValid() || addr.IsUnspecified() {
+		return true
+	}
+	if addr.Is4() {
+		b := addr.As4()
+		switch {
+		case b[0] == 162 && b[1] >= 158 && b[1] <= 159:
+			return true
+		case b[0] == 172 && b[1] >= 64 && b[1] <= 71:
+			return true
+		case b[0] == 104 && b[1] >= 16 && b[1] <= 31:
+			return true
+		default:
+			return false
+		}
+	}
+	if addr.Is6() && !addr.Is4In6() {
+		if p, err := netip.ParsePrefix("2606:4700::/32"); err == nil && p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseProfileInterfaceAddress(raw string) netip.Addr {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return netip.Addr{}
+	}
+	// Cloudflare profile fields usually contain plain IPs, but tolerate CIDR payloads.
+	if strings.Contains(raw, "/") {
+		if pfx, err := netip.ParsePrefix(raw); err == nil {
+			addr := pfx.Addr().Unmap()
+			if addr.IsValid() && !addr.IsUnspecified() {
+				return addr
+			}
+		}
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Addr{}
+	}
+	addr = addr.Unmap()
+	if !addr.IsValid() || addr.IsUnspecified() {
+		return netip.Addr{}
+	}
+	if bogusProfileMasqueIfaceAddr(addr) {
+		return netip.Addr{}
+	}
+	return addr
+}
+
+func connectIPSessionProfileLocalIPv4(session IPPacketSession) string {
+	if s, ok := session.(*connectIPPacketSession); ok {
+		return s.profileLocalIPv4
+	}
+	return ""
+}
+
+func connectIPSessionProfileLocalIPv6(session IPPacketSession) string {
+	if s, ok := session.(*connectIPPacketSession); ok {
+		return s.profileLocalIPv6
+	}
+	return ""
+}
+
 func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSession) (TCPNetstack, error) {
 	// Align with masque server route advertisements (LocalPrefixes) so CONNECT-IP TCP works when
 	// lookup is empty/timed-out; mismatched synthetic locals (198.18.0.1) strand TCP (SOCKS rep=1).
-	localV4 := netip.MustParseAddr("198.18.0.1")
-	localV6 := netip.MustParseAddr("fd00::1")
+	defaultV4 := netip.MustParseAddr("198.18.0.1")
+	defaultV6 := netip.MustParseAddr("fd00::1")
+	localV4 := defaultV4
+	localV6 := defaultV6
 	mtu := 1500
 	ceilingMax := connectIPDatagramCeilingMax()
-	foundV4 := false
-	foundV6 := false
+	profileV4 := parseProfileInterfaceAddress(connectIPSessionProfileLocalIPv4(session))
+	profileV6 := parseProfileInterfaceAddress(connectIPSessionProfileLocalIPv6(session))
+	var prefixV4, prefixV6 netip.Addr
 	if connectIPSession, ok := session.(*connectIPPacketSession); ok && connectIPSession.conn != nil {
 		if connectIPSession.datagramCeiling > 0 {
 			if connectIPSession.datagramCeiling < 1280 {
@@ -82,18 +187,46 @@ func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSe
 			} else {
 				mtu = connectIPSession.datagramCeiling
 			}
+			// Proxied IPv4/IPv6 over HTTP/3 uses QUIC unreliable DATAGRAM. quic-go's packet packer can drop
+			// frames that do not fit the remaining coalesced packet budget (quic_datagram_packer_oversize_drop_total),
+			// which loses TCP segments without always surfacing DatagramTooLargeError for PTB. Keep the virtual
+			// link MTU below the CONNECT-IP ceiling so full IP frames still fit with context-id + QUIC/crypto
+			// overhead. HTTP/2 CONNECT-IP uses stream capsules only — no QUIC datagram slack (see overlayH2).
+			if !connectIPSession.overlayH2 {
+				const connectIPTCPHTTP3DatagramSlack = 192
+				if mtu > connectIPTCPHTTP3DatagramSlack+576 {
+					mtu -= connectIPTCPHTTP3DatagramSlack
+				}
+			}
 		}
 		// Prefer a non-blocking snapshot: LocalPrefixes waits for the next notify; if the server
 		// already sent ADDRESS_ASSIGN before we subscribe, blocking would miss the signal and
 		// time out into a wrong synthetic source (SOCKS rep=1).
 		prefixes := connectIPSession.conn.CurrentAssignedPrefixes()
+		if masqueConnectIPNetstackDebug() {
+			w := connectIPTCPNetstackLocalPrefixWait()
+			if len(prefixes) == 0 {
+				w = connectIPNetstackLocalPrefixWaitForSession(profileV4, profileV6)
+			}
+			log.Printf("masque connect_ip netstack: CurrentAssignedPrefixes count=%d local_prefix_wait_sec=%d", len(prefixes), int(w.Seconds()))
+		}
 		var err error
 		if len(prefixes) == 0 {
-			prefixCtx, cancel := context.WithTimeout(ctx, connectIPTCPNetstackLocalPrefixWait())
-			prefixes, err = connectIPSession.conn.LocalPrefixes(prefixCtx)
-			cancel()
+			// Always wait when the snapshot is empty: profile interface v4/v6 from the device API is not
+			// always the CONNECT-IP packet-plane host (see parseProfileInterfaceAddress). dialConnectIPTCP
+			// bumps connectIPTCPInstallInflight so ingress drains ReadPacket while this runs.
+			wait := connectIPNetstackLocalPrefixWaitForSession(profileV4, profileV6)
+			prefixes, err = waitForNonEmptyAssignedPrefixes(connectIPSession.conn, wait)
+			if masqueConnectIPNetstackDebug() {
+				log.Printf("masque connect_ip netstack: LocalPrefixes after wait count=%d err=%v", len(prefixes), err)
+			}
+			// waitForNonEmptyAssignedPrefixes may return (nil, deadline) while ADDRESS_ASSIGN already
+			// landed on the conn (notify vs. snapshot ordering). Always merge a fresh snapshot.
+			if len(prefixes) == 0 {
+				prefixes = connectIPSession.conn.CurrentAssignedPrefixes()
+			}
 		}
-		if err == nil {
+		if len(prefixes) > 0 {
 			for _, prefix := range prefixes {
 				if !prefix.IsValid() {
 					continue
@@ -102,22 +235,56 @@ func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSe
 				if !addr.IsValid() {
 					continue
 				}
-				if addr.Is4() && !foundV4 {
-					localV4 = addr
-					foundV4 = true
+				if addr.Is4() && !prefixV4.IsValid() {
+					prefixV4 = addr
 				}
-				if addr.Is6() && !foundV6 {
-					localV6 = addr
-					foundV6 = true
+				if addr.Is6() && !addr.Is4In6() && !prefixV6.IsValid() {
+					prefixV6 = addr
 				}
 			}
 		}
 	}
-	return newConnectIPTCPNetstack(ctx, session, connectIPTCPNetstackOptions{
+	// Inbound CONNECT-IP payloads are addressed to what the edge announced in ADDRESS_ASSIGN.
+	// Device profile interface IPs usually match, but when they differ, using only the profile
+	// leaves gVisor with no address matching the wire dst — SYN-ACK never binds to a socket.
+	if prefixV4.Is4() {
+		localV4 = prefixV4
+	} else if profileV4.Is4() {
+		localV4 = profileV4
+	}
+	if prefixV6.Is6() {
+		localV6 = prefixV6
+	} else if profileV6.Is6() {
+		localV6 = profileV6
+	}
+	if masqueConnectIPNetstackDebug() {
+		log.Printf("masque connect_ip netstack: chosen localIPv4=%s localIPv6=%s mtu=%d prefixV4=%v prefixV6=%v profileV4=%v profileV6=%v",
+			localV4, localV6, mtu, prefixV4.IsValid(), prefixV6.IsValid(), profileV4.IsValid(), profileV6.IsValid())
+	}
+	ns, err := newConnectIPTCPNetstack(ctx, session, connectIPTCPNetstackOptions{
 		LocalIPv4: localV4,
 		LocalIPv6: localV6,
 		MTU:       mtu,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if cs, ok := session.(*connectIPPacketSession); ok && cs.conn != nil {
+		ns.ReconcileLocalFromAssignedPrefixes(cs.conn.CurrentAssignedPrefixes())
+	}
+	return ns, nil
+}
+
+// syntheticConnectIPPlaceholder reports stack bootstrap placeholders replaced when ADDRESS_ASSIGN
+// or profile provides a real tunnel local. These are safe to RemoveAddress during reconcile.
+func syntheticConnectIPPlaceholder(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	if addr == netip.MustParseAddr("198.18.0.1") {
+		return true
+	}
+	return addr == netip.MustParseAddr("fd00::1")
 }
 
 func prefixPreferredAddress(prefix netip.Prefix) netip.Addr {
@@ -144,6 +311,9 @@ type connectIPTCPNetstack struct {
 	gStack       *stack.Stack
 	endpoint     *channel.Endpoint
 	notifyHandle *channel.NotificationHandle
+	reconcileMu  sync.Mutex
+	installedV4  netip.Addr
+	installedV6  netip.Addr
 	closeOnce    sync.Once
 	failOnce     sync.Once
 	closed       atomic.Bool
@@ -165,31 +335,150 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 		opts.LocalIPv6 = netip.MustParseAddr("fd00::1")
 	}
 	gStack := stack.New(stack.Options{
-		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
-		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol},
-		HandleLocal:        true,
+		NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		// ICMPv4/v6: CONNECT-IP PMTU injects ICMP PTB into the stack; parity with replace/sing-tun/stack_gvisor.
+		TransportProtocols: []stack.TransportProtocolFactory{
+			tcp.NewProtocol,
+			udp.NewProtocol,
+			icmp.NewProtocol4,
+			icmp.NewProtocol6,
+		},
+		// Omit HandleLocal: use stack default (false), matching replace/sing-tun NewGVisorStackWithOptions.
 	})
 	endpoint := channel.New(connectIPLinkOutboundQueueSlots, uint32(opts.MTU), "")
-	if err := gStack.CreateNIC(1, endpoint); err != nil {
+	if err := gStack.CreateNIC(connectIPTCPNetstackNIC, endpoint); err != nil {
 		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
 	}
-	if err := addStackAddress(gStack, 1, opts.LocalIPv4); err != nil {
+	if err := addStackAddress(gStack, int(connectIPTCPNetstackNIC), opts.LocalIPv4); err != nil {
 		return nil, errors.Join(ErrTCPStackInit, err)
 	}
-	if err := addStackAddress(gStack, 1, opts.LocalIPv6); err != nil {
+	if err := addStackAddress(gStack, int(connectIPTCPNetstackNIC), opts.LocalIPv6); err != nil {
 		return nil, errors.Join(ErrTCPStackInit, err)
 	}
-	gStack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: 1})
-	gStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: 1})
+	gStack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: connectIPTCPNetstackNIC})
+	gStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: connectIPTCPNetstackNIC})
+
+	// Match replace/sing-tun NewGVisorStackWithOptions: without promiscuous/spoofing, inbound IPv4
+	// can be dropped if ADDRESS_ASSIGN (async reconcile) changes the NIC primary while an existing
+	// TCP flow still receives segments destined to the pre-reconcile local (TLS hangs after handshake).
+	if err := gStack.SetSpoofing(connectIPTCPNetstackNIC, true); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
+	if err := gStack.SetPromiscuousMode(connectIPTCPNetstackNIC, true); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
+	sackOpt := tcpip.TCPSACKEnabled(true)
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackOpt); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
+	modRxOpt := tcpip.TCPModerateReceiveBufferOption(true)
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &modRxOpt); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
+	if runtime.GOOS == "windows" {
+		tcpRecoveryOpt := tcpip.TCPRecovery(0)
+		if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRecoveryOpt); err != nil {
+			return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+		}
+	}
+	tcpRXBufOpt := tcpip.TCPReceiveBufferSizeRangeOption{
+		Min:     tcp.MinBufferSize,
+		Default: tcp.DefaultSendBufferSize,
+		Max:     8 << 20,
+	}
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRXBufOpt); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
+	tcpTXBufOpt := tcpip.TCPSendBufferSizeRangeOption{
+		Min:     tcp.MinBufferSize,
+		Default: tcp.DefaultReceiveBufferSize,
+		Max:     6 << 20,
+	}
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpTXBufOpt); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
 
 	s := &connectIPTCPNetstack{
-		session:  session,
-		gStack:   gStack,
-		endpoint: endpoint,
-		done:     make(chan struct{}),
+		session:     session,
+		gStack:      gStack,
+		endpoint:    endpoint,
+		done:        make(chan struct{}),
+		installedV4: opts.LocalIPv4,
+		installedV6: opts.LocalIPv6,
 	}
 	s.notifyHandle = endpoint.AddNotify(s)
 	return s, nil
+}
+
+// ReconcileLocalFromAssignedPrefixes updates gVisor NIC addresses when the peer later emits
+// ADDRESS_ASSIGN: connect-ip-go then enforces incoming dst ∈ assigned; if the netstack was
+// bootstrapped from profile/synthetic locals, SYN-ACK would otherwise be dropped in ReadPacket.
+func (s *connectIPTCPNetstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
+	if s == nil || len(prefixes) == 0 {
+		return
+	}
+	if s.closed.Load() {
+		return
+	}
+	if err, ok := s.terminalErr.Load().(error); ok && err != nil {
+		return
+	}
+	var wantV4, wantV6 netip.Addr
+	for _, prefix := range prefixes {
+		if !prefix.IsValid() {
+			continue
+		}
+		addr := prefixPreferredAddress(prefix)
+		if !addr.IsValid() {
+			continue
+		}
+		if addr.Is4() && !wantV4.IsValid() {
+			wantV4 = addr
+		}
+		if addr.Is6() && !addr.Is4In6() && !wantV6.IsValid() {
+			wantV6 = addr
+		}
+	}
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	if wantV4.Is4() && wantV4 != s.installedV4 {
+		if err := addStackAddress(s.gStack, int(connectIPTCPNetstackNIC), wantV4); err != nil {
+			if masqueConnectIPNetstackDebug() {
+				log.Printf("masque connect_ip netstack: reconcile add IPv4 want=%s err=%v", wantV4, err)
+			}
+			low := strings.ToLower(err.Error())
+			if !strings.Contains(low, "duplicate") && !strings.Contains(low, "already") {
+				return
+			}
+		}
+		// Never remove a non-synthetic prior local (e.g. profile 172.16.x while ADDRESS_ASSIGN adds
+		// another); removing it strands established TCP (TLS hangs after handshake).
+		if s.installedV4.Is4() && s.installedV4 != wantV4 && syntheticConnectIPPlaceholder(s.installedV4) {
+			_ = s.gStack.RemoveAddress(connectIPTCPNetstackNIC, tcpip.AddrFrom4(s.installedV4.As4()))
+		}
+		s.installedV4 = wantV4
+		if masqueConnectIPNetstackDebug() {
+			log.Printf("masque connect_ip netstack: reconciled local IPv4 to %s (peer ADDRESS_ASSIGN)", wantV4)
+		}
+	}
+	if wantV6.Is6() && !wantV6.Is4In6() && wantV6 != s.installedV6 {
+		if err := addStackAddress(s.gStack, int(connectIPTCPNetstackNIC), wantV6); err != nil {
+			if masqueConnectIPNetstackDebug() {
+				log.Printf("masque connect_ip netstack: reconcile add IPv6 want=%s err=%v", wantV6, err)
+			}
+			low := strings.ToLower(err.Error())
+			if !strings.Contains(low, "duplicate") && !strings.Contains(low, "already") {
+				return
+			}
+		}
+		if s.installedV6.Is6() && !s.installedV6.Is4In6() && s.installedV6 != wantV6 && syntheticConnectIPPlaceholder(s.installedV6) {
+			_ = s.gStack.RemoveAddress(connectIPTCPNetstackNIC, tcpip.AddrFrom16(s.installedV6.As16()))
+		}
+		s.installedV6 = wantV6
+		if masqueConnectIPNetstackDebug() {
+			log.Printf("masque connect_ip netstack: reconciled local IPv6 to %s (peer ADDRESS_ASSIGN)", wantV6)
+		}
+	}
 }
 
 func (s *connectIPTCPNetstack) injectInboundClone(data []byte) {
@@ -299,13 +588,13 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 	a := endpoint.Addr()
 	if a.Is4() {
 		return tcpip.FullAddress{
-			NIC:  1,
+			NIC:  connectIPTCPNetstackNIC,
 			Addr: tcpip.AddrFrom4(a.As4()),
 			Port: endpoint.Port(),
 		}, ipv4.ProtocolNumber
 	}
 	return tcpip.FullAddress{
-		NIC:  1,
+		NIC:  connectIPTCPNetstackNIC,
 		Addr: tcpip.AddrFrom16(a.As16()),
 		Port: endpoint.Port(),
 	}, ipv6.ProtocolNumber
@@ -429,7 +718,7 @@ func (s *connectIPTCPNetstack) Close() error {
 		close(s.done)
 		s.endpoint.RemoveNotify(s.notifyHandle)
 		s.endpoint.Close()
-		s.gStack.RemoveNIC(1)
+		s.gStack.RemoveNIC(connectIPTCPNetstackNIC)
 		s.gStack.Close()
 		closeErr = s.session.Close()
 	})

@@ -13,20 +13,85 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 var newQUICOutboundDialer = dialer.New
+
+// dialerOptionsRequireCustomMasqueQUICPacketConn reports whether MASQUE must dial QUIC through
+// sing-box dialer (connected UDP + quic.Transport). When false, transport/masque uses quic.DialAddr
+// (unbound *net.UDPConn, Tier A). WARP configs often set only domain_resolver; that does not need a
+// custom PacketConn, and the connected-socket path breaks CONNECT-IP TCP/TLS on some live paths.
+func dialerOptionsRequireCustomMasqueQUICPacketConn(o option.DialerOptions) bool {
+	if o.Detour != "" {
+		return true
+	}
+	if o.BindInterface != "" || o.BindAddressNoPort {
+		return true
+	}
+	if o.Inet4BindAddress != nil || o.Inet6BindAddress != nil {
+		return true
+	}
+	if o.ProtectPath != "" || o.RoutingMark != 0 || o.NetNs != "" {
+		return true
+	}
+	if o.UDPFragment != nil {
+		return true
+	}
+	if o.TCPFastOpen {
+		return true
+	}
+	if o.NetworkStrategy != nil {
+		return true
+	}
+	if len(o.NetworkType) > 0 || len(o.FallbackNetworkType) > 0 || o.FallbackDelay != 0 {
+		return true
+	}
+	return false
+}
+
+// masqueBootstrapShouldUseSingBoxDefaultDialer mirrors common/dialer/default.go: when
+// NetworkManager.AutoDetectInterface() is enabled, NewDefault attaches ProtectFunc or
+// AutoDetectInterfaceFunc so process sockets bypass the virtual TUN default route.
+// MASQUE previously used quic.DialAddr / net.Dialer for empty DialerOptions (Tier A),
+// skipping those hooks and causing traffic to the MASQUE server to recurse through
+// the same tunnel (QUIC timeouts, DNS hangs).
+//
+// Only applies when the user left DialerOptions at defaults (strictly empty). If they
+// set fields such as domain_resolver without detour, we keep Tier A per historical MASQUE behavior.
+func masqueBootstrapShouldUseSingBoxDefaultDialer(ctx context.Context, options option.DialerOptions) bool {
+	if ctx == nil {
+		return false
+	}
+	if !reflect.DeepEqual(options, option.DialerOptions{}) {
+		return false
+	}
+	nm := service.FromContext[adapter.NetworkManager](ctx)
+	if nm == nil {
+		return false
+	}
+	return nm.AutoDetectInterface()
+}
 
 // buildMasqueTCPDialFunc wires sing-box TCP dialing (detour, routing) for MASQUE HTTP/2 overlay paths.
 func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, remoteIsDomain bool) (TM.MasqueTCPDialFunc, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(options)
+	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
+	if !requireCustom && !forceProtect {
+		return func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{}
+			return d.DialContext(ctx, network, address)
+		}, nil
 	}
 	var (
 		outboundDialer N.Dialer
@@ -42,7 +107,7 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 		outboundDialer, err = newQUICOutboundDialer(ctx, options, remoteIsDomain)
 	}()
 	if err != nil {
-		if !reflect.DeepEqual(options, option.DialerOptions{}) {
+		if !reflect.DeepEqual(options, option.DialerOptions{}) || requireCustom {
 			return nil, E.Cause(err, "initialize MASQUE TCP dialer")
 		}
 		outboundDialer = nil
@@ -67,6 +132,11 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(options)
+	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
+	if !requireCustom && !forceProtect {
+		return nil, nil
+	}
 	var (
 		outboundDialer N.Dialer
 		err            error
@@ -81,13 +151,16 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 		outboundDialer, err = newQUICOutboundDialer(ctx, options, remoteIsDomain)
 	}()
 	if err != nil {
-		if reflect.DeepEqual(options, option.DialerOptions{}) {
-			return nil, nil
+		if requireCustom {
+			return nil, E.Cause(err, "initialize MASQUE QUIC dialer")
 		}
-		return nil, E.Cause(err, "initialize MASQUE QUIC dialer")
+		return nil, nil
 	}
 	if outboundDialer == nil {
-		return nil, E.New("initialize MASQUE QUIC dialer: got nil dialer")
+		if requireCustom {
+			return nil, E.New("initialize MASQUE QUIC dialer: got nil dialer")
+		}
+		return nil, nil
 	}
 	return func(ctx context.Context, address string, tlsConf *tls.Config, quicConf *quic.Config) (*quic.Conn, error) {
 		destination := M.ParseSocksaddr(address)

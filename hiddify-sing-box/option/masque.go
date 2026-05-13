@@ -65,13 +65,19 @@ type MasqueEndpointOptions struct {
 	ServerOptions
 	DialerOptions
 
-	TransportMode         string `json:"transport_mode,omitempty"`
-	Mode                  string `json:"mode,omitempty"`
-	TemplateUDP           string `json:"template_udp,omitempty"`
-	TemplateIP            string `json:"template_ip,omitempty"`
+	TransportMode string `json:"transport_mode,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	// TemplateUDP is a URI template for CONNECT-UDP. Use a full https://… URL, or a path-only form
+	// starting with / (e.g. /masque/udp/{target_host}/{target_port}); path-only templates get
+	// https://<server>:<server_port> (client) or https://<derived listen authority> (server) prefixed.
+	// Empty uses default /masque/udp/{target_host}/{target_port}.
+	TemplateUDP string `json:"template_udp,omitempty"`
+	// TemplateIP is a URI template for CONNECT-IP; same path-only rule as TemplateUDP. Empty defaults to /masque/ip.
+	TemplateIP string `json:"template_ip,omitempty"`
 	ConnectIPScopeTarget  string `json:"connect_ip_scope_target,omitempty"`
 	ConnectIPScopeIPProto uint8  `json:"connect_ip_scope_ipproto,omitempty"`
-	TemplateTCP           string `json:"template_tcp,omitempty"`
+	// TemplateTCP is a URI template for CONNECT-stream TCP; same path-only rule. Empty defaults to /masque/tcp/{target_host}/{target_port}.
+	TemplateTCP string `json:"template_tcp,omitempty"`
 	FallbackPolicy        string `json:"fallback_policy,omitempty"`
 	TCPMode               string `json:"tcp_mode,omitempty"`
 	// TCPTransport selects how outbound TCP is carried:
@@ -129,6 +135,12 @@ type WarpMasqueProfileOptions struct {
 	DataplanePortStrategy string `json:"dataplane_port_strategy,omitempty"`
 	// MasqueECDSAPrivateKey is the enrolled MASQUE device key (EC SEC1 DER), base64/std — same semantics as `private_key` in usque/config.json after `usque register`. Required for Cloudflare dataplane parity (mTLS leaf). WireGuard PrivateKey alone is insufficient.
 	MasqueECDSAPrivateKey string `json:"masque_ecdsa_private_key,omitempty"`
+	// AutoEnrollMasque: nil or true — when device tunnel is MASQUE and masque_ecdsa_private_key is empty, generate ECDSA and PATCH enroll (usque parity). Explicit false skips auto enroll (labs / manual key only).
+	AutoEnrollMasque *bool `json:"auto_enroll_masque,omitempty"`
+	// WarpMasqueStatePath: JSON file for auth_token, id, wireguard private_key, masque_ecdsa_private_key. Empty uses env HIDDIFY_WARP_MASQUE_DEVICE_STATE or OS user config dir sing-box/warp_masque_device_state.json.
+	WarpMasqueStatePath string `json:"warp_masque_state_path,omitempty"`
+	// MasqueDeviceName optional name field in PATCH body during MASQUE key enrollment.
+	MasqueDeviceName string `json:"masque_device_name,omitempty"`
 	// EndpointPublicKey overrides peers[0].public_key PEM for TLS peer pinning when non-empty (advanced).
 	EndpointPublicKey string `json:"endpoint_public_key,omitempty"`
 	// DisableMasquePeerPublicKeyPin skips ECDSA pinning of the MASQUE server leaf (dangerous outside labs).

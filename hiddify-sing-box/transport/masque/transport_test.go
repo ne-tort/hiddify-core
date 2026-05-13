@@ -234,6 +234,20 @@ func TestWarpMasqueConnectStreamBearerToken(t *testing.T) {
 	if got := warpMasqueConnectStreamBearerToken(ClientOptions{ServerToken: "a", WarpMasqueDeviceBearerToken: "b"}); got != "a" {
 		t.Fatalf("prefer server_token: got %q", got)
 	}
+	warpCert := tls.Certificate{Certificate: [][]byte{[]byte{0x30, 0x03, 0x01, 0x02, 0x03}}}
+	if got := warpMasqueConnectStreamBearerToken(ClientOptions{
+		WarpMasqueClientCert:        warpCert,
+		WarpMasqueDeviceBearerToken: "device-token",
+	}); got != "" {
+		t.Fatalf("WARP mTLS must omit device bearer on connect-stream; got %q", got)
+	}
+	if got := warpMasqueConnectStreamBearerToken(ClientOptions{
+		WarpMasqueClientCert:        warpCert,
+		ServerToken:                 "srv",
+		WarpMasqueDeviceBearerToken: "device",
+	}); got != "srv" {
+		t.Fatalf("server_token must win with WARP cert; got %q", got)
+	}
 }
 
 func TestResolveEntryHopNoEntryRejected(t *testing.T) {
@@ -641,6 +655,45 @@ func TestBuildTemplatesDefaultsServerPortTo443WhenZero(t *testing.T) {
 	}
 	if got := tcp.Raw(); !strings.Contains(got, "https://example.com:443/masque/tcp/") {
 		t.Fatalf("unexpected tcp template default server_port wiring: %s", got)
+	}
+}
+
+func TestBuildTemplatesWarpMasqueUsqueConnectIPURL(t *testing.T) {
+	_, ip, _, err := buildTemplates(ClientOptions{
+		Server:                "engage.cloudflareclient.com",
+		ServerPort:            443,
+		WarpConnectIPProtocol: "cf-connect-ip",
+	})
+	if err != nil {
+		t.Fatalf("buildTemplates: %v", err)
+	}
+	if ip == nil {
+		t.Fatal("expected ip template")
+	}
+	if got := ip.Raw(); got != "https://cloudflareaccess.com" {
+		t.Fatalf("CONNECT-IP template must match usque internal.ConnectURI, got %q", got)
+	}
+}
+
+func TestApplyWarpMasqueHTTP3TransportFieldsCfConnectIPEnablesLegacy276(t *testing.T) {
+	tr := &http3.Transport{}
+	applyWarpMasqueHTTP3TransportFields(tr, ClientOptions{
+		WarpMasqueLegacyH3Extras: false,
+		WarpConnectIPProtocol:    "cf-connect-ip",
+	})
+	if tr.AdditionalSettings == nil || tr.AdditionalSettings[cloudflareLegacyH3DatagramSettingID] != 1 {
+		t.Fatalf("expected legacy H3 datagram setting for cf-connect-ip, got %#v", tr.AdditionalSettings)
+	}
+	if !tr.DisableCompression {
+		t.Fatal("expected DisableCompression for WARP H3 extras path")
+	}
+}
+
+func TestApplyWarpMasqueHTTP3TransportFieldsNoopWithoutExtrasOrCf(t *testing.T) {
+	tr := &http3.Transport{}
+	applyWarpMasqueHTTP3TransportFields(tr, ClientOptions{})
+	if len(tr.AdditionalSettings) > 0 {
+		t.Fatalf("unexpected AdditionalSettings: %#v", tr.AdditionalSettings)
 	}
 }
 

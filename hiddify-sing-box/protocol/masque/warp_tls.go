@@ -2,6 +2,7 @@ package masque
 
 import (
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -16,6 +17,24 @@ import (
 )
 
 const warpMasqueClientCertTTL = 24 * time.Hour
+
+// GenerateWarpMasqueECDSAKeyPair creates a P-256 key pair for MASQUE mTLS enrollment.
+// Returns masque_ecdsa_private_key encoding (base64 EC SEC1 DER) for the profile and PKIX DER of the public key for PATCH /reg/{id} (same as usque).
+func GenerateWarpMasqueECDSAKeyPair() (sec1Base64 string, publicKeyPKIX []byte, err error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", nil, err
+	}
+	sec1DER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return "", nil, err
+	}
+	pkixDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		return "", nil, err
+	}
+	return base64.StdEncoding.EncodeToString(sec1DER), pkixDER, nil
+}
 
 // ParseWarpMasqueECDSAPrivateKey parses enrolled MASQUE device key material (matches usque/config.json private_key encoding: base64(EC SEC1 DER), or PEM block).
 func ParseWarpMasqueECDSAPrivateKey(raw string) (*ecdsa.PrivateKey, error) {
@@ -111,7 +130,12 @@ func WarpMasqueTLSPackageFromProfile(options option.WarpMasqueEndpointOptions, b
 	}
 	pin, err = ParseWarpMasquePeerPublicKey(peerBlob)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		// Bootstrap peer.public_key from Cloudflare device profile is typically WireGuard (Curve25519),
+		// not PKIX ECDSA; MASQUE server pin applies only when the blob is ECDSA PKIX or user sets endpoint_public_key.
+		if strings.TrimSpace(options.Profile.EndpointPublicKey) != "" {
+			return tls.Certificate{}, nil, E.Cause(err, "warp_masque: invalid profile.endpoint_public_key")
+		}
+		pin, err = nil, nil
 	}
 	if options.Profile.DisableMasquePeerPublicKeyPin {
 		pin = nil

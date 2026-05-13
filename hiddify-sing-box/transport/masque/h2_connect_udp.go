@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -593,26 +595,96 @@ func (s *coreSession) ensureH2UDPTransport(ctx context.Context) (*http2.Transpor
 		return s.h2UdpTransport, nil
 	}
 	tlsConf := masqueClientH2TLSConfig(s.options)
+	// Keep HTTP authority/SNI semantics from request URL, but route the TCP socket to DialPeer when set
+	// (parity with H3 path using masqueQuicDialCandidateHost / endpoint_v4 from WARP profile).
+	dialOverrideHost := strings.TrimSpace(masqueQuicDialCandidateHost(s.options))
+	alternateDialHost := ""
+	if strings.EqualFold(strings.TrimSpace(s.options.WarpConnectIPProtocol), "cf-connect-ip") {
+		alternateDialHost = warpMasqueH2AlternateDialHost(dialOverrideHost)
+	}
 	tr := &http2.Transport{
 		TLSClientConfig: tlsConf,
 		// Parity with http3.Transport DisableCompression: default H2 adds Accept-Encoding: gzip and may
 		// transparently decompress Response.Body — fatal for Extended CONNECT capsule/datagram streams.
 		DisableCompression: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			conn, err := s.options.TCPDial(ctx, network, addr)
-			if err != nil {
-				return nil, fmt.Errorf("masque h2: tcp dial %s %s: %w", network, addr, err)
+			dialHostCandidates := h2DialHostCandidates(strings.TrimSpace(s.options.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost)
+			var lastErr error
+			for _, candidateHost := range dialHostCandidates {
+				dialAddr := addr
+				if candidateHost != "" {
+					if _, p, splitErr := net.SplitHostPort(addr); splitErr == nil {
+						dialAddr = net.JoinHostPort(candidateHost, p)
+					}
+				}
+				if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+					log.Printf("masque h2 tcp dial attempt network=%s addr=%s candidate=%q", network, dialAddr, candidateHost)
+				}
+				conn, err := s.options.TCPDial(ctx, network, dialAddr)
+				if err != nil {
+					lastErr = fmt.Errorf("masque h2: tcp dial %s %s: %w", network, dialAddr, err)
+					continue
+				}
+				tlsConn := tls.Client(conn, cfg)
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					_ = conn.Close()
+					lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
+					continue
+				}
+				return tlsConn, nil
 			}
-			tlsConn := tls.Client(conn, cfg)
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				_ = conn.Close()
-				return nil, fmt.Errorf("masque h2: tls handshake %s %s: %w", network, addr, err)
-			}
-			return tlsConn, nil
+			return nil, lastErr
 		},
 	}
 	s.h2UdpTransport = tr
 	return tr, nil
+}
+
+func h2DialHostCandidates(connectProto string, dialOverrideHost string, alternateDialHost string) []string {
+	dialOverrideHost = strings.TrimSpace(dialOverrideHost)
+	alternateDialHost = strings.TrimSpace(alternateDialHost)
+	if dialOverrideHost == "" {
+		return []string{""}
+	}
+	if alternateDialHost == "" || strings.EqualFold(alternateDialHost, dialOverrideHost) {
+		return []string{dialOverrideHost}
+	}
+	if strings.EqualFold(strings.TrimSpace(connectProto), "cf-connect-ip") {
+		// For WARP H2, some sibling edges advertise h2 but reject RFC 8441 Extended CONNECT.
+		// Force sibling endpoint first (and only) so h2 pool does not pin to a known-bad peer.
+		return []string{alternateDialHost}
+	}
+	return []string{dialOverrideHost, alternateDialHost}
+}
+
+// isMasqueH2ExtendedConnectUnsupportedByPeer matches golang.org/x/net/http2 errors when the peer did not
+// advertise RFC 8441 (SETTINGS_ENABLE_CONNECT_PROTOCOL). TLS may still succeed on the sibling IPv4.
+func isMasqueH2ExtendedConnectUnsupportedByPeer(err error) bool {
+	if err == nil {
+		return false
+	}
+	es := strings.ToLower(err.Error())
+	return strings.Contains(es, "extended connect not supported") ||
+		strings.Contains(es, "enable_connect_protocol") ||
+		strings.Contains(es, "enable connect protocol")
+}
+
+func warpMasqueH2AlternateDialHost(host string) string {
+	host = strings.TrimSpace(host)
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.Is4() {
+		return ""
+	}
+	v4 := addr.As4()
+	switch v4[3] {
+	case 1:
+		v4[3] = 2
+	case 2:
+		v4[3] = 1
+	default:
+		return ""
+	}
+	return netip.AddrFrom4(v4).String()
 }
 
 // resetH2UDPTransportLockedAssumeMu closes the cached HTTP/2 client transport shared by CONNECT-UDP,
@@ -664,7 +736,6 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 	}
 
 	pipeR, pipeW := io.Pipe()
-	// Relay parent cancellation only through handshake, then detach on success.
 	streamCtx, stopReqCtxRelay := connectip.NewH2ExtendedConnectRequestContext(ctx)
 	defer stopReqCtxRelay(false)
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, &h2ExtendedConnectUploadBody{pipe: pipeR})
@@ -687,6 +758,16 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 	if err != nil {
 		_ = pipeW.Close()
 		_ = pipeR.Close()
+		proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
+		primaryHost := strings.TrimSpace(masqueQuicDialCandidateHost(s.options))
+		altHost := ""
+		if strings.EqualFold(proto, "cf-connect-ip") {
+			altHost = warpMasqueH2AlternateDialHost(primaryHost)
+		}
+		if altHost != "" && isMasqueH2ExtendedConnectUnsupportedByPeer(err) {
+			log.Printf("masque h2 cf-connect-ip: connect-udp tcp uses sibling %s of quic dataplane %s; peer omits RFC8441 SETTINGS_ENABLE_CONNECT_PROTOCOL tag=%s",
+				altHost, primaryHost, strings.TrimSpace(s.options.Tag))
+		}
 		return nil, fmt.Errorf("masque h2: roundtrip: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

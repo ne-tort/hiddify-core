@@ -42,6 +42,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	if normalizeMode(options.Mode) == option.MasqueModeServer {
 		return NewServerEndpoint(ctx, router, logger, tag, options)
 	}
+	options = applyMasqueClientMasqueDefaults(options)
 	if err := validateMasqueOptions(options); err != nil {
 		return nil, err
 	}
@@ -182,12 +183,13 @@ func (e *Endpoint) startRuntime() {
 		port = 443
 	}
 
-	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, true)
+	remoteIsDomain := M.ParseSocksaddrHostPort(server, port).IsFqdn()
+	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, remoteIsDomain)
 	if err != nil {
 		e.startErr.Store(err)
 		return
 	}
-	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, true)
+	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, remoteIsDomain)
 	if err != nil {
 		e.startErr.Store(err)
 		return

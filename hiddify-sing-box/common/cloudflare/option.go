@@ -15,3 +15,10 @@ func WithDialContext(dialContext func(ctx context.Context, network, addr string)
 		}
 	}
 }
+
+// WithRoundTripper replaces the HTTP transport (e.g. tests forwarding requests to httptest).
+func WithRoundTripper(rt http.RoundTripper) CloudflareApiOption {
+	return func(api *CloudflareApi) {
+		api.client.Transport = rt
+	}
+}

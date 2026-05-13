@@ -13,6 +13,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -123,6 +124,76 @@ func (s *h2CapsulePipeStream) closePipeReader() error {
 	return err
 }
 
+// h2LegacyDatagramStream matches Cloudflare WARP's HTTP/2 cf-connect-ip behavior as used by usque:
+// plain HTTP/2 CONNECT, capsule type 0 carries the raw IP packet, and CONNECT-IP control capsules are absent.
+type h2LegacyDatagramStream struct {
+	requestBody  *io.PipeWriter
+	responseBody io.ReadCloser
+	readMu       sync.Mutex
+	writeMu      sync.Mutex
+}
+
+func (s *h2LegacyDatagramStream) ReceiveDatagram(context.Context) ([]byte, error) {
+	s.readMu.Lock()
+	defer s.readMu.Unlock()
+	r := quicvarint.NewReader(s.responseBody)
+	for {
+		t, cr, err := parseConnectIPStreamCapsule(r)
+		if err != nil {
+			return nil, err
+		}
+		if t != capsuleTypeHTTPDatagram {
+			if _, err := io.Copy(io.Discard, cr); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		payload, err := readRFC9297HTTPDatagramCapsulePayload(cr)
+		if err != nil {
+			return nil, err
+		}
+		data := make([]byte, 0, len(contextIDZero)+len(payload))
+		data = append(data, contextIDZero...)
+		data = append(data, payload...)
+		return data, nil
+	}
+}
+
+func (s *h2LegacyDatagramStream) SendDatagram(data []byte) error {
+	contextID, n, err := quicvarint.Parse(data)
+	if err != nil {
+		return fmt.Errorf("connect-ip: malformed datagram: %w", err)
+	}
+	if contextID != 0 {
+		return fmt.Errorf("connect-ip: unsupported datagram context ID: %d", contextID)
+	}
+	var buf bytes.Buffer
+	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, data[n:]); err != nil {
+		return err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err = writeAllWriter(s.requestBody, buf.Bytes())
+	return err
+}
+
+func (s *h2LegacyDatagramStream) TryReceiveDatagram() ([]byte, bool) { return nil, false }
+func (s *h2LegacyDatagramStream) CancelRead(quic.StreamErrorCode)    {}
+func (s *h2LegacyDatagramStream) Read([]byte) (int, error)           { return 0, io.EOF }
+func (s *h2LegacyDatagramStream) Write([]byte) (int, error) {
+	return 0, ErrControlCapsulesUnsupported
+}
+func (s *h2LegacyDatagramStream) Close() error {
+	var errs []error
+	if s.requestBody != nil {
+		errs = append(errs, s.requestBody.Close())
+	}
+	if s.responseBody != nil {
+		errs = append(errs, s.responseBody.Close())
+	}
+	return errors.Join(errs...)
+}
+
 // DialHTTP2 establishes CONNECT-IP over HTTP/2 Extended CONNECT (RFC 8441).
 // IP traffic uses HTTP Datagram payloads in RFC 9297 DATAGRAM capsules on the CONNECT stream (not QUIC unreliable datagrams).
 func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.Template, opts DialOptions) (*Conn, *http.Response, error) {
@@ -144,6 +215,9 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 	proto := strings.TrimSpace(opts.ExtendedConnectProtocol)
 	if proto == "" {
 		proto = requestProtocol
+	}
+	if opts.HTTP2LegacyConnect {
+		return dialHTTP2LegacyConnectIP(ctx, rt, rawURL, u, opts, proto)
 	}
 
 	select {
@@ -168,17 +242,27 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 	// the server may see an immediate EOF on Request.Body and tear down the tunnel while the
 	// client still writes DATAGRAM capsules to the pipe. Explicit -1 means unknown length.
 	req.ContentLength = -1
-	req.Proto = proto
-	req.ProtoMajor = 2
-	req.ProtoMinor = 0
+	// Keep pseudo-header :protocol for RFC 8441 semantics, but avoid forcing Request.Proto to a
+	// non-HTTP token (e.g. "cf-connect-ip"), which can trigger client-side prechecks before edge response.
 	req.Header = make(http.Header)
 	req.Header.Set(":protocol", proto)
 	req.Header.Set(http3.CapsuleProtocolHeader, capsuleProtocolHeaderValue)
+	for k, vv := range opts.ExtraRequestHeaders {
+		if len(vv) == 0 {
+			continue
+		}
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		req.Header[k] = cp
+	}
 	if t := strings.TrimSpace(opts.BearerToken); t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
 	if proto == "cf-connect-ip" {
 		req.Header.Set("User-Agent", "")
+		// Parity with Diniboy1123/usque api/masque.go HTTP/2 CONNECT-IP branch (cf-connect-proto / pq-enabled).
+		req.Header.Set("cf-connect-proto", "cf-connect-ip")
+		req.Header.Set("pq-enabled", "false")
 	}
 	req.Host = u.Host
 
@@ -204,4 +288,76 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 
 	str := &h2CapsulePipeStream{body: resp.Body, pipeW: pw, pipeR: pr}
 	return newProxiedConn(str, true), resp, nil
+}
+
+func dialHTTP2LegacyConnectIP(ctx context.Context, rt http.RoundTripper, rawURL string, u *url.URL, opts DialOptions, proto string) (*Conn, *http.Response, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, context.Cause(ctx)
+	default:
+	}
+	pr, pw := io.Pipe()
+	streamCtx, stopReqCtxRelay := NewH2ExtendedConnectRequestContext(ctx)
+	defer stopReqCtxRelay(false)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, rawURL, pr)
+	if err != nil {
+		_ = pw.Close()
+		_ = pr.Close()
+		return nil, nil, fmt.Errorf("connect-ip: failed to build legacy HTTP/2 CONNECT request: %w", err)
+	}
+	req.ContentLength = -1
+	req.Header = make(http.Header)
+	for k, vv := range opts.ExtraRequestHeaders {
+		if len(vv) == 0 {
+			continue
+		}
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		req.Header[k] = cp
+	}
+	if t := strings.TrimSpace(opts.BearerToken); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	if proto == "cf-connect-ip" {
+		req.Header.Set("User-Agent", "")
+		req.Header.Set("cf-connect-proto", "cf-connect-ip")
+		req.Header.Set("pq-enabled", "false")
+	}
+	req.Host = authorityFromURLWithDefaultPort(u, "443")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		_ = pr.CloseWithError(err)
+		_ = pw.Close()
+		return nil, nil, fmt.Errorf("connect-ip: legacy HTTP/2 CONNECT roundtrip: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		_ = pr.CloseWithError(errors.New("connect-ip: legacy CONNECT-IP failed HTTP status"))
+		_ = pw.Close()
+		_ = resp.Body.Close()
+		return nil, resp, fmt.Errorf("connect-ip: server responded with %d", resp.StatusCode)
+	}
+	if ctxErr := context.Cause(ctx); ctxErr != nil {
+		_ = pr.CloseWithError(ctxErr)
+		_ = pw.Close()
+		_ = resp.Body.Close()
+		return nil, nil, ctxErr
+	}
+	stopReqCtxRelay(true)
+	str := &h2LegacyDatagramStream{requestBody: pw, responseBody: resp.Body}
+	return newDatagramOnlyConn(str), resp, nil
+}
+
+func authorityFromURLWithDefaultPort(u *url.URL, defaultPort string) string {
+	if u == nil {
+		return ""
+	}
+	if u.Port() != "" {
+		return u.Host
+	}
+	host := u.Hostname()
+	if host == "" {
+		return u.Host
+	}
+	return host + ":" + defaultPort
 }

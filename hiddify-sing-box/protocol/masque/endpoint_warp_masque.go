@@ -38,15 +38,29 @@ type WarpEndpoint struct {
 	startCancel    context.CancelFunc
 }
 
+func (e *WarpEndpoint) setStartErr(err error, stage string) {
+	e.startErr.Store(err)
+	if err == nil {
+		return
+	}
+	if key := ClassifyMasqueFailure(err); key != "" {
+		stdlog.Printf("warp_masque startup failed stage=%s class=%s err=%v", stage, key, err)
+		return
+	}
+	stdlog.Printf("warp_masque startup failed stage=%s err=%v", stage, err)
+}
+
 func NewWarpEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WarpMasqueEndpointOptions) (adapter.Endpoint, error) {
 	masqueOptions := options.MasqueEndpointOptions
 	if strings.TrimSpace(masqueOptions.Server) == "" && strings.TrimSpace(masqueOptions.HopPolicy) != option.MasqueHopPolicyChain {
 		masqueOptions.Server = "bootstrap.warp.invalid"
 		masqueOptions.ServerPort = 443
 	}
+	masqueOptions = applyMasqueClientMasqueDefaults(masqueOptions)
 	if err := validateMasqueOptions(masqueOptions); err != nil {
 		return nil, err
 	}
+	options.MasqueEndpointOptions = masqueOptions
 	if err := validateWarpMasqueOptions(options); err != nil {
 		return nil, err
 	}
@@ -172,37 +186,54 @@ func (e *WarpEndpoint) Close() error {
 	return runtime.Close()
 }
 
-func (e *WarpEndpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	e.mu.RLock()
-	runtime := e.runtime
-	e.mu.RUnlock()
-	if runtime == nil {
+// waitRuntime blocks until startRuntime assigns e.runtime, records a startup error, or ctx ends.
+// Without this, the first packets from a TUN that already carries routes fail with "startup in progress"
+// while CONNECT-IP bootstrap can still take tens of seconds (prefix waits, port retries).
+func (e *WarpEndpoint) waitRuntime(ctx context.Context) (CM.Runtime, error) {
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		e.mu.RLock()
+		rt := e.runtime
+		e.mu.RUnlock()
+		if rt != nil {
+			return rt, nil
+		}
 		if err := e.lastStartError(); err != nil {
 			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
 		}
-		return nil, errors.Join(TM.ErrTransportInit, E.New("warp_masque startup in progress"))
+		select {
+		case <-ctx.Done():
+			if err := e.lastStartError(); err != nil {
+				return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
+			}
+			return nil, errors.Join(TM.ErrTransportInit, E.Cause(context.Cause(ctx), "warp_masque startup not finished"))
+		case <-tick.C:
+		}
 	}
-	return runtime.DialContext(ctx, network, destination)
+}
+
+func (e *WarpEndpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	rt, err := e.waitRuntime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return rt.DialContext(ctx, network, destination)
 }
 
 func (e *WarpEndpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	e.mu.RLock()
-	runtime := e.runtime
-	e.mu.RUnlock()
-	if runtime == nil {
-		if err := e.lastStartError(); err != nil {
-			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
-		}
-		return nil, errors.Join(TM.ErrTransportInit, E.New("warp_masque startup in progress"))
+	rt, err := e.waitRuntime(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return runtime.ListenPacket(ctx, destination)
+	return rt.ListenPacket(ctx, destination)
 }
 
 func (e *WarpEndpoint) bootstrapProfile(ctx context.Context) (WarpMasqueDataplaneTarget, error) {
 	if e.controlAdapter == nil {
 		e.controlAdapter = CloudflareWarpControlAdapter{}
 	}
-	return e.controlAdapter.ResolveDataplaneCandidates(ctx, e.options)
+	return e.controlAdapter.ResolveDataplaneCandidates(ctx, &e.options)
 }
 
 func (e *WarpEndpoint) startRuntime() {
@@ -214,19 +245,21 @@ func (e *WarpEndpoint) startRuntime() {
 		}
 	}
 	if e.closed.Load() {
-		e.startErr.Store(E.New("warp_masque endpoint closed before startup"))
+		e.setStartErr(E.New("warp_masque endpoint closed before startup"), "precheck_closed")
 		return
 	}
 	// Single deadline for bootstrap (device API) + CM.Runtime.Start (QUIC/MASQUE). If this
 	// is routinely exceeded, the deployment/network is unusable for warp_masque — fail fast.
 	const (
-		defaultWarpMasqueStartupDeadline = 25 * time.Second
+		defaultWarpMasqueStartupDeadline = 45 * time.Second
 		minWarpMasqueStartupDeadline     = 12 * time.Second
-		maxWarpMasqueStartupDeadline     = 45 * time.Second
+		maxWarpMasqueStartupDeadline     = 120 * time.Second
 	)
 	runDeadline := defaultWarpMasqueStartupDeadline
 	if d := time.Duration(e.options.ConnectTimeout); d > 0 {
-		runDeadline = d * 2
+		// CONNECT-IP bootstrap (passive ADDRESS_ASSIGN + RequestAddresses + netstack prefix wait)
+		// can exceed 2× connect_timeout on live CF edges; allow headroom without unbounded hangs.
+		runDeadline = d * 4
 	}
 	if runDeadline < minWarpMasqueStartupDeadline {
 		runDeadline = minWarpMasqueStartupDeadline
@@ -257,13 +290,15 @@ func (e *WarpEndpoint) startRuntime() {
 	var bootstrapTLSName string
 	var bootstrapTunnelProto string
 	var bootstrapEndpointPub string
+	var bootstrapProfileLocalIPv4 string
+	var bootstrapProfileLocalIPv6 string
 	var bootstrapErr error
 	for attempt := 0; attempt < warpBootstrapMaxAttempts; attempt++ {
 		if attempt > 0 {
 			backoff := time.Duration(120+attempt*80+rand.IntN(160)) * time.Millisecond
 			select {
 			case <-runCtx.Done():
-				e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque bootstrap timed out"))
+				e.setStartErr(E.Cause(runCtx.Err(), "warp_masque bootstrap timed out"), "bootstrap_retry_backoff")
 				return
 			case <-time.After(backoff):
 			}
@@ -277,26 +312,28 @@ func (e *WarpEndpoint) startRuntime() {
 			bootstrapTLSName = tgt.TLSServerName
 			bootstrapTunnelProto = tgt.TunnelProtocol
 			bootstrapEndpointPub = tgt.EndpointPublicKey
+			bootstrapProfileLocalIPv4 = tgt.ProfileLocalIPv4
+			bootstrapProfileLocalIPv6 = tgt.ProfileLocalIPv6
 			bootstrapErr = nil
 			break
 		}
 		bootstrapErr = err
 	}
 	if bootstrapErr != nil {
-		e.startErr.Store(bootstrapErr)
+		e.setStartErr(bootstrapErr, "bootstrap_profile")
 		return
 	}
 	if len(dataplanePorts) == 0 {
-		e.startErr.Store(E.New("warp_masque bootstrap returned no dataplane ports"))
+		e.setStartErr(E.New("warp_masque bootstrap returned no dataplane ports"), "bootstrap_dataplane_ports")
 		return
 	}
 	if tunnelProtocolSuggestsMasque(bootstrapTunnelProto) && strings.TrimSpace(e.options.Profile.MasqueECDSAPrivateKey) == "" {
-		e.startErr.Store(E.New("warp_masque: profile.masque_ecdsa_private_key is required when device tunnel is MASQUE (same field as config.json private_key after `usque register`, base64 EC SEC1 DER); WireGuard-only private_key alone is insufficient for TLS client auth"))
+		e.setStartErr(E.New("warp_masque: profile.masque_ecdsa_private_key is required when device tunnel is MASQUE (same field as config.json private_key after `usque register`, base64 EC SEC1 DER); WireGuard-only private_key alone is insufficient for TLS client auth"), "profile_key_requirements")
 		return
 	}
 	warpCert, warpPin, tlsPackErr := WarpMasqueTLSPackageFromProfile(e.options, bootstrapEndpointPub)
 	if tlsPackErr != nil {
-		e.startErr.Store(tlsPackErr)
+		e.setStartErr(tlsPackErr, "tls_package")
 		return
 	}
 	useWarpParityExtras := tunnelProtocolSuggestsMasque(bootstrapTunnelProto) || strings.TrimSpace(e.options.Profile.MasqueECDSAPrivateKey) != ""
@@ -310,17 +347,22 @@ func (e *WarpEndpoint) startRuntime() {
 	}
 	chain, err := CM.BuildChain(e.options.MasqueEndpointOptions)
 	if err != nil {
-		e.startErr.Store(err)
+		e.setStartErr(err, "build_chain")
 		return
 	}
-	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, true)
+	dialHost := strings.TrimSpace(quicDialPeer)
+	if dialHost == "" {
+		dialHost = strings.TrimSpace(logicalServer)
+	}
+	remoteIsDomain := M.ParseSocksaddrHostPort(dialHost, dataplanePorts[0]).IsFqdn()
+	quicDial, err := buildQUICDialFunc(runCtx, e.options.DialerOptions, remoteIsDomain)
 	if err != nil {
-		e.startErr.Store(err)
+		e.setStartErr(err, "build_quic_dial")
 		return
 	}
-	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, true)
+	tcpDial, err := buildMasqueTCPDialFunc(runCtx, e.options.DialerOptions, remoteIsDomain)
 	if err != nil {
-		e.startErr.Store(err)
+		e.setStartErr(err, "build_tcp_dial")
 		return
 	}
 	const warpRuntimeStartMaxAttempts = 3
@@ -336,7 +378,7 @@ func (e *WarpEndpoint) startRuntime() {
 			// Yield briefly between UDP port candidates under the shared startup deadline.
 			select {
 			case <-runCtx.Done():
-				e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"))
+				e.setStartErr(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"), "runtime_start_port_switch")
 				return
 			case <-time.After(time.Duration(80+rand.IntN(180)) * time.Millisecond):
 			}
@@ -392,6 +434,8 @@ func (e *WarpEndpoint) startRuntime() {
 			WarpMasqueLegacyH3Extras:    useWarpParityExtras,
 			WarpConnectIPProtocol:       warpConnectProto,
 			WarpMasqueDeviceBearerToken: strings.TrimSpace(e.options.Profile.AuthToken),
+			ProfileLocalIPv4:            strings.TrimSpace(bootstrapProfileLocalIPv4),
+			ProfileLocalIPv6:            strings.TrimSpace(bootstrapProfileLocalIPv6),
 			TCPDial:                     tcpDial,
 			MasqueEffectiveHTTPLayer:    effectiveMasqueHL,
 			HTTPLayerFallback:           e.options.HTTPLayerFallback,
@@ -403,11 +447,11 @@ func (e *WarpEndpoint) startRuntime() {
 				backoff := time.Duration(180+attempt*120+rand.IntN(120)) * time.Millisecond
 				select {
 				case <-baseCtx.Done():
-					e.startErr.Store(baseCtx.Err())
+					e.setStartErr(baseCtx.Err(), "runtime_start_base_ctx")
 					_ = rt.Close()
 					return
 				case <-runCtx.Done():
-					e.startErr.Store(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"))
+					e.setStartErr(E.Cause(runCtx.Err(), "warp_masque runtime start timed out"), "runtime_start_attempt_timeout")
 					_ = rt.Close()
 					return
 				case <-time.After(backoff):
@@ -419,7 +463,7 @@ func (e *WarpEndpoint) startRuntime() {
 			}
 		}
 		if startErr == nil {
-			RecordWarpMasqueDataplaneSuccess(e.options, logicalServer, rtDialPeer, warpTLSServerName, bootstrapTunnelProto, bootstrapEndpointPub, rtPort)
+			RecordWarpMasqueDataplaneSuccess(e.options, logicalServer, rtDialPeer, warpTLSServerName, bootstrapTunnelProto, bootstrapEndpointPub, rtPort, bootstrapProfileLocalIPv4, bootstrapProfileLocalIPv6)
 			break
 		}
 		if key := ClassifyMasqueFailure(startErr); key != "" {
@@ -428,18 +472,18 @@ func (e *WarpEndpoint) startRuntime() {
 		_ = rt.Close()
 		rt = nil
 		if pi == len(portTries)-1 || !IsRetryableWarpMasqueDataplanePort(startErr) {
-			e.startErr.Store(startErr)
+			e.setStartErr(startErr, "runtime_start")
 			return
 		}
 		continue
 	}
 	if startErr != nil {
-		e.startErr.Store(startErr)
+		e.setStartErr(startErr, "runtime_start_final")
 		return
 	}
 	if e.closed.Load() {
 		_ = rt.Close()
-		e.startErr.Store(E.New("warp_masque endpoint closed during startup"))
+		e.setStartErr(E.New("warp_masque endpoint closed during startup"), "post_start_closed")
 		return
 	}
 	e.mu.Lock()

@@ -12,6 +12,22 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// connectIPH3SettingsError validates peer HTTP/3 SETTINGS before Extended CONNECT (RFC 9298).
+// When opts.IgnoreExtendedConnect is true, matches Diniboy1123/connect-ip-go (usque) Dial(..., true):
+// Cloudflare WARP may omit EnableExtendedConnect in SETTINGS while still accepting cf-connect-ip.
+func connectIPH3SettingsError(settings *http3.Settings, opts DialOptions) error {
+	if settings == nil {
+		return errors.New("connect-ip: nil HTTP/3 settings")
+	}
+	if !opts.IgnoreExtendedConnect && !settings.EnableExtendedConnect {
+		return errors.New("connect-ip: server didn't enable Extended CONNECT")
+	}
+	if !settings.EnableDatagrams {
+		return errors.New("connect-ip: server didn't enable datagrams")
+	}
+	return nil
+}
+
 // dialConnectIPH3TestAfterSuccessfulCONNECTResponse is set by tests after HTTP/3 CONNECT-IP
 // succeeds (2xx) and before handing out *Conn (nil in non-test binaries).
 var dialConnectIPH3TestAfterSuccessfulCONNECTResponse func(ctx context.Context)
@@ -23,6 +39,16 @@ type DialOptions struct {
 	// ExtendedConnectProtocol is the HTTP/3 :protocol pseudo-header (Extended CONNECT).
 	// Empty defaults to RFC 9298 "connect-ip". Cloudflare WARP MASQUE uses "cf-connect-ip".
 	ExtendedConnectProtocol string
+	// IgnoreExtendedConnect, when true, skips requiring SETTINGS_ENABLE_CONNECT_PROTOCOL
+	// (Extended CONNECT) on the peer. Datagrams are still required. Parity with
+	// github.com/Diniboy1123/connect-ip-go @ v0.0.0-20260409225322-8d7bb0a858a2 as used by usque.
+	IgnoreExtendedConnect bool
+	// HTTP2LegacyConnect sends WARP's non-RFC8441 HTTP/2 CONNECT-IP variant: a plain
+	// CONNECT request plus cf-connect-proto headers, with IP packets in capsule type 0.
+	HTTP2LegacyConnect bool
+	// ExtraRequestHeaders are merged into the CONNECT request after Capsule-Protocol;
+	// BearerToken and cf-connect-ip User-Agent override the same keys when set below.
+	ExtraRequestHeaders http.Header
 }
 
 // Dial dials a proxied CONNECT-IP session. bearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
@@ -52,11 +78,8 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	case <-conn.ReceivedSettings():
 	}
 	settings := conn.Settings()
-	if !settings.EnableExtendedConnect {
-		return nil, nil, errors.New("connect-ip: server didn't enable Extended CONNECT")
-	}
-	if !settings.EnableDatagrams {
-		return nil, nil, errors.New("connect-ip: server didn't enable datagrams")
+	if err := connectIPH3SettingsError(settings, opts); err != nil {
+		return nil, nil, err
 	}
 
 	rstr, err := conn.OpenRequestStream(ctx)
@@ -68,6 +91,14 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 		proto = requestProtocol
 	}
 	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
+	for k, vv := range opts.ExtraRequestHeaders {
+		if len(vv) == 0 {
+			continue
+		}
+		cp := make([]string, len(vv))
+		copy(cp, vv)
+		hdr[k] = cp
+	}
 	bearerToken := opts.BearerToken
 	if t := strings.TrimSpace(bearerToken); t != "" {
 		hdr.Set("Authorization", "Bearer "+t)

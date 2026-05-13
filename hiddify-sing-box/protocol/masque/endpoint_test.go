@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,7 @@ func TestWarpEndpointCompatibilityValidation(t *testing.T) {
 	}
 }
 
-func (a testControlAdapter) ResolveServer(ctx context.Context, options option.WarpMasqueEndpointOptions) (string, uint16, error) {
+func (a testControlAdapter) ResolveServer(ctx context.Context, options *option.WarpMasqueEndpointOptions) (string, uint16, error) {
 	t, err := a.ResolveDataplaneCandidates(ctx, options)
 	if err != nil || len(t.Ports) == 0 {
 		return t.LogicalServer, 0, err
@@ -128,7 +129,7 @@ func (a testControlAdapter) ResolveServer(ctx context.Context, options option.Wa
 	return t.LogicalServer, t.Ports[0], nil
 }
 
-func (a testControlAdapter) ResolveDataplaneCandidates(ctx context.Context, options option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
+func (a testControlAdapter) ResolveDataplaneCandidates(ctx context.Context, options *option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
 	if a.err != nil {
 		return WarpMasqueDataplaneTarget{}, a.err
 	}
@@ -161,6 +162,18 @@ func TestBuildQUICDialFuncAllowsEmptyDialerOptions(t *testing.T) {
 	}
 	if quicDial != nil {
 		t.Fatal("expected empty dialer options to return nil QUIC dial override")
+	}
+}
+
+func TestBuildQUICDialFuncSkipsCustomPacketConnForDomainResolverOnly(t *testing.T) {
+	quicDial, err := buildQUICDialFunc(context.Background(), option.DialerOptions{
+		DomainResolver: &option.DomainResolveOptions{Server: "local-dns"},
+	}, true)
+	if err != nil {
+		t.Fatalf("domain_resolver-only dialer options: %v", err)
+	}
+	if quicDial != nil {
+		t.Fatal("expected domain_resolver-only options to return nil QUIC dial override (quic.DialAddr / Tier A)")
 	}
 }
 
@@ -473,24 +486,58 @@ func TestEndpointClientModeAllowsServerToken(t *testing.T) {
 	}
 }
 
-func TestEndpointRejectsAutoTCPTransportInClientMode(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "client-auto-tcp-transport", option.MasqueEndpointOptions{
+func TestEndpointAllowsAutoTCPTransportDefaultsToConnectStreamInClientMode(t *testing.T) {
+	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-auto-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		TCPTransport:  option.MasqueTCPTransportAuto,
 	})
-	if err == nil {
-		t.Fatal("expected client mode to reject tcp_transport=auto")
+	if err != nil {
+		t.Fatalf("expected tcp_transport=auto to default to connect_stream, got %v", err)
+	}
+	ep, ok := epRaw.(*Endpoint)
+	if !ok || ep == nil {
+		t.Fatalf("expected *Endpoint, got %T", epRaw)
+	}
+	if ep.options.TCPTransport != option.MasqueTCPTransportConnectStream {
+		t.Fatalf("expected tcp_transport connect_stream, got %q", ep.options.TCPTransport)
 	}
 }
 
-func TestEndpointRejectsImplicitTCPTransportInClientMode(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "client-implicit-tcp-transport", option.MasqueEndpointOptions{
+func TestEndpointAllowsImplicitTCPTransportDefaultsToConnectStream(t *testing.T) {
+	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-implicit-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 	})
-	if err == nil {
-		t.Fatal("expected client mode to reject implicit tcp_transport default")
+	if err != nil {
+		t.Fatalf("expected implicit tcp_transport to default to connect_stream, got %v", err)
+	}
+	ep, ok := epRaw.(*Endpoint)
+	if !ok || ep == nil {
+		t.Fatalf("expected *Endpoint, got %T", epRaw)
+	}
+	if ep.options.TCPTransport != option.MasqueTCPTransportConnectStream {
+		t.Fatalf("expected tcp_transport connect_stream, got %q", ep.options.TCPTransport)
+	}
+}
+
+func TestEndpointClearsTemplateIPWhenTransportModeConnectUDP(t *testing.T) {
+	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-connect-udp-strip-template-ip", option.MasqueEndpointOptions{
+		ServerOptions:   option.ServerOptions{Server: "example.com", ServerPort: 443},
+		HopPolicy:       option.MasqueHopPolicySingle,
+		TransportMode:   option.MasqueTransportModeConnectUDP,
+		TemplateIP:      "https://example.com:443/masque/ip",
+		TCPTransport:    option.MasqueTCPTransportConnectStream,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ep, ok := epRaw.(*Endpoint)
+	if !ok || ep == nil {
+		t.Fatalf("expected *Endpoint, got %T", epRaw)
+	}
+	if strings.TrimSpace(ep.options.TemplateIP) != "" {
+		t.Fatalf("expected template_ip cleared for connect_udp, got %q", ep.options.TemplateIP)
 	}
 }
 
@@ -670,7 +717,7 @@ func TestParseTCPTargetFromRequestRejectsMalformedTarget(t *testing.T) {
 		t.Fatalf("template init: %v", err)
 	}
 	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/masque/tcp//bad", nil)
-	if _, _, err := parseTCPTargetFromRequest(req, template); err == nil {
+	if _, _, err := parseTCPTargetFromRequest(req, template, false); err == nil {
 		t.Fatal("expected malformed target to be rejected")
 	}
 }
@@ -686,12 +733,77 @@ func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *tes
 	}
 	req.Host = "example.com"
 	req.RequestURI = "masque/tcp/host.example/9443"
-	host, port, err := parseTCPTargetFromRequest(req, template)
+	host, port, err := parseTCPTargetFromRequest(req, template, false)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if host != "host.example" || port != "9443" {
 		t.Fatalf("unexpected target: host=%s port=%s", host, port)
+	}
+}
+
+func TestMasqueServerShouldRelaxTCPAuthority(t *testing.T) {
+	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "::", ListenPort: 8443}) {
+		t.Fatal("expected relax for unspecified listen and empty template_tcp")
+	}
+	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "0.0.0.0"}) {
+		t.Fatal("expected relax for 0.0.0.0 listen")
+	}
+	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: ""}) {
+		t.Fatal("expected relax for empty listen")
+	}
+	if masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "::", TemplateTCP: "https://x/x"}) {
+		t.Fatal("expected no relax when template_tcp set")
+	}
+	if masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "192.0.2.1"}) {
+		t.Fatal("expected no relax for specific listen")
+	}
+}
+
+func TestParseTCPTargetFromRequestRelaxesAuthorityDefaultLoopbackTemplate(t *testing.T) {
+	template, err := uritemplate.New("https://127.0.0.1:8443/masque/tcp/{target_host}/{target_port}")
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodConnect, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "203.0.113.1:8443"
+	req.RequestURI = "/masque/tcp/example.com/443"
+	host, port, err := parseTCPTargetFromRequest(req, template, true)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if host != "example.com" || port != "443" {
+		t.Fatalf("unexpected target: host=%s port=%s", host, port)
+	}
+
+	req2, _ := http.NewRequest(http.MethodConnect, "", nil)
+	req2.Host = "203.0.113.1:8443"
+	req2.RequestURI = "/masque/tcp/example.com/443"
+	if _, _, err := parseTCPTargetFromRequest(req2, template, false); err == nil {
+		t.Fatal("expected strict mode to reject authority mismatch")
+	}
+
+	req3, _ := http.NewRequest(http.MethodConnect, "", nil)
+	req3.Host = "203.0.113.1:9443"
+	req3.RequestURI = "/masque/tcp/example.com/443"
+	if _, _, err := parseTCPTargetFromRequest(req3, template, true); err == nil {
+		t.Fatal("expected port mismatch to reject even when relaxed")
+	}
+}
+
+func TestParseTCPTargetFromRequestRelaxedRejectsNonLoopbackTemplateHost(t *testing.T) {
+	template, err := uritemplate.New("https://203.0.113.2:8443/masque/tcp/{target_host}/{target_port}")
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodConnect, "", nil)
+	req.Host = "203.0.113.1:8443"
+	req.RequestURI = "/masque/tcp/example.com/443"
+	if _, _, err := parseTCPTargetFromRequest(req, template, true); err == nil {
+		t.Fatal("expected failure when template host is not loopback")
 	}
 }
 
@@ -740,9 +852,11 @@ func TestWarpEndpointStartupInProgressIsTransportInit(t *testing.T) {
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start warp endpoint: %v", err)
 	}
-	_, err = ep.DialContext(context.Background(), "tcp", M.Socksaddr{})
+	dctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+	defer cancel()
+	_, err = ep.DialContext(dctx, "tcp", M.Socksaddr{})
 	if err == nil {
-		t.Fatal("expected startup-in-progress error")
+		t.Fatal("expected error while startup not finished and ctx short")
 	}
 	if !errors.Is(err, TM.ErrTransportInit) {
 		t.Fatalf("expected ErrTransportInit sentinel, got %v", err)
@@ -767,9 +881,11 @@ func TestWarpEndpointListenPacketStartupInProgressIsTransportInit(t *testing.T) 
 	if err := ep.Start(adapter.StartStatePostStart); err != nil {
 		t.Fatalf("start warp endpoint: %v", err)
 	}
-	_, err = ep.ListenPacket(context.Background(), M.Socksaddr{})
+	lctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+	defer cancel()
+	_, err = ep.ListenPacket(lctx, M.Socksaddr{})
 	if err == nil {
-		t.Fatal("expected startup-in-progress error")
+		t.Fatal("expected error while startup not finished and ctx short")
 	}
 	if !errors.Is(err, TM.ErrTransportInit) {
 		t.Fatalf("expected ErrTransportInit sentinel, got %v", err)

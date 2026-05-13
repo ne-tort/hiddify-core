@@ -9,7 +9,9 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -29,6 +31,11 @@ func (e *CloseError) Error() string        { return net.ErrClosed.Error() }
 func (e *CloseError) Is(target error) bool { return target == net.ErrClosed }
 
 type appendable interface{ append([]byte) []byte }
+
+// masqueConnectIPDebug enables verbose policy/netstack diagnostics (addresses and lengths only).
+func masqueConnectIPDebug() bool {
+	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
+}
 
 type writeCapsule struct {
 	capsule appendable
@@ -59,21 +66,28 @@ var (
 )
 
 var (
-	unknownCapsuleTotal         atomic.Uint64
-	unknownCapsuleByType        sync.Map // map[uint64]*atomic.Uint64
-	unknownContextDatagramTotal atomic.Uint64
-	malformedDatagramTotal      atomic.Uint64
-	validationDropTotal         atomic.Uint64
-	outgoingComposeDropTotal    atomic.Uint64
-	policyDropICMPTotal         atomic.Uint64
-	policyDropICMPAttemptTotal  atomic.Uint64
-	policyDropICMPComposeFail   atomic.Uint64
-	policyDropICMPSendFail      atomic.Uint64
-	policyDropICMPByReason      sync.Map // map[string]*atomic.Uint64
+	unknownCapsuleTotal                   atomic.Uint64
+	unknownCapsuleByType                  sync.Map // map[uint64]*atomic.Uint64
+	unknownContextDatagramTotal           atomic.Uint64
+	malformedDatagramTotal                atomic.Uint64
+	validationDropTotal                   atomic.Uint64
+	outgoingComposeDropTotal              atomic.Uint64
+	policyDropICMPTotal                   atomic.Uint64
+	policyDropICMPAttemptTotal            atomic.Uint64
+	policyDropICMPComposeFail             atomic.Uint64
+	policyDropICMPSendFail                atomic.Uint64
+	policyDropICMPByReason                sync.Map      // map[string]*atomic.Uint64
+	connectIPStreamCapsuleDebugLeft       atomic.Int32  // HIDDIFY_MASQUE_CONNECT_IP_DEBUG: log at most N stream capsule types
+	streamCapsuleDatagramIngressDropTotal atomic.Uint64 // HTTP_DATAGRAM blocked on full ingress (HoL vs ADDRESS_ASSIGN)
 )
+
+func init() {
+	connectIPStreamCapsuleDebugLeft.Store(64)
+}
 
 var ErrIPv6ExtensionChainAmbiguous = errors.New("connect-ip: IPv6 extension chain parse ambiguity")
 var ErrInvalidRouteAdvertisement = errors.New("connect-ip: invalid route advertisement")
+var ErrControlCapsulesUnsupported = errors.New("connect-ip: control capsules unsupported by this transport")
 
 func UnknownCapsuleTotal() uint64 {
 	return unknownCapsuleTotal.Load()
@@ -255,8 +269,13 @@ func (g *adaptivePrefetchProbeGate) skipBudgetValue() int {
 type Conn struct {
 	str                    http3Stream
 	drain                  tryDrainHTTPDatagrams
+	controlCapsules        bool
 	datagramCapsuleIngress chan []byte // CONNECT-IP over HTTP/2: IP HTTP Datagram payloads from RFC9297 capsules on stream
-	writes                 chan writeCapsule
+	// h3UnifiedDatagramIngress merges QUIC HTTP DATAGRAM frames (ReceiveDatagram) with RFC9297
+	// HTTP_DATAGRAM capsules on the CONNECT request stream — some peers use only the latter on H3.
+	h3UnifiedDatagramIngress chan []byte
+	h3QuicPumpOnce           sync.Once
+	writes                   chan writeCapsule
 
 	prefetchMu    sync.Mutex
 	prefetchSlots [][]byte
@@ -277,8 +296,25 @@ type Conn struct {
 
 	routeView atomic.Pointer[connRouteView]
 
+	// assignedPrefixesListener is invoked (without holding c.mu) after peer ADDRESS_ASSIGN
+	// updates assignedAddresses + routeView. Used by MASQUE CONNECT-IP TCP netstack to align
+	// gVisor NIC locals with policy so return-path packets are not dropped by validateIncoming.
+	listenerMu               sync.Mutex
+	assignedPrefixesListener func([]netip.Prefix)
+
 	closeChan chan struct{}
 	closeErr  error
+}
+
+// SetAssignedPrefixesListener registers a callback fired after each successful ADDRESS_ASSIGN
+// capsule updates local route policy. The slice is a clone owned by the callee; nil clears.
+func (c *Conn) SetAssignedPrefixesListener(fn func([]netip.Prefix)) {
+	if c == nil {
+		return
+	}
+	c.listenerMu.Lock()
+	defer c.listenerMu.Unlock()
+	c.assignedPrefixesListener = fn
 }
 
 func (c *Conn) publishRouteViewLocked() {
@@ -327,6 +363,7 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 	c := &Conn{
 		str:                   str,
 		drain:                 nil,
+		controlCapsules:       true,
 		writes:                make(chan writeCapsule),
 		assignedAddressNotify: make(chan struct{}, 1),
 		availableRoutesNotify: make(chan struct{}, 1),
@@ -335,8 +372,10 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 	}
 	if http2CapsuleDatagramDataplane {
 		c.datagramCapsuleIngress = make(chan []byte, connReadPrefetchMax)
+	} else {
+		c.h3UnifiedDatagramIngress = make(chan []byte, connReadPrefetchMax)
 	}
-	if dr, ok := str.(tryDrainHTTPDatagrams); ok && c.datagramCapsuleIngress == nil {
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok && c.datagramCapsuleIngress == nil && c.h3UnifiedDatagramIngress == nil {
 		c.drain = dr
 	}
 	go func() {
@@ -370,6 +409,76 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 	}()
 	c.routeView.Store(&connRouteView{})
 	return c
+}
+
+func newDatagramOnlyConn(str http3Stream) *Conn {
+	c := &Conn{
+		str:                   str,
+		drain:                 nil,
+		controlCapsules:       false,
+		assignedAddressNotify: make(chan struct{}, 1),
+		availableRoutesNotify: make(chan struct{}, 1),
+		closeChan:             make(chan struct{}),
+		prefetchSlots:         make([][]byte, connReadPrefetchMax),
+	}
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
+		c.drain = dr
+	}
+	c.routeView.Store(&connRouteView{})
+	return c
+}
+
+func (c *Conn) ControlCapsulesSupported() bool {
+	return c != nil && c.controlCapsules
+}
+
+func (c *Conn) ensureH3QuicDatagramPump() {
+	if c == nil || c.h3UnifiedDatagramIngress == nil {
+		return
+	}
+	c.h3QuicPumpOnce.Do(func() { go c.pumpH3QUICDatagrams() })
+}
+
+func (c *Conn) pumpH3QUICDatagrams() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-c.closeChan:
+			cancel()
+		}
+	}()
+	for {
+		d, err := c.str.ReceiveDatagram(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			c.mu.Lock()
+			if c.closeErr == nil {
+				c.closeErr = &CloseError{Remote: true}
+				close(c.closeChan)
+			}
+			c.mu.Unlock()
+			return
+		}
+		select {
+		case <-c.closeChan:
+			return
+		case c.h3UnifiedDatagramIngress <- d:
+		default:
+			// Keep QUIC datagram receive loop non-blocking: a full ingress queue during
+			// startup (before ReadPacket consumers attach) must not stall connection-level
+			// reads and delay control capsules (ADDRESS_ASSIGN/ROUTE_ADVERTISEMENT).
+			logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped QUIC HTTP_DATAGRAM frame (h3 unified ingress full)")
+		}
+	}
 }
 
 func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
@@ -409,6 +518,30 @@ func (c *Conn) extendPrefetchFromTry() {
 				drained++
 			default:
 				break capsDrain
+			}
+		}
+		c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+		c.prefetchGate.observeDrain(drained)
+		return
+	}
+	if c.h3UnifiedDatagramIngress != nil {
+		c.ensureH3QuicDatagramPump()
+		if !c.prefetchGate.shouldProbe() {
+			return
+		}
+		c.prefetchMu.Lock()
+		defer c.prefetchMu.Unlock()
+		drained := 0
+	h3UnifiedDrain:
+		for c.prefetchCount < connReadPrefetchMax {
+			select {
+			case raw := <-c.h3UnifiedDatagramIngress:
+				tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
+				c.prefetchSlots[tail] = slices.Clone(raw)
+				c.prefetchCount++
+				drained++
+			default:
+				break h3UnifiedDrain
 			}
 		}
 		c.prefetchCountAtomic.Store(int32(c.prefetchCount))
@@ -469,7 +602,17 @@ func (c *Conn) AssignAddresses(ctx context.Context, prefixes []netip.Prefix) err
 	return c.sendCapsule(ctx, capsule)
 }
 
+// RequestAddresses sends an ADDRESS_REQUEST capsule (RFC 9484): ask the peer to assign
+// addresses to this endpoint. An empty slice sends a request with no requested prefixes
+// (peer-specific semantics; used for consumer WARP cf-connect-ip bootstrap).
+func (c *Conn) RequestAddresses(ctx context.Context, requested []RequestedAddress) error {
+	return c.sendCapsule(ctx, &addressRequestCapsule{RequestedAddresses: slices.Clone(requested)})
+}
+
 func (c *Conn) sendCapsule(ctx context.Context, capsule appendable) error {
+	if c == nil || !c.controlCapsules || c.writes == nil {
+		return ErrControlCapsulesUnsupported
+	}
 	res := make(chan error, 1)
 	select {
 	case c.writes <- writeCapsule{
@@ -501,6 +644,9 @@ func (c *Conn) CurrentAssignedPrefixes() []netip.Prefix {
 // Note that at any point during the connection, the peer can change the assignment.
 // It is therefore recommended to call this function in a loop.
 func (c *Conn) LocalPrefixes(ctx context.Context) ([]netip.Prefix, error) {
+	if c == nil || !c.controlCapsules {
+		return nil, ErrControlCapsulesUnsupported
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -517,6 +663,9 @@ func (c *Conn) LocalPrefixes(ctx context.Context) ([]netip.Prefix, error) {
 // Note that at any point during the connection, the peer can change the advertised routes.
 // It is therefore recommended to call this function in a loop.
 func (c *Conn) Routes(ctx context.Context) ([]IPRoute, error) {
+	if c == nil || !c.controlCapsules {
+		return nil, ErrControlCapsulesUnsupported
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -584,20 +733,40 @@ func (c *Conn) readFromStream() error {
 			}
 			return wrapConnectIPStreamDataplaneErr(c, err)
 		}
+		if masqueConnectIPDebug() && t != capsuleTypeHTTPDatagram {
+			if connectIPStreamCapsuleDebugLeft.Add(-1) >= 0 {
+				log.Printf("connect-ip debug: stream capsule type=%d", uint64(t))
+			}
+		}
 		switch t {
 		case capsuleTypeHTTPDatagram:
 			payload, err := readRFC9297HTTPDatagramCapsulePayload(cr)
 			if err != nil {
 				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
-			if c.datagramCapsuleIngress == nil {
+			if c.datagramCapsuleIngress != nil {
+				select {
+				case <-c.closeChan:
+					return c.errAfterClose()
+				case c.datagramCapsuleIngress <- slices.Clone(payload):
+				default:
+					// Never block readFromStream on a full datagram queue: control capsules (e.g.
+					// ADDRESS_ASSIGN) must still be parsed from the same stream.
+					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (ingress channel full)")
+				}
 				continue
 			}
-			select {
-			case <-c.closeChan:
-				return c.errAfterClose()
-			case c.datagramCapsuleIngress <- slices.Clone(payload):
+			if c.h3UnifiedDatagramIngress != nil {
+				select {
+				case <-c.closeChan:
+					return c.errAfterClose()
+				case c.h3UnifiedDatagramIngress <- slices.Clone(payload):
+				default:
+					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h3 unified ingress full)")
+				}
+				continue
 			}
+			continue
 		case capsuleTypeAddressAssign:
 			capsule, err := parseAddressAssignCapsule(cr)
 			if err != nil {
@@ -607,19 +776,45 @@ func (c *Conn) readFromStream() error {
 			for _, assigned := range capsule.AssignedAddresses {
 				prefixes = append(prefixes, assigned.IPPrefix)
 			}
+			if masqueConnectIPDebug() {
+				log.Printf("connect-ip debug: ADDRESS_ASSIGN count=%d", len(prefixes))
+			}
 			c.mu.Lock()
 			c.assignedAddresses = prefixes
 			c.publishRouteViewLocked()
 			c.mu.Unlock()
+			c.listenerMu.Lock()
+			fn := c.assignedPrefixesListener
+			c.listenerMu.Unlock()
+			if fn != nil {
+				fn(slices.Clone(prefixes))
+			}
+			// assignedAddressNotify is buf=1: a non-blocking send can drop an update if a stale token
+			// still occupies the channel (waiter not yet scheduled). Drain then block-send.
 			select {
-			case c.assignedAddressNotify <- struct{}{}:
+			case <-c.closeChan:
+				return c.errAfterClose()
 			default:
+			}
+			select {
+			case <-c.assignedAddressNotify:
+			default:
+			}
+			select {
+			case <-c.closeChan:
+				return c.errAfterClose()
+			case c.assignedAddressNotify <- struct{}{}:
 			}
 		case capsuleTypeAddressRequest:
 			if _, err := parseAddressRequestCapsule(cr); err != nil {
 				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
-			return wrapConnectIPStreamDataplaneErr(c, errors.New("connect-ip: address request not yet supported"))
+			// Some deployments (e.g. consumer WARP edge) may emit ADDRESS_REQUEST before assignment;
+			// tearing down the stream breaks ADDRESS_ASSIGN delivery. Ignore when parse succeeded.
+			if masqueConnectIPDebug() {
+				log.Printf("connect-ip: peer ADDRESS_REQUEST capsule observed (ignored)")
+			}
+			continue
 		case capsuleTypeRouteAdvertisement:
 			capsule, err := parseRouteAdvertisementCapsule(cr)
 			if err != nil {
@@ -629,8 +824,18 @@ func (c *Conn) readFromStream() error {
 			c.availableRoutes = capsule.IPAddressRanges
 			c.mu.Unlock()
 			select {
-			case c.availableRoutesNotify <- struct{}{}:
+			case <-c.closeChan:
+				return c.errAfterClose()
 			default:
+			}
+			select {
+			case <-c.availableRoutesNotify:
+			default:
+			}
+			select {
+			case <-c.closeChan:
+				return c.errAfterClose()
+			case c.availableRoutesNotify <- struct{}{}:
 			}
 		default:
 			unknownCapsuleTotal.Add(1)
@@ -668,21 +873,32 @@ func (c *Conn) writeToStream() error {
 }
 
 func (c *Conn) receiveProxiedDatagram(ctx context.Context) ([]byte, error) {
-	if c.datagramCapsuleIngress == nil {
-		data, err := c.str.ReceiveDatagram(ctx)
-		if err != nil {
-			return nil, wrapConnectIPIngressDatagramErr(c, err)
+	if c.datagramCapsuleIngress != nil {
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-c.closeChan:
+			return nil, c.errAfterClose()
+		case d := <-c.datagramCapsuleIngress:
+			return d, nil
 		}
-		return data, nil
 	}
-	select {
-	case <-ctx.Done():
-		return nil, context.Cause(ctx)
-	case <-c.closeChan:
-		return nil, c.errAfterClose()
-	case d := <-c.datagramCapsuleIngress:
-		return d, nil
+	if c.h3UnifiedDatagramIngress != nil {
+		c.ensureH3QuicDatagramPump()
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-c.closeChan:
+			return nil, c.errAfterClose()
+		case d := <-c.h3UnifiedDatagramIngress:
+			return d, nil
+		}
 	}
+	data, err := c.str.ReceiveDatagram(ctx)
+	if err != nil {
+		return nil, wrapConnectIPIngressDatagramErr(c, err)
+	}
+	return data, nil
 }
 
 func (c *Conn) ReadPacket(b []byte) (n int, err error) {
@@ -1012,6 +1228,9 @@ func (c *Conn) handleIncomingProxiedPacketWithViewAndVersion(data []byte, view *
 	if peerAddresses != nil {
 		if !prefixesContainAddrSameFamily(peerAddresses, src) {
 			c.emitPolicyDropICMP(data, "src_not_allowed")
+			if masqueConnectIPDebug() {
+				log.Printf("connect-ip debug: incoming policy src=%s dst=%s len=%d err=src_not_allowed", src, dst, len(data))
+			}
 			return fmt.Errorf("connect-ip: datagram source address not allowed: %s", src)
 		}
 	}
@@ -1050,6 +1269,9 @@ func (c *Conn) handleIncomingProxiedPacketWithViewAndVersion(data []byte, view *
 			reason = "proto_not_allowed"
 		}
 		c.emitPolicyDropICMP(data, reason)
+		if masqueConnectIPDebug() {
+			log.Printf("connect-ip debug: incoming policy src=%s dst=%s proto=%d len=%d reason=%s", src, dst, ipProto, len(data), reason)
+		}
 		return fmt.Errorf("connect-ip: datagram destination address / protocol not allowed: %s (protocol: %d)", dst, ipProto)
 	}
 	return nil
@@ -1203,6 +1425,9 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 		pktDst := netip.AddrFrom4([4]byte(packet[16:20]))
 		pktProto := packet[9]
 		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
+			if masqueConnectIPDebug() {
+				log.Printf("connect-ip debug: outgoing IPv4 policy len=%d src=%s dst=%s proto=%d err=%v", len(packet), pktSrc, pktDst, pktProto, err)
+			}
 			return err
 		}
 		return nil
@@ -1240,6 +1465,9 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 			pktProto = proto
 		}
 		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
+			if masqueConnectIPDebug() {
+				log.Printf("connect-ip debug: outgoing IPv6 policy len=%d src=%s dst=%s proto=%d err=%v", len(packet), pktSrc, pktDst, pktProto, err)
+			}
 			return err
 		}
 		return nil
@@ -1468,6 +1696,9 @@ func (c *Conn) Close() error {
 	if c == nil {
 		return nil
 	}
+	c.listenerMu.Lock()
+	c.assignedPrefixesListener = nil
+	c.listenerMu.Unlock()
 	c.mu.Lock()
 	if c.closeErr == nil {
 		c.closeErr = &CloseError{Remote: false}

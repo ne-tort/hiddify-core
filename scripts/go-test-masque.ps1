@@ -11,7 +11,7 @@ Push-Location $singbox
 try {
     Remove-Item Env:GOOS -ErrorAction SilentlyContinue
     Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
-    go test ./protocol/masque/... ./transport/masque/... -count=1 @args
+    go test ./protocol/masque/... ./transport/masque/... ./common/masque/... -count=1 @args
     exit $LASTEXITCODE
 }
 finally {

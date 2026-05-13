@@ -126,18 +126,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	if err != nil {
 		return E.Cause(err, "load server certificate")
 	}
-	udpTemplateRaw := strings.TrimSpace(e.options.TemplateUDP)
-	if udpTemplateRaw == "" {
-		udpTemplateRaw = "https://masque.local/masque/udp/{target_host}/{target_port}"
-	}
-	ipTemplateRaw := strings.TrimSpace(e.options.TemplateIP)
-	if ipTemplateRaw == "" {
-		ipTemplateRaw = "https://masque.local/masque/ip"
-	}
-	tcpTemplateRaw := strings.TrimSpace(e.options.TemplateTCP)
-	if tcpTemplateRaw == "" {
-		tcpTemplateRaw = "https://masque.local/masque/tcp/{target_host}/{target_port}"
-	}
+	udpTemplateRaw, ipTemplateRaw, tcpTemplateRaw := resolveMasqueServerTemplateURLs(e.options)
 	udpTemplate, err := uritemplate.New(udpTemplateRaw)
 	if err != nil {
 		return E.Cause(err, "invalid server UDP template")
@@ -230,8 +219,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
 		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger)
 	})
+	tcpRelaxedAuthority := masqueServerShouldRelaxTCPAuthority(e.options)
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
-		e.handleTCPConnectRequest(w, r, tcpTemplate)
+		e.handleTCPConnectRequest(w, r, tcpTemplate, tcpRelaxedAuthority)
 	})
 	listenHost := strings.TrimSpace(e.options.Listen)
 	if listenHost == "" {
@@ -604,7 +594,7 @@ func isExpectedServerShutdownError(err error) bool {
 		strings.Contains(text, "server closed")
 }
 
-func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template) {
+func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template, relaxedTCPAuthority bool) {
 	debugf := func(format string, args ...any) {
 		if e.logger == nil {
 			return
@@ -630,7 +620,7 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	targetHost, targetPort, parseErr := parseTCPTargetFromRequest(r, tcpTemplate)
+	targetHost, targetPort, parseErr := parseTCPTargetFromRequest(r, tcpTemplate, relaxedTCPAuthority)
 	if parseErr != nil {
 		debugf("masque tcp connect parse denied status=400 error_class=misconfig err=%v", parseErr)
 		w.WriteHeader(http.StatusBadRequest)
@@ -950,7 +940,67 @@ func (d *connDeadlines) writeTimeoutExceeded() bool {
 	return v != 0 && time.Now().UnixNano() > v
 }
 
-func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) (string, string, error) {
+func masqueListenBindsUnspecified(listen string) bool {
+	h := strings.TrimSpace(listen)
+	if h == "" {
+		return true
+	}
+	hostForParse := stripIPv6BracketsForParse(h)
+	if i := strings.IndexByte(hostForParse, '%'); i >= 0 {
+		hostForParse = hostForParse[:i]
+	}
+	if ip := net.ParseIP(hostForParse); ip != nil {
+		return ip.IsUnspecified()
+	}
+	return false
+}
+
+func masqueServerShouldRelaxTCPAuthority(o option.MasqueEndpointOptions) bool {
+	if strings.TrimSpace(o.TemplateTCP) != "" {
+		return false
+	}
+	return masqueListenBindsUnspecified(o.Listen)
+}
+
+func masqueTCPAuthorityRelaxableTemplateHost(host string) bool {
+	h := strings.TrimSpace(host)
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	h = strings.ToLower(h)
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+// tcpConnectStreamAuthorityMatches enforces :authority vs template URL host for MASQUE TCP CONNECT-stream.
+// When relaxedTCPAuthority is true (unspecified listen + empty server_template_tcp), the mux template uses
+// loopback as a stable placeholder; after TLS the client's :authority is the public address, so only the
+// port must match the template.
+func tcpConnectStreamAuthorityMatches(templateHost, requestHost string, relaxedTCPAuthority bool) bool {
+	tH := strings.TrimSpace(templateHost)
+	rH := strings.TrimSpace(requestHost)
+	if strings.EqualFold(tH, rH) {
+		return true
+	}
+	if !relaxedTCPAuthority || tH == "" {
+		return false
+	}
+	tHost, tPort, tErr := net.SplitHostPort(tH)
+	rHost, rPort, rErr := net.SplitHostPort(rH)
+	_ = rHost
+	if tErr != nil || rErr != nil {
+		return false
+	}
+	if !masqueTCPAuthorityRelaxableTemplateHost(tHost) {
+		return false
+	}
+	return tPort == rPort
+}
+
+func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, relaxedTCPAuthority bool) (string, string, error) {
 	if r.Method != http.MethodConnect {
 		return "", "", E.New("expected CONNECT request")
 	}
@@ -958,7 +1008,7 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) 
 	if err != nil {
 		return "", "", E.Cause(err, "parse tcp template")
 	}
-	if templateURL.Host != "" && !strings.EqualFold(strings.TrimSpace(r.Host), strings.TrimSpace(templateURL.Host)) {
+	if templateURL.Host != "" && !tcpConnectStreamAuthorityMatches(templateURL.Host, strings.TrimSpace(r.Host), relaxedTCPAuthority) {
 		return "", "", E.New("CONNECT authority does not match TCP template host")
 	}
 	var candidates []string
@@ -998,6 +1048,29 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template) 
 		}
 	}
 	appendCandidate(requestURIWithAuthority)
+	if relaxedTCPAuthority && templateURL.Host != "" {
+		scheme := strings.TrimSpace(templateURL.Scheme)
+		if scheme == "" {
+			scheme = "https"
+		}
+		requestURI := strings.TrimSpace(r.RequestURI)
+		switch {
+		case requestURI == "":
+		case strings.HasPrefix(strings.ToLower(requestURI), "http://"),
+			strings.HasPrefix(strings.ToLower(requestURI), "https://"):
+		default:
+			if !strings.HasPrefix(requestURI, "/") {
+				requestURI = "/" + requestURI
+			}
+			appendCandidate(scheme + "://" + templateURL.Host + requestURI)
+		}
+		if p := strings.TrimSpace(r.URL.Path); p != "" {
+			if !strings.HasPrefix(p, "/") {
+				p = "/" + p
+			}
+			appendCandidate(scheme + "://" + templateURL.Host + p)
+		}
+	}
 	var host, port string
 	for _, candidate := range candidates {
 		if candidate == "" {

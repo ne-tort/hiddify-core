@@ -70,6 +70,8 @@ type RuntimeOptions struct {
 	WarpMasqueLegacyH3Extras    bool
 	WarpConnectIPProtocol       string
 	WarpMasqueDeviceBearerToken string
+	ProfileLocalIPv4            string
+	ProfileLocalIPv6            string
 
 	TCPDial                  T.MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
@@ -175,6 +177,8 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			WarpMasqueLegacyH3Extras:    r.options.WarpMasqueLegacyH3Extras,
 			WarpConnectIPProtocol:       r.options.WarpConnectIPProtocol,
 			WarpMasqueDeviceBearerToken: r.options.WarpMasqueDeviceBearerToken,
+			ProfileLocalIPv4:            strings.TrimSpace(r.options.ProfileLocalIPv4),
+			ProfileLocalIPv6:            strings.TrimSpace(r.options.ProfileLocalIPv6),
 		})
 		if err == nil {
 			break

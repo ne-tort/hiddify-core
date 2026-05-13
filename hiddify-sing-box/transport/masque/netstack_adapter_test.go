@@ -368,3 +368,33 @@ func ipv4Protocol(addr netip.AddrPort) tcpip.NetworkProtocolNumber {
 	}
 	return ipv6.ProtocolNumber
 }
+
+func TestConnectIPNetstackLocalPrefixWaitForSession(t *testing.T) {
+	t.Run("caps_long_env_when_profile_v4", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
+		v4 := netip.MustParseAddr("172.16.0.2")
+		if d := connectIPNetstackLocalPrefixWaitForSession(v4, netip.Addr{}); d != 2*time.Second {
+			t.Fatalf("expected 2s cap, got %v", d)
+		}
+	})
+	t.Run("caps_long_env_when_profile_v6", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
+		v6 := netip.MustParseAddr("fd12::1")
+		if d := connectIPNetstackLocalPrefixWaitForSession(netip.Addr{}, v6); d != 2*time.Second {
+			t.Fatalf("expected 2s cap, got %v", d)
+		}
+	})
+	t.Run("full_wait_without_profile", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "9")
+		if d := connectIPNetstackLocalPrefixWaitForSession(netip.Addr{}, netip.Addr{}); d != 9*time.Second {
+			t.Fatalf("expected 9s from env, got %v", d)
+		}
+	})
+	t.Run("respects_shorter_env_with_profile", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "1")
+		v4 := netip.MustParseAddr("172.16.0.2")
+		if d := connectIPNetstackLocalPrefixWaitForSession(v4, netip.Addr{}); d != 1*time.Second {
+			t.Fatalf("expected 1s (below cap), got %v", d)
+		}
+	})
+}

@@ -15,26 +15,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/cloudflare"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/wireguard"
 	E "github.com/sagernet/sing/common/exceptions"
+	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 // WarpMasqueDataplaneTarget splits the MASQUE HTTPS host (LogicalServer) from the QUIC socket peer (DialPeer).
 type WarpMasqueDataplaneTarget struct {
-	LogicalServer string // host for default /masque/{udp,ip,tcp} URL templates (engage FQDN)
-	DialPeer      string // optional literal IP (or host) for QUIC only; empty → dial LogicalServer
-	TLSServerName string
-	Ports         []uint16
+	LogicalServer    string // host for default /masque/{udp,ip,tcp} URL templates (engage FQDN)
+	DialPeer         string // optional literal IP (or host) for QUIC only; empty → dial LogicalServer
+	TLSServerName    string
+	ProfileLocalIPv4 string // profile.config.interface.addresses.v4
+	ProfileLocalIPv6 string // profile.config.interface.addresses.v6
+	Ports            []uint16
 	// TunnelProtocol and EndpointPublicKey come from Cloudflare device profile after bootstrap (RFC control-plane snapshot).
 	TunnelProtocol    string
 	EndpointPublicKey string // PEM or PKIX blob from peers[0].public_key; used with masque_ecdsa_private_key for mTLS pinning
 }
 
 type WarpControlAdapter interface {
-	ResolveServer(ctx context.Context, options option.WarpMasqueEndpointOptions) (string, uint16, error)
-	ResolveDataplaneCandidates(ctx context.Context, options option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error)
+	ResolveServer(ctx context.Context, options *option.WarpMasqueEndpointOptions) (string, uint16, error)
+	ResolveDataplaneCandidates(ctx context.Context, options *option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error)
 }
 
 type CloudflareWarpControlAdapter struct{}
@@ -42,13 +47,18 @@ type CloudflareWarpControlAdapter struct{}
 var warpMasqueCacheMu sync.Mutex
 
 type warpMasqueCacheEntry struct {
-	LogicalServer     string    `json:"logical_server"`
-	QuicPeer          string    `json:"quic_peer,omitempty"`
-	TLSServerName     string    `json:"tls_server_name,omitempty"`
-	Port              uint16    `json:"port"`
-	TunnelProtocol    string    `json:"tunnel_protocol,omitempty"`
-	EndpointPublicKey string    `json:"endpoint_public_key,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	LogicalServer     string `json:"logical_server"`
+	QuicPeer          string `json:"quic_peer,omitempty"`
+	TLSServerName     string `json:"tls_server_name,omitempty"`
+	Port              uint16 `json:"port"`
+	TunnelProtocol    string `json:"tunnel_protocol,omitempty"`
+	EndpointPublicKey string `json:"endpoint_public_key,omitempty"`
+	// Profile interface IPs from device API (same run as successful dataplane). CONNECT-IP netstack uses
+	// them when ADDRESS_ASSIGN is late; readWarpCache must restore them — otherwise a cache hit skips
+	// GetWarpProfile and bootstrap leaves ProfileLocalIPv* empty (TLS/trace flakiness after restart).
+	ProfileLocalIPv4 string    `json:"profile_local_v4,omitempty"`
+	ProfileLocalIPv6 string    `json:"profile_local_v6,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type warpMasqueCacheStore struct {
@@ -57,11 +67,165 @@ type warpMasqueCacheStore struct {
 }
 
 const (
-	warpMasqueCacheVersion = 3
+	warpMasqueCacheVersion = 4
 	warpMasqueCacheTTL     = 24 * time.Hour
 )
 
-func (a CloudflareWarpControlAdapter) ResolveServer(ctx context.Context, options option.WarpMasqueEndpointOptions) (string, uint16, error) {
+func autoEnrollMasqueEnabled(p *bool) bool {
+	return p == nil || *p
+}
+
+func mergeCloudflareProfileIntoWarpOptions(options *option.WarpMasqueEndpointOptions, cf *cloudflare.CloudflareProfile) {
+	if options == nil || cf == nil {
+		return
+	}
+	if strings.TrimSpace(cf.Token) != "" {
+		options.Profile.AuthToken = strings.TrimSpace(cf.Token)
+	}
+	if strings.TrimSpace(cf.ID) != "" {
+		options.Profile.ID = strings.TrimSpace(cf.ID)
+	}
+	if strings.TrimSpace(cf.Config.PrivateKey) != "" {
+		options.Profile.PrivateKey = strings.TrimSpace(cf.Config.PrivateKey)
+	}
+}
+
+func resolvedWarpMasqueDeviceStatePath(options *option.WarpMasqueEndpointOptions) string {
+	if options == nil {
+		return filepath.Join(os.TempDir(), "warp_masque_device_state.json")
+	}
+	if p := strings.TrimSpace(options.Profile.WarpMasqueStatePath); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(os.Getenv("HIDDIFY_WARP_MASQUE_DEVICE_STATE")); p != "" {
+		return p
+	}
+	cfg, err := os.UserConfigDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "warp_masque_device_state.json")
+	}
+	return filepath.Join(cfg, "sing-box", "warp_masque_device_state.json")
+}
+
+// resolvedWarpMasqueDataplaneCachePath keeps the store next to device state (not a fixed /tmp name) so a
+// host bind-mount of /tmp with non-root ownership does not make rename/write fail under container root.
+func resolvedWarpMasqueDataplaneCachePath(options *option.WarpMasqueEndpointOptions) string {
+	statePath := resolvedWarpMasqueDeviceStatePath(options)
+	return filepath.Join(filepath.Dir(statePath), "hiddify_warp_masque_dataplane_cache.json")
+}
+
+type warpMasqueDeviceStateV1 struct {
+	Version               int    `json:"version"`
+	AuthToken             string `json:"auth_token,omitempty"`
+	ID                    string `json:"id,omitempty"`
+	WireguardPrivateKey   string `json:"wireguard_private_key,omitempty"`
+	MasqueECDSAPrivateKey string `json:"masque_ecdsa_private_key,omitempty"`
+}
+
+func loadWarpMasqueDeviceStateInto(options *option.WarpMasqueEndpointOptions) {
+	if options == nil {
+		return
+	}
+	path := resolvedWarpMasqueDeviceStatePath(options)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var s warpMasqueDeviceStateV1
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return
+	}
+	if s.Version != 0 && s.Version != 1 {
+		return
+	}
+	if strings.TrimSpace(options.Profile.AuthToken) == "" && strings.TrimSpace(s.AuthToken) != "" {
+		options.Profile.AuthToken = strings.TrimSpace(s.AuthToken)
+	}
+	if strings.TrimSpace(options.Profile.ID) == "" && strings.TrimSpace(s.ID) != "" {
+		options.Profile.ID = strings.TrimSpace(s.ID)
+	}
+	if strings.TrimSpace(options.Profile.PrivateKey) == "" && strings.TrimSpace(s.WireguardPrivateKey) != "" {
+		options.Profile.PrivateKey = strings.TrimSpace(s.WireguardPrivateKey)
+	}
+	if strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey) == "" && strings.TrimSpace(s.MasqueECDSAPrivateKey) != "" {
+		options.Profile.MasqueECDSAPrivateKey = strings.TrimSpace(s.MasqueECDSAPrivateKey)
+	}
+}
+
+func saveWarpMasqueDeviceState(options *option.WarpMasqueEndpointOptions) {
+	if options == nil {
+		return
+	}
+	path := resolvedWarpMasqueDeviceStatePath(options)
+	s := warpMasqueDeviceStateV1{
+		Version:               1,
+		AuthToken:             strings.TrimSpace(options.Profile.AuthToken),
+		ID:                    strings.TrimSpace(options.Profile.ID),
+		WireguardPrivateKey:   strings.TrimSpace(options.Profile.PrivateKey),
+		MasqueECDSAPrivateKey: strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey),
+	}
+	if s.AuthToken == "" && s.ID == "" && s.WireguardPrivateKey == "" && s.MasqueECDSAPrivateKey == "" {
+		return
+	}
+	raw, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
+}
+
+func warpMasqueCloudflareAPI(ctx context.Context, profileDetour string) *cloudflare.CloudflareApi {
+	var dialer N.Dialer
+	if profileDetour != "" {
+		if outmanager := service.FromContext[adapter.OutboundManager](ctx); outmanager != nil {
+			if d, ok := outmanager.Outbound(profileDetour); ok {
+				dialer = d
+			}
+		}
+	}
+	return cloudflare.NewCloudflareApiDetour(dialer)
+}
+
+// maybeEnrollWarpMasqueKey returns enrolled=true when this run generated ECDSA and PATCH-enrolled (usque parity).
+func maybeEnrollWarpMasqueKey(ctx context.Context, options *option.WarpMasqueEndpointOptions, tunnelProto string) (enrolled bool, err error) {
+	if options == nil {
+		return false, nil
+	}
+	if !tunnelProtocolSuggestsMasque(tunnelProto) {
+		return false, nil
+	}
+	if strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey) != "" {
+		return false, nil
+	}
+	if !autoEnrollMasqueEnabled(options.Profile.AutoEnrollMasque) {
+		return false, nil
+	}
+	token := strings.TrimSpace(options.Profile.AuthToken)
+	id := strings.TrimSpace(options.Profile.ID)
+	if token == "" || id == "" {
+		return false, E.New("warp_masque: MASQUE tunnel requires profile.auth_token and profile.id for ECDSA enroll (or set profile.masque_ecdsa_private_key / profile.auto_enroll_masque=false with a pre-enrolled key)")
+	}
+	sec1B64, pkixPub, err := GenerateWarpMasqueECDSAKeyPair()
+	if err != nil {
+		return false, E.Cause(err, "warp_masque: generate MASQUE ECDSA key")
+	}
+	api := warpMasqueCloudflareAPI(ctx, options.Profile.Detour)
+	if err := api.EnrollMasqueDeviceKey(ctx, token, id, pkixPub, strings.TrimSpace(options.Profile.MasqueDeviceName)); err != nil {
+		return false, E.Cause(err, "warp_masque: enroll MASQUE device key (PATCH /reg)")
+	}
+	options.Profile.MasqueECDSAPrivateKey = sec1B64
+	return true, nil
+}
+
+func (a CloudflareWarpControlAdapter) ResolveServer(ctx context.Context, options *option.WarpMasqueEndpointOptions) (string, uint16, error) {
 	t, err := a.ResolveDataplaneCandidates(ctx, options)
 	if err != nil || len(t.Ports) == 0 {
 		return t.LogicalServer, 0, err
@@ -69,12 +233,12 @@ func (a CloudflareWarpControlAdapter) ResolveServer(ctx context.Context, options
 	return t.LogicalServer, t.Ports[0], nil
 }
 
-func (a CloudflareWarpControlAdapter) ResolveDataplaneCandidates(ctx context.Context, options option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
+func (a CloudflareWarpControlAdapter) ResolveDataplaneCandidates(ctx context.Context, options *option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
 	return resolveWarpMasqueCandidatePorts(ctx, options)
 }
 
 // RecordWarpMasqueDataplaneSuccess stores a working dataplane port for reuse (24h TTL), after QUIC/MASQUE succeeds.
-func RecordWarpMasqueDataplaneSuccess(options option.WarpMasqueEndpointOptions, logicalServer string, quicDialPeer string, tlsServerName string, tunnelProto string, endpointPub string, port uint16) {
+func RecordWarpMasqueDataplaneSuccess(options option.WarpMasqueEndpointOptions, logicalServer string, quicDialPeer string, tlsServerName string, tunnelProto string, endpointPub string, port uint16, profileLocalV4 string, profileLocalV6 string) {
 	if port == 0 || strings.TrimSpace(logicalServer) == "" {
 		return
 	}
@@ -89,14 +253,21 @@ func RecordWarpMasqueDataplaneSuccess(options option.WarpMasqueEndpointOptions, 
 		Port:              port,
 		TunnelProtocol:    strings.TrimSpace(tunnelProto),
 		EndpointPublicKey: strings.TrimSpace(endpointPub),
-	})
+		ProfileLocalIPv4:  strings.TrimSpace(profileLocalV4),
+		ProfileLocalIPv6:  strings.TrimSpace(profileLocalV6),
+	}, &options)
 }
 
-func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
-	cacheKey := buildWarpCacheKey(options)
+func resolveWarpMasqueCandidatePorts(ctx context.Context, options *option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, error) {
+	if options == nil {
+		return WarpMasqueDataplaneTarget{}, E.New("internal: nil warp_masque options")
+	}
+	loadWarpMasqueDeviceStateInto(options)
+
+	cacheKey := buildWarpCacheKey(*options)
 	explicitServer := strings.TrimSpace(options.Server) != "" && options.ServerPort != 0
 	if !options.Profile.Recreate && !explicitServer {
-		if tgt, ok := readWarpCache(cacheKey); ok {
+		if tgt, ok := readWarpCache(cacheKey, options); ok {
 			return tgt, nil
 		}
 	}
@@ -112,11 +283,38 @@ func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMas
 	if err != nil {
 		return WarpMasqueDataplaneTarget{}, err
 	}
+	mergeCloudflareProfileIntoWarpOptions(options, cfProfile)
 	if len(cfProfile.Config.Peers) == 0 {
 		return WarpMasqueDataplaneTarget{}, E.New("missing peers in cloudflare profile")
 	}
 	peer := cfProfile.Config.Peers[0]
 	tunnelProto := strings.TrimSpace(cfProfile.Policy.TunnelProtocol)
+	enrolledMasque, err := maybeEnrollWarpMasqueKey(ctx, options, tunnelProto)
+	if err != nil {
+		return WarpMasqueDataplaneTarget{}, err
+	}
+	// After enroll, Cloudflare returns ECDSA endpoint key in peers[0].public_key (same as usque Register); refresh for mTLS pin.
+	if enrolledMasque {
+		refetch := option.WARPProfile{
+			ID:         options.Profile.ID,
+			PrivateKey: options.Profile.PrivateKey,
+			AuthToken:  options.Profile.AuthToken,
+			Recreate:   options.Profile.Recreate,
+			Detour:     options.Profile.Detour,
+			License:    options.Profile.License,
+		}
+		cfFresh, rerr := resolveWarpProfileWithRetry(ctx, refetch)
+		if rerr != nil {
+			return WarpMasqueDataplaneTarget{}, E.Cause(rerr, "warp_masque: refresh Cloudflare profile after MASQUE ECDSA enroll")
+		}
+		cfProfile = cfFresh
+		mergeCloudflareProfileIntoWarpOptions(options, cfProfile)
+		if len(cfProfile.Config.Peers) == 0 {
+			return WarpMasqueDataplaneTarget{}, E.New("missing peers in cloudflare profile after MASQUE enroll refresh")
+		}
+		peer = cfProfile.Config.Peers[0]
+		tunnelProto = strings.TrimSpace(cfProfile.Policy.TunnelProtocol)
+	}
 	strategy := normalizeDataplanePortStrategy(options.Profile)
 	log.Printf("warp_masque control profile endpoint host=%s v4=%s v6=%s ports=%v tunnel_protocol=%s",
 		peer.Endpoint.Host, peer.Endpoint.V4, peer.Endpoint.V6, peer.Endpoint.Ports, tunnelProto)
@@ -142,7 +340,7 @@ func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMas
 	}
 	dialPeer, tlsSNI := warpMasqueDialPeerAndTLS(server, peer.Endpoint.V4, peer.Endpoint.V6, options.Server)
 	endpointPubKey := strings.TrimSpace(peer.PublicKey)
-	if hostname := warpCloudflareMasqueTLSHostname(options, tunnelProto); hostname != "" {
+	if hostname := warpCloudflareMasqueTLSHostname(*options, tunnelProto); hostname != "" {
 		tlsSNI = hostname
 	} else if strings.TrimSpace(tlsSNI) == "" && strings.TrimSpace(dialPeer) == "" {
 		tlsSNI = ""
@@ -154,6 +352,8 @@ func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMas
 		LogicalServer:     server,
 		DialPeer:          dialPeer,
 		TLSServerName:     tlsSNI,
+		ProfileLocalIPv4:  strings.TrimSpace(cfProfile.Config.Interface.Addresses.V4),
+		ProfileLocalIPv6:  strings.TrimSpace(cfProfile.Config.Interface.Addresses.V6),
 		TunnelProtocol:    tunnelProto,
 		EndpointPublicKey: endpointPubKey,
 	}
@@ -161,10 +361,12 @@ func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMas
 	// Hard overrides: single explicit port list of length 1.
 	if options.Profile.DataplanePort != 0 {
 		baseRet.Ports = []uint16{options.Profile.DataplanePort}
+		saveWarpMasqueDeviceState(options)
 		return baseRet, nil
 	}
 	if serverPort != 0 {
 		baseRet.Ports = []uint16{serverPort}
+		saveWarpMasqueDeviceState(options)
 		return baseRet, nil
 	}
 
@@ -195,10 +397,11 @@ func resolveWarpMasqueCandidatePorts(ctx context.Context, options option.WarpMas
 	ports = capDataplanePorts(ports, maxDataplanePortCandidates)
 	log.Printf("warp_masque dataplane UDP candidates (try order): %v", ports)
 	baseRet.Ports = ports
+	saveWarpMasqueDeviceState(options)
 	return baseRet, nil
 }
 
-func resolveWarpProfileByCompatibility(ctx context.Context, options option.WarpMasqueEndpointOptions, profile option.WARPProfile) (*cloudflare.CloudflareProfile, error) {
+func resolveWarpProfileByCompatibility(ctx context.Context, options *option.WarpMasqueEndpointOptions, profile option.WARPProfile) (*cloudflare.CloudflareProfile, error) {
 	mode := normalizeWarpCompatibility(options.Profile.Compatibility)
 	switch mode {
 	case option.WarpMasqueCompatibilityConsumer:
@@ -280,26 +483,28 @@ func buildWarpCacheKey(options option.WarpMasqueEndpointOptions) string {
 		override = "|override:" + server + ":" + strconv.Itoa(int(port))
 	}
 	detour := strings.TrimSpace(options.Profile.Detour)
+	httpLayer := normalizeHTTPLayer(options.HTTPLayer)
+	httpFallback := "off"
+	if options.HTTPLayerFallback {
+		httpFallback = "on"
+	}
+	httpCacheScope := "|http:" + httpLayer + "|fb:" + httpFallback
 	masqueTail := ""
 	if strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey) != "" {
 		mh := sha256.Sum256([]byte(strings.TrimSpace(options.Profile.MasqueECDSAPrivateKey)))
 		masqueTail = "|msk:" + hex.EncodeToString(mh[:8])
 	}
 	if strings.TrimSpace(options.Profile.ID) != "" {
-		return prefix + "id:" + strings.TrimSpace(options.Profile.ID) + "|detour:" + detour + override + masqueTail
+		return prefix + "id:" + strings.TrimSpace(options.Profile.ID) + "|detour:" + detour + httpCacheScope + override + masqueTail
 	}
 	if strings.TrimSpace(options.Profile.License) != "" {
-		return prefix + "license:" + strings.TrimSpace(options.Profile.License) + "|detour:" + detour + override + masqueTail
+		return prefix + "license:" + strings.TrimSpace(options.Profile.License) + "|detour:" + detour + httpCacheScope + override + masqueTail
 	}
 	if strings.TrimSpace(options.Profile.PrivateKey) != "" {
 		hash := sha256.Sum256([]byte(strings.TrimSpace(options.Profile.PrivateKey)))
-		return prefix + "pk:" + hex.EncodeToString(hash[:8]) + "|detour:" + detour + override + masqueTail
+		return prefix + "pk:" + hex.EncodeToString(hash[:8]) + "|detour:" + detour + httpCacheScope + override + masqueTail
 	}
-	return prefix + "default|detour:" + detour + override + masqueTail
-}
-
-func warpCachePath() string {
-	return filepath.Join(os.TempDir(), "hiddify_warp_masque_cache.json")
+	return prefix + "default|detour:" + detour + httpCacheScope + override + masqueTail
 }
 
 func warpCloudflareMasqueTLSHostname(options option.WarpMasqueEndpointOptions, tunnelProto string) string {
@@ -315,10 +520,11 @@ func warpCloudflareMasqueTLSHostname(options option.WarpMasqueEndpointOptions, t
 	return "consumer-masque.cloudflareclient.com"
 }
 
-func readWarpCache(key string) (WarpMasqueDataplaneTarget, bool) {
+func readWarpCache(key string, options *option.WarpMasqueEndpointOptions) (WarpMasqueDataplaneTarget, bool) {
 	warpMasqueCacheMu.Lock()
 	defer warpMasqueCacheMu.Unlock()
-	raw, err := os.ReadFile(warpCachePath())
+	cacheFile := resolvedWarpMasqueDataplaneCachePath(options)
+	raw, err := os.ReadFile(cacheFile)
 	if err != nil {
 		return WarpMasqueDataplaneTarget{}, false
 	}
@@ -336,6 +542,11 @@ func readWarpCache(key string) (WarpMasqueDataplaneTarget, bool) {
 	if !entry.UpdatedAt.IsZero() && time.Since(entry.UpdatedAt) > warpMasqueCacheTTL {
 		return WarpMasqueDataplaneTarget{}, false
 	}
+	// Entries written before profile_local_* was stored (or partial writes) restore dataplane port but
+	// leave CONNECT-IP netstack without ROUTE_ADVERTISEMENT fallbacks — treat as miss and refetch API.
+	if strings.TrimSpace(entry.ProfileLocalIPv4) == "" && strings.TrimSpace(entry.ProfileLocalIPv6) == "" {
+		return WarpMasqueDataplaneTarget{}, false
+	}
 	return WarpMasqueDataplaneTarget{
 		LogicalServer:     strings.TrimSpace(entry.LogicalServer),
 		DialPeer:          strings.TrimSpace(entry.QuicPeer),
@@ -343,17 +554,23 @@ func readWarpCache(key string) (WarpMasqueDataplaneTarget, bool) {
 		Ports:             []uint16{entry.Port},
 		TunnelProtocol:    strings.TrimSpace(entry.TunnelProtocol),
 		EndpointPublicKey: strings.TrimSpace(entry.EndpointPublicKey),
+		ProfileLocalIPv4:  strings.TrimSpace(entry.ProfileLocalIPv4),
+		ProfileLocalIPv6:  strings.TrimSpace(entry.ProfileLocalIPv6),
 	}, true
 }
 
-func writeWarpCache(key string, entry warpMasqueCacheEntry) {
+func writeWarpCache(key string, entry warpMasqueCacheEntry, options *option.WarpMasqueEndpointOptions) {
 	warpMasqueCacheMu.Lock()
 	defer warpMasqueCacheMu.Unlock()
 	store := warpMasqueCacheStore{
 		Version: warpMasqueCacheVersion,
 		Entries: map[string]warpMasqueCacheEntry{},
 	}
-	cacheFile := warpCachePath()
+	cacheFile := resolvedWarpMasqueDataplaneCachePath(options)
+	dir := filepath.Dir(cacheFile)
+	if dir != "." && dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
 	if raw, err := os.ReadFile(cacheFile); err == nil {
 		_ = json.Unmarshal(raw, &store)
 		if store.Version != warpMasqueCacheVersion || store.Entries == nil {
@@ -371,7 +588,17 @@ func writeWarpCache(key string, entry warpMasqueCacheEntry) {
 	}
 	tmpFile := cacheFile + ".tmp"
 	if err := os.WriteFile(tmpFile, raw, 0o600); err != nil {
+		log.Printf("warp_masque: cache write failed (path=%s, dir read-only or full?): %v", cacheFile, err)
 		return
 	}
-	_ = os.Rename(tmpFile, cacheFile)
+	if err := os.Rename(tmpFile, cacheFile); err != nil {
+		_ = os.Remove(tmpFile)
+		// Docker overlay / bind mounts sometimes return EBUSY on rename-over; inplace write
+		// keeps cache usable (slightly less atomic for external readers).
+		if werr := os.WriteFile(cacheFile, raw, 0o600); werr != nil {
+			log.Printf("warp_masque: cache update failed (path=%s, rename: %v; inplace: %v)", cacheFile, err, werr)
+			return
+		}
+		log.Printf("warp_masque: cache rename failed, used inplace write (path=%s): %v", cacheFile, err)
+	}
 }

@@ -172,7 +172,7 @@ func TestServerHandleTCPConnectRequestSuccess(t *testing.T) {
 	req.RemoteAddr = "198.18.0.10:12345"
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -204,7 +204,7 @@ func TestServerHandleTCPConnectRequestRejectsMisusedExtendedProtocol(t *testing.
 	req.Header.Set(":protocol", "connect-udp")
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unexpected status want %d got %d", http.StatusBadRequest, rec.Code)
@@ -224,7 +224,7 @@ func TestServerHandleTCPConnectRequestAuthDenied(t *testing.T) {
 	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -247,7 +247,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
 	req := newConnectRequest(t, "/masque/tcp/127.0.0.1/443", http.NoBody)
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -272,7 +272,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t 
 	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("unexpected status: %d", rec.Code)
@@ -297,7 +297,7 @@ func TestServerHandleTCPConnectRequestTemplateHostMismatchRejected(t *testing.T)
 	req.Host = "masque.local"
 	rec := httptest.NewRecorder()
 
-	ep.handleTCPConnectRequest(rec, req, template)
+	ep.handleTCPConnectRequest(rec, req, template, false)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unexpected status: %d", rec.Code)

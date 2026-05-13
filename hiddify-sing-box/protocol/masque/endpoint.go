@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 
+	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -86,6 +87,25 @@ func normalizeHTTPLayer(layer string) string {
 	default:
 		return strings.TrimSpace(layer)
 	}
+}
+
+// applyMasqueClientMasqueDefaults runs before validateMasqueOptions for client mode only.
+// It clears incompatible leftovers and fills a safe TCP default so minimal JSON is accepted.
+func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.MasqueEndpointOptions {
+	if normalizeMode(o.Mode) == option.MasqueModeServer {
+		return o
+	}
+	tm := normalizeTransportMode(o.TransportMode)
+	if tm == option.MasqueTransportModeConnectUDP && strings.TrimSpace(o.TemplateIP) != "" {
+		o.TemplateIP = ""
+	}
+	tcp := normalizeTCPTransport(o.TCPTransport)
+	if tcp == "" || tcp == option.MasqueTCPTransportAuto {
+		if tm != option.MasqueTransportModeConnectIP {
+			o.TCPTransport = option.MasqueTCPTransportConnectStream
+		}
+	}
+	return o
 }
 
 func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUICExperimentalOptions {
@@ -203,6 +223,9 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 				return E.New("masque: hop missing server_port")
 			}
 		}
+		if _, err := CM.BuildChain(o); err != nil {
+			return err
+		}
 	} else if strings.TrimSpace(o.Server) == "" {
 		return E.New("masque: server is required")
 	}
@@ -309,30 +332,20 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if o.ConnectIPScopeTarget != "" || o.ConnectIPScopeIPProto != 0 {
 		return E.New("masque server: connect_ip_scope_* is client-only")
 	}
-	tudp := strings.TrimSpace(o.TemplateUDP)
-	if tudp != "" && (!strings.Contains(tudp, "{target_host}") || !strings.Contains(tudp, "{target_port}")) {
+	udpExp, _, tcpExp := resolveMasqueServerTemplateURLs(o)
+	if strings.TrimSpace(o.TemplateUDP) != "" &&
+		(!strings.Contains(udpExp, "{target_host}") || !strings.Contains(udpExp, "{target_port}")) {
 		return E.New("masque server: template_udp must include {target_host} and {target_port}")
 	}
-	ttcp := strings.TrimSpace(o.TemplateTCP)
-	if ttcp != "" && (!strings.Contains(ttcp, "{target_host}") || !strings.Contains(ttcp, "{target_port}")) {
+	if strings.TrimSpace(o.TemplateTCP) != "" &&
+		(!strings.Contains(tcpExp, "{target_host}") || !strings.Contains(tcpExp, "{target_port}")) {
 		return E.New("masque server: template_tcp must include {target_host} and {target_port}")
 	}
 	return validateMasqueServerMuxPaths(o)
 }
 
 func validateMasqueServerMuxPaths(o option.MasqueEndpointOptions) error {
-	udpRaw := strings.TrimSpace(o.TemplateUDP)
-	if udpRaw == "" {
-		udpRaw = "https://masque.local/masque/udp/{target_host}/{target_port}"
-	}
-	ipRaw := strings.TrimSpace(o.TemplateIP)
-	if ipRaw == "" {
-		ipRaw = "https://masque.local/masque/ip"
-	}
-	tcpRaw := strings.TrimSpace(o.TemplateTCP)
-	if tcpRaw == "" {
-		tcpRaw = "https://masque.local/masque/tcp/{target_host}/{target_port}"
-	}
+	udpRaw, ipRaw, tcpRaw := resolveMasqueServerTemplateURLs(o)
 	paths := []string{
 		pathFromTemplate(udpRaw),
 		pathFromTemplate(ipRaw),
