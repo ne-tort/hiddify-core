@@ -78,6 +78,12 @@ type MasqueEndpointOptions struct {
 	ConnectIPScopeIPProto uint8  `json:"connect_ip_scope_ipproto,omitempty"`
 	// TemplateTCP is a URI template for CONNECT-stream TCP; same path-only rule. Empty defaults to /masque/tcp/{target_host}/{target_port}.
 	TemplateTCP string `json:"template_tcp,omitempty"`
+	// TCPIPv6PathBracket, when true, puts RFC 5952 bracketed IPv6 in the CONNECT-stream path segment
+	// (`/tcp/[2001:db8::1]/443`). Some reverse proxies return HTTP 400 for unbracketed literals because
+	// colons are ambiguous with pseudo-path syntax; others reject brackets — default false keeps the
+	// legacy unbracketed wire form. When false, the client may still retry once with brackets after
+	// HTTP 400 if the TCP target resolves to IPv6 (see transport/masque dialTCPStreamAttempt).
+	TCPIPv6PathBracket bool `json:"tcp_ipv6_path_bracket,omitempty"`
 	FallbackPolicy        string `json:"fallback_policy,omitempty"`
 	TCPMode               string `json:"tcp_mode,omitempty"`
 	// TCPTransport selects how outbound TCP is carried:

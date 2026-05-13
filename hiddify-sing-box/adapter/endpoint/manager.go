@@ -64,27 +64,45 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 
 func (m *Manager) Close() error {
 	m.access.Lock()
-	defer m.access.Unlock()
 	if !m.started {
+		m.access.Unlock()
 		return nil
 	}
 	m.started = false
 	endpoints := m.endpoints
 	m.endpoints = nil
-	monitor := taskmonitor.New(m.logger, C.StopTimeout)
+	m.endpointByTag = make(map[string]adapter.Endpoint)
+	m.access.Unlock()
+
+	// Close endpoints in parallel: lab configs register many MASQUE clients; sequential Close made
+	// Box shutdown wait for the sum of every QUIC/H2 teardown (minutes). Each close uses its own
+	// task monitor timer — a shared monitor would race when Start runs concurrently.
+	var wg sync.WaitGroup
+	var errMu sync.Mutex
 	var err error
-	for _, endpoint := range endpoints {
-		name := "endpoint/" + endpoint.Type() + "[" + endpoint.Tag() + "]"
-		m.logger.Trace("close ", name)
-		startTime := time.Now()
-		monitor.Start("close ", name)
-		err = E.Append(err, endpoint.Close(), func(err error) error {
-			return E.Cause(err, "close ", name)
-		})
-		monitor.Finish()
-		m.logger.Trace("close ", name, " completed (", F.Seconds(time.Since(startTime).Seconds()), "s)")
+	for _, ep := range endpoints {
+		wg.Add(1)
+		go func(endpoint adapter.Endpoint) {
+			defer wg.Done()
+			name := "endpoint/" + endpoint.Type() + "[" + endpoint.Tag() + "]"
+			m.logger.Trace("close ", name)
+			startTime := time.Now()
+			mon := taskmonitor.New(m.logger, C.EndpointCloseTimeout)
+			mon.Start("close ", name)
+			cerr := endpoint.Close()
+			mon.Finish()
+			m.logger.Trace("close ", name, " completed (", F.Seconds(time.Since(startTime).Seconds()), "s)")
+			if cerr != nil {
+				errMu.Lock()
+				err = E.Append(err, cerr, func(e error) error {
+					return E.Cause(e, "close ", name)
+				})
+				errMu.Unlock()
+			}
+		}(ep)
 	}
-	return nil
+	wg.Wait()
+	return err
 }
 
 func (m *Manager) Endpoints() []adapter.Endpoint {

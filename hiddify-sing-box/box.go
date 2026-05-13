@@ -54,6 +54,9 @@ type Box struct {
 	router          *route.Router
 	internalService []adapter.LifecycleService
 	done            chan struct{}
+	// shutdownCancel cancels the Box-owned subtree of options.Context so dials, DNS, monitoring
+	// and MASQUE runtimes observe cancellation before adapter Close() runs (sing-box lifecycle pattern).
+	shutdownCancel context.CancelFunc
 }
 
 type Options struct {
@@ -96,7 +99,7 @@ func Context(
 	return ctx
 }
 
-func New(options Options) (*Box, error) {
+func New(options Options) (_ *Box, err error) {
 	createdAt := time.Now()
 	ctx := options.Context
 	if ctx == nil {
@@ -144,6 +147,13 @@ func New(options Options) (*Box, error) {
 	if experimentalOptions.UnifiedDelay != nil && experimentalOptions.UnifiedDelay.Enabled {
 		ctx = urltest.ContextWithIsUnifiedDelay(ctx)
 	}
+	var shutdownCancel context.CancelFunc
+	ctx, shutdownCancel = context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			shutdownCancel()
+		}
+	}()
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
 	var defaultLogWriter io.Writer
 	if platformInterface != nil {
@@ -416,20 +426,21 @@ func New(options Options) (*Box, error) {
 		internalServices = append(internalServices, adapter.NewLifecycleService(ntpService, "ntp service"))
 	}
 	return &Box{
-		network:         networkManager,
-		endpoint:        endpointManager,
-		inbound:         inboundManager,
-		outbound:        outboundManager,
-		dnsTransport:    dnsTransportManager,
-		service:         serviceManager,
-		dnsRouter:       dnsRouter,
-		connection:      connectionManager,
-		router:          router,
-		createdAt:       createdAt,
-		logFactory:      logFactory,
-		logger:          logFactory.Logger(),
-		internalService: internalServices,
-		done:            make(chan struct{}),
+		network:          networkManager,
+		endpoint:         endpointManager,
+		inbound:          inboundManager,
+		outbound:         outboundManager,
+		dnsTransport:     dnsTransportManager,
+		service:          serviceManager,
+		dnsRouter:        dnsRouter,
+		connection:       connectionManager,
+		router:           router,
+		createdAt:        createdAt,
+		logFactory:       logFactory,
+		logger:           logFactory.Logger(),
+		internalService:  internalServices,
+		done:             make(chan struct{}),
+		shutdownCancel:   shutdownCancel,
 	}, nil
 }
 
@@ -531,36 +542,58 @@ func (s *Box) Close() error {
 	case <-s.done:
 		return os.ErrClosed
 	default:
+		if s.shutdownCancel != nil {
+			s.shutdownCancel()
+			s.shutdownCancel = nil
+		}
 		close(s.done)
 	}
-	closeTimeout := time.Second * 10
+	defaultCloseTimeout := 10 * time.Second
+	// shutdownCancel (above) already signaled cancellation to the whole Box context tree; this stops
+	// OutboundMonitoring workers and other internal trackers before tearing down inbounds/endpoints.
+	internalLifecycleTimeout := 60 * time.Second
+	// EndpointManager closes every `type: masque` / `warp_masque` / … endpoint; lab profiles with
+	// many endpoints can need a long budget for QUIC/H2 pool teardown — adapter/endpoint/manager.go.
+	//
+	// shutdownCancel leaves the Box context cancelled while internalService.Close can run for a long
+	// time (certificate/cache, etc.). If TUN (inbound) is still accepting, every new flow dials with
+	// that cancelled context and spams "context canceled" / competes with endpoint teardown. Close
+	// inbound immediately after cancel, then run internal trackers, then the rest (service → … →
+	// endpoint). Endpoint still closes after outbound/DNS so MASQUE is not torn down before the
+	// router stops selecting it for new dials from already-draining connection table.
+	endpointCloseTimeout := 3 * time.Minute
 	var err error
-	for _, closeItem := range []struct {
-		name    string
-		service adapter.Lifecycle
-	}{
-		{"service", s.service},
-		{"endpoint", s.endpoint},
-		{"inbound", s.inbound},
-		{"outbound", s.outbound},
-		{"router", s.router},
-		{"connection", s.connection},
-		{"dns-router", s.dnsRouter},
-		{"dns-transport", s.dnsTransport},
-		{"network", s.network},
-	} {
-		cerr := s.closeWithTimeout(closeItem.name, closeTimeout, closeItem.service.Close)
+	if cerr := s.closeWithTimeout("inbound", defaultCloseTimeout, s.inbound.Close); cerr != nil {
 		err = E.Append(err, cerr, func(err error) error {
-			return E.Cause(err, "close ", closeItem.name)
+			return E.Cause(err, "close inbound")
 		})
 	}
 	for _, lifecycleService := range s.internalService {
-		cerr := s.closeWithTimeout(lifecycleService.Name(), closeTimeout, lifecycleService.Close)
+		cerr := s.closeWithTimeout(lifecycleService.Name(), internalLifecycleTimeout, lifecycleService.Close)
 		err = E.Append(err, cerr, func(err error) error {
 			return E.Cause(err, "close ", lifecycleService.Name())
 		})
 	}
-	cerr := s.closeWithTimeout("logger", closeTimeout, s.logFactory.Close)
+	for _, closeItem := range []struct {
+		name    string
+		timeout time.Duration
+		service adapter.Lifecycle
+	}{
+		{"service", defaultCloseTimeout, s.service},
+		{"connection", defaultCloseTimeout, s.connection},
+		{"router", defaultCloseTimeout, s.router},
+		{"outbound", defaultCloseTimeout, s.outbound},
+		{"dns-router", defaultCloseTimeout, s.dnsRouter},
+		{"dns-transport", defaultCloseTimeout, s.dnsTransport},
+		{"endpoint", endpointCloseTimeout, s.endpoint},
+		{"network", defaultCloseTimeout, s.network},
+	} {
+		cerr := s.closeWithTimeout(closeItem.name, closeItem.timeout, closeItem.service.Close)
+		err = E.Append(err, cerr, func(err error) error {
+			return E.Cause(err, "close ", closeItem.name)
+		})
+	}
+	cerr := s.closeWithTimeout("logger", defaultCloseTimeout, s.logFactory.Close)
 	err = E.Append(err, cerr, func(err error) error {
 		return E.Cause(err, "close logger")
 	})

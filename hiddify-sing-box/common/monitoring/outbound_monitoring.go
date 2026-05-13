@@ -36,10 +36,15 @@ var _ adapter.InterfaceUpdateListener = (*OutboundMonitoring)(nil)
 const (
 	defaultWorkerCount    = 10
 	defaultDebounceWindow = 500 * time.Millisecond
-	defaultURLTestTimeout = 5 * time.Second
+	// MASQUE connect_ip TCP (e.g. h2-ip-tcpi) often needs QUIC + CONNECT-IP + gVisor SYN; 5s produced
+	// mass false "masque tcp dial failed | context canceled" during parallel outbound URL tests.
+	defaultURLTestTimeout = 12 * time.Second
 	defaultIdleTimeout    = 10 * time.Minute
 	defaultInterval       = 5 * time.Minute
 	defaultURLTest        = "https://www.gstatic.com/generate_204"
+	// After Box shutdownCancel, in-flight urltest/ipinfo should unwind before endpoint Close; 150ms
+	// was too short and left dials racing MASQUE teardown (hang + noisy context canceled / H3 cancel).
+	monitoringShutdownTestGrace = 2 * time.Second
 )
 
 // func RegisterService(registry *boxService.Registry) {
@@ -452,6 +457,7 @@ func (m *OutboundMonitoring) UnsubscribeGroup(groupTag string, observer <-chan G
 
 func (m *OutboundMonitoring) Close() error {
 	m.closerOnce.Do(func() {
+		m.cancel()
 		m.stopTimerWorkers()
 
 		// close(m.priorityQueue)
@@ -461,7 +467,6 @@ func (m *OutboundMonitoring) Close() error {
 				g.observer.Close()
 			}
 		}
-		m.cancel()
 		m.workerWG.Wait()
 		m.schedulerWG.Wait()
 
@@ -544,6 +549,9 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
 				return
 			case <-time.After(3 * time.Second):
 			}
+			if m.ctx.Err() != nil {
+				return
+			}
 			state.mu.Lock()
 			task.cycleID++
 			state.mu.Unlock()
@@ -576,6 +584,14 @@ func (m *OutboundMonitoring) executeTask(task *testTask) {
 	}()
 	select {
 	case <-m.ctx.Done():
+		// In-flight urltest / ipinfo may ignore parent cancellation briefly; wait so workers do not
+		// return while a goroutine still dials through MASQUE during endpoint Close.
+		timer := time.NewTimer(monitoringShutdownTestGrace)
+		select {
+		case <-done:
+			timer.Stop()
+		case <-timer.C:
+		}
 		return
 	case <-done:
 	}

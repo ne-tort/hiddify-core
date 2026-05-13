@@ -54,6 +54,27 @@ func (c *httpLayerProcessCache) put(key, layer string, ttl time.Duration, now ti
 	c.mu.Unlock()
 }
 
+// invalidateMasqueHTTPLayerCacheForTag removes all TTL entries for one MASQUE endpoint tag.
+// Keys are built as masqueHTTPLayerCacheKey(tag, ...) => "tag|..." so prefix tag+"|" is safe.
+func (c *httpLayerProcessCache) invalidateMasqueHTTPLayerCacheForTag(tag string) {
+	tag = strings.TrimSpace(tag)
+	if c == nil || tag == "" {
+		return
+	}
+	prefix := tag + "|"
+	c.mu.Lock()
+	for k := range c.m {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.m, k)
+		}
+	}
+	c.mu.Unlock()
+}
+
+func invalidateMasqueHTTPLayerCacheForTag(tag string) {
+	defaultMasqueHTTPLayerCache.invalidateMasqueHTTPLayerCacheForTag(tag)
+}
+
 // masqueHTTPLayerCacheIdentity matches the entry hop used for MASQUE dial (hop with empty Via), not necessarily chain[0] order.
 func masqueHTTPLayerCacheIdentity(chain []cm.ChainHop, o option.MasqueEndpointOptions) (hopTag, server string, port uint16) {
 	for _, h := range chain {

@@ -95,13 +95,16 @@ func (e *Endpoint) Close() error {
 	if e.startCancel != nil {
 		e.startCancel()
 	}
-	e.mu.RLock()
-	runtime := e.runtime
-	e.mu.RUnlock()
-	if runtime == nil {
+	invalidateMasqueHTTPLayerCacheForTag(e.Tag())
+	e.mu.Lock()
+	rt := e.runtime
+	e.runtime = nil
+	e.mu.Unlock()
+	// Do not startErr.Store(nil): sync/atomic.Value panics on nil Store.
+	if rt == nil {
 		return nil
 	}
-	return runtime.Close()
+	return rt.Close()
 }
 
 func (e *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -225,6 +228,7 @@ func (e *Endpoint) startRuntime() {
 		MasqueEffectiveHTTPLayer: effectiveHL,
 		HTTPLayerFallback:        e.options.HTTPLayerFallback,
 		HTTPLayerSuccess:         recordHL,
+		TCPIPv6PathBracket:       e.options.TCPIPv6PathBracket,
 	})
 	const masqueRuntimeStartMaxAttempts = 3
 	var startErr error

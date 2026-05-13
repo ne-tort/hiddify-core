@@ -236,6 +236,15 @@ var (
 	ErrQUICPacketConnContract = errors.New("quic transport packetconn contract violation")
 )
 
+// isMasqueTCPConnectStreamHTTP400 reports whether err is a CONNECT-stream failure with HTTP 400,
+// used to auto-retry with bracketed IPv6 in the path when the first attempt used a bare literal.
+func isMasqueTCPConnectStreamHTTP400(err error) bool {
+	if err == nil || !errors.Is(err, ErrTCPConnectStreamFailed) {
+		return false
+	}
+	return strings.Contains(err.Error(), "status=400")
+}
+
 func unsupportedNetworkError(network string) error {
 	return errors.Join(ErrUnsupportedNetwork, E.New("unsupported network in masque session: ", network))
 }
@@ -347,6 +356,8 @@ type ClientOptions struct {
 	WarpMasqueDeviceBearerToken string // WARP profile auth_token; see warpMasqueConnectStreamBearerToken
 	ProfileLocalIPv4            string // optional profile.config.interface.addresses.v4 fallback when ADDRESS_ASSIGN is absent
 	ProfileLocalIPv6            string // optional profile.config.interface.addresses.v6 fallback when ADDRESS_ASSIGN is absent
+	// TCPIPv6PathBracket mirrors option.MasqueEndpointOptions.tcp_ipv6_path_bracket (CONNECT-stream path only).
+	TCPIPv6PathBracket bool
 }
 
 // warpMasqueConnectStreamBearerToken chooses Authorization Bearer for CONNECT-stream only.
@@ -832,12 +843,11 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 // CONNECT-IP here would cancel a healthy session (ingress_cancel / H3_NO_ERROR). Real abandon is
 // covered when the factory fails before tcpNetstack is attached.
 func (s *coreSession) releaseOpenedConnectIPSessionIfAbandoned() {
-	s.stopConnectIPIngressForClose()
+	s.cancelConnectIPIngress()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.connectIPTCPInstallInflight.Store(0)
 	s.clearPreTCPNetstackIngress()
-	s.ipIngressPacketReader.Store(nil)
 	s.ingressTCPNetstack.Store(nil)
 	if s.tcpNetstack != nil {
 		_ = s.tcpNetstack.Close()
@@ -847,6 +857,8 @@ func (s *coreSession) releaseOpenedConnectIPSessionIfAbandoned() {
 		_ = s.ipConn.Close()
 		s.ipConn = nil
 	}
+	s.joinConnectIPIngress()
+	s.ipIngressPacketReader.Store(nil)
 	// Next openIPSessionLocked must not reuse HTTP/3 CONNECT-IP clientConn or the shared H2 pool from
 	// the abandoned connect-ip.Conn (parity with teardown inside tryHTTPFallbackSwitchLockedAssumeMu).
 	s.resetIPH3TransportLockedAssumeMu()
@@ -1089,8 +1101,9 @@ func (s *coreSession) tryHTTPFallbackSwitchLockedAssumeMu(err error) bool {
 	}
 	log.Printf("masque_http_layer_fallback tag=%s from=%s to=%s", strings.TrimSpace(s.options.Tag), cur, next)
 	// CONNECT-IP / CONNECT-stream / ingress must not outlive overlay switch: udpHTTPLayer is shared.
-	s.stopConnectIPIngressForClose()
-	s.ipIngressPacketReader.Store(nil)
+	s.cancelConnectIPIngress()
+	s.connectIPTCPInstallInflight.Store(0)
+	s.clearPreTCPNetstackIngress()
 	s.ingressTCPNetstack.Store(nil)
 	if s.tcpNetstack != nil {
 		_ = s.tcpNetstack.Close()
@@ -1100,6 +1113,8 @@ func (s *coreSession) tryHTTPFallbackSwitchLockedAssumeMu(err error) bool {
 		_ = s.ipConn.Close()
 		s.ipConn = nil
 	}
+	s.joinConnectIPIngress()
+	s.ipIngressPacketReader.Store(nil)
 	if s.ipHTTP != nil {
 		s.ipHTTP.Close()
 		if s.tcpHTTP == s.ipHTTP {
@@ -2340,45 +2355,67 @@ func (s *coreSession) Capabilities() CapabilitySet {
 }
 
 func (s *coreSession) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var errs []error
 	emitConnectIPObservabilityEvent("session_close_begin")
-	s.stopConnectIPIngressForClose()
+	s.cancelConnectIPIngress()
+	s.ipIngressPacketReader.Store(nil)
 	s.connectIPTCPInstallInflight.Store(0)
 	s.clearPreTCPNetstackIngress()
-	if s.ipConn != nil {
-		errs = append(errs, s.ipConn.Close())
-		s.ipConn = nil
+	s.ingressTCPNetstack.Store(nil)
+
+	// Snapshot and clear pointers under s.mu, then release before join / http.Close / QUIC teardown.
+	// Holding s.mu across joinConnectIPIngress or Transport.Close can deadlock with dials that take
+	// s.mu briefly (e.g. connect_ip TCP) or stall shutdown for minutes (h2-ip-tcpi lab profiles).
+	var (
+		errs        []error
+		tcpNetstack TCPNetstack
+		ipConn      *connectip.Conn
+		ipHTTP      *http3.Transport
+		tcpHTTP     *http3.Transport
+		udpClient   *qmasque.Client
+	)
+	s.mu.Lock()
+	tcpNetstack = s.tcpNetstack
+	s.tcpNetstack = nil
+	ipConn = s.ipConn
+	s.ipConn = nil
+	ipHTTP = s.ipHTTP
+	tcpHTTP = s.tcpHTTP
+	s.ipHTTP = nil
+	s.tcpHTTP = nil
+	s.ipHTTPConn = nil
+	udpClient = s.udpClient
+	s.udpClient = nil
+	s.mu.Unlock()
+
+	var h2Tr *http2.Transport
+	s.h2UdpMu.Lock()
+	h2Tr = s.h2UdpTransport
+	s.h2UdpTransport = nil
+	s.h2UdpMu.Unlock()
+
+	// Close CONNECT-IP before gVisor: unblocks ingress ReadPacket on the H2 tunnel, then join the
+	// ingress goroutine, then tear down the TCP netstack (gVisor Abort is fast; waiting on ipConn
+	// after a blocked tcpNetstack.Close was a shutdown footgun for h2-ip-tcpi).
+	if ipConn != nil {
+		errs = append(errs, ipConn.Close())
+	}
+	s.joinConnectIPIngress()
+	if tcpNetstack != nil {
+		_ = tcpNetstack.Close()
 	}
 	s.ipIngressPacketReader.Store(nil)
-	s.ingressTCPNetstack.Store(nil)
-	// CONNECT-IP ingress stops before teardown; tcp netstack consumes inbound via inject path only.
-	if s.tcpNetstack != nil {
-		_ = s.tcpNetstack.Close()
-		s.tcpNetstack = nil
+
+	if ipHTTP != nil {
+		errs = append(errs, ipHTTP.Close())
 	}
-	if s.ipHTTP != nil {
-		errs = append(errs, s.ipHTTP.Close())
-		if s.tcpHTTP == s.ipHTTP {
-			s.tcpHTTP = nil
-		}
-		s.ipHTTP = nil
-		s.ipHTTPConn = nil
+	if udpClient != nil {
+		errs = append(errs, udpClient.Close())
 	}
-	if s.udpClient != nil {
-		errs = append(errs, s.udpClient.Close())
-		s.udpClient = nil
+	if h2Tr != nil {
+		h2Tr.CloseIdleConnections()
 	}
-	s.h2UdpMu.Lock()
-	if s.h2UdpTransport != nil {
-		s.h2UdpTransport.CloseIdleConnections()
-		s.h2UdpTransport = nil
-	}
-	s.h2UdpMu.Unlock()
-	if s.tcpHTTP != nil {
-		errs = append(errs, s.tcpHTTP.Close())
-		s.tcpHTTP = nil
+	if tcpHTTP != nil && tcpHTTP != ipHTTP {
+		errs = append(errs, tcpHTTP.Close())
 	}
 	emitConnectIPObservabilityEvent("session_close_end")
 	return errors.Join(errs...)
@@ -2401,6 +2438,12 @@ func resolveDestinationHost(destination M.Socksaddr) (string, error) {
 		}
 	}
 	if destination.Addr.IsValid() {
+		// Unbracketed literal (IPv4 or IPv6) for template expansion and :authority-adjacent uses.
+		// Default CONNECT-stream path uses this literal with `{+target_host}`; many edges accept
+		// `/tcp/2001::1/443` but some reverse proxies return HTTP 400 on bare IPv6 in the path — set
+		// `tcp_ipv6_path_bracket` to emit `/tcp/[2001::1]/443` instead. Other edges reject brackets;
+		// keep default false. net.JoinHostPort(host, port) adds brackets for IPv6 dial addresses only
+		// when the host has no brackets; pre-bracketed hosts would become `[[2001::1]]:port`.
 		host := strings.TrimSpace(destination.Addr.String())
 		if host == "" {
 			return "", errors.Join(ErrCapability, E.New("invalid destination host"))
@@ -2477,7 +2520,7 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 	httpsAuthority := net.JoinHostPort(srvHost, strconv.Itoa(int(options.ServerPort)))
 	udpRaw := ExpandMasqueHTTPSURI(options.TemplateUDP, httpsAuthority)
 	if udpRaw == "" {
-		udpRaw = "https://" + httpsAuthority + "/masque/udp/{target_host}/{target_port}"
+		udpRaw = "https://" + httpsAuthority + "/masque/udp/{+target_host}/{target_port}"
 	}
 	// Consumer WARP CONNECT-IP request URL must match Diniboy1123/usque api/tunnel.go + internal/consts.go:
 	// ConnectTunnel(..., internal.ConnectURI, endpoint) with ConnectURI = "https://cloudflareaccess.com".
@@ -2497,8 +2540,10 @@ func buildTemplates(options ClientOptions) (*uritemplate.Template, *uritemplate.
 	}
 	tcpRaw := ExpandMasqueHTTPSURI(options.TemplateTCP, httpsAuthority)
 	if tcpRaw == "" {
-		tcpRaw = "https://" + httpsAuthority + "/masque/tcp/{target_host}/{target_port}"
+		tcpRaw = "https://" + httpsAuthority + "/masque/tcp/{+target_host}/{target_port}"
 	}
+	udpRaw = NormalizeMasqueTCPUDPTemplateTargetHost(udpRaw)
+	tcpRaw = NormalizeMasqueTCPUDPTemplateTargetHost(tcpRaw)
 	udpTemplate, err := uritemplate.New(udpRaw)
 	if err != nil {
 		return nil, nil, nil, E.Cause(err, "invalid UDP MASQUE template")
@@ -2633,13 +2678,20 @@ func (s *coreSession) resetHopTemplates() error {
 	if s.hopIndex > 0 {
 		s.options.DialPeer = ""
 	}
-	s.stopConnectIPIngressForClose()
-	s.ipIngressPacketReader.Store(nil)
+	s.cancelConnectIPIngress()
+	s.connectIPTCPInstallInflight.Store(0)
+	s.clearPreTCPNetstackIngress()
 	s.ingressTCPNetstack.Store(nil)
 	if s.tcpNetstack != nil {
 		_ = s.tcpNetstack.Close()
 		s.tcpNetstack = nil
 	}
+	if s.ipConn != nil {
+		_ = s.ipConn.Close()
+		s.ipConn = nil
+	}
+	s.joinConnectIPIngress()
+	s.ipIngressPacketReader.Store(nil)
 	incConnectIPSessionReset("hop_advance")
 	hop := s.hopOrder[s.hopIndex]
 	s.options.Server = hop.Server
@@ -2654,10 +2706,6 @@ func (s *coreSession) resetHopTemplates() error {
 	if s.udpClient != nil {
 		_ = s.udpClient.Close()
 		s.udpClient = nil
-	}
-	if s.ipConn != nil {
-		_ = s.ipConn.Close()
-		s.ipConn = nil
 	}
 	if s.ipHTTP != nil {
 		s.ipHTTP.Close()
@@ -2818,7 +2866,8 @@ func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksa
 	select {
 	case <-ctx.Done():
 		s.clearHTTPFallbackConsumedAfterGivingUp()
-		return nil, context.Cause(ctx)
+		// Join ErrTCPDial so ClassifyError and unwrap parity match netstack DialContext (ErrTCPDial | cause).
+		return nil, errors.Join(ErrTCPDial, context.Cause(ctx))
 	default:
 	}
 	dest, err := normalizeTCPDestinationForConnectIPNetstack(ctx, destination)
@@ -2878,7 +2927,7 @@ func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksa
 		s.clearHTTPFallbackConsumedAfterGivingUp()
 		// Do not releaseOpenedConnectIPSessionIfAbandoned here: ctx is often a monitoring URL test
 		// with a ~5s deadline while the CONNECT-IP session is shared; teardown stranded real traffic.
-		return nil, context.Cause(ctx)
+		return nil, errors.Join(ErrTCPDial, context.Cause(ctx))
 	default:
 	}
 	conn, err := ns.DialContext(ctx, dest)
@@ -3018,6 +3067,32 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 	}
 }
 
+func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritemplate.Template, options ClientOptions, destination M.Socksaddr, httpLayer string, tcpHTTP *http3.Transport, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error) {
+	tcpPathHost := MasqueTCPPathHostForTemplate(targetHost, pathBracket)
+	expanded, err := templateTCP.Expand(uritemplate.Values{
+		"target_host": uritemplate.String(tcpPathHost),
+		"target_port": uritemplate.String(strconv.Itoa(int(destination.Port))),
+	})
+	if err != nil {
+		return nil, nil, errors.Join(ErrCapability, E.Cause(err, "expand TCP MASQUE template"))
+	}
+	expanded = FixMasqueExpandedTCPConnectStreamURL(expanded, pathBracket)
+	tcpURL, err := url.Parse(expanded)
+	if err != nil {
+		return nil, nil, errors.Join(ErrCapability, E.Cause(err, "parse TCP MASQUE URL"))
+	}
+	RewriteMasqueTCPURLIfPercentEncodedIPv6(tcpURL, pathBracket)
+	if httpLayer == option.MasqueHTTPLayerH2 {
+		conn, err := s.dialTCPStreamH2(ctx, tcpURL, options, targetHost, destination)
+		return conn, tcpURL, err
+	}
+	if tcpHTTP == nil {
+		return nil, nil, errors.Join(ErrCapability, E.New("internal: masque CONNECT-stream HTTP/3 transport uninitialized"))
+	}
+	conn, err := s.dialTCPStreamHTTP3(ctx, tcpURL, options, targetHost, targetPort, tcpHTTP)
+	return conn, tcpURL, err
+}
+
 // dialTCPStreamAttempt performs one CONNECT-stream dial on the current udpHTTPLayer overlay (H2 extended CONNECT vs H3).
 func (s *coreSession) dialTCPStreamAttempt(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
 	s.mu.Lock()
@@ -3030,8 +3105,9 @@ func (s *coreSession) dialTCPStreamAttempt(ctx context.Context, destination M.So
 		auth := net.JoinHostPort(strings.TrimSpace(s.options.Server), strconv.Itoa(port))
 		raw := ExpandMasqueHTTPSURI(s.options.TemplateTCP, auth)
 		if raw == "" {
-			raw = "https://" + auth + "/masque/tcp/{target_host}/{target_port}"
+			raw = "https://" + auth + "/masque/tcp/{+target_host}/{target_port}"
 		}
+		raw = NormalizeMasqueTCPUDPTemplateTargetHost(raw)
 		t, err := uritemplate.New(raw)
 		if err != nil {
 			s.mu.Unlock()
@@ -3079,38 +3155,29 @@ func (s *coreSession) dialTCPStreamAttempt(ctx context.Context, destination M.So
 		return nil, err
 	}
 	targetPort := destination.Port
-	expanded, err := templateTCP.Expand(uritemplate.Values{
-		"target_host": uritemplate.String(targetHost),
-		"target_port": uritemplate.String(strconv.Itoa(int(destination.Port))),
-	})
-	if err != nil {
-		return nil, errors.Join(ErrCapability, E.Cause(err, "expand TCP MASQUE template"))
+	pathBracket := options.TCPIPv6PathBracket
+	conn, tcpURL, err := s.dialTCPStreamOnce(ctx, templateTCP, options, destination, httpLayer, tcpHTTP, targetHost, targetPort, pathBracket)
+	if err != nil && !pathBracket && MasqueTCPBracketRetryEligible(targetHost) && isMasqueTCPConnectStreamHTTP400(err) {
+		conn, tcpURL, err = s.dialTCPStreamOnce(ctx, templateTCP, options, destination, httpLayer, tcpHTTP, targetHost, targetPort, true)
+		if err == nil {
+			log.Printf("masque_tcp_ipv6_bracket_auto_retry tag=%s target_host=%s url=%s", strings.TrimSpace(options.Tag), targetHost, MasqueTCPConnectStreamRequestURL(tcpURL))
+		}
 	}
-	tcpURL, err := url.Parse(expanded)
 	if err != nil {
-		return nil, errors.Join(ErrCapability, E.Cause(err, "parse TCP MASQUE URL"))
+		return nil, err
 	}
 	if httpLayer == option.MasqueHTTPLayerH2 {
-		conn, err := s.dialTCPStreamH2(ctx, tcpURL, options, targetHost, destination)
-		if err == nil {
-			s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH2)
-			logTarget, dialAddr := tcpMasqueConnectStreamChosenLogFields(tcpURL, options)
-			log.Printf("masque_http_layer_chosen layer=h2 tag=%s tcp_stream=1 target=%s dial=%s", strings.TrimSpace(options.Tag), logTarget, dialAddr)
-			s.resetHTTPFallbackBudgetAfterSuccess()
-		}
-		return conn, err
-	}
-	if tcpHTTP == nil {
-		return nil, errors.Join(ErrCapability, E.New("internal: masque CONNECT-stream HTTP/3 transport uninitialized"))
-	}
-	conn, err := s.dialTCPStreamHTTP3(ctx, tcpURL, options, targetHost, targetPort, tcpHTTP)
-	if err == nil {
-		s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH3)
+		s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH2)
 		logTarget, dialAddr := tcpMasqueConnectStreamChosenLogFields(tcpURL, options)
-		log.Printf("masque_http_layer_chosen layer=h3 tag=%s tcp_stream=1 target=%s dial=%s", strings.TrimSpace(options.Tag), logTarget, dialAddr)
+		log.Printf("masque_http_layer_chosen layer=h2 tag=%s tcp_stream=1 target=%s dial=%s", strings.TrimSpace(options.Tag), logTarget, dialAddr)
 		s.resetHTTPFallbackBudgetAfterSuccess()
+		return conn, nil
 	}
-	return conn, err
+	s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH3)
+	logTarget, dialAddr := tcpMasqueConnectStreamChosenLogFields(tcpURL, options)
+	log.Printf("masque_http_layer_chosen layer=h3 tag=%s tcp_stream=1 target=%s dial=%s", strings.TrimSpace(options.Tag), logTarget, dialAddr)
+	s.resetHTTPFallbackBudgetAfterSuccess()
+	return conn, nil
 }
 
 func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, options ClientOptions, targetHost string, targetPort uint16, tcpHTTP *http3.Transport) (net.Conn, error) {
@@ -3140,10 +3207,13 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 			return nil, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
 		}
 		tcpTracef("masque tcp connect_stream request host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
-		// Unlike H2 Extended CONNECT (`dialTCPStreamH2`), bind the dial ctx to the CONNECT request: quic-go/http3
-		// ties stream/teardown to Request.Context, and downstack paths rely on cancel/deadline propagation.
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodConnect, tcpURL.String(), nil)
+		// Same handshake detach as H2 Extended CONNECT (h2_connect_stream.go): quic-go/http3 binds the
+		// CONNECT stream to Request.Context; sing-box often passes a dial ctx that ends right after
+		// setup — without detaching, reads hit H3_REQUEST_CANCELLED (local) when the dial ctx cancels.
+		streamCtx, stopReqCtxRelay := connectip.NewH2ExtendedConnectRequestContext(ctx)
+		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, MasqueTCPConnectStreamRequestURL(tcpURL), nil)
 		if reqErr != nil {
+			stopReqCtxRelay(false)
 			return nil, errors.Join(ErrTCPConnectStreamFailed, E.Cause(reqErr, "build TCP MASQUE request"))
 		}
 		req.Host = serverHost
@@ -3160,6 +3230,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		roundTripper := s.getTCPRoundTripper(tcpHTTP)
 		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
+			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
 			_ = pr.Close()
 			_ = pw.Close()
@@ -3182,28 +3253,31 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 			return nil, errors.Join(ErrTCPConnectStreamFailed, roundTripErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			stopReqCtxRelay(false)
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				tcpTracef("masque tcp connect_stream denied host=%s port=%d status=%d error_class=%s", targetHost, targetPort, resp.StatusCode, ClassifyError(ErrAuthFailed))
-				return nil, errors.Join(ErrAuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, tcpURL.String()))
+				return nil, errors.Join(ErrAuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, MasqueTCPConnectStreamRequestURL(tcpURL)))
 			}
 			tcpTracef("masque tcp connect_stream failed host=%s port=%d status=%d error_class=%s", targetHost, targetPort, resp.StatusCode, ClassifyError(ErrTCPConnectStreamFailed))
-			return nil, fmt.Errorf("%w: status=%d url=%s", ErrTCPConnectStreamFailed, resp.StatusCode, tcpURL.String())
+			return nil, fmt.Errorf("%w: status=%d url=%s", ErrTCPConnectStreamFailed, resp.StatusCode, MasqueTCPConnectStreamRequestURL(tcpURL))
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			stopReqCtxRelay(false)
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
 			return nil, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
 		}
 		tcpTracef("masque tcp connect_stream success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
+		stopReqCtxRelay(true)
 		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
 		return &streamConn{
 			reader: resp.Body,
 			writer: pw,
-			ctx:    ctx,
+			ctx:    streamCtx,
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
 		}, nil

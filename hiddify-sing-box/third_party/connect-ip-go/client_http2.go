@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -133,9 +134,55 @@ type h2LegacyDatagramStream struct {
 	writeMu      sync.Mutex
 }
 
-func (s *h2LegacyDatagramStream) ReceiveDatagram(context.Context) ([]byte, error) {
+func (s *h2LegacyDatagramStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Legacy cf-connect-ip reads capsule-framed datagrams directly from the response body; a plain
+	// blocking read loop ignores ctx unless we interrupt it. Closing the body unblocks the reader
+	// when the caller cancels (MASQUE CONNECT-IP ingress shutdown, box shutdown, etc.).
+	type recvResult struct {
+		data []byte
+		err  error
+	}
+	resultCh := make(chan recvResult, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				select {
+				case resultCh <- recvResult{nil, fmt.Errorf("connect-ip: legacy h2 ReceiveDatagram panic: %v", r)}:
+				default:
+				}
+			}
+		}()
+		data, err := s.receiveDatagramLocked()
+		resultCh <- recvResult{data, err}
+	}()
+	select {
+	case <-ctx.Done():
+		if s.responseBody != nil {
+			_ = s.responseBody.Close()
+		}
+		res := <-resultCh
+		// If a datagram was already decoded before cancellation was observed, return it.
+		if res.err == nil && len(res.data) > 0 {
+			return res.data, nil
+		}
+		if res.err != nil {
+			return nil, errors.Join(context.Cause(ctx), res.err)
+		}
+		return nil, context.Cause(ctx)
+	case res := <-resultCh:
+		return res.data, res.err
+	}
+}
+
+func (s *h2LegacyDatagramStream) receiveDatagramLocked() ([]byte, error) {
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
+	if s.responseBody == nil {
+		return nil, net.ErrClosed
+	}
 	r := quicvarint.NewReader(s.responseBody)
 	for {
 		t, cr, err := parseConnectIPStreamCapsule(r)

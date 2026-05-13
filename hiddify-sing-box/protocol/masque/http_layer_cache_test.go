@@ -219,3 +219,29 @@ func TestEffectiveMasqueHTTPLayerResolvedPortMatchesRecordDialOverride(t *testin
 		t.Fatalf("Effective with dialPortOverride 0 must match normalized hop port key: got %q", got)
 	}
 }
+
+func TestInvalidateMasqueHTTPLayerCacheForTagResetsAutoLayer(t *testing.T) {
+	// Mutates package-level TTL cache — do not parallelize.
+	tag := fmt.Sprintf("ct-inv-%d", time.Now().UnixNano())
+	o := option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{
+			Server:     fmt.Sprintf("inv-%s.example.invalid", tag),
+			ServerPort: 8443,
+		},
+		TransportMode:     option.MasqueTransportModeConnectIP,
+		HTTPLayer:         option.MasqueHTTPLayerAuto,
+		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
+		HTTPLayerFallback: false,
+	}
+	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH3 {
+		t.Fatalf("cold start: expected h3, got %q", got)
+	}
+	RecordMasqueHTTPLayerSuccess(tag, o, option.MasqueHTTPLayerH2, masqueHTTPLayerDialIdentityFromChain(nil, o))
+	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH2 {
+		t.Fatalf("after record: expected h2, got %q", got)
+	}
+	invalidateMasqueHTTPLayerCacheForTag(tag)
+	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH3 {
+		t.Fatalf("after invalidate: expected cold h3, got %q", got)
+	}
+}

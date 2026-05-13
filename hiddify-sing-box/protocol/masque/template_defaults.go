@@ -62,7 +62,7 @@ func resolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, t
 	auth := defaultMasqueListenHTTPSAuthority(o.Listen, o.ListenPort)
 	udp = TM.ExpandMasqueHTTPSURI(o.TemplateUDP, auth)
 	if udp == "" {
-		udp = "https://" + auth + "/masque/udp/{target_host}/{target_port}"
+		udp = "https://" + auth + "/masque/udp/{+target_host}/{target_port}"
 	}
 	ip = TM.ExpandMasqueHTTPSURI(o.TemplateIP, auth)
 	if ip == "" {
@@ -70,7 +70,7 @@ func resolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, t
 	}
 	tcp = TM.ExpandMasqueHTTPSURI(o.TemplateTCP, auth)
 	if tcp == "" {
-		tcp = "https://" + auth + "/masque/tcp/{target_host}/{target_port}"
+		tcp = "https://" + auth + "/masque/tcp/{+target_host}/{target_port}"
 	}
 	return udp, ip, tcp
 }

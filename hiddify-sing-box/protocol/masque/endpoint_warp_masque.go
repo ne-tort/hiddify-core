@@ -177,13 +177,16 @@ func (e *WarpEndpoint) Close() error {
 	if e.startCancel != nil {
 		e.startCancel()
 	}
-	e.mu.RLock()
-	runtime := e.runtime
-	e.mu.RUnlock()
-	if runtime == nil {
+	invalidateMasqueHTTPLayerCacheForTag(e.Tag())
+	e.mu.Lock()
+	rt := e.runtime
+	e.runtime = nil
+	e.mu.Unlock()
+	// Do not startErr.Store(nil): sync/atomic.Value panics on nil Store.
+	if rt == nil {
 		return nil
 	}
-	return runtime.Close()
+	return rt.Close()
 }
 
 // waitRuntime blocks until startRuntime assigns e.runtime, records a startup error, or ctx ends.
@@ -440,6 +443,7 @@ func (e *WarpEndpoint) startRuntime() {
 			MasqueEffectiveHTTPLayer:    effectiveMasqueHL,
 			HTTPLayerFallback:           e.options.HTTPLayerFallback,
 			HTTPLayerSuccess:            recordMasqueHL,
+			TCPIPv6PathBracket:          e.options.TCPIPv6PathBracket,
 		})
 		startErr = nil
 		for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {

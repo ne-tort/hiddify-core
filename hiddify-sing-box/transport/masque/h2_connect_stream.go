@@ -64,7 +64,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 
 		pr, pw := io.Pipe()
 		streamCtx, stopReqCtxRelay := h2ConnectRequestContextFactory(ctx)
-		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, tcpURL.String(), &h2ExtendedConnectUploadBody{pipe: pr})
+		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, MasqueTCPConnectStreamRequestURL(tcpURL), &h2ExtendedConnectUploadBody{pipe: pr})
 		if reqErr != nil {
 			stopReqCtxRelay(false)
 			_ = pr.Close()
@@ -108,11 +108,11 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				tcpTracef("masque tcp connect_stream h2 denied host=%s port=%d status=%d error_class=%s", targetHost, targetPort, resp.StatusCode, ClassifyError(ErrAuthFailed))
-				return nil, errors.Join(ErrAuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, tcpURL.String()))
+				return nil, errors.Join(ErrAuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, MasqueTCPConnectStreamRequestURL(tcpURL)))
 			}
 			tcpTracef("masque tcp connect_stream h2 failed host=%s port=%d status=%d error_class=%s", targetHost, targetPort, resp.StatusCode, ClassifyError(ErrTCPConnectStreamFailed))
 			// Same shape as dialTCPStreamHTTP3 (%w: status=…) so logs and substring classifiers align.
-			return nil, fmt.Errorf("masque h2: %w: status=%d url=%s", ErrTCPConnectStreamFailed, resp.StatusCode, tcpURL.String())
+			return nil, fmt.Errorf("masque h2: %w: status=%d url=%s", ErrTCPConnectStreamFailed, resp.StatusCode, MasqueTCPConnectStreamRequestURL(tcpURL))
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)

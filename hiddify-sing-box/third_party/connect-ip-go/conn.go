@@ -1715,14 +1715,18 @@ func (c *Conn) Close() error {
 		return h2srv.closeMasqueH2RequestBody()
 	}
 	if h2x, ok := c.str.(*h2CapsulePipeStream); ok {
+		// Tear down the duplex pipe before resp.Body.Close. x/net/http2 can block on response
+		// teardown until the Extended CONNECT upload half quiesces; closing pw/pr first unblocks
+		// writeToStream and readFromStream so MASQUE coreSession.Close does not sit at the
+		// EndpointCloseTimeout (90s) per endpoint on lab profiles with many h2-ip-tcpi clients.
 		var errs []error
-		if err := h2x.Close(); err != nil {
-			errs = append(errs, err)
-		}
 		if err := h2x.closePipeWriter(); err != nil {
 			errs = append(errs, err)
 		}
 		if err := h2x.closePipeReader(); err != nil {
+			errs = append(errs, err)
+		}
+		if err := h2x.Close(); err != nil {
 			errs = append(errs, err)
 		}
 		return errors.Join(errs...)

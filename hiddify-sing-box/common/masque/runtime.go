@@ -72,6 +72,7 @@ type RuntimeOptions struct {
 	WarpMasqueDeviceBearerToken string
 	ProfileLocalIPv4            string
 	ProfileLocalIPv6            string
+	TCPIPv6PathBracket          bool
 
 	TCPDial                  T.MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
@@ -179,6 +180,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			WarpMasqueDeviceBearerToken: r.options.WarpMasqueDeviceBearerToken,
 			ProfileLocalIPv4:            strings.TrimSpace(r.options.ProfileLocalIPv4),
 			ProfileLocalIPv6:            strings.TrimSpace(r.options.ProfileLocalIPv6),
+			TCPIPv6PathBracket:          r.options.TCPIPv6PathBracket,
 		})
 		if err == nil {
 			break
@@ -329,16 +331,23 @@ func (r *runtimeImpl) OpenIPSession(ctx context.Context) (T.IPPacketSession, err
 
 func (r *runtimeImpl) Close() error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.state.Store(uint32(StateClosed))
-	if r.session != nil {
-		if r.ipPlane != nil {
-			_ = r.ipPlane.Close()
-			r.ipPlane = nil
-		}
-		err := r.session.Close()
-		r.session = nil
-		return err
+	if State(r.state.Load()) == StateClosed {
+		r.mu.Unlock()
+		return nil
 	}
-	return nil
+	r.state.Store(uint32(StateClosed))
+	ipPlane := r.ipPlane
+	sess := r.session
+	r.ipPlane = nil
+	r.session = nil
+	r.mu.Unlock()
+
+	var errs []error
+	if ipPlane != nil {
+		_ = ipPlane.Close()
+	}
+	if sess != nil {
+		errs = append(errs, sess.Close())
+	}
+	return errors.Join(errs...)
 }

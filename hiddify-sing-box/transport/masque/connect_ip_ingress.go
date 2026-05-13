@@ -92,10 +92,11 @@ func (s *coreSession) maybeStartConnectIPIngressLocked() {
 		s.connectIPIngressLoopMu.Unlock()
 		return
 	}
+	// Add before running=true so joinConnectIPIngress cannot observe wg==0 while the loop is still starting.
+	s.connectIPIngressWG.Add(1)
 	s.connectIPIngressRunning.Store(true)
 	runCtx, cancel := context.WithCancel(context.Background())
 	s.connectIPIngressCancel = cancel
-	s.connectIPIngressWG.Add(1)
 	go s.connectIPIngressLoop(runCtx)
 	s.connectIPIngressLoopMu.Unlock()
 }
@@ -140,8 +141,8 @@ func (s *coreSession) maybeStopConnectIPIngressIfIdle() {
 
 func (s *coreSession) stopConnectIPIngressGracefully() {
 	s.connectIPIngressLoopMu.Lock()
-	defer s.connectIPIngressLoopMu.Unlock()
 	if !s.connectIPIngressRunning.Load() {
+		s.connectIPIngressLoopMu.Unlock()
 		return
 	}
 	cancel := s.connectIPIngressCancel
@@ -149,12 +150,16 @@ func (s *coreSession) stopConnectIPIngressGracefully() {
 	if cancel != nil {
 		cancel()
 	}
+	s.connectIPIngressLoopMu.Unlock()
+
 	s.connectIPIngressWG.Wait()
-	s.connectIPIngressRunning.Store(false)
+
 	emitConnectIPObservabilityEvent("ingress_loop_stopped_idle")
 }
 
-func (s *coreSession) stopConnectIPIngressForClose() {
+// cancelConnectIPIngress stops the CONNECT-IP ingress loop context. It does not wait for the
+// goroutine to exit — see joinConnectIPIngress.
+func (s *coreSession) cancelConnectIPIngress() {
 	s.connectIPIngressLoopMu.Lock()
 	defer s.connectIPIngressLoopMu.Unlock()
 	if !s.connectIPIngressRunning.Load() {
@@ -166,13 +171,24 @@ func (s *coreSession) stopConnectIPIngressForClose() {
 		emitConnectIPObservabilityEvent("ingress_cancel_session_close")
 		cancel()
 	}
+}
+
+// joinConnectIPIngress waits for the ingress loop after cancelConnectIPIngress. Callers that
+// tear down the packet plane should close s.ipConn (or otherwise unblock ReadPacketWithContext)
+// before join; coreSession.Close closes ipConn before tcpNetstack so H2 capsule reads do not stall
+// behind a slow gVisor teardown.
+func (s *coreSession) joinConnectIPIngress() {
 	s.connectIPIngressWG.Wait()
-	s.connectIPIngressRunning.Store(false)
 	emitConnectIPObservabilityEvent("ingress_joined_session_close")
 }
 
 func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
-	defer s.connectIPIngressWG.Done()
+	defer func() {
+		s.connectIPIngressLoopMu.Lock()
+		s.connectIPIngressRunning.Store(false)
+		s.connectIPIngressWG.Done()
+		s.connectIPIngressLoopMu.Unlock()
+	}()
 	readBuffer := make([]byte, 64*1024)
 	consecutiveRetryableFailures := 0
 	const retryableReadFailureLimit = 32
