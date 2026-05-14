@@ -2,6 +2,8 @@ package masque
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	stdlog "log"
 	"math/rand/v2"
@@ -22,6 +24,35 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
+
+// loadMasqueClientTLSCertificate loads client mTLS material: PEM pair, then base64 pair, then file paths.
+// At most one source must be configured (enforced by validateMasqueClientTLSMaterial).
+func loadMasqueClientTLSCertificate(o option.MasqueEndpointOptions) (tls.Certificate, error) {
+	cPem := strings.TrimSpace(o.ClientTLSCertPEM)
+	kPem := strings.TrimSpace(o.ClientTLSKeyPEM)
+	if cPem != "" && kPem != "" {
+		return tls.X509KeyPair([]byte(cPem), []byte(kPem))
+	}
+	cB64 := strings.TrimSpace(o.ClientTLSCertB64)
+	kB64 := strings.TrimSpace(o.ClientTLSKeyB64)
+	if cB64 != "" && kB64 != "" {
+		certDER, err := base64.StdEncoding.DecodeString(cB64)
+		if err != nil {
+			return tls.Certificate{}, E.Cause(err, "decode client_tls_cert_b64")
+		}
+		keyDER, err := base64.StdEncoding.DecodeString(kB64)
+		if err != nil {
+			return tls.Certificate{}, E.Cause(err, "decode client_tls_key_b64")
+		}
+		return tls.X509KeyPair(certDER, keyDER)
+	}
+	cPath := strings.TrimSpace(o.ClientTLSCert)
+	kPath := strings.TrimSpace(o.ClientTLSKey)
+	if cPath != "" && kPath != "" {
+		return tls.LoadX509KeyPair(cPath, kPath)
+	}
+	return tls.Certificate{}, nil
+}
 
 // Endpoint is the generic MASQUE client (non-WARP bootstrap) behind `type: masque`.
 type Endpoint struct {
@@ -204,6 +235,17 @@ func (e *Endpoint) startRuntime() {
 		id.DialPortOverride = port
 		RecordMasqueHTTPLayerSuccess(e.Tag(), e.options, layer, id)
 	}
+	var clientTLSCert tls.Certificate
+	if strings.TrimSpace(e.options.ClientTLSCertPEM) != "" || strings.TrimSpace(e.options.ClientTLSKeyPEM) != "" ||
+		strings.TrimSpace(e.options.ClientTLSCertB64) != "" || strings.TrimSpace(e.options.ClientTLSKeyB64) != "" ||
+		strings.TrimSpace(e.options.ClientTLSCert) != "" || strings.TrimSpace(e.options.ClientTLSKey) != "" {
+		cert, err := loadMasqueClientTLSCertificate(e.options)
+		if err != nil {
+			e.startErr.Store(E.Cause(err, "load masque client TLS certificate material"))
+			return
+		}
+		clientTLSCert = cert
+	}
 	rt := CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 		Tag:                      e.Tag(),
 		Server:                   server,
@@ -218,6 +260,8 @@ func (e *Endpoint) startRuntime() {
 		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
 		TCPTransport:             normalizeTCPTransport(e.options.TCPTransport),
 		ServerToken:              e.options.ServerToken,
+		ClientBasicUsername:      e.options.ClientBasicUsername,
+		ClientBasicPassword:      e.options.ClientBasicPassword,
 		TLSServerName:            e.options.TLSServerName,
 		Insecure:                 e.options.Insecure,
 		ConnectIPDatagramCeiling: e.options.MTU,
@@ -229,6 +273,7 @@ func (e *Endpoint) startRuntime() {
 		HTTPLayerFallback:        e.options.HTTPLayerFallback,
 		HTTPLayerSuccess:         recordHL,
 		TCPIPv6PathBracket:       e.options.TCPIPv6PathBracket,
+		WarpMasqueClientCert:     clientTLSCert,
 	})
 	const masqueRuntimeStartMaxAttempts = 3
 	var startErr error

@@ -54,6 +54,38 @@ const (
 	MasqueHTTPLayerAuto = "auto"
 )
 
+// MasqueServerAuthPolicy controls how HTTP (Basic/Bearer) and optional mTLS must succeed together.
+const (
+	MasqueServerAuthPolicyFirstMatch  = "first_match"  // default: any configured layer may grant access
+	MasqueServerAuthPolicyAllRequired = "all_required" // every configured layer must succeed
+)
+
+// MasqueServerMTLSOptions configures TLS client authentication on the MASQUE server (QUIC+H2 listeners).
+// No online CA: only PEM blobs from config. Trusted leaf PEMs are added as trust anchors (AddCert).
+type MasqueServerMTLSOptions struct {
+	ClientCAPEM          []string `json:"client_ca_pem,omitempty"`
+	TrustedClientCertPEM []string `json:"trusted_client_cert_pem,omitempty"`
+}
+
+// MasqueServerAuthOptions is server-side ACL: multiple Bearer secrets, multiple Basic pairs, optional mTLS.
+// The endpoint does not model "users" — only credential lists (see repo AGENTS.md §4.1).
+type MasqueServerAuthOptions struct {
+	// Policy: first_match (default) or all_required (see constants MasqueServerAuthPolicy*).
+	Policy string `json:"policy,omitempty"`
+	// BearerTokens are hashed at startup; wire format remains Authorization: Bearer <token>.
+	BearerTokens []string `json:"bearer_tokens,omitempty"`
+	// BearerTokenSHA256 is a list of lowercase hex SHA-256 hashes of allowed bearer tokens (64 hex chars each).
+	BearerTokenSHA256 []string `json:"bearer_token_sha256,omitempty"`
+	BasicCredentials  []MasqueBasicCredential `json:"basic_credentials,omitempty"`
+	MTLS              *MasqueServerMTLSOptions `json:"mtls,omitempty"`
+}
+
+// MasqueBasicCredential is one allowed RFC 7617 Basic identity (user + password).
+type MasqueBasicCredential struct {
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
 type MasqueChainHopOptions struct {
 	ServerOptions
 	DialerOptions
@@ -96,7 +128,22 @@ type MasqueEndpointOptions struct {
 	ListenPort          uint16                  `json:"listen_port,omitempty"`
 	Certificate         string                  `json:"certificate,omitempty"`
 	Key                 string                  `json:"key,omitempty"`
+	// ServerAuth optional ACL (Basic / Bearer / mTLS). Legacy ServerToken is merged as one Bearer token when ServerAuth is absent or has no bearer entries.
+	ServerAuth *MasqueServerAuthOptions `json:"server_auth,omitempty"`
 	ServerToken         string                  `json:"server_token,omitempty"`
+	// ClientBasicUsername / ClientBasicPassword: client-only; sent as Authorization: Basic on CONNECT-stream and CONNECT-IP (H2/H3 paths that we control).
+	// CONNECT-UDP via masque-go still uses ServerToken as Bearer only (see docs).
+	ClientBasicUsername string `json:"client_basic_username,omitempty"`
+	ClientBasicPassword string `json:"client_basic_password,omitempty"`
+	// ClientTLSCert / ClientTLSKey: optional file paths to PEM (client mTLS to server).
+	ClientTLSCert string `json:"client_tls_cert,omitempty"`
+	ClientTLSKey  string `json:"client_tls_key,omitempty"`
+	// ClientTLSCertPEM / ClientTLSKeyPEM: inline PEM (preferred for subscriptions; overrides file paths when set).
+	ClientTLSCertPEM string `json:"client_tls_cert_pem,omitempty"`
+	ClientTLSKeyPEM  string `json:"client_tls_key_pem,omitempty"`
+	// ClientTLSCertB64 / ClientTLSKeyB64: standard base64 of DER or PEM bytes (optional alternative to _pem).
+	ClientTLSCertB64 string `json:"client_tls_cert_b64,omitempty"`
+	ClientTLSKeyB64  string `json:"client_tls_key_b64,omitempty"`
 	AllowPrivateTargets bool                    `json:"allow_private_targets,omitempty"`
 	AllowedTargetPorts  []uint16                `json:"allowed_target_ports,omitempty"`
 	BlockedTargetPorts  []uint16                `json:"blocked_target_ports,omitempty"`

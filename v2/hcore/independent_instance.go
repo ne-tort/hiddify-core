@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/hiddify/hiddify-core/v2/config"
@@ -50,7 +51,7 @@ func RunInstance(ctx context.Context, hiddifySettings *config.HiddifyOptions, si
 	hiddifySettings.InboundOptions.RedirectPort = 0
 	hiddifySettings.Region = "other"
 	hiddifySettings.BlockAds = false
-	hiddifySettings.LogFile = "/dev/null"
+	hiddifySettings.LogFile = os.DevNull
 
 	finalConfigs, err := config.BuildConfig(ctx, hiddifySettings, &config.ReadOptions{Options: singconfig})
 	if err != nil {

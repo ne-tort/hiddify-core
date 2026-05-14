@@ -126,6 +126,42 @@ func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUI
 	return out
 }
 
+func validateMasqueClientTLSMaterial(o option.MasqueEndpointOptions) error {
+	cPem := strings.TrimSpace(o.ClientTLSCertPEM)
+	kPem := strings.TrimSpace(o.ClientTLSKeyPEM)
+	cB64 := strings.TrimSpace(o.ClientTLSCertB64)
+	kB64 := strings.TrimSpace(o.ClientTLSKeyB64)
+	cPath := strings.TrimSpace(o.ClientTLSCert)
+	kPath := strings.TrimSpace(o.ClientTLSKey)
+
+	if (cPem != "") != (kPem != "") {
+		return E.New("masque: client_tls_cert_pem and client_tls_key_pem must both be set or both empty")
+	}
+	if (cB64 != "") != (kB64 != "") {
+		return E.New("masque: client_tls_cert_b64 and client_tls_key_b64 must both be set or both empty")
+	}
+	if (cPath != "") != (kPath != "") {
+		return E.New("masque: client_tls_cert and client_tls_key must both be set or both empty")
+	}
+	pemOK := cPem != "" && kPem != ""
+	b64OK := cB64 != "" && kB64 != ""
+	pathOK := cPath != "" && kPath != ""
+	n := 0
+	if pemOK {
+		n++
+	}
+	if b64OK {
+		n++
+	}
+	if pathOK {
+		n++
+	}
+	if n > 1 {
+		return E.New("masque: use only one of client_tls_cert_pem+key_pem, client_tls_cert_b64+key_b64, or client_tls_cert+key file paths")
+	}
+	return nil
+}
+
 func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	mode := normalizeMode(o.Mode)
 	if mode != option.MasqueModeClient && mode != option.MasqueModeServer {
@@ -163,6 +199,15 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		if strings.TrimSpace(os.Getenv("MASQUE_EXPERIMENTAL_QUIC")) != "1" {
 			return E.New("masque: quic_experimental.enabled requires MASQUE_EXPERIMENTAL_QUIC=1")
 		}
+	}
+	if o.ServerAuth != nil {
+		return E.New("masque: server_auth is server-only")
+	}
+	if strings.TrimSpace(o.ClientBasicUsername) != "" && o.ClientBasicPassword == "" {
+		return E.New("masque: client_basic_password is required when client_basic_username is set")
+	}
+	if err := validateMasqueClientTLSMaterial(o); err != nil {
+		return err
 	}
 
 	// Client mode
@@ -332,6 +377,17 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if o.ConnectIPScopeTarget != "" || o.ConnectIPScopeIPProto != 0 {
 		return E.New("masque server: connect_ip_scope_* is client-only")
 	}
+	if strings.TrimSpace(o.ClientBasicUsername) != "" || o.ClientBasicPassword != "" {
+		return E.New("masque server: client_basic_username / client_basic_password are client-only")
+	}
+	if strings.TrimSpace(o.ClientTLSCert) != "" || strings.TrimSpace(o.ClientTLSKey) != "" ||
+		strings.TrimSpace(o.ClientTLSCertPEM) != "" || strings.TrimSpace(o.ClientTLSKeyPEM) != "" ||
+		strings.TrimSpace(o.ClientTLSCertB64) != "" || strings.TrimSpace(o.ClientTLSKeyB64) != "" {
+		return E.New("masque server: client_tls_* fields are client-only")
+	}
+	if err := validateMasqueServerAuthOptions(o); err != nil {
+		return err
+	}
 	udpExp, _, tcpExp := resolveMasqueServerTemplateURLs(o)
 	if strings.TrimSpace(o.TemplateUDP) != "" &&
 		(!strings.Contains(udpExp, "{target_host}") || !strings.Contains(udpExp, "{target_port}")) {
@@ -360,6 +416,19 @@ func validateMasqueServerMuxPaths(o option.MasqueEndpointOptions) error {
 			return E.New("masque server: template paths must be unique")
 		}
 		seen[p] = struct{}{}
+	}
+	return nil
+}
+
+func validateMasqueServerAuthOptions(o option.MasqueEndpointOptions) error {
+	if o.ServerAuth == nil {
+		return nil
+	}
+	a := o.ServerAuth
+	for i, c := range a.BasicCredentials {
+		if strings.TrimSpace(c.Username) == "" && strings.TrimSpace(c.Password) != "" {
+			return E.New("masque server_auth: basic_credentials[", i, "] missing username")
+		}
 	}
 	return nil
 }

@@ -426,6 +426,8 @@ func (e *WarpEndpoint) startRuntime() {
 			TCPMode:                     normalizeTCPMode(e.options.TCPMode),
 			TCPTransport:                normalizeTCPTransport(e.options.TCPTransport),
 			ServerToken:                 e.options.ServerToken,
+			ClientBasicUsername:         e.options.ClientBasicUsername,
+			ClientBasicPassword:         e.options.ClientBasicPassword,
 			TLSServerName:               warpTLSServerName,
 			Insecure:                    e.options.Insecure,
 			ConnectIPDatagramCeiling:    e.options.MasqueEndpointOptions.MTU,

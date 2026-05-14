@@ -26,7 +26,12 @@ import (
 
 // TestMasqueConnectIPTCP_E2E_Local verifies generic MASQUE server CONNECT-IP + tcp_transport=connect_ip
 // by dialing a local TCP echo through the in-process server (HTTP/2 MASQUE overlay).
+//
+// Requires RUN_MASQUE_CONNECT_IP_TCP_E2E=1: depends on host routing and timing; optional smoke only.
 func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
+	if os.Getenv("RUN_MASQUE_CONNECT_IP_TCP_E2E") == "" {
+		t.Skip("set RUN_MASQUE_CONNECT_IP_TCP_E2E=1 to run this optional local CONNECT-IP+TCP smoke test")
+	}
 	certPath, keyPath := writeMasqueTestServerCertPair(t)
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

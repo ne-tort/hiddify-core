@@ -2,7 +2,6 @@ package masque
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -26,13 +25,16 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -75,13 +77,27 @@ func connectIPRouteAdvertiseErrorClass(err error) TM.ErrorClass {
 	return TM.ErrorClassTransport
 }
 
+// loadMasqueServerTLSKeyPair loads server TLS material from file paths or inline PEM (same as client mTLS loader).
+func loadMasqueServerTLSKeyPair(certInput, keyInput string) (tls.Certificate, error) {
+	certInput = strings.TrimSpace(certInput)
+	keyInput = strings.TrimSpace(keyInput)
+	if certInput == "" || keyInput == "" {
+		return tls.Certificate{}, E.New("empty certificate or key")
+	}
+	if strings.HasPrefix(certInput, "-----BEGIN") && strings.HasPrefix(keyInput, "-----BEGIN") {
+		return tls.X509KeyPair([]byte(certInput), []byte(keyInput))
+	}
+	return tls.LoadX509KeyPair(certInput, keyInput)
+}
+
 type ServerEndpoint struct {
 	endpoint.Adapter
-	options    option.MasqueEndpointOptions
-	router     adapter.Router
-	logger     log.ContextLogger
-	server     *http3.Server
-	packetConn net.PacketConn
+	options       option.MasqueEndpointOptions
+	compiledAuth  *compiledMasqueServerAuth
+	router        adapter.Router
+	logger        log.ContextLogger
+	server        *http3.Server
+	packetConn    net.PacketConn
 	// tcpTLSListener is the TLS listener (HTTP/2 ALPN) dual-stacked with QUIC on the same host:port.
 	tcpTLSListener net.Listener
 	http2Server    *http.Server
@@ -122,10 +138,24 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	// Fresh listen/Serve cycle: clear shutdown marker from a previous Close().
 	// Do not reset closing in Close()'s defer — Serve may still be unwinding after Close returns.
 	e.closing.Store(false)
-	tlsCert, err := tls.LoadX509KeyPair(e.options.Certificate, e.options.Key)
+	tlsCert, err := loadMasqueServerTLSKeyPair(e.options.Certificate, e.options.Key)
 	if err != nil {
 		return E.Cause(err, "load server certificate")
 	}
+	compiled, compileErr := compileMasqueServerAuth(e.options)
+	if compileErr != nil {
+		return compileErr
+	}
+	e.compiledAuth = compiled
+
+	baseTLS := &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if e.compiledAuth != nil {
+		e.compiledAuth.applyTLSClientAuth(baseTLS)
+	}
+
 	udpTemplateRaw, ipTemplateRaw, tcpTemplateRaw := resolveMasqueServerTemplateURLs(e.options)
 	udpTemplate, err := uritemplate.New(udpTemplateRaw)
 	if err != nil {
@@ -139,9 +169,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	if err != nil {
 		return E.Cause(err, "invalid server TCP template")
 	}
-	udpPath := pathFromTemplate(udpTemplateRaw)
-	ipPath := pathFromTemplate(ipTemplateRaw)
-	tcpPath := pathFromTemplate(tcpTemplateRaw)
+	udpPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(udpTemplateRaw))
+	ipPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(ipTemplateRaw))
+	tcpPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(tcpTemplateRaw))
 	udpProxy := &qmasque.Proxy{}
 	e.udpProxy = udpProxy
 	ipProxy := &connectip.Proxy{}
@@ -231,7 +261,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	e.server = &http3.Server{
 		Addr:            addr,
 		Handler:         mux,
-		TLSConfig:       http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{tlsCert}}),
+		TLSConfig:       http3.ConfigureTLSConfig(baseTLS),
 		EnableDatagrams: true,
 		QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
 	}
@@ -289,12 +319,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	}
 	e.packetConn = packetConn
 
-	tcpTLS := tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		MinVersion:   tls.VersionTLS12,
-		NextProtos:   []string{"h2", "http/1.1"},
-	}
-	tcpLn := tls.NewListener(tcpRaw, &tcpTLS)
+	tcpTLS := baseTLS.Clone()
+	tcpTLS.NextProtos = []string{"h2", "http/1.1"}
+	tcpLn := tls.NewListener(tcpRaw, tcpTLS)
 	e.tcpTLSListener = tcpLn
 	http2Srv := &http.Server{
 		Handler:           mux,
@@ -330,8 +357,30 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	return nil
 }
 
-func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, routeLog log.ContextLogger) {
+	if router != nil {
+		router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
+		return
+	}
+	lg := routeLog
+	if lg == nil {
+		lg = log.NewNOPFactory().NewLogger("masque-connect-ip-fallback")
+	}
+	// Standalone MASQUE server (e.g. tests) may omit Router; use the default dial stack without
+	// domain-resolution extras (avoids DNSTransportManager from service context).
+	fallbackCtx := service.ContextWithDefaultRegistry(ctx)
+	nd, err := dialer.NewWithOptions(dialer.Options{
+		Context:        fallbackCtx,
+		Options:        option.DialerOptions{},
+		RemoteIsDomain: false,
+		DirectOutbound: true,
+	})
+	if err != nil {
+		N.CloseOnHandshakeFailure(conn, onClose, err)
+		return
+	}
+	cm := route.NewConnectionManager(lg)
+	cm.NewPacketConnection(ctx, nd, conn, metadata, onClose)
 }
 
 // routeMasqueConnectIPBlocked keeps this HTTP handler alive until the CONNECT-IP packet-plane
@@ -350,7 +399,7 @@ func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, 
 		_ = packetConn.Close()
 		notify()
 	}
-	routePacketConnectionExBypassTunnelWrapper(router, reqCtx, packetConn, metadata, onClose)
+	routePacketConnectionExBypassTunnelWrapper(router, reqCtx, packetConn, metadata, onClose, logger)
 	<-done
 }
 
@@ -366,6 +415,16 @@ func pathFromTemplate(raw string) string {
 	if path == "" {
 		return "/"
 	}
+	return path
+}
+
+// sanitizeTemplatePathForHTTPMux maps URI-template path segments to patterns valid for
+// net/http.ServeMux (Go 1.22+): wildcard names must be simple identifiers; "{+target_host}"
+// from RFC 6570 reserved expansion is not accepted as a mux wildcard name.
+func sanitizeTemplatePathForHTTPMux(path string) string {
+	path = strings.ReplaceAll(path, "{+target_host*}", "{target_host*}")
+	path = strings.ReplaceAll(path, "{+target_host:", "{target_host:")
+	path = strings.ReplaceAll(path, "{+target_host}", "{target_host}")
 	return path
 }
 
@@ -431,19 +490,19 @@ func (e *ServerEndpoint) ListenPacket(ctx context.Context, destination M.Socksad
 }
 
 func (e *ServerEndpoint) authorizeRequest(r *http.Request) bool {
-	required := strings.TrimSpace(e.options.ServerToken)
-	if required == "" {
+	a := e.compiledAuth
+	// Unit tests call authorizeRequest/handleTCPConnectRequest without Start(); compile from options.
+	if a == nil && e.server == nil {
+		var err error
+		a, err = compileMasqueServerAuth(e.options)
+		if err != nil || a == nil {
+			return true
+		}
+	}
+	if a == nil {
 		return true
 	}
-	auth := strings.TrimSpace(r.Header.Get("Authorization"))
-	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(auth[7:])), []byte(required)) == 1
-	}
-	proxyAuth := strings.TrimSpace(r.Header.Get("Proxy-Authorization"))
-	if strings.HasPrefix(strings.ToLower(proxyAuth), "bearer ") {
-		return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(proxyAuth[7:])), []byte(required)) == 1
-	}
-	return false
+	return a.AuthorizeRequest(r)
 }
 
 const masqueRequestProtocolConnectUDP = "connect-udp"

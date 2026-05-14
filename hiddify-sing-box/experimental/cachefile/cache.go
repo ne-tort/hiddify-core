@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -134,8 +135,12 @@ func (c *CacheFile) Start(stage adapter.StartStage) error {
 	}
 	err = filemanager.Chown(c.ctx, c.path)
 	if err != nil {
-		db.Close()
-		return E.Cause(err, "platform chown")
+		if runtime.GOOS == "windows" {
+			// os.Chown is not supported on Windows; filemanager may still attempt chown when UID/GID differ from the process.
+		} else {
+			db.Close()
+			return E.Cause(err, "platform chown")
+		}
 	}
 	err = db.Batch(func(tx *bbolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bbolt.Bucket) error {

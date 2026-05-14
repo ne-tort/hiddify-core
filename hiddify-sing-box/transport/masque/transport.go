@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -338,6 +339,9 @@ type ClientOptions struct {
 	TCPMode                  string
 	TCPTransport             string
 	ServerToken              string
+	// ClientBasicUsername / ClientBasicPassword: optional RFC 7617 Basic on CONNECT-stream and CONNECT-IP (H2/H3 paths). CONNECT-UDP still uses ServerToken as Bearer (masque-go).
+	ClientBasicUsername string
+	ClientBasicPassword string
 	TLSServerName            string
 	Insecure                 bool
 	QUICExperimental         QUICExperimentalOptions
@@ -375,6 +379,20 @@ func warpMasqueConnectStreamBearerToken(opts ClientOptions) string {
 		return ""
 	}
 	return strings.TrimSpace(opts.WarpMasqueDeviceBearerToken)
+}
+
+func masqueClientBasicAuthHeader(user, pass string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(user)+":"+pass))
+}
+
+func setMasqueAuthorizationHeader(h http.Header, opts ClientOptions) {
+	if u := strings.TrimSpace(opts.ClientBasicUsername); u != "" {
+		h.Set("Authorization", masqueClientBasicAuthHeader(u, opts.ClientBasicPassword))
+		return
+	}
+	if tok := warpMasqueConnectStreamBearerToken(opts); tok != "" {
+		h.Set("Authorization", "Bearer "+tok)
+	}
 }
 
 type QUICExperimentalOptions struct {
@@ -2076,6 +2094,12 @@ func connectIPBootstrapRequireAssignedPrefix() bool {
 func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *http3.ClientConn) (*connectip.Conn, error) {
 	token := strings.TrimSpace(s.options.ServerToken)
 	proto := strings.TrimSpace(s.options.WarpConnectIPProtocol)
+	var basicHdr http.Header
+	if u := strings.TrimSpace(s.options.ClientBasicUsername); u != "" {
+		token = ""
+		basicHdr = make(http.Header)
+		basicHdr.Set("Authorization", masqueClientBasicAuthHeader(u, s.options.ClientBasicPassword))
+	}
 	var conn *connectip.Conn
 	var rsp *http.Response
 	var err error
@@ -2083,6 +2107,10 @@ func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *h
 		dopts := connectip.DialOptions{
 			BearerToken:             token,
 			ExtendedConnectProtocol: proto,
+		}
+		if basicHdr != nil {
+			dopts.BearerToken = ""
+			dopts.ExtraRequestHeaders = basicHdr
 		}
 		if strings.EqualFold(proto, "cf-connect-ip") {
 			// Parity with Diniboy1123/usque → connect-ip-go Dial(..., ignoreExtendedConnect=true).
@@ -2098,7 +2126,13 @@ func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *h
 		}
 		conn, rsp, err = connectip.DialWithOptions(ctx, clientConn, s.templateIP, dopts)
 	} else {
-		conn, rsp, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
+		if basicHdr != nil {
+			conn, rsp, err = connectip.DialWithOptions(ctx, clientConn, s.templateIP, connectip.DialOptions{
+				ExtraRequestHeaders: basicHdr,
+			})
+		} else {
+			conn, rsp, err = connectip.Dial(ctx, clientConn, s.templateIP, token)
+		}
 	}
 	if err != nil || conn == nil {
 		return conn, err
@@ -3221,9 +3255,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		req.ProtoMajor = 3
 		req.ProtoMinor = 0
 		req.Header = make(http.Header)
-		if token := warpMasqueConnectStreamBearerToken(options); token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		setMasqueAuthorizationHeader(req.Header, options)
 		pr, pw := io.Pipe()
 		req.Body = pr
 		req.ContentLength = -1

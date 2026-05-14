@@ -74,9 +74,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		req.Host = serverHost
 		req.Header = make(http.Header)
 		req.Header.Set(":protocol", h2ConnectStreamProto)
-		if token := warpMasqueConnectStreamBearerToken(options); token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		setMasqueAuthorizationHeader(req.Header, options)
 		req.ContentLength = -1
 
 		roundTripper := s.getTCPRoundTripper(tr)

@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	hcore "github.com/hiddify/hiddify-core/v2/hcore"
@@ -25,7 +26,11 @@ var commandInstance = &cobra.Command{
 			hiddifySetting = *hiddifySetting2
 		}
 		ctx := libbox.BaseContext(nil)
-		instance, err := hcore.RunInstanceString(ctx, &hiddifySetting, configPath)
+		proxyJSON, err := loadProxyConfigInputForInstance(configPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		instance, err := hcore.RunInstanceString(ctx, &hiddifySetting, proxyJSON)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -57,4 +62,17 @@ var commandInstance = &cobra.Command{
 func init() {
 	mainCommand.AddCommand(commandInstance)
 	addHConfigFlags(commandInstance)
+}
+
+// loadProxyConfigInputForInstance supports inline JSON (starts with '{' or '[') or a file path, matching the -c flag help text.
+func loadProxyConfigInputForInstance(config string) (string, error) {
+	s := strings.TrimSpace(config)
+	if len(s) > 0 && (s[0] == '{' || s[0] == '[') {
+		return config, nil
+	}
+	b, err := os.ReadFile(config)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }

@@ -59,6 +59,8 @@ type RuntimeOptions struct {
 	TCPMode                     string
 	TCPTransport                string
 	ServerToken                 string
+	ClientBasicUsername         string
+	ClientBasicPassword         string
 	TLSServerName               string
 	Insecure                    bool
 	QUICExperimental            T.QUICExperimentalOptions
@@ -163,6 +165,8 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			TCPMode:                     r.options.TCPMode,
 			TCPTransport:                r.options.TCPTransport,
 			ServerToken:                 strings.TrimSpace(r.options.ServerToken),
+			ClientBasicUsername:         strings.TrimSpace(r.options.ClientBasicUsername),
+			ClientBasicPassword:         r.options.ClientBasicPassword,
 			TLSServerName:               strings.TrimSpace(r.options.TLSServerName),
 			Insecure:                    r.options.Insecure,
 			QUICExperimental:            r.options.QUICExperimental,
