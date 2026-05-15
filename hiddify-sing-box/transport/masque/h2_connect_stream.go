@@ -126,8 +126,8 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		// short-lived dial ctx while Request.Context is WithoutCancel — using the dial ctx here would
 		// mis-attribute transport errors via context.Cause after the handshake when the dial op ended.
 		return &streamConn{
-			reader:       newH2ConnectStreamResponseBody(resp.Body),
-			writer:       pw,
+			reader:       newH3MasqueResponseReadCloser(newH2ConnectStreamResponseBody(resp.Body)),
+			writer:       newH3MasqueBufferedPipeWriter(pw),
 			h2UploadPipe: pr,
 			ctx:          streamCtx,
 			local:        &net.TCPAddr{},

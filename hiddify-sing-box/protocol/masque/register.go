@@ -8,8 +8,5 @@ import (
 
 func RegisterEndpoint(registry *endpoint.Registry) {
 	endpoint.Register[option.MasqueEndpointOptions](registry, C.TypeMasque, NewEndpoint)
-}
-
-func RegisterWarpMasqueEndpoint(registry *endpoint.Registry) {
 	endpoint.Register[option.WarpMasqueEndpointOptions](registry, C.TypeWarpMasque, NewWarpEndpoint)
 }

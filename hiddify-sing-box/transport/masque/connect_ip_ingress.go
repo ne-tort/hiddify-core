@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"slices"
 	"strings"
@@ -234,6 +235,10 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			continue
 		}
 		pkt := readBuffer[:n]
+		if masqueConnectIPNetstackDebug() && n >= 20 {
+			log.Printf("masque connect_ip ingress: rx n=%d ver=%d proto=%d ns=%v inflight=%d",
+				n, pkt[0]>>4, pkt[9], s.ingressTCPNetstack.Load() != nil, s.connectIPTCPInstallInflight.Load())
+		}
 		if bridgeable, malformed := classifyIPv4UDPBridgeCandidate(pkt); malformed {
 			incConnectIPEngineDropReason("ingress_udp_malformed")
 			continue
@@ -250,11 +255,26 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			s.enqueuePreTCPNetstackIngress(pkt)
 			continue
 		}
+		if ns := s.tcpNetstackForIngressInject(); ns != nil {
+			ns.injectInboundClone(pkt)
+			continue
+		}
 		incConnectIPEngineDropReason("ingress_drop_no_consumer")
 	}
 }
 
 const preTCPNetstackIngressMax = 128
+
+// tcpNetstackForIngressInject returns the live CONNECT-IP TCP netstack when the atomic ingress
+// pointer is not yet published (store ordering) but tcpNetstack is already installed under s.mu.
+func (s *coreSession) tcpNetstackForIngressInject() *connectIPTCPNetstack {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ns, ok := s.tcpNetstack.(*connectIPTCPNetstack); ok {
+		return ns
+	}
+	return nil
+}
 
 func (s *coreSession) enqueuePreTCPNetstackIngress(pkt []byte) {
 	if len(pkt) == 0 {

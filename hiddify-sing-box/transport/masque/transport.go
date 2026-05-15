@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/tls"
@@ -42,6 +43,93 @@ const cloudflareLegacyH3DatagramSettingID uint64 = 0x276
 // Above 1200: room for CONNECT-IP (context id + full IPv4/UDP datagram @ 1152 B payload)
 // inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
 const defaultUDPInitialPacketSize uint16 = 1420
+
+// masqueH3ConnectStreamBufSize coalesces small SOCKS/TCP reads and writes into fewer
+// HTTP/3 stream frames on CONNECT-stream (download: response body; upload: io.Pipe body).
+const masqueH3ConnectStreamBufSize = 256 * 1024
+
+// masqueH3ConnectStreamFlushSmall — only writes this small (handshake/control) trigger an
+// early flush while the bufio window is still tiny. Bulk iperf/TUN relay often uses 4–8 KiB
+// chunks; flushing on every ≤8 KiB write prevented filling masqueH3ConnectStreamBufSize.
+const masqueH3ConnectStreamFlushSmall = 512
+
+// masqueH3ConnectStreamFlushBulk — push upload bytes to the HTTP/3 request body (io.Pipe) so
+// quic-go sendRequestBody can read; without this, 8–128 KiB iperf chunks could sit in bufio
+// indefinitely because shouldFlushAfterWrite only flushed at 256 KiB or tiny control writes.
+const masqueH3ConnectStreamFlushBulk = 64 * 1024
+
+// h3MasqueBufferedPipeWriter wraps the upload-side *io.PipeWriter (same stack as H2 CONNECT-stream).
+// The bare pipe does not implement SetWriteDeadline; streamConn stores write deadlines in
+// h2PipeWriteDL and tears down the pipe on expiry (parity across http_layer h2/h3).
+type h3MasqueBufferedPipeWriter struct {
+	bw    *bufio.Writer
+	inner io.WriteCloser
+}
+
+func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWriter {
+	return &h3MasqueBufferedPipeWriter{
+		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamBufSize),
+		inner: inner,
+	}
+}
+
+// h3MasqueResponseReadCloser wraps the CONNECT-stream response body. Unlike bufio.Reader,
+// it does not cap a single Read to one underlying chunk (bufio only fill()s once per Read
+// when len(p) < buf size), which capped iperf download to ~8–12 Mbit/s on HTTP/3 DATA frames.
+type h3MasqueResponseReadCloser struct {
+	inner io.ReadCloser
+}
+
+func newH3MasqueResponseReadCloser(inner io.ReadCloser) *h3MasqueResponseReadCloser {
+	return &h3MasqueResponseReadCloser{inner: inner}
+}
+
+func (r *h3MasqueResponseReadCloser) Read(p []byte) (int, error) {
+	return r.inner.Read(p)
+}
+
+func (r *h3MasqueResponseReadCloser) Close() error {
+	return r.inner.Close()
+}
+
+func (r *h3MasqueResponseReadCloser) SetReadDeadline(t time.Time) error {
+	if d, ok := r.inner.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return d.SetReadDeadline(t)
+	}
+	return ErrDeadlineUnsupported
+}
+
+func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
+	buffered := w.bw.Buffered()
+	if buffered == 0 {
+		return false
+	}
+	if buffered >= masqueH3ConnectStreamBufSize {
+		return true
+	}
+	if buffered >= masqueH3ConnectStreamFlushBulk {
+		return true
+	}
+	return chunkLen <= masqueH3ConnectStreamFlushSmall && buffered <= 2*masqueH3ConnectStreamFlushSmall
+}
+
+func (w *h3MasqueBufferedPipeWriter) Write(p []byte) (int, error) {
+	n, err := w.bw.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if w.shouldFlushAfterWrite(len(p)) {
+		if flushErr := w.bw.Flush(); flushErr != nil {
+			return n, flushErr
+		}
+	}
+	return n, nil
+}
+
+func (w *h3MasqueBufferedPipeWriter) Close() error {
+	_ = w.bw.Flush()
+	return w.inner.Close()
+}
 
 // connectIPUDPWriteBufPool backs CONNECT-IP UDP bridge egress builds (IPv4+UDP+payload).
 // Avoids a process-global mutex on connectIPUDPPacketConn for buffer reuse; WritePacket copies before return.
@@ -151,6 +239,17 @@ func (c *masqueUDPDatagramSplitConn) WriteTo(p []byte, addr net.Addr) (int, erro
 // masquePacketPlaneQUICConfig applies defaults for CONNECT-IP / CONNECT-UDP over HTTP/3.
 // quic-go's default MaxIdleTimeout (30s) can close a session during long bulk datagram
 // transfers when pacing and receiver-side drain stretch wall-clock beyond the idle window.
+//
+// Default quic-go stream RX windows (~2 MiB initial / 6 MiB max) underfill high-BDP links
+// typical for MASQUE (long RTT, single fat CONNECT stream). Raise only when unset so
+// QUICExperimental and callers can still override.
+const (
+	masqueDefaultInitialStreamRecvWindow     = 8 << 20  // 8 MiB
+	masqueDefaultMaxStreamRecvWindow         = 48 << 20 // 48 MiB
+	masqueDefaultInitialConnectionRecvWindow = 12 << 20 // ≥ 1.5 × stream initial (Chromium-style ratio)
+	masqueDefaultMaxConnectionRecvWindow     = 64 << 20 // 64 MiB
+)
+
 func masquePacketPlaneQUICConfig(base *quic.Config) *quic.Config {
 	if base == nil {
 		base = &quic.Config{}
@@ -162,6 +261,18 @@ func masquePacketPlaneQUICConfig(base *quic.Config) *quic.Config {
 	}
 	if base.KeepAlivePeriod == 0 {
 		base.KeepAlivePeriod = 15 * time.Second
+	}
+	if base.InitialStreamReceiveWindow == 0 {
+		base.InitialStreamReceiveWindow = masqueDefaultInitialStreamRecvWindow
+	}
+	if base.MaxStreamReceiveWindow == 0 {
+		base.MaxStreamReceiveWindow = masqueDefaultMaxStreamRecvWindow
+	}
+	if base.InitialConnectionReceiveWindow == 0 {
+		base.InitialConnectionReceiveWindow = masqueDefaultInitialConnectionRecvWindow
+	}
+	if base.MaxConnectionReceiveWindow == 0 {
+		base.MaxConnectionReceiveWindow = masqueDefaultMaxConnectionRecvWindow
 	}
 	return base
 }
@@ -191,12 +302,26 @@ func masqueQUICConfigForDial(opts ClientOptions) *quic.Config {
 	return newMasqueQUICConfig()
 }
 
-// MasqueHTTPServerQUICConfig returns QUIC settings aligned with the MASQUE packet-plane
-// client (idle timeout, keepalive, InitialPacketSize, datagrams) for HTTP/3 server listeners.
-// The server previously used only partial defaults, diverging from dial paths and weakening
-// high-rate CONNECT-IP / CONNECT-UDP symmetry with the client stack.
+// masqueTCPConnectStreamQUICConfig is used for the dedicated http3.Transport behind CONNECT-stream.
+// Unlike newMasqueQUICConfig (1420 B first flight for CONNECT-UDP datagram sizing), leave
+// InitialPacketSize unset so quic-go path-MTU discovery can grow packets on bulk TCP relays.
+func masqueTCPConnectStreamQUICConfig(opts ClientOptions) *quic.Config {
+	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
+		return masquePacketPlaneQUICConfig(masqueWarpCloudflareQUICBase())
+	}
+	return masquePacketPlaneQUICConfig(&quic.Config{
+		EnableDatagrams: true,
+	})
+}
+
+// MasqueHTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
+// Large RX windows match the client; omit InitialPacketSize (unlike newMasqueQUICConfig's 1420 B
+// first flight for CONNECT-UDP datagram sizing) so path MTU discovery can use full packets on
+// CONNECT-stream bulk relay — the client tcpHTTP path already does the same.
 func MasqueHTTPServerQUICConfig() *quic.Config {
-	return newMasqueQUICConfig()
+	return masquePacketPlaneQUICConfig(&quic.Config{
+		EnableDatagrams: true,
+	})
 }
 
 type ClientSession interface {
@@ -260,9 +385,11 @@ type connectIPObservabilityCounters struct {
 	bytesRxTotal                 atomic.Uint64
 	netstackReadInjectTotal      atomic.Uint64
 	netstackReadDropInvalidTotal atomic.Uint64
-	netstackWriteDequeuedTotal   atomic.Uint64
-	netstackWriteAttemptTotal    atomic.Uint64
-	netstackWriteSuccessTotal    atomic.Uint64
+	netstackWriteDequeuedTotal                 atomic.Uint64
+	netstackWriteAttemptTotal                atomic.Uint64
+	netstackWriteSuccessTotal                atomic.Uint64
+	netstackWriteNotifyRetryContinueDropTotal atomic.Uint64
+	netstackWriteNotifySlowIterationTotal   atomic.Uint64
 	bypassListenPacketTotal      atomic.Uint64
 	openSessionTotal             atomic.Uint64
 	engineIngressTotal           atomic.Uint64
@@ -327,23 +454,25 @@ type ClientOptions struct {
 	Server string
 	// DialPeer, when non-empty, is the UDP/QUIC packet destination host (often a literal CF edge IP).
 	// Masque HTTPS templates and default URIs continue to use Server (typically a hostname).
-	DialPeer                 string
-	ServerPort               uint16
-	TransportMode            string
-	TemplateUDP              string
-	TemplateIP               string
-	ConnectIPScopeTarget     string
-	ConnectIPScopeIPProto    uint8
-	TemplateTCP              string
-	FallbackPolicy           string
-	TCPMode                  string
-	TCPTransport             string
-	ServerToken              string
-	// ClientBasicUsername / ClientBasicPassword: optional RFC 7617 Basic on CONNECT-stream and CONNECT-IP (H2/H3 paths). CONNECT-UDP still uses ServerToken as Bearer (masque-go).
+	DialPeer              string
+	ServerPort            uint16
+	TransportMode         string
+	TemplateUDP           string
+	TemplateIP            string
+	ConnectIPScopeTarget  string
+	ConnectIPScopeIPProto uint8
+	TemplateTCP           string
+	FallbackPolicy        string
+	TCPMode               string
+	TCPTransport          string
+	ServerToken           string
+	// ClientBasicUsername / ClientBasicPassword: optional RFC 7617 Basic for CONNECT-stream / CONNECT-IP / H2 CONNECT-UDP (see setMasqueAuthorizationHeader).
 	ClientBasicUsername string
 	ClientBasicPassword string
-	TLSServerName            string
-	Insecure                 bool
+	// MasqueQUICCryptoTLS is stdlib TLS for QUIC/HTTP3 (required unless WarpMasqueClientCert is set).
+	MasqueQUICCryptoTLS *tls.Config
+	// MasqueTCPDialTLS performs client TLS over TCP for HTTP/2 overlay (stdlib or uTLS via sing-box).
+	MasqueTCPDialTLS         func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
 	QUICExperimental         QUICExperimentalOptions
 	ConnectIPDatagramCeiling uint32
 	Hops                     []HopOptions
@@ -1509,6 +1638,12 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 	offset := 0
 	first := true
 	for first || offset < len(p) {
+		if c.deadlines.writeTimeoutExceeded() {
+			if offset > 0 {
+				return offset, os.ErrDeadlineExceeded
+			}
+			return 0, os.ErrDeadlineExceeded
+		}
 		first = false
 		connectIPCounters.bridgeWriteChunkTotal.Add(1)
 		end := offset + maxPayload
@@ -1520,6 +1655,12 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 		const localMTURetryMax = 3
 		localRetries := 0
 		for {
+			if c.deadlines.writeTimeoutExceeded() {
+				if offset > 0 {
+					return offset, os.ErrDeadlineExceeded
+				}
+				return 0, os.ErrDeadlineExceeded
+			}
 			packet, buildErr := buildIPv4UDPPacketInplaceHeaderV4(writeBuf, headerTemplate, p[offset:end])
 			if buildErr != nil {
 				connectIPCounters.bridgeWriteErrTotal.Add(1)
@@ -2141,7 +2282,31 @@ func (s *coreSession) dialWarpConnectIPTunnel(ctx context.Context, clientConn *h
 	if err := s.warpMasqueConnectIPBootstrap(conn); err != nil {
 		return nil, err
 	}
+	if err := s.genericMasqueConnectIPBootstrap(conn); err != nil {
+		return nil, err
+	}
 	return conn, nil
+}
+
+// genericMasqueConnectIPBootstrap waits briefly for ADDRESS_ASSIGN from a generic MASQUE server
+// (AssignAddresses on the server side) so CONNECT-IP TCP netstack uses the same local as the wire.
+func (s *coreSession) genericMasqueConnectIPBootstrap(conn *connectip.Conn) error {
+	if conn == nil || strings.TrimSpace(s.options.WarpConnectIPProtocol) != "" {
+		return nil
+	}
+	wait := connectIPTCPNetstackLocalPrefixWait()
+	if wait > 5*time.Second {
+		wait = 5 * time.Second
+	}
+	prefixes, err := waitForNonEmptyAssignedPrefixes(conn, wait)
+	if len(prefixes) == 0 {
+		if err != nil {
+			log.Printf("masque connect_ip bootstrap: generic server no ADDRESS_ASSIGN within %s tag=%s err=%v", wait, strings.TrimSpace(s.options.Tag), err)
+		}
+		return nil
+	}
+	log.Printf("masque connect_ip bootstrap: generic server assigned prefix count=%d tag=%s", len(prefixes), strings.TrimSpace(s.options.Tag))
+	return nil
 }
 
 func (s *coreSession) dialConnectIPAttempt(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
@@ -2369,6 +2534,7 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 	connectIPCounters.openSessionTotal.Add(1)
 	setConnectIPSessionID()
 	emitConnectIPObservabilityEvent("open_ip_session_success")
+	s.maybeStartConnectIPIngressLocked()
 	return &connectIPPacketSession{
 		conn:             conn,
 		datagramCeiling:  s.connectIPDatagramCeiling,
@@ -2767,46 +2933,60 @@ func (s *coreSession) resetHopTemplates() error {
 }
 
 func resolveTLSServerName(options ClientOptions) string {
-	if sni := strings.TrimSpace(options.TLSServerName); sni != "" {
-		return sni
+	if options.MasqueQUICCryptoTLS != nil && strings.TrimSpace(options.MasqueQUICCryptoTLS.ServerName) != "" {
+		return strings.TrimSpace(options.MasqueQUICCryptoTLS.ServerName)
 	}
 	return strings.TrimSpace(options.Server)
 }
 
 func masqueClientTLSConfig(opts ClientOptions) *tls.Config {
+	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
+		return masqueClientTLSConfigWarp(opts)
+	}
+	if opts.MasqueQUICCryptoTLS != nil {
+		cfg := opts.MasqueQUICCryptoTLS.Clone()
+		if len(cfg.NextProtos) == 0 {
+			cfg.NextProtos = []string{http3.NextProtoH3}
+		}
+		return cfg
+	}
+	return &tls.Config{
+		NextProtos: []string{http3.NextProtoH3},
+		ServerName: resolveTLSServerName(opts),
+	}
+}
+
+func masqueClientTLSConfigWarp(opts ClientOptions) *tls.Config {
 	cfg := &tls.Config{
 		NextProtos: []string{http3.NextProtoH3},
 		ServerName: resolveTLSServerName(opts),
 	}
-	if len(opts.WarpMasqueClientCert.Certificate) > 0 {
-		cfg.Certificates = []tls.Certificate{opts.WarpMasqueClientCert}
-		cfg.InsecureSkipVerify = true
-		if opts.WarpMasquePinnedPubKey != nil && !opts.Insecure {
-			pub := opts.WarpMasquePinnedPubKey
-			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				if len(rawCerts) == 0 {
-					return fmt.Errorf("warp_masque: empty peer TLS certificate")
-				}
-				leaf, err := x509.ParseCertificate(rawCerts[0])
-				if err != nil {
-					return err
-				}
-				esk, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-				if !ok {
-					return fmt.Errorf("warp_masque: peer TLS certificate is not ECDSA")
-				}
-				if !esk.Equal(pub) {
-					return fmt.Errorf("warp_masque: peer TLS public key does not match Cloudflare device profile pin")
-				}
-				return nil
+	cfg.Certificates = []tls.Certificate{opts.WarpMasqueClientCert}
+	cfg.InsecureSkipVerify = true
+	insecure := opts.MasqueQUICCryptoTLS != nil && opts.MasqueQUICCryptoTLS.InsecureSkipVerify
+	if opts.WarpMasquePinnedPubKey != nil && !insecure {
+		pub := opts.WarpMasquePinnedPubKey
+		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("warp_masque: empty peer TLS certificate")
 			}
+			leaf, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			esk, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+			if !ok {
+				return fmt.Errorf("warp_masque: peer TLS certificate is not ECDSA")
+			}
+			if !esk.Equal(pub) {
+				return fmt.Errorf("warp_masque: peer TLS public key does not match Cloudflare device profile pin")
+			}
+			return nil
 		}
-		if opts.Insecure {
-			cfg.VerifyPeerCertificate = nil
-		}
-		return cfg
 	}
-	cfg.InsecureSkipVerify = opts.Insecure
+	if insecure {
+		cfg.VerifyPeerCertificate = nil
+	}
 	return cfg
 }
 
@@ -2912,8 +3092,16 @@ func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksa
 		return nil, err
 	}
 	s.mu.Lock()
+	if s.tcpNetstack == nil {
+		// Cover the window between CONNECT-IP session open and netstack attach: early peer
+		// datagrams must not be dropped before connectIPTCPInstallInflight is raised.
+		s.connectIPTCPInstallInflight.Add(1)
+	}
 	ipSess, err := s.openIPSessionLocked(ctx)
 	if err != nil {
+		if s.tcpNetstack == nil {
+			s.connectIPTCPInstallInflight.Add(-1)
+		}
 		s.mu.Unlock()
 		return nil, err
 	}
@@ -2922,7 +3110,6 @@ func (s *coreSession) dialConnectIPTCP(ctx context.Context, destination M.Socksa
 		// DefaultTCPNetstackFactory.New may block on LocalPrefixes (see netstack_adapter). Bump
 		// connectIPTCPInstallInflight so ingress drains ReadPacket during construction; replay buffered
 		// frames after attach (inflight covers concurrent first-dial races).
-		s.connectIPTCPInstallInflight.Add(1)
 		s.maybeStartConnectIPIngressLocked()
 		s.mu.Unlock()
 		newStack, nerr := DefaultTCPNetstackFactory.New(ctx, ipSess)
@@ -3165,7 +3352,7 @@ func (s *coreSession) dialTCPStreamAttempt(ctx context.Context, destination M.So
 				}
 				target := masqueDialTarget(masqueQuicDialCandidateHost(s.options), port)
 				cfg := applyQUICExperimentalOptions(
-					masqueQUICConfigForDial(options),
+					masqueTCPConnectStreamQUICConfig(options),
 					options.QUICExperimental,
 				)
 				return s.quicDialWithPolicy("client_connect_stream")(ctx, target, tlsCfg, cfg)
@@ -3307,8 +3494,8 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		stopReqCtxRelay(true)
 		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
 		return &streamConn{
-			reader: resp.Body,
-			writer: pw,
+			reader: newH3MasqueResponseReadCloser(resp.Body),
+			writer: newH3MasqueBufferedPipeWriter(pw),
 			ctx:    streamCtx,
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
@@ -3366,7 +3553,7 @@ func (s *coreSession) resetTCPHTTPTransport() {
 			}
 			target := masqueDialTarget(masqueQuicDialCandidateHost(s.options), port)
 			cfg := applyQUICExperimentalOptions(
-				masqueQUICConfigForDial(s.options),
+				masqueTCPConnectStreamQUICConfig(s.options),
 				s.options.QUICExperimental,
 			)
 			return s.quicDialWithPolicy("client_connect_stream")(ctx, target, tlsCfg, cfg)
@@ -3495,11 +3682,11 @@ func applyQUICExperimentalOptions(base *quic.Config, opts QUICExperimentalOption
 
 type streamConn struct {
 	mu            sync.Mutex
-	h2PipeWriteMu sync.Mutex // serializes Writes when using H2 Extended CONNECT pipe upload (parity h2ConnectUDPPacketConn.writeMu)
+	h2PipeWriteMu sync.Mutex // CONNECT-stream pipe upload (H2 Extended CONNECT + H3 request body): serializes Writes (parity h2ConnectUDPPacketConn.writeMu)
 	reader        io.ReadCloser
 	writer        io.WriteCloser
 	h2UploadPipe  *io.PipeReader // H2 CONNECT-stream upload half; Request body uses h2ExtendedConnectUploadBody noop Close
-	h2PipeWriteDL connDeadlines  // write deadlines for h2 PipeWriter path (PipeWriter lacks SetWriteDeadline)
+	h2PipeWriteDL connDeadlines // upload write deadlines — underlying PipeWriter lacks SetWriteDeadline (h2+h3 CONNECT-stream)
 	ctx           context.Context
 	local         net.Addr
 	remote        net.Addr
@@ -3559,14 +3746,10 @@ func (c *streamConn) Read(p []byte) (int, error) {
 	return n, c.wrapConnectStreamDataplaneErr("read", err)
 }
 func (c *streamConn) Write(p []byte) (int, error) {
-	if c.h2UploadPipe != nil {
-		return c.writeH2ExtendedConnectPipe(p)
-	}
-	n, err := writeAllIOWriter(c.writer, p)
-	return c.connectStreamFinishWriteError(n, err)
+	return c.writeConnectStreamPipeUpload(p)
 }
 
-func (c *streamConn) writeH2ExtendedConnectPipe(p []byte) (int, error) {
+func (c *streamConn) writeConnectStreamPipeUpload(p []byte) (int, error) {
 	c.h2PipeWriteMu.Lock()
 	defer c.h2PipeWriteMu.Unlock()
 	if len(p) == 0 {
@@ -3587,16 +3770,16 @@ func (c *streamConn) writeH2ExtendedConnectPipe(p []byte) (int, error) {
 		}
 		wctx, wcancel := context.WithDeadline(context.Background(), time.Unix(0, wNanos))
 		defer wcancel()
-		n, err = c.awaitH2PipeWriterBlockedWriteInterruptible(wctx, p)
+		n, err = c.awaitConnectStreamPipeWriterBlockedWriteInterruptible(wctx, p)
 	}
 	return c.connectStreamFinishWriteError(n, err)
 }
 
-// awaitH2PipeWriterBlockedWriteInterruptible mirrors h2ConnectUDPPacketConn.awaitH2UDPReqBodyWrite so a pipe
+// awaitConnectStreamPipeWriterBlockedWriteInterruptible mirrors h2ConnectUDPPacketConn.awaitH2UDPReqBodyWrite so a pipe
 // upload blocked on flow-control/unread data can observe SetWriteDeadline (Close tears the Pipe).
-func (c *streamConn) awaitH2PipeWriterBlockedWriteInterruptible(ctx context.Context, data []byte) (int, error) {
+func (c *streamConn) awaitConnectStreamPipeWriterBlockedWriteInterruptible(ctx context.Context, data []byte) (int, error) {
 	if c.writer == nil {
-		return 0, errors.New("masque h2: connect-stream: nil upload writer")
+		return 0, errors.New("masque connect-stream: nil upload writer")
 	}
 	ch := make(chan struct {
 		n   int
@@ -3675,14 +3858,8 @@ func (c *streamConn) SetReadDeadline(t time.Time) error {
 	return ErrDeadlineUnsupported
 }
 func (c *streamConn) SetWriteDeadline(t time.Time) error {
-	if c.h2UploadPipe != nil {
-		c.h2PipeWriteDL.setWriteDeadline(t)
-		return nil
-	}
-	if deadlineConn, ok := c.writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		return deadlineConn.SetWriteDeadline(t)
-	}
-	return ErrDeadlineUnsupported
+	c.h2PipeWriteDL.setWriteDeadline(t)
+	return nil
 }
 
 func isTCPNetwork(network string) bool {
@@ -4024,9 +4201,11 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_bytes_rx_total":                   connectIPCounters.bytesRxTotal.Load(),
 		"connect_ip_netstack_read_inject_total":       connectIPCounters.netstackReadInjectTotal.Load(),
 		"connect_ip_netstack_read_drop_invalid_total": connectIPCounters.netstackReadDropInvalidTotal.Load(),
-		"connect_ip_netstack_write_dequeued_total":    connectIPCounters.netstackWriteDequeuedTotal.Load(),
-		"connect_ip_netstack_write_attempt_total":     connectIPCounters.netstackWriteAttemptTotal.Load(),
-		"connect_ip_netstack_write_success_total":     connectIPCounters.netstackWriteSuccessTotal.Load(),
+		"connect_ip_netstack_write_dequeued_total":                   connectIPCounters.netstackWriteDequeuedTotal.Load(),
+		"connect_ip_netstack_write_attempt_total":                    connectIPCounters.netstackWriteAttemptTotal.Load(),
+		"connect_ip_netstack_write_success_total":                    connectIPCounters.netstackWriteSuccessTotal.Load(),
+		"connect_ip_netstack_write_notify_retry_continue_drop_total": connectIPCounters.netstackWriteNotifyRetryContinueDropTotal.Load(),
+		"connect_ip_netstack_write_notify_slow_iteration_total":      connectIPCounters.netstackWriteNotifySlowIterationTotal.Load(),
 		"connect_ip_bypass_listenpacket_total":        connectIPCounters.bypassListenPacketTotal.Load(),
 		"connect_ip_open_session_total":               connectIPCounters.openSessionTotal.Load(),
 		"connect_ip_engine_ingress_total":             connectIPCounters.engineIngressTotal.Load(),
@@ -4055,18 +4234,8 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 		"connect_ip_policy_drop_icmp_total":           connectip.PolicyDropICMPTotal(),
 		"connect_ip_policy_drop_icmp_attempt_total":   connectip.PolicyDropICMPAttemptTotal(),
 		"connect_ip_policy_drop_icmp_reason_total":    policyDropICMPReasonSnapshot(),
-		// Process-wide HTTP/3 per-stream DATAGRAM queue drops (patched quic-go http3); correlates with bulk/burst loss.
-		"http3_stream_datagram_queue_drop_total":       http3.StreamDatagramQueueDropTotal(),
-		"http3_stream_datagram_recv_closed_drop_total": http3.StreamDatagramRecvClosedDropTotal(),
-		// Process-wide drops for DATAGRAM frames mapped to unknown HTTP/3 stream IDs.
-		// Indicates mapping/lifecycle mismatches without stopping the receive loop.
-		"http3_datagram_unknown_stream_drop_total": http3.UnknownStreamDatagramDropTotal(),
-		// QUIC conn-level DATAGRAM receive-queue overflow (patched quic-go datagram_queue.go).
-		"quic_datagram_rcv_queue_drop_total": quic.DatagramReceiveQueueDropTotal(),
-		// QUIC packet-packer DATAGRAM oversize drops (frame too large for remaining packet budget AND no co-packed ACK).
-		// Silent TX-side loss bucket previously invisible to OBS; sub-percent CONNECT-IP loss without queue drops typically lands here.
-		"quic_datagram_packer_oversize_drop_total": quic.DatagramPackerOversizeDropTotal(),
 	}
+	mergeConnectIPDatagramOBSMetrics(out)
 	if fn := connectIPServerParseDropSupplier; fn != nil {
 		out["connect_ip_server_parse_drop_total"] = fn()
 	}

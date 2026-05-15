@@ -61,8 +61,10 @@ type RuntimeOptions struct {
 	ServerToken                 string
 	ClientBasicUsername         string
 	ClientBasicPassword         string
-	TLSServerName               string
-	Insecure                    bool
+	// MasqueQUICCryptoTLS is *tls.Config for QUIC/HTTP3 (stdlib); required unless WarpMasqueClientCert is set.
+	MasqueQUICCryptoTLS *tls.Config
+	// MasqueTCPDialTLS performs TLS over TCP for HTTP/2 overlay (supports uTLS when configured in outbound_tls).
+	MasqueTCPDialTLS func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
 	QUICExperimental            T.QUICExperimentalOptions
 	ConnectIPDatagramCeiling    uint32
 	Chain                       []ChainHop
@@ -167,8 +169,8 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			ServerToken:                 strings.TrimSpace(r.options.ServerToken),
 			ClientBasicUsername:         strings.TrimSpace(r.options.ClientBasicUsername),
 			ClientBasicPassword:         r.options.ClientBasicPassword,
-			TLSServerName:               strings.TrimSpace(r.options.TLSServerName),
-			Insecure:                    r.options.Insecure,
+			MasqueQUICCryptoTLS:         r.options.MasqueQUICCryptoTLS,
+			MasqueTCPDialTLS:            r.options.MasqueTCPDialTLS,
 			QUICExperimental:            r.options.QUICExperimental,
 			ConnectIPDatagramCeiling:    r.options.ConnectIPDatagramCeiling,
 			Hops:                        toTransportHops(r.options.Chain),

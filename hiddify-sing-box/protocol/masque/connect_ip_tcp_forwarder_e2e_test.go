@@ -2,6 +2,7 @@ package masque
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,7 +14,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -32,6 +32,7 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	if os.Getenv("RUN_MASQUE_CONNECT_IP_TCP_E2E") == "" {
 		t.Skip("set RUN_MASQUE_CONNECT_IP_TCP_E2E=1 to run this optional local CONNECT-IP+TCP smoke test")
 	}
+	_ = os.Setenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG", "1")
 	certPath, keyPath := writeMasqueTestServerCertPair(t)
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -63,11 +64,14 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	logger := log.NewNOPFactory().NewLogger("masque-e2e")
 
 	epRaw, err := NewServerEndpoint(context.Background(), nil, logger, "masque-e2e-srv", option.MasqueEndpointOptions{
-		Mode:                option.MasqueModeServer,
-		Listen:              "127.0.0.1",
-		ListenPort:          uint16(srvPort),
-		Certificate:         certPath,
-		Key:                 keyPath,
+		Mode:       option.MasqueModeServer,
+		Listen:     "127.0.0.1",
+		ListenPort: uint16(srvPort),
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: certPath,
+			KeyPath:         keyPath,
+		},
 		AllowPrivateTargets: true,
 		AllowedTargetPorts:  nil,
 		BlockedTargetPorts:  nil,
@@ -98,7 +102,7 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	host := fmt.Sprintf("127.0.0.1:%d", srvPort)
 	base := "https://" + host
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	session, err := (TM.CoreClientFactory{}).NewSession(waitCtx, TM.ClientOptions{
@@ -109,7 +113,11 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 		TemplateIP:               base + "/masque/ip",
 		TemplateUDP:              base + "/masque/udp/{target_host}/{target_port}",
 		TemplateTCP:              base + "/masque/tcp/{target_host}/{target_port}",
-		Insecure:                 true,
+		MasqueQUICCryptoTLS: &tls.Config{
+			ServerName:         "127.0.0.1",
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h3"},
+		},
 		MasqueEffectiveHTTPLayer: "h3",
 		TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			var d net.Dialer
@@ -199,21 +207,15 @@ func writeMasqueTestServerCertPair(t *testing.T) (certPath, keyPath string) {
 
 func pickMasqueE2EFreePort(t *testing.T) int {
 	t.Helper()
-	for range 128 {
-		u, err := net.ListenPacket("udp", "127.0.0.1:0")
+	for range 64 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			continue
 		}
-		port := u.LocalAddr().(*net.UDPAddr).Port
-		_ = u.Close()
-		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-		tr, err := net.Listen("tcp", addr)
-		if err != nil {
-			continue
-		}
-		_ = tr.Close()
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
 		return port
 	}
-	t.Fatal("no ephemeral UDP/TCP pair available on 127.0.0.1")
+	t.Fatal("no ephemeral TCP port available on 127.0.0.1")
 	return 0
 }

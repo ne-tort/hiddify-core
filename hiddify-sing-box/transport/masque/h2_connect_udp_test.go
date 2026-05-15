@@ -3,18 +3,26 @@ package masque
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/stretchr/testify/require"
+	"github.com/yosida95/uritemplate/v3"
+	"golang.org/x/net/http2"
+
+	"github.com/sagernet/sing-box/option"
 )
 
 // dialTimeoutNetErr is synthetic net-compatible timeout text matching common Windows dial failures
@@ -535,4 +543,106 @@ func TestIsMasqueHTTPLayerSwitchableFailure(t *testing.T) {
 	if IsMasqueHTTPLayerSwitchableFailure(nil) {
 		t.Fatal("nil err")
 	}
+}
+
+// startInProcessH2UDPConnectProxy serves HTTPS + HTTP/2 with RFC 8441 CONNECT-UDP and relays UDP via ServeH2ConnectUDP.
+func startInProcessH2UDPConnectProxy(t *testing.T) int {
+	t.Helper()
+	serverTLS := connectUDPTestTLS.Clone()
+	serverTLS.NextProtos = []string{http2.NextProtoTLS, "http/1.1"}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(r.Header.Get(":protocol")) != h2ConnectUDPProto {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		host := r.PathValue("target_host")
+		port := r.PathValue("target_port")
+		addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, port))
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		conn, err := net.DialUDP("udp", nil, addr)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set(http3.CapsuleProtocolHeader, CapsuleProtocolHeaderValueH2())
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_ = ServeH2ConnectUDP(w, r, conn)
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	tlsLn := tls.NewListener(ln, serverTLS)
+	srv := &http.Server{
+		Handler: mux,
+	}
+	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+		t.Fatalf("configure http2 server: %v", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve(tlsLn)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		wg.Wait()
+	})
+	time.Sleep(20 * time.Millisecond)
+	return tlsLn.Addr().(*net.TCPAddr).Port
+}
+
+func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
+	echo := runUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	echoPort := echo.LocalAddr().(*net.UDPAddr).Port
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	tpl, err := uritemplate.New(rawTpl)
+	require.NoError(t, err)
+
+	s := &coreSession{
+		options: ClientOptions{
+			Server:              "127.0.0.1",
+			ServerPort:          uint16(proxyPort),
+			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	pc, err := s.dialUDPOverHTTP2(ctx, tpl, net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)))
+	require.NoError(t, err)
+	defer pc.Close()
+
+	payload := []byte("ping-h2-udp-echo")
+	nw, err := pc.WriteTo(payload, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(payload), nw)
+
+	buf := make([]byte, 256)
+	nr, _, err := pc.ReadFrom(buf)
+	require.NoError(t, err)
+	require.Equal(t, payload, buf[:nr])
 }

@@ -6,9 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +42,9 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Co
 	if conn == nil {
 		return errors.New("masque: connect-ip forwarder: nil conn")
 	}
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: started")
+	}
 	f := &connectIPTCPForwarder{
 		conn: conn,
 		o:    o,
@@ -67,21 +73,30 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Co
 		if n < header.IPv4MinimumSize {
 			continue
 		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: read n=%d first_byte=0x%02x", n, buf[0])
+		}
 		pkt := buf[:n]
-		if pkt[0]>>4 != 4 {
+		if pkt[0]>>4 != 4 || len(pkt) < header.IPv4MinimumSize || pkt[9] != uint8(header.TCPProtocolNumber) {
 			continue
 		}
 		iph := header.IPv4(pkt)
-		if !iph.IsValid(len(pkt)) || iph.Protocol() != uint8(header.TCPProtocolNumber) {
-			continue
+		// CONNECT-IP peers may carry trailing bytes or gVisor egress with relaxed TotalLength;
+		// do not require iph.IsValid(len(pkt)) before TCP termination.
+		if totalLen := int(iph.TotalLength()); totalLen >= header.IPv4MinimumSize && totalLen < len(pkt) {
+			pkt = pkt[:totalLen]
+			iph = header.IPv4(pkt)
 		}
-		ihl := int(iph.HeaderLength())
-		if ihl+header.TCPMinimumSize > len(pkt) {
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < header.IPv4MinimumSize || ihl+header.TCPMinimumSize > len(pkt) {
 			continue
 		}
 		tc := header.TCP(pkt[ihl:])
-		doff := int(tc.DataOffset()) * 4
+		doff := int(pkt[ihl+12]>>4) * 4
 		if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: drop invalid tcp header doff=%d ihl=%d len=%d", doff, ihl, len(pkt))
+			}
 			continue
 		}
 		tcpLen := uint16(len(pkt) - ihl)
@@ -90,7 +105,11 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Co
 		if payloadLen > 0 {
 			payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
 		}
-		if !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+		// gVisor CONNECT-IP egress may leave TCP checksum zero (stack offload semantics).
+		if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x", csum)
+			}
 			continue
 		}
 		flow := tcp4Tuple{
@@ -104,12 +123,19 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Co
 			f.handleSyn(ctx, pkt, iph, tc, flow)
 			continue
 		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" && flags&header.TCPFlagSyn != 0 {
+			log.Printf("masque connect_ip forwarder: skip non-syn flags=0x%02x", flags)
+		}
 		if flags&header.TCPFlagRst != 0 {
 			f.dropFlow(flow)
 			continue
 		}
 		s := f.getSession(flow)
 		if s == nil {
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: no session flags=0x%02x %s:%d -> %s:%d",
+					flags, flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
+			}
 			continue
 		}
 		s.handleSegment(ctx, pkt, iph, tc, ihl, doff)
@@ -145,7 +171,7 @@ func (f *connectIPTCPForwarder) shutdownSessions() {
 func (f *connectIPTCPForwarder) writeRaw(pkt []byte) error {
 	f.wMu.Lock()
 	defer f.wMu.Unlock()
-	p := pkt
+	p := RewriteConnectIPOutgoingPeerDst(pkt, f.conn.CurrentPeerPrefixes())
 	for i := 0; i < connectIPTCPForwarderICMPRelayMax; i++ {
 		icmp, err := f.conn.WritePacket(p)
 		if err != nil {
@@ -251,8 +277,14 @@ func (f *connectIPTCPForwarder) handleSyn(ctx context.Context, _ []byte, iph hea
 	dialAddr := net.JoinHostPort(dstIP.String(), strconv.Itoa(int(tc.DestinationPort())))
 	remote, dialErr := f.o.Dialer.DialContext(ctx, "tcp", dialAddr)
 	if dialErr != nil {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: syn dial %s err=%v", dialAddr, dialErr)
+		}
 		_ = f.sendRST(iph, tc, irs+1)
 		return
+	}
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: syn dial ok %s", dialAddr)
 	}
 
 	iss, err := randomISN()
@@ -370,6 +402,10 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 	if !s.established {
 		if flags&header.TCPFlagAck != 0 && ack == s.iss+1 && flags&header.TCPFlagSyn == 0 {
 			s.established = true
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: handshake established %s:%d -> %s:%d",
+					s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+			}
 			s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(ctx) })
 		}
 	}
@@ -565,14 +601,14 @@ func buildIPv4TCPPacket(
 	iph.SetChecksum(^iph.CalculateChecksum())
 
 	tcpOff := header.IPv4MinimumSize
-	tc := header.TCP(pkt[tcpOff : tcpOff+tcpHdrLen])
+	tc := header.TCP(pkt[tcpOff:])
 	copy(tc[header.TCPMinimumSize:], tcpOpts)
 	tf := header.TCPFields{
 		SrcPort:       srcPort,
 		DstPort:       dstPort,
 		SeqNum:        seq,
 		AckNum:        ack,
-		DataOffset:    uint8(tcpHdrLen / 4),
+		DataOffset:    uint8(tcpHdrLen),
 		Flags:         flags,
 		WindowSize:    window,
 		Checksum:      0,

@@ -335,7 +335,12 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 		opts.LocalIPv6 = netip.MustParseAddr("fd00::1")
 	}
 	gStack := stack.New(stack.Options{
-		NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+		// CONNECT-IP injects proxied replies (e.g. SYN-ACK from 127.0.0.1 after forwarder dials loopback).
+		// Without AllowExternalLoopbackTraffic gVisor drops them as martian loopback packets.
+		NetworkProtocols: []stack.NetworkProtocolFactory{
+			ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic: true}),
+			ipv6.NewProtocolWithOptions(ipv6.Options{AllowExternalLoopbackTraffic: true}),
+		},
 		// ICMPv4/v6: CONNECT-IP PMTU injects ICMP PTB into the stack; parity with replace/sing-tun/stack_gvisor.
 		TransportProtocols: []stack.TransportProtocolFactory{
 			tcp.NewProtocol,
@@ -600,10 +605,45 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 	}, ipv6.ProtocolNumber
 }
 
+// Future work (egress reliability):
+// - B2: on retryable WritePacket failure, avoid silently dropping the dequeued outbound (this continue);
+//   options: bounded re-send of same slice, or netstack-facing re-queue if the channel.Endpoint contract allows.
+// - B3: if HoL appears on H2 capsule path (single writeMu + writeToStream), consider a small buffered
+//   writes channel or splitting control vs bulk after slow-iteration metrics implicate that path.
+
+func connectIPSlowNetstackWriteNotifyThreshold() time.Duration {
+	v := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_SLOW_WRITE_NOTIFY_MS"))
+	if v == "" {
+		return 0
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func maybeSampleSlowNetstackWriteNotifyIteration(start time.Time, threshold time.Duration) {
+	if threshold <= 0 {
+		return
+	}
+	elapsed := time.Since(start)
+	if elapsed < threshold {
+		return
+	}
+	connectIPCounters.netstackWriteNotifySlowIterationTotal.Add(1)
+	n := connectIPCounters.netstackWriteNotifySlowIterationTotal.Load()
+	if n == 1 || n%256 == 0 {
+		log.Printf("masque connect-ip: slow WriteNotify iteration dur=%v (threshold=%v)", elapsed, threshold)
+	}
+}
+
 func (s *connectIPTCPNetstack) WriteNotify() {
 	consecutiveRetryableFailures := 0
 	const retryableFailureLimit = 32
+	slowThresh := connectIPSlowNetstackWriteNotifyThreshold()
 	for {
+		iterStart := time.Now()
 		packet := s.endpoint.Read()
 		if packet == nil {
 			return
@@ -612,6 +652,7 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 		outbound := view.AsSlice()
 		if len(outbound) == 0 {
 			packet.DecRef()
+			maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 			continue
 		}
 		connectIPCounters.netstackWriteDequeuedTotal.Add(1)
@@ -622,7 +663,9 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 				consecutiveRetryableFailures++
 				incConnectIPWriteFailReason("retryable")
 				if consecutiveRetryableFailures < retryableFailureLimit {
+					connectIPCounters.netstackWriteNotifyRetryContinueDropTotal.Add(1)
 					time.Sleep(2 * time.Millisecond)
+					maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 					continue
 				}
 				incConnectIPWriteFailReason("retry_exhausted")
@@ -639,6 +682,7 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 		if len(icmp) > 0 {
 			s.injectPacket(icmp)
 		}
+		maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 	}
 }
 

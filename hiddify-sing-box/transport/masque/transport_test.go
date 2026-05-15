@@ -213,13 +213,13 @@ func TestTcpMasqueConnectStreamChosenLogFields(t *testing.T) {
 
 func TestResolveTLSServerNameTrimmed(t *testing.T) {
 	t.Parallel()
-	if got := resolveTLSServerName(ClientOptions{TLSServerName: "  sni.example  ", Server: "  ignored.example "}); got != "sni.example" {
+	if got := resolveTLSServerName(ClientOptions{MasqueQUICCryptoTLS: &tls.Config{ServerName: "  sni.example  "}, Server: "  ignored.example "}); got != "sni.example" {
 		t.Fatalf("explicit SNI: got %q", got)
 	}
 	if got := resolveTLSServerName(ClientOptions{Server: "  host.example "}); got != "host.example" {
 		t.Fatalf("fallback Server: got %q", got)
 	}
-	if got := resolveTLSServerName(ClientOptions{TLSServerName: "\t ", Server: "edge.example"}); got != "edge.example" {
+	if got := resolveTLSServerName(ClientOptions{MasqueQUICCryptoTLS: &tls.Config{ServerName: "\t "}, Server: "edge.example"}); got != "edge.example" {
 		t.Fatalf("whitespace-only SNI falls back to Server: got %q", got)
 	}
 }
@@ -1255,13 +1255,50 @@ func TestNewUDPClientSetsInitialPacketSizeBaseline(t *testing.T) {
 	}
 }
 
-func TestStreamConnDeadlineUnsupported(t *testing.T) {
+func TestStreamConnSetWriteDeadlineAlwaysStored(t *testing.T) {
 	c := &streamConn{
 		reader: io.NopCloser(&fakeDeadlineReader{}),
 		writer: &fakeWriter{},
 	}
-	if err := c.SetWriteDeadline(time.Now().Add(time.Second)); !errors.Is(err, ErrDeadlineUnsupported) {
-		t.Fatalf("expected unsupported deadline error, got: %v", err)
+	if err := c.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetWriteDeadline: %v", err)
+	}
+}
+
+func TestStreamConnWriteH3PipeUploadRespectsWriteDeadline(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	bw := newH3MasqueBufferedPipeWriter(pw)
+	c := &streamConn{
+		reader: io.NopCloser(strings.NewReader("")),
+		writer: bw,
+		ctx:    context.Background(),
+		local:  &net.TCPAddr{},
+		remote: &net.TCPAddr{},
+	}
+	if err := c.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	// No reader on pr: flushes from bufio block on the pipe; deadline must unblock Write.
+	data := make([]byte, masqueH3ConnectStreamBufSize+64*1024)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Write(data)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected deadline-related error")
+		}
+		if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want ErrTCPConnectStreamFailed+DeadlineExceeded, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Write did not respect write deadline")
 	}
 }
 
@@ -3242,7 +3279,7 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 	defer conn.Close()
 	select {
 	case <-accepted:
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("expected direct TCP accept after MASQUE failure")
 	}
 }
@@ -3721,13 +3758,17 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
 		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			// dialTCPStream attaches Request.Context via connectip.NewH2ExtendedConnectRequestContext:
+			// it deliberately does not inherit dial deadline cancellation on the CONNECT stream body.
+			// Simulate relay-phase timeout with an independent timer on the response body.
+			relayCtx, _ := context.WithTimeout(context.Background(), 40*time.Millisecond)
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       &contextBoundReadCloser{ctx: req.Context()},
+				Body:       &contextBoundReadCloser{ctx: relayCtx},
 			}, nil
 		}),
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if err != nil {
@@ -3745,6 +3786,43 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 	}
 	if got := ClassifyError(err); got != ErrorClassDial {
 		t.Fatalf("expected relay-phase deadline to classify as dial, got: %s", got)
+	}
+}
+
+func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
+	relayCtx, relayCancel := context.WithCancel(context.Background())
+	session := &coreSession{
+		options: ClientOptions{
+			Server:      "masque.local",
+			ServerPort:  443,
+			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+		},
+		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &contextBoundReadCloser{ctx: relayCtx},
+			}, nil
+		}),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
+	if err != nil {
+		t.Fatalf("dial should succeed before relay-phase cancel, got: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	relayCancel()
+
+	buf := make([]byte, 8)
+	_, err = conn.Read(buf)
+	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected relay-phase read error to preserve context cancel cause, got: %v", err)
+	}
+	if got := ClassifyError(err); got != ErrorClassDial {
+		t.Fatalf("expected relay-phase cancel to classify as dial, got: %s", got)
 	}
 }
 
@@ -3798,12 +3876,12 @@ func TestDialTCPStreamInProcessHTTP3ProxySuccess(t *testing.T) {
 		_, _ = io.Copy(w, upstream)
 		<-copyDone
 	})
-	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		TCPTransport: "connect_stream",
 	})
 	if err != nil {
@@ -3836,12 +3914,12 @@ func TestDialTCPStreamInProcessHTTP3ProxyAuthAndPolicyStatusesMapToAuthClass(t *
 			proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
 				w.WriteHeader(statusCode)
 			})
-			waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			waitCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
 			session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
-				Insecure:     true,
+				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 				TCPTransport: "connect_stream",
 			})
 			if err != nil {
@@ -3870,12 +3948,12 @@ func TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass(t *testing
 			proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
 				w.WriteHeader(statusCode)
 			})
-			waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			waitCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
 			session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
-				Insecure:     true,
+				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 				TCPTransport: "connect_stream",
 			})
 			if err != nil {
@@ -3894,90 +3972,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass(t *testing
 	}
 }
 
-func TestDialTCPStreamInProcessHTTP3ProxyRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
-	proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer waitCancel()
-	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:       "127.0.0.1",
-		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
-		TCPTransport: "connect_stream",
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	relayCtx, relayCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer relayCancel()
-	conn, err := session.DialContext(relayCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-	if err != nil {
-		t.Fatalf("dial should succeed before relay-phase deadline, got: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-
-	buf := make([]byte, 8)
-	_, err = conn.Read(buf)
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected relay-phase read error to preserve context deadline cause, got: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassDial {
-		t.Fatalf("expected relay-phase deadline to classify as dial, got: %s", got)
-	}
-}
-
-func TestDialTCPStreamInProcessHTTP3ProxyRelayPhaseCanceledMapsToDialClass(t *testing.T) {
-	proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer waitCancel()
-	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:       "127.0.0.1",
-		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
-		TCPTransport: "connect_stream",
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	relayCtx, relayCancel := context.WithCancel(context.Background())
-	conn, err := session.DialContext(relayCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-	if err != nil {
-		t.Fatalf("dial should succeed before relay-phase cancel, got: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	relayCancel()
-
-	buf := make([]byte, 8)
-	_, err = conn.Read(buf)
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected relay-phase read error to preserve context cancel cause, got: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassDial {
-		t.Fatalf("expected relay-phase cancel to classify as dial, got: %s", got)
-	}
-}
-
 func TestDialTCPStreamInProcessHTTP3ProxyRetryableRoundTripErrorKeepsBudgetAndDialClass(t *testing.T) {
 	proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
 		w.WriteHeader(http.StatusOK)
@@ -3986,14 +3980,14 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableRoundTripErrorKeepsBudgetAndDi
 		}
 		<-r.Context().Done()
 	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer waitCancel()
 	var attempts int32
 	retryableErr := timeoutNetError{msg: "timeout during quic dial"}
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		TCPTransport: "connect_stream",
 		QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			if atomic.AddInt32(&attempts, 1) < 3 {
@@ -4025,14 +4019,14 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableApplicationErrorKeepsBudgetAnd
 		}
 		<-r.Context().Done()
 	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer waitCancel()
 	var attempts int32
 	retryableErr := &quic.ApplicationError{ErrorCode: 0x100, Remote: true}
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		TCPTransport: "connect_stream",
 		QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			if atomic.AddInt32(&attempts, 1) < 3 {
@@ -4125,13 +4119,13 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivity
 				}
 				<-r.Context().Done()
 			})
-			waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer waitCancel()
 			var attempts int32
 			session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
-				Insecure:     true,
+				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 				TCPTransport: "connect_stream",
 				QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 					if atomic.AddInt32(&attempts, 1) < 3 {
@@ -4155,102 +4149,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivity
 			}
 		})
 	}
-}
-
-func TestDialTCPStreamInProcessHTTP3ProxyRelayPhaseWriteDeadlineExceededMapsToDialClass(t *testing.T) {
-	proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer waitCancel()
-	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:       "127.0.0.1",
-		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
-		TCPTransport: "connect_stream",
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	relayCtx, relayCancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer relayCancel()
-	conn, err := session.DialContext(relayCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-	if err != nil {
-		t.Fatalf("dial should succeed before relay-phase deadline, got: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	time.Sleep(70 * time.Millisecond)
-
-	writeErr := awaitWriteError(conn, 2*time.Second)
-	if !errors.Is(writeErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase write error to preserve ErrTCPConnectStreamFailed, got: %v", writeErr)
-	}
-	if !errors.Is(writeErr, context.DeadlineExceeded) {
-		t.Fatalf("expected relay-phase write error to preserve context deadline cause, got: %v", writeErr)
-	}
-	if got := ClassifyError(writeErr); got != ErrorClassDial {
-		t.Fatalf("expected relay-phase write deadline to classify as dial, got: %s", got)
-	}
-}
-
-func TestDialTCPStreamInProcessHTTP3ProxyRelayPhaseWriteCanceledMapsToDialClass(t *testing.T) {
-	proxyPort := startInProcessTCPConnectProxy(t, func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		<-r.Context().Done()
-	})
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer waitCancel()
-	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:       "127.0.0.1",
-		ServerPort:   uint16(proxyPort),
-		Insecure:     true,
-		TCPTransport: "connect_stream",
-	})
-	if err != nil {
-		t.Fatalf("new session: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	relayCtx, relayCancel := context.WithCancel(context.Background())
-	conn, err := session.DialContext(relayCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-	if err != nil {
-		t.Fatalf("dial should succeed before relay-phase cancel, got: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	relayCancel()
-
-	writeErr := awaitWriteError(conn, 2*time.Second)
-	if !errors.Is(writeErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase write error to preserve ErrTCPConnectStreamFailed, got: %v", writeErr)
-	}
-	if !errors.Is(writeErr, context.Canceled) {
-		t.Fatalf("expected relay-phase write error to preserve context cancel cause, got: %v", writeErr)
-	}
-	if got := ClassifyError(writeErr); got != ErrorClassDial {
-		t.Fatalf("expected relay-phase write cancel to classify as dial, got: %s", got)
-	}
-}
-
-func awaitWriteError(conn net.Conn, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	payload := bytes.Repeat([]byte("w"), 32*1024)
-	for time.Now().Before(deadline) {
-		_, err := conn.Write(payload)
-		if err != nil {
-			return err
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return errors.New("expected write to fail after relay context cancellation")
 }
 
 func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter)) int {
@@ -4356,6 +4254,22 @@ func TestConnectIPObservabilitySnapshotPolicyReasonContract(t *testing.T) {
 	}
 	if ClassifyError(ErrPolicyFallbackDenied) != ErrorClassPolicy {
 		t.Fatal("expected ErrPolicyFallbackDenied to stay classified as policy")
+	}
+}
+
+func TestConnectIPObservabilitySnapshotIncludesNetstackNotifyMetrics(t *testing.T) {
+	snapshot := ConnectIPObservabilitySnapshot()
+	for _, key := range []string{
+		"connect_ip_netstack_write_notify_retry_continue_drop_total",
+		"connect_ip_netstack_write_notify_slow_iteration_total",
+	} {
+		raw, ok := snapshot[key]
+		if !ok {
+			t.Fatalf("expected %q in ConnectIPObservabilitySnapshot", key)
+		}
+		if _, ok := raw.(uint64); !ok {
+			t.Fatalf("unexpected type for %s: %T", key, raw)
+		}
 	}
 }
 

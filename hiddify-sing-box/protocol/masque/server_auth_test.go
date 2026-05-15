@@ -1,9 +1,14 @@
 package masque
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"math/big"
 	"net/http"
 	"testing"
 
@@ -93,7 +98,7 @@ func TestCompileMasqueServerAuth_proxyAuthorization(t *testing.T) {
 func TestAuthorizeRequest_firstMatchTLSOrHTTP(t *testing.T) {
 	a := &compiledMasqueServerAuth{
 		policyFirstMatch: true,
-		tlsConfigured:    true,
+		tlsPeerRequired:  true,
 		httpConfigured:   true,
 		bearerHashes:     map[[32]byte]struct{}{sha256SumBytes([]byte("tok")): {}},
 	}
@@ -117,7 +122,7 @@ func TestAuthorizeRequest_firstMatchTLSOrHTTP(t *testing.T) {
 func TestAuthorizeRequest_allRequiredTLSAndHTTP(t *testing.T) {
 	a := &compiledMasqueServerAuth{
 		policyFirstMatch: false,
-		tlsConfigured:    true,
+		tlsPeerRequired:  true,
 		httpConfigured:   true,
 		bearerHashes:     map[[32]byte]struct{}{sha256SumBytes([]byte("x")): {}},
 	}
@@ -138,7 +143,7 @@ func TestAuthorizeRequest_allRequiredTLSAndHTTP(t *testing.T) {
 func TestAuthorizeRequest_mTLSVerifiedChain(t *testing.T) {
 	a := &compiledMasqueServerAuth{
 		policyFirstMatch: true,
-		tlsConfigured:    true,
+		tlsPeerRequired:  true,
 		httpConfigured:   false,
 	}
 	leaf := &x509.Certificate{Raw: []byte{1, 2, 3}}
@@ -150,21 +155,63 @@ func TestAuthorizeRequest_mTLSVerifiedChain(t *testing.T) {
 	}
 }
 
-func TestApplyTLSClientAuth_verifyIfGiven(t *testing.T) {
-	a := &compiledMasqueServerAuth{tlsConfigured: true, clientCAs: x509.NewCertPool()}
-	cfg := &tls.Config{}
-	a.applyTLSClientAuth(cfg)
-	if cfg.ClientAuth != tls.VerifyClientCertIfGiven {
-		t.Fatalf("expected VerifyClientCertIfGiven, got %v", cfg.ClientAuth)
-	}
-	if cfg.ClientCAs != a.clientCAs {
-		t.Fatal("ClientCAs not set")
-	}
-}
-
 func mustReqWithAuth(t *testing.T, key, val string) *http.Request {
 	t.Helper()
 	r := &http.Request{Header: make(http.Header)}
 	r.Header.Set(key, val)
 	return r
+}
+
+func TestCompileMasqueServerAuth_leafSPKIRequiresInboundTLS(t *testing.T) {
+	hex64 := "0000000000000000000000000000000000000000000000000000000000000000"
+	_, err := compileMasqueServerAuth(option.MasqueEndpointOptions{
+		ServerAuth: &option.MasqueServerAuthOptions{
+			ClientLeafSPKI_SHA256: []string{hex64},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error: leaf SPKI pins require mTLS (InboundTLS client authentication)")
+	}
+}
+
+func TestAuthorizeRequest_leafSPKIPinMatchAndReject(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpl := x509.Certificate{SerialNumber: big.NewInt(1)}
+	der, err := x509.CreateCertificate(rand.Reader, &tpl, &tpl, priv.Public(), priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+	var wrong [32]byte
+	wrong[0] = 0xff
+
+	a := &compiledMasqueServerAuth{
+		policyFirstMatch: true,
+		tlsPeerRequired:  true,
+		httpConfigured:   false,
+		leafSPKIHashes:   map[[32]byte]struct{}{want: {}},
+	}
+	reqOK := &http.Request{Header: make(http.Header), TLS: &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{leaf},
+		VerifiedChains:   [][]*x509.Certificate{{leaf}},
+	}}
+	if !a.AuthorizeRequest(reqOK) {
+		t.Fatal("expected SPKI pin match")
+	}
+	a2 := &compiledMasqueServerAuth{
+		policyFirstMatch: true,
+		tlsPeerRequired:  true,
+		httpConfigured:   false,
+		leafSPKIHashes:   map[[32]byte]struct{}{wrong: {}},
+	}
+	if a2.AuthorizeRequest(reqOK) {
+		t.Fatal("expected SPKI pin reject")
+	}
 }

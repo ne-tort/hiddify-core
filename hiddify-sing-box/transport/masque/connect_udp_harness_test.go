@@ -1,5 +1,9 @@
 package masque
 
+// Tests here exercise the real client CONNECT-UDP path (ListenPacket → masque/quic-go stack) against an
+// in-process HTTP/3 MASQUE proxy and a local UDP echo. No Docker/VPN/WAN — failures point to fork code or
+// harness, not internet/iperf firewall. For end-to-end UDP through VPN see bench/run-bench-report.sh UDP probe.
+
 import (
 	"context"
 	"crypto/rand"
@@ -156,13 +160,13 @@ func TestCoreSessionConnectUDPEchoInProcess(t *testing.T) {
 		})
 	})
 
-	waitCtx2, cancel2 := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx2, cancel2 := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel2()
 
 	session, err := (CoreClientFactory{}).NewSession(waitCtx2, ClientOptions{
-		Server:     "127.0.0.1",
-		ServerPort: uint16(proxyPort),
-		Insecure:   true,
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
@@ -181,10 +185,10 @@ func TestCoreSessionConnectUDPEchoInProcess(t *testing.T) {
 	payload := []byte("masque-udp-harness-echo-ping")
 	dest := echoAddr
 
-	if err := pkt.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := pkt.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
 	}
-	if err := pkt.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := pkt.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatalf("set write deadline: %v", err)
 	}
 
@@ -235,13 +239,13 @@ func TestCoreSessionConnectUDPSplitPayloadEchoInProcess(t *testing.T) {
 		})
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:     "127.0.0.1",
-		ServerPort: uint16(proxyPort),
-		Insecure:   true,
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
@@ -264,7 +268,7 @@ func TestCoreSessionConnectUDPSplitPayloadEchoInProcess(t *testing.T) {
 	}
 	dest := echoAddr
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(4 * time.Second)
 	if err := pkt.SetReadDeadline(deadline); err != nil {
 		t.Fatalf("set read deadline: %v", err)
 	}
@@ -321,13 +325,13 @@ func TestCoreSessionConnectUDPForbiddenBeforeProxy(t *testing.T) {
 		})
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
-		Server:     "127.0.0.1",
-		ServerPort: uint16(proxyPort),
-		Insecure:   true,
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)

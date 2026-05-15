@@ -15,6 +15,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -57,12 +58,35 @@ func dialerOptionsRequireCustomMasqueQUICPacketConn(o option.DialerOptions) bool
 	return false
 }
 
+// masqueEffectiveBootstrapDialerOptions fills bootstrap detour when DialerOptions are empty:
+// underlay QUIC/TCP to the MASQUE server must use a direct outbound, not Tier A kernel routing
+// (with TUN auto_route that loops into tun0).
+func masqueEffectiveBootstrapDialerOptions(ctx context.Context, options option.DialerOptions) option.DialerOptions {
+	if !reflect.DeepEqual(options, option.DialerOptions{}) {
+		return options
+	}
+	if tag := masqueBootstrapDirectDetourTag(ctx); tag != "" {
+		return option.DialerOptions{Detour: tag}
+	}
+	return options
+}
+
+func masqueBootstrapDirectDetourTag(ctx context.Context) string {
+	om := service.FromContext[adapter.OutboundManager](ctx)
+	if om == nil {
+		return ""
+	}
+	for _, ob := range om.Outbounds() {
+		if ob != nil && ob.Type() == C.TypeDirect {
+			return ob.Tag()
+		}
+	}
+	return ""
+}
+
 // masqueBootstrapShouldUseSingBoxDefaultDialer mirrors common/dialer/default.go: when
-// NetworkManager.AutoDetectInterface() is enabled, NewDefault attaches ProtectFunc or
-// AutoDetectInterfaceFunc so process sockets bypass the virtual TUN default route.
-// MASQUE previously used quic.DialAddr / net.Dialer for empty DialerOptions (Tier A),
-// skipping those hooks and causing traffic to the MASQUE server to recurse through
-// the same tunnel (QUIC timeouts, DNS hangs).
+// sing-box NetworkManager is available and no explicit detour was resolved, bootstrap dials
+// still use dialer.New (interface binding when route.auto_detect_interface is enabled).
 //
 // Only applies when the user left DialerOptions at defaults (strictly empty). If they
 // set fields such as domain_resolver without detour, we keep Tier A per historical MASQUE behavior.
@@ -74,10 +98,7 @@ func masqueBootstrapShouldUseSingBoxDefaultDialer(ctx context.Context, options o
 		return false
 	}
 	nm := service.FromContext[adapter.NetworkManager](ctx)
-	if nm == nil {
-		return false
-	}
-	return nm.AutoDetectInterface()
+	return nm != nil
 }
 
 // buildMasqueTCPDialFunc wires sing-box TCP dialing (detour, routing) for MASQUE HTTP/2 overlay paths.
@@ -85,6 +106,7 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	options = masqueEffectiveBootstrapDialerOptions(ctx, options)
 	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(options)
 	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
 	if !requireCustom && !forceProtect {
@@ -132,6 +154,7 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	options = masqueEffectiveBootstrapDialerOptions(ctx, options)
 	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(options)
 	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
 	if !requireCustom && !forceProtect {
@@ -190,20 +213,29 @@ type connectedPacketConn struct {
 	remoteAddr net.Addr
 }
 
+func masqueQUICDialerTraceEnabled() bool {
+	return strings.TrimSpace(os.Getenv("MASQUE_TRACE_QUIC_DIAL")) == "1" ||
+		strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_QUIC_TRACE")) == "1"
+}
+
 func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	n, err = c.Conn.Read(p)
 	if err != nil {
 		return 0, nil, err
 	}
-	log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
-	if os.Getenv("HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS") == "1" && n > 0 && n <= 64 {
-		log.Printf("masque quic_dialer small_read hex=%s", strings.ToUpper(hex.EncodeToString(p[:n])))
+	if masqueQUICDialerTraceEnabled() {
+		log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
+		if os.Getenv("HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS") == "1" && n > 0 && n <= 64 {
+			log.Printf("masque quic_dialer small_read hex=%s", strings.ToUpper(hex.EncodeToString(p[:n])))
+		}
 	}
 	return n, c.remoteAddr, nil
 }
 
 func (c *connectedPacketConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
-	log.Printf("masque quic_dialer write_to bytes=%d remote=%v", len(p), c.remoteAddr)
+	if masqueQUICDialerTraceEnabled() {
+		log.Printf("masque quic_dialer write_to bytes=%d remote=%v", len(p), c.remoteAddr)
+	}
 	return c.Conn.Write(p)
 }
 

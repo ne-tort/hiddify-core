@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/pem"
 	"net/http"
 	"strings"
 
@@ -14,16 +13,16 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// compiledMasqueServerAuth holds precomputed ACL state for MASQUE server HTTP+TLS authorization.
+// compiledMasqueServerAuth holds precomputed ACL state for MASQUE server HTTP authorization.
 type compiledMasqueServerAuth struct {
 	policyFirstMatch bool
 
-	tlsConfigured bool
-	clientCAs     *x509.CertPool
+	tlsPeerRequired bool
 
 	httpConfigured bool
 	bearerHashes     map[[sha256.Size]byte]struct{}
 	basicHashes      map[[sha256.Size]byte]struct{}
+	leafSPKIHashes   map[[sha256.Size]byte]struct{}
 }
 
 func sha256SumBytes(b []byte) [sha256.Size]byte {
@@ -60,9 +59,40 @@ func parseBearerSHA256HexEntries(entries []string, dst map[[sha256.Size]byte]str
 	return nil
 }
 
+func parseLeafSPKIHexEntries(entries []string, dst map[[sha256.Size]byte]struct{}) error {
+	for _, s := range entries {
+		s = strings.TrimSpace(strings.ToLower(s))
+		if s == "" {
+			continue
+		}
+		if len(s) != sha256.Size*2 {
+			return E.New("masque server_auth: client_leaf_spki_sha256 must be 64 hex chars, got length ", len(s))
+		}
+		var h [sha256.Size]byte
+		_, err := hex.Decode(h[:], []byte(s))
+		if err != nil {
+			return E.Cause(err, "masque server_auth: invalid client_leaf_spki_sha256 hex")
+		}
+		dst[h] = struct{}{}
+	}
+	return nil
+}
+
 func basicCredentialHash(user, pass string) [sha256.Size]byte {
 	u := strings.TrimSpace(user)
 	return sha256SumBytes([]byte(u + "\x00" + pass))
+}
+
+func inboundTLSRequiresVerifiedClientPeer(t *option.InboundTLSOptions) bool {
+	if t == nil {
+		return false
+	}
+	switch tls.ClientAuthType(t.ClientAuthentication) {
+	case tls.NoClientCert:
+		return false
+	default:
+		return true
+	}
 }
 
 func compileMasqueServerAuth(o option.MasqueEndpointOptions) (*compiledMasqueServerAuth, error) {
@@ -82,6 +112,7 @@ func compileMasqueServerAuth(o option.MasqueEndpointOptions) (*compiledMasqueSer
 
 	bearerHashes := make(map[[sha256.Size]byte]struct{})
 	basicMap := make(map[[sha256.Size]byte]struct{})
+	leafSPKIHashes := make(map[[sha256.Size]byte]struct{})
 	if auth != nil {
 		mergeBearerTokenHashes(bearerHashes, auth.BearerTokens)
 		if err := parseBearerSHA256HexEntries(auth.BearerTokenSHA256, bearerHashes); err != nil {
@@ -95,85 +126,54 @@ func compileMasqueServerAuth(o option.MasqueEndpointOptions) (*compiledMasqueSer
 			h := basicCredentialHash(u, c.Password)
 			basicMap[h] = struct{}{}
 		}
+		if err := parseLeafSPKIHexEntries(auth.ClientLeafSPKI_SHA256, leafSPKIHashes); err != nil {
+			return nil, err
+		}
 	}
 	if legacy != "" {
 		mergeBearerTokenHashes(bearerHashes, []string{legacy})
 	}
 
-	var pool *x509.CertPool
-	if auth != nil && auth.MTLS != nil {
-		m := auth.MTLS
-		pemCount := 0
-		for _, pemStr := range m.ClientCAPEM {
-			if strings.TrimSpace(pemStr) == "" {
-				continue
-			}
-			pemCount++
-			if pool == nil {
-				pool = x509.NewCertPool()
-			}
-			if !pool.AppendCertsFromPEM([]byte(pemStr)) {
-				return nil, E.New("masque server_auth: failed to parse client_ca_pem")
-			}
-		}
-		for _, pemStr := range m.TrustedClientCertPEM {
-			pemStr = strings.TrimSpace(pemStr)
-			if pemStr == "" {
-				continue
-			}
-			pemCount++
-			if pool == nil {
-				pool = x509.NewCertPool()
-			}
-			block, _ := pem.Decode([]byte(pemStr))
-			if block == nil {
-				return nil, E.New("masque server_auth: trusted_client_cert_pem: no PEM block")
-			}
-			cert, err := x509.ParseCertificate(block.Bytes)
-			if err != nil {
-				return nil, E.Cause(err, "masque server_auth: trusted_client_cert_pem")
-			}
-			pool.AddCert(cert)
-		}
-		if pemCount == 0 {
-			pool = nil
-		}
+	httpConfigured := len(bearerHashes) > 0 || len(basicMap) > 0
+	tlsPeerRequired := inboundTLSRequiresVerifiedClientPeer(o.InboundTLS)
+	if len(leafSPKIHashes) > 0 && !tlsPeerRequired {
+		return nil, E.New("masque server_auth: client_leaf_spki_sha256 requires InboundTLS client authentication (mTLS)")
 	}
 
-	httpConfigured := len(bearerHashes) > 0 || len(basicMap) > 0
-	tlsConfigured := pool != nil
-
-	if !httpConfigured && !tlsConfigured {
+	if !httpConfigured && !tlsPeerRequired {
 		return nil, nil
 	}
 
 	return &compiledMasqueServerAuth{
 		policyFirstMatch: policy == option.MasqueServerAuthPolicyFirstMatch,
-		tlsConfigured:    tlsConfigured,
-		clientCAs:        pool,
+		tlsPeerRequired:  tlsPeerRequired,
 		httpConfigured:   httpConfigured,
 		bearerHashes:     bearerHashes,
 		basicHashes:      basicMap,
+		leafSPKIHashes:   leafSPKIHashes,
 	}, nil
 }
 
-func (a *compiledMasqueServerAuth) applyTLSClientAuth(cfg *tls.Config) {
-	if a == nil || !a.tlsConfigured || a.clientCAs == nil || cfg == nil {
-		return
-	}
-	// VerifyClientCertIfGiven: optional client cert at TLS, verified against ClientCAs when present.
-	// Final access control stays in AuthorizeRequest (tlsPeerOK vs HTTP Basic/Bearer, first_match / all_required).
-	// RequireAndVerifyClientCert would block HTTP-only clients when server_auth combines mTLS CA + Bearer/Basic.
-	cfg.ClientAuth = tls.VerifyClientCertIfGiven
-	cfg.ClientCAs = a.clientCAs
-}
-
 func (a *compiledMasqueServerAuth) tlsPeerOK(r *http.Request) bool {
-	if !a.tlsConfigured {
+	if !a.tlsPeerRequired {
 		return true
 	}
 	if r == nil || r.TLS == nil {
 		return false
+	}
+	var leaf *x509.Certificate
+	if len(r.TLS.PeerCertificates) > 0 {
+		leaf = r.TLS.PeerCertificates[0]
+	} else if len(r.TLS.VerifiedChains) > 0 && len(r.TLS.VerifiedChains[0]) > 0 {
+		leaf = r.TLS.VerifiedChains[0][0]
+	}
+	if leaf == nil {
+		return false
+	}
+	if len(a.leafSPKIHashes) > 0 {
+		h := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+		_, ok := a.leafSPKIHashes[h]
+		return ok
 	}
 	return len(r.TLS.VerifiedChains) > 0
 }
@@ -243,23 +243,20 @@ func (a *compiledMasqueServerAuth) AuthorizeRequest(r *http.Request) bool {
 	if a == nil {
 		return true
 	}
-	// Only evaluate layers that were configured; an absent layer must not make
-	// first_match succeed when the other layer is the sole real requirement.
 	if a.policyFirstMatch {
 		switch {
-		case a.tlsConfigured && a.httpConfigured:
+		case a.tlsPeerRequired && a.httpConfigured:
 			return a.tlsPeerOK(r) || a.httpCredentialsOK(r)
-		case a.tlsConfigured:
+		case a.tlsPeerRequired:
 			return a.tlsPeerOK(r)
 		default:
 			return a.httpCredentialsOK(r)
 		}
 	}
-	// all_required
 	switch {
-	case a.tlsConfigured && a.httpConfigured:
+	case a.tlsPeerRequired && a.httpConfigured:
 		return a.tlsPeerOK(r) && a.httpCredentialsOK(r)
-	case a.tlsConfigured:
+	case a.tlsPeerRequired:
 		return a.tlsPeerOK(r)
 	default:
 		return a.httpCredentialsOK(r)

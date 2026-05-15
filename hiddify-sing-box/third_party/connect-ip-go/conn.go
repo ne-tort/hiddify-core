@@ -640,6 +640,14 @@ func (c *Conn) CurrentAssignedPrefixes() []netip.Prefix {
 	return slices.Clone(c.assignedAddresses)
 }
 
+// CurrentPeerPrefixes returns prefixes this endpoint assigned to the remote peer (server-side
+// ADDRESS_ASSIGN). Used to normalize router-originated replies before connect-ip-go policy checks.
+func (c *Conn) CurrentPeerPrefixes() []netip.Prefix {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.peerAddresses)
+}
+
 // LocalPrefixes returns the prefixes that the peer currently assigned.
 // Note that at any point during the connection, the peer can change the assignment.
 // It is therefore recommended to call this function in a loop.

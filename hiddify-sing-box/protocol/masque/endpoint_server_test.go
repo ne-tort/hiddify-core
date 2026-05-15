@@ -38,6 +38,24 @@ func TestMasqueTCPBindFailureRetryable(t *testing.T) {
 	}
 }
 
+func TestMasqueConnectIPDataplaneContextDoesNotInheritHTTPRequestCancel(t *testing.T) {
+	t.Parallel()
+	type ctxKey struct{}
+	parent := context.WithValue(context.Background(), ctxKey{}, "marker")
+	parent, cancel := context.WithCancel(parent)
+	cancel()
+	if parent.Err() == nil {
+		t.Fatal("parent context should be canceled")
+	}
+	dc := masqueConnectIPDataplaneContext(parent)
+	if dc.Err() != nil {
+		t.Fatalf("dataplane context must not inherit request cancellation: %v", dc.Err())
+	}
+	if got, _ := dc.Value(ctxKey{}).(string); got != "marker" {
+		t.Fatalf("expected context values preserved from parent, got %q", got)
+	}
+}
+
 func TestParseIPDestinationAndPayloadIPv4UDP(t *testing.T) {
 	payload := []byte{1, 2, 3, 4, 5}
 	packet := makeIPv4UDPPacket(
@@ -238,6 +256,23 @@ func TestConnectIPRequestErrorStatusAndClass(t *testing.T) {
 	}
 }
 
+func TestMasqueConnectIPRequestForParseRelaxedAuthority(t *testing.T) {
+	t.Parallel()
+	template := uritemplate.MustNew("https://127.0.0.1:4438/masque/ip")
+	req := makeConnectIPTestRequest(t, "https://127.0.0.1:4438/masque/ip")
+	req.Host = "193.233.216.26:4438"
+	if _, err := connectip.ParseRequest(req, template); err == nil {
+		t.Fatal("expected strict host mismatch without relaxed parse request")
+	}
+	parseR := masqueHTTPRequestForTemplateParse(req, template, true)
+	if parseR.Host != "127.0.0.1:4438" {
+		t.Fatalf("relaxed parse host: got %q want 127.0.0.1:4438", parseR.Host)
+	}
+	if _, err := connectip.ParseRequest(parseR, template); err != nil {
+		t.Fatalf("relaxed parse request: %v", err)
+	}
+}
+
 func TestConnectIPRouteAdvertiseErrorClass(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -377,8 +412,11 @@ func TestServerEndpointLifecycleStartIsReadyCloseTwice(t *testing.T) {
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	if ep.IsReady() {
@@ -399,7 +437,7 @@ func TestServerEndpointLifecycleStartIsReadyCloseTwice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first close failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("first close timed out (potential lifecycle hang)")
 	}
 	if ep.IsReady() {
@@ -414,7 +452,7 @@ func TestServerEndpointLifecycleStartIsReadyCloseTwice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second close failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("second close timed out (close must stay idempotent)")
 	}
 }
@@ -433,8 +471,11 @@ func TestServerEndpointStartInvalidCertificateFailsFast(t *testing.T) {
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	err := ep.Start(adapter.StartStateStart)
@@ -453,7 +494,7 @@ func TestServerEndpointStartInvalidCertificateFailsFast(t *testing.T) {
 		if closeErr != nil {
 			t.Fatalf("close after failed start should stay safe, got: %v", closeErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("close after failed start timed out (unexpected lifecycle hang)")
 	}
 }
@@ -475,8 +516,11 @@ func TestServerEndpointStartListenConflictFailsFast(t *testing.T) {
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  uint16(conflictAddr.Port),
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	startErr := ep.Start(adapter.StartStateStart)
@@ -495,7 +539,7 @@ func TestServerEndpointStartListenConflictFailsFast(t *testing.T) {
 		if closeErr != nil {
 			t.Fatalf("close after listen conflict should stay safe, got: %v", closeErr)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("close after listen conflict timed out (unexpected lifecycle hang)")
 	}
 	if _, listenErr := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(conflictAddr.Port))); listenErr == nil {
@@ -509,8 +553,11 @@ func TestServerEndpointStartNonStartStageNoOpThenRegularStartWorks(t *testing.T)
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	if err := ep.Start(adapter.StartStateInitialize); err != nil {
@@ -539,8 +586,11 @@ func TestServerEndpointStartNonStartStagesAreIdempotentAndDoNotContaminateStartE
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	ep.startErr.Store(startErrorState{err: net.ErrClosed})
@@ -573,8 +623,11 @@ func TestServerEndpointServeFailureThenRestartClearsStartErrorAndRestoresReady(t
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	if err := ep.Start(adapter.StartStateStart); err != nil {
@@ -587,7 +640,7 @@ func TestServerEndpointServeFailureThenRestartClearsStartErrorAndRestoresReady(t
 		t.Fatal("expected packetConn to be initialized after start")
 	}
 	_ = ep.packetConn.Close()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if ep.lastStartError() != nil && !ep.IsReady() {
 			break
@@ -620,8 +673,11 @@ func TestServerEndpointConcurrentCloseDoesNotPoisonStartError(t *testing.T) {
 		options: option.MasqueEndpointOptions{
 			Listen:      "127.0.0.1",
 			ListenPort:  0,
-			Certificate: certPath,
-			Key:         keyPath,
+			InboundTLS: &option.InboundTLSOptions{
+				Enabled:         true,
+				CertificatePath: certPath,
+				KeyPath:         keyPath,
+			},
 		},
 	}
 	if err := ep.Start(adapter.StartStateStart); err != nil {
@@ -639,7 +695,7 @@ func TestServerEndpointConcurrentCloseDoesNotPoisonStartError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("close failed: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("close timed out")
 	}
 	deadline := time.Now().Add(300 * time.Millisecond)

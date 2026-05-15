@@ -625,6 +625,15 @@ func (s *coreSession) ensureH2UDPTransport(ctx context.Context) (*http2.Transpor
 					lastErr = fmt.Errorf("masque h2: tcp dial %s %s: %w", network, dialAddr, err)
 					continue
 				}
+				if s.options.MasqueTCPDialTLS != nil {
+					tlsConn, err := s.options.MasqueTCPDialTLS(ctx, conn, cfg.NextProtos, dialAddr)
+					if err != nil {
+						_ = conn.Close()
+						lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
+						continue
+					}
+					return tlsConn, nil
+				}
 				tlsConn := tls.Client(conn, cfg)
 				if err := tlsConn.HandshakeContext(ctx); err != nil {
 					_ = conn.Close()
@@ -749,9 +758,7 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 	req.ProtoMinor = 0
 	req.Header.Set(":protocol", h2ConnectUDPProto)
 	req.Header.Set(http3.CapsuleProtocolHeader, capsuleProtoHeaderValueH2)
-	if t := strings.TrimSpace(s.options.ServerToken); t != "" {
-		req.Header.Set("Authorization", "Bearer "+t)
-	}
+	setMasqueAuthorizationHeader(req.Header, s.options)
 	req.ContentLength = -1
 
 	resp, err := tr.RoundTrip(req)

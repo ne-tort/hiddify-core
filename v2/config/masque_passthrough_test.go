@@ -17,7 +17,7 @@ func TestBuildConfigMinimalMasqueEndpointPassthrough(t *testing.T) {
       "tag": "masque-min",
       "server": "example.com",
       "server_port": 443,
-      "insecure": true
+      "outbound_tls": { "enabled": true, "insecure": true }
     }
   ]
 }`
@@ -54,7 +54,7 @@ func TestBuildConfigPassthroughMasqueConnectUDPWithTemplateIP(t *testing.T) {
       "transport_mode": "connect_udp",
       "tcp_transport": "connect_stream",
       "template_ip": "https://example.com:443/masque/ip",
-      "insecure": true
+      "outbound_tls": { "enabled": true, "insecure": true }
     }
   ]
 }`
@@ -88,7 +88,7 @@ func TestBuildConfigPreservesMasqueEndpoint(t *testing.T) {
       "tcp_transport": "connect_stream",
       "template_ip": "https://example.com:443/masque/ip",
       "template_tcp": "https://example.com:443/masque/tcp/{target_host}/{target_port}",
-      "tls_server_name": "example.com"
+      "outbound_tls": { "enabled": true, "server_name": "example.com" }
     }
   ]
 }`
@@ -128,6 +128,7 @@ func TestBuildConfigPreservesWarpMasqueEndpoint(t *testing.T) {
       "tcp_transport": "connect_stream",
       "http_layer": "h2",
       "http_layer_fallback": false,
+      "outbound_tls": { "enabled": true, "insecure": true },
       "profile": {
         "id": "test-device",
         "auth_token": "test-auth-token",
@@ -178,7 +179,7 @@ func TestBuildConfigMasqueDoesNotInjectTunServerIPBypassRule(t *testing.T) {
       "tag": "masque-lab",
       "server": "203.0.113.5",
       "server_port": 8443,
-      "insecure": true
+      "outbound_tls": { "enabled": true, "insecure": true }
     }
   ]
 }`

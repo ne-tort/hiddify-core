@@ -100,7 +100,10 @@ func masqueHTTPLayerCacheKey(tag string, o option.MasqueEndpointOptions, id TM.H
 	if id.DialPortOverride != 0 {
 		port = id.DialPortOverride
 	}
-	sni := strings.TrimSpace(o.TLSServerName)
+	sni := ""
+	if o.OutboundTLS != nil {
+		sni = strings.TrimSpace(o.OutboundTLS.ServerName)
+	}
 	if sni == "" {
 		sni = srv
 	}

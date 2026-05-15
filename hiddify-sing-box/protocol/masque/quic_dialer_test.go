@@ -51,18 +51,33 @@ func (testMasqueNetworkManager) WIFIState() adapter.WIFIState       { return ada
 func (testMasqueNetworkManager) UpdateWIFIState()                  {}
 func (testMasqueNetworkManager) ResetNetwork()                     {}
 
-func TestBuildQUICDialFuncUsesSingBoxDialerWhenAutoDetectInterface(t *testing.T) {
+func TestBuildQUICDialFuncUsesSingBoxDialerWhenNetworkManagerPresent(t *testing.T) {
 	t.Parallel()
-	ctx := service.ContextWith[adapter.NetworkManager](
-		context.Background(),
-		testMasqueNetworkManager{autoDetect: true},
-	)
-	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
-	if err != nil {
-		t.Fatalf("build QUIC dial: %v", err)
+	for _, autoDetect := range []bool{true, false} {
+		autoDetect := autoDetect
+		t.Run(map[bool]string{true: "auto_detect", false: "no_auto_detect"}[autoDetect], func(t *testing.T) {
+			t.Parallel()
+			ctx := service.ContextWith[adapter.NetworkManager](
+				context.Background(),
+				testMasqueNetworkManager{autoDetect: autoDetect},
+			)
+			quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
+			if err != nil {
+				t.Fatalf("build QUIC dial: %v", err)
+			}
+			if quicDial == nil {
+				t.Fatal("expected non-nil QUIC dial when NetworkManager is present (sing-box routed bootstrap)")
+			}
+		})
 	}
-	if quicDial == nil {
-		t.Fatal("expected non-nil QUIC dial when NetworkManager auto-detect is enabled (protected default dialer)")
+}
+
+func TestMasqueEffectiveBootstrapDialerOptionsPreservesExplicitDetour(t *testing.T) {
+	t.Parallel()
+	in := option.DialerOptions{Detour: "custom"}
+	got := masqueEffectiveBootstrapDialerOptions(context.Background(), in)
+	if got.Detour != "custom" {
+		t.Fatalf("expected explicit detour preserved, got %q", got.Detour)
 	}
 }
 

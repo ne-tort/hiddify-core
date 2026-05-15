@@ -9,6 +9,5 @@ import (
 
 func registerMasqueEndpoint(registry *endpoint.Registry) {
 	masque.RegisterEndpoint(registry)
-	masque.RegisterWarpMasqueEndpoint(registry)
 }
 

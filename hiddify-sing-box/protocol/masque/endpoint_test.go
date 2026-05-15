@@ -281,14 +281,17 @@ func TestServerModeValidation(t *testing.T) {
 		Mode: option.MasqueModeServer,
 	})
 	if err == nil {
-		t.Fatal("expected validation error for missing listen/certificate in server mode")
+		t.Fatal("expected validation error for missing listen/tls in server mode")
 	}
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "srv2", option.MasqueEndpointOptions{
 		Mode:        option.MasqueModeServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
-		Certificate: "cert.pem",
-		Key:         "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 	})
 	if err != nil {
 		t.Fatalf("new server mode endpoint: %v", err)
@@ -300,8 +303,11 @@ func TestServerModeValidation(t *testing.T) {
 		Mode:          option.MasqueModeServer,
 		Listen:        "127.0.0.1",
 		ListenPort:    8443,
-		Certificate:   "cert.pem",
-		Key:           "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 		TransportMode: option.MasqueTransportModeConnectUDP,
 	})
 	if err == nil {
@@ -311,8 +317,11 @@ func TestServerModeValidation(t *testing.T) {
 		Mode:        option.MasqueModeServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
-		Certificate: "cert.pem",
-		Key:         "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 		TemplateTCP: "https://masque.local/masque/tcp",
 	})
 	if err == nil {
@@ -325,8 +334,11 @@ func TestEndpointServerModeRejectsConnectIPScopeFields(t *testing.T) {
 		Mode:                 option.MasqueModeServer,
 		Listen:               "127.0.0.1",
 		ListenPort:           8443,
-		Certificate:          "cert.pem",
-		Key:                  "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 		ConnectIPScopeTarget: "10.0.0.0/8",
 	})
 	if err == nil {
@@ -570,8 +582,11 @@ func TestEndpointRejectsServerTemplateUDPWithoutPlaceholders(t *testing.T) {
 		Mode:        option.MasqueModeServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
-		Certificate: "cert.pem",
-		Key:         "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 		TemplateUDP: "https://example.com/masque/udp",
 	})
 	if err == nil {
@@ -584,8 +599,11 @@ func TestEndpointRejectsServerTemplatePathCollisions(t *testing.T) {
 		Mode:        option.MasqueModeServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
-		Certificate: "cert.pem",
-		Key:         "key.pem",
+		InboundTLS: &option.InboundTLSOptions{
+			Enabled:         true,
+			CertificatePath: "cert.pem",
+			KeyPath:         "key.pem",
+		},
 		TemplateUDP: "https://example.com/masque/shared/{target_host}/{target_port}",
 		TemplateIP:  "https://example.com/masque/shared/{target_host}/{target_port}",
 	})
@@ -743,19 +761,19 @@ func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *tes
 }
 
 func TestMasqueServerShouldRelaxTCPAuthority(t *testing.T) {
-	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "::", ListenPort: 8443}) {
+	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "::", ListenPort: 8443}, masqueTemplateFieldTCP) {
 		t.Fatal("expected relax for unspecified listen and empty template_tcp")
 	}
-	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "0.0.0.0"}) {
+	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "0.0.0.0"}, masqueTemplateFieldTCP) {
 		t.Fatal("expected relax for 0.0.0.0 listen")
 	}
-	if !masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: ""}) {
+	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: ""}, masqueTemplateFieldTCP) {
 		t.Fatal("expected relax for empty listen")
 	}
-	if masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "::", TemplateTCP: "https://x/x"}) {
+	if masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "::", TemplateTCP: "https://x/x"}, masqueTemplateFieldTCP) {
 		t.Fatal("expected no relax when template_tcp set")
 	}
-	if masqueServerShouldRelaxTCPAuthority(option.MasqueEndpointOptions{Listen: "192.0.2.1"}) {
+	if masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "192.0.2.1"}, masqueTemplateFieldTCP) {
 		t.Fatal("expected no relax for specific listen")
 	}
 }

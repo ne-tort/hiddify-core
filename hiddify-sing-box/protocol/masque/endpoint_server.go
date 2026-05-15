@@ -22,10 +22,12 @@ import (
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/http2"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/common/dialer"
+	btls "github.com/sagernet/sing-box/common/tls"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/route"
@@ -41,6 +43,36 @@ import (
 // connectIPServerParseDropTotal counts inbound CONNECT-IP packets dropped at the
 // server IP parse boundary (non-fatal; read continues).
 var connectIPServerParseDropTotal atomic.Uint64
+
+// masqueRelayTCPCopyBufLen is larger than io.Copy's default (32 KiB) to cut syscall /
+// framing overhead on CONNECT-stream bulk relay (H2/H3 response body ↔ target TCP).
+const masqueRelayTCPCopyBufLen = 512 * 1024
+
+// masqueRelayTCPKernelBuf is a best-effort SO_RCVBUF/SO_SNDBUF for the onward TCP
+// dial to the MASQUE template target (kernel caps still apply).
+const masqueRelayTCPKernelBuf = 4 << 20
+
+
+var masqueRelayTCPCopyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, masqueRelayTCPCopyBufLen)
+		return &b
+	},
+}
+
+func relayCopyBuffered(dst io.Writer, src io.Reader) (int64, error) {
+	bp := masqueRelayTCPCopyBufPool.Get().(*[]byte)
+	defer masqueRelayTCPCopyBufPool.Put(bp)
+	return io.CopyBuffer(dst, src, *bp)
+}
+
+func tuneMasqueRelayTCPOutbound(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(masqueRelayTCPKernelBuf)
+		_ = tc.SetWriteBuffer(masqueRelayTCPKernelBuf)
+	}
+}
 
 // ConnectIPServerParseDropTotal exposes the parse-drop counter for tests/ops.
 func ConnectIPServerParseDropTotal() uint64 {
@@ -77,27 +109,15 @@ func connectIPRouteAdvertiseErrorClass(err error) TM.ErrorClass {
 	return TM.ErrorClassTransport
 }
 
-// loadMasqueServerTLSKeyPair loads server TLS material from file paths or inline PEM (same as client mTLS loader).
-func loadMasqueServerTLSKeyPair(certInput, keyInput string) (tls.Certificate, error) {
-	certInput = strings.TrimSpace(certInput)
-	keyInput = strings.TrimSpace(keyInput)
-	if certInput == "" || keyInput == "" {
-		return tls.Certificate{}, E.New("empty certificate or key")
-	}
-	if strings.HasPrefix(certInput, "-----BEGIN") && strings.HasPrefix(keyInput, "-----BEGIN") {
-		return tls.X509KeyPair([]byte(certInput), []byte(keyInput))
-	}
-	return tls.LoadX509KeyPair(certInput, keyInput)
-}
-
+// ServerEndpoint is the MASQUE server (CONNECT-UDP / CONNECT-IP / CONNECT-stream over HTTP/3 + HTTP/2).
 type ServerEndpoint struct {
 	endpoint.Adapter
-	options       option.MasqueEndpointOptions
-	compiledAuth  *compiledMasqueServerAuth
-	router        adapter.Router
-	logger        log.ContextLogger
-	server        *http3.Server
-	packetConn    net.PacketConn
+	options      option.MasqueEndpointOptions
+	compiledAuth *compiledMasqueServerAuth
+	router       adapter.Router
+	logger       log.ContextLogger
+	server       *http3.Server
+	packetConn   net.PacketConn
 	// tcpTLSListener is the TLS listener (HTTP/2 ALPN) dual-stacked with QUIC on the same host:port.
 	tcpTLSListener net.Listener
 	http2Server    *http.Server
@@ -106,6 +126,8 @@ type ServerEndpoint struct {
 	closing        atomic.Bool
 	startErr       atomic.Value
 	dialer         net.Dialer
+	// singServerTLS holds sing-box inbound TLS lifecycle (ACME, cert reload); closed with the endpoint.
+	singServerTLS btls.ServerConfig
 }
 
 type startErrorState struct {
@@ -138,23 +160,40 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	// Fresh listen/Serve cycle: clear shutdown marker from a previous Close().
 	// Do not reset closing in Close()'s defer — Serve may still be unwinding after Close returns.
 	e.closing.Store(false)
-	tlsCert, err := loadMasqueServerTLSKeyPair(e.options.Certificate, e.options.Key)
+	ctx := context.Background()
+	inTLS, err := prepareMasqueServerInboundTLS(e.options.InboundTLS, normalizeHTTPLayer(e.options.HTTPLayer))
 	if err != nil {
-		return E.Cause(err, "load server certificate")
+		return err
+	}
+	srvCfg, err := btls.NewServerWithOptions(btls.ServerOptions{Context: ctx, Logger: e.logger, Options: *inTLS})
+	if err != nil {
+		return E.Cause(err, "masque server tls")
+	}
+	if srvCfg == nil {
+		return E.New("masque server: tls config is nil")
+	}
+	if err := srvCfg.Start(); err != nil {
+		return E.Cause(err, "masque server tls start")
+	}
+	e.singServerTLS = srvCfg
+	baseTLS, err := srvCfg.STDConfig()
+	if err != nil {
+		_ = srvCfg.Close()
+		e.singServerTLS = nil
+		return E.Cause(err, "masque server tls std config")
+	}
+	if baseTLS == nil {
+		_ = srvCfg.Close()
+		e.singServerTLS = nil
+		return E.New("masque server: tls std config is nil")
 	}
 	compiled, compileErr := compileMasqueServerAuth(e.options)
 	if compileErr != nil {
+		_ = srvCfg.Close()
+		e.singServerTLS = nil
 		return compileErr
 	}
 	e.compiledAuth = compiled
-
-	baseTLS := &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		MinVersion:   tls.VersionTLS12,
-	}
-	if e.compiledAuth != nil {
-		e.compiledAuth.applyTLSClientAuth(baseTLS)
-	}
 
 	udpTemplateRaw, ipTemplateRaw, tcpTemplateRaw := resolveMasqueServerTemplateURLs(e.options)
 	udpTemplate, err := uritemplate.New(udpTemplateRaw)
@@ -181,7 +220,8 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		req, err := qmasque.ParseRequest(r, udpTemplate)
+		parseR := masqueHTTPRequestForTemplateParse(r, udpTemplate, masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldUDP))
+		req, err := qmasque.ParseRequest(parseR, udpTemplate)
 		if err != nil {
 			var perr *qmasque.RequestParseError
 			if errors.As(err, &perr) {
@@ -200,7 +240,8 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		req, err := connectip.ParseRequest(r, ipTemplate)
+		parseR := masqueHTTPRequestForTemplateParse(r, ipTemplate, masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldIP))
+		req, err := connectip.ParseRequest(parseR, ipTemplate)
 		if err != nil {
 			status := connectIPRequestErrorHTTPStatus(err)
 			e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip parse denied status=%d error_class=%s err=%v", status, connectIPRequestErrorClass(status), err))
@@ -247,9 +288,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route dispatch router_type=%T destination=dynamic", e.router))
 		// TUN-only hard switch: CONNECT-IP runs as packet-plane forwarding only.
 		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
-		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger)
+		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger, e.options)
 	})
-	tcpRelaxedAuthority := masqueServerShouldRelaxTCPAuthority(e.options)
+	tcpRelaxedAuthority := masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldTCP)
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
 		e.handleTCPConnectRequest(w, r, tcpTemplate, tcpRelaxedAuthority)
 	})
@@ -329,6 +370,9 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		ReadTimeout:       0,
 		WriteTimeout:      0,
 	}
+	if err := http2.ConfigureServer(http2Srv, &http2.Server{}); err != nil {
+		return E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
+	}
 	e.http2Server = http2Srv
 	go func() {
 		err := http2Srv.Serve(tcpLn)
@@ -383,12 +427,19 @@ func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx conte
 	cm.NewPacketConnection(ctx, nd, conn, metadata, onClose)
 }
 
+// masqueConnectIPDataplaneContext returns a context for CONNECT-IP packet-plane work that does not
+// propagate cancellation from the inbound HTTP request. sing-box Router forwards the same ctx into
+// matchRule and outbound packet handlers; req.Context may cancel independently of relay lifetime.
+func masqueConnectIPDataplaneContext(reqCtx context.Context) context.Context {
+	return context.WithoutCancel(reqCtx)
+}
+
 // routeMasqueConnectIPBlocked keeps this HTTP handler alive until the CONNECT-IP packet-plane
 // relay ends. On HTTP/3 the stream is hijacked via http3.HTTPStreamer inside connect-ip Proxy,
 // so ending the handler does not close the QUIC stream. On HTTP/2 Extended CONNECT there is no
 // hijack; if the handler returned immediately, net/http would finalize the response and tear down
 // the CONNECT stream while RoutePacketConnectionEx goroutines were still running.
-func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *connectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger) {
+func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *connectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger, opts option.MasqueEndpointOptions) {
 	done := make(chan struct{})
 	var once sync.Once
 	notify := func() { once.Do(func() { close(done) }) }
@@ -399,7 +450,23 @@ func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, 
 		_ = packetConn.Close()
 		notify()
 	}
-	routePacketConnectionExBypassTunnelWrapper(router, reqCtx, packetConn, metadata, onClose, logger)
+	if router == nil {
+		fwdCtx := masqueConnectIPDataplaneContext(reqCtx)
+		go func() {
+			err := TM.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, packetConn.conn, TM.ConnectIPTCPForwarderOptions{
+				AllowPrivateTargets: opts.AllowPrivateTargets,
+				AllowedTargetPorts:  opts.AllowedTargetPorts,
+				BlockedTargetPorts:  opts.BlockedTargetPorts,
+			})
+			onClose(err)
+		}()
+		<-done
+		return
+	}
+	// Match router==nil branch: dataplane must not inherit HTTP request cancellation.
+	// Router.RoutePacketConnectionEx forwards this ctx to matchRule / outbound packet handlers (see route/route.go).
+	routeCtx := masqueConnectIPDataplaneContext(reqCtx)
+	routePacketConnectionExBypassTunnelWrapper(router, routeCtx, packetConn, metadata, onClose, logger)
 	<-done
 }
 
@@ -451,6 +518,10 @@ func (e *ServerEndpoint) Close() error {
 	if e.tcpTLSListener != nil {
 		_ = e.tcpTLSListener.Close()
 		e.tcpTLSListener = nil
+	}
+	if e.singServerTLS != nil {
+		_ = e.singServerTLS.Close()
+		e.singServerTLS = nil
 	}
 	if e.server != nil {
 		_ = e.server.Close()
@@ -703,6 +774,7 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
+	tuneMasqueRelayTCPOutbound(targetConn)
 	defer targetConn.Close()
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -783,7 +855,7 @@ func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(targetConn, reqBody)
+		_, err := relayCopyBuffered(targetConn, reqBody)
 		if cw, ok := targetConn.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
@@ -796,7 +868,8 @@ func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.
 			flusher = f
 		}
 		out := &flushWriter{w: responseWriter, f: flusher}
-		_, err := io.Copy(out, targetConn)
+		defer out.flush()
+		_, err := relayCopyBuffered(out, targetConn)
 		downloadErrCh <- err
 	}()
 	select {
@@ -823,6 +896,12 @@ type flushWriter struct {
 	f http.Flusher
 }
 
+func (w *flushWriter) flush() {
+	if w.f != nil {
+		w.f.Flush()
+	}
+}
+
 func (w *flushWriter) Write(p []byte) (int, error) {
 	// Underlying ResponseWriter implementations may legally return partial progress
 	// with a nil error; io.Copy rejects that (ErrShortWrite). Drain the full slice
@@ -830,9 +909,6 @@ func (w *flushWriter) Write(p []byte) (int, error) {
 	nn := 0
 	for nn < len(p) {
 		n, err := w.w.Write(p[nn:])
-		if n > 0 && w.f != nil {
-			w.f.Flush()
-		}
 		nn += n
 		if err != nil {
 			return nn, err
@@ -840,6 +916,11 @@ func (w *flushWriter) Write(p []byte) (int, error) {
 		if n == 0 {
 			return nn, io.ErrShortWrite
 		}
+	}
+	// One flush per io.Copy chunk avoids H2/H3 response body fragmentation where the
+	// stack performs many short writes (each would otherwise flush and cap throughput).
+	if nn > 0 && w.f != nil {
+		w.f.Flush()
 	}
 	return nn, nil
 }
@@ -888,8 +969,12 @@ func (c *connectIPNetPacketConn) WritePacket(buffer *buf.Buffer, destination M.S
 const connectIPMaxICMPRelay = 8
 
 func (c *connectIPNetPacketConn) writeOutgoingWithICMPRelay(packet []byte) error {
-	payload := packet
+	peerPrefixes := c.conn.CurrentPeerPrefixes()
+	payload := TM.RewriteConnectIPOutgoingPeerDst(packet, peerPrefixes)
 	for i := 0; i < connectIPMaxICMPRelay; i++ {
+		if i > 0 {
+			payload = TM.RewriteConnectIPOutgoingPeerDst(payload, peerPrefixes)
+		}
 		icmp, err := c.conn.WritePacket(payload)
 		TM.ObserveConnectIPServerWriteIteration(len(payload), len(icmp), err)
 		if err != nil {
@@ -1014,51 +1099,6 @@ func masqueListenBindsUnspecified(listen string) bool {
 	return false
 }
 
-func masqueServerShouldRelaxTCPAuthority(o option.MasqueEndpointOptions) bool {
-	if strings.TrimSpace(o.TemplateTCP) != "" {
-		return false
-	}
-	return masqueListenBindsUnspecified(o.Listen)
-}
-
-func masqueTCPAuthorityRelaxableTemplateHost(host string) bool {
-	h := strings.TrimSpace(host)
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
-	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
-	h = strings.ToLower(h)
-	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
-		return true
-	}
-	return false
-}
-
-// tcpConnectStreamAuthorityMatches enforces :authority vs template URL host for MASQUE TCP CONNECT-stream.
-// When relaxedTCPAuthority is true (unspecified listen + empty server_template_tcp), the mux template uses
-// loopback as a stable placeholder; after TLS the client's :authority is the public address, so only the
-// port must match the template.
-func tcpConnectStreamAuthorityMatches(templateHost, requestHost string, relaxedTCPAuthority bool) bool {
-	tH := strings.TrimSpace(templateHost)
-	rH := strings.TrimSpace(requestHost)
-	if strings.EqualFold(tH, rH) {
-		return true
-	}
-	if !relaxedTCPAuthority || tH == "" {
-		return false
-	}
-	tHost, tPort, tErr := net.SplitHostPort(tH)
-	rHost, rPort, rErr := net.SplitHostPort(rH)
-	_ = rHost
-	if tErr != nil || rErr != nil {
-		return false
-	}
-	if !masqueTCPAuthorityRelaxableTemplateHost(tHost) {
-		return false
-	}
-	return tPort == rPort
-}
-
 func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, relaxedTCPAuthority bool) (string, string, error) {
 	if r.Method != http.MethodConnect {
 		return "", "", E.New("expected CONNECT request")
@@ -1067,7 +1107,7 @@ func parseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 	if err != nil {
 		return "", "", E.Cause(err, "parse tcp template")
 	}
-	if templateURL.Host != "" && !tcpConnectStreamAuthorityMatches(templateURL.Host, strings.TrimSpace(r.Host), relaxedTCPAuthority) {
+	if templateURL.Host != "" && !masqueRequestAuthorityMatchesTemplate(templateURL.Host, strings.TrimSpace(r.Host), relaxedTCPAuthority) {
 		return "", "", E.New("CONNECT authority does not match TCP template host")
 	}
 	var candidates []string

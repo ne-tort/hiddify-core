@@ -43,6 +43,23 @@ func TestH2ExtendedConnectRequestContextDetachesAfterHandshake(t *testing.T) {
 	stop(false)
 }
 
+func TestH2ExtendedConnectRequestContextDetachWinsConcurrentParentCancel(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	reqCtx, stop := NewH2ExtendedConnectRequestContext(parent)
+	done := make(chan struct{})
+	go func() {
+		stop(true)
+		close(done)
+	}()
+	cancelParent()
+	<-done
+	select {
+	case <-reqCtx.Done():
+		t.Fatal("request context canceled when detach raced parent cancel")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestDialHTTP2CfConnectIPRequestHeadersUsqueParity(t *testing.T) {
 	var gotProto, gotPQ, gotUA string
 	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {

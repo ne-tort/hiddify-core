@@ -344,7 +344,10 @@ func (e *WarpEndpoint) startRuntime() {
 	if useWarpParityExtras {
 		warpConnectProto = "cf-connect-ip"
 	}
-	warpTLSServerName := strings.TrimSpace(e.options.TLSServerName)
+	warpTLSServerName := ""
+	if e.options.OutboundTLS != nil {
+		warpTLSServerName = strings.TrimSpace(e.options.OutboundTLS.ServerName)
+	}
 	if warpTLSServerName == "" {
 		warpTLSServerName = strings.TrimSpace(bootstrapTLSName)
 	}
@@ -411,6 +414,29 @@ func (e *WarpEndpoint) startRuntime() {
 			}
 			RecordMasqueHTTPLayerSuccess(e.Tag(), e.options.MasqueEndpointOptions, layer, id)
 		}
+		warpOut := e.options.MasqueEndpointOptions.OutboundTLS
+		if warpOut == nil {
+			warpOut = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
+		}
+		outMerge := *warpOut
+		outMerge.Enabled = true
+		if warpTLSServerName != "" {
+			outMerge.ServerName = warpTLSServerName
+		}
+		tlsHost := warpTLSServerName
+		if tlsHost == "" {
+			tlsHost = rtServer
+		}
+		quicTLS, tlsErr := buildMasqueQUICStdTLSConfig(runCtx, log.StdLogger(), tlsHost, &outMerge)
+		if tlsErr != nil {
+			e.setStartErr(E.Cause(tlsErr, "warp_masque client tls quic"), "build_quic_tls")
+			return
+		}
+		tcpDialTLS, tlsErr2 := buildMasqueTCPDialTLS(runCtx, log.StdLogger(), tlsHost, &outMerge)
+		if tlsErr2 != nil {
+			e.setStartErr(E.Cause(tlsErr2, "warp_masque client tls tcp"), "build_tcp_tls")
+			return
+		}
 		rt = CM.NewRuntime(TM.CoreClientFactory{}, CM.RuntimeOptions{
 			Tag:                         e.Tag(),
 			Server:                      rtServer,
@@ -428,8 +454,8 @@ func (e *WarpEndpoint) startRuntime() {
 			ServerToken:                 e.options.ServerToken,
 			ClientBasicUsername:         e.options.ClientBasicUsername,
 			ClientBasicPassword:         e.options.ClientBasicPassword,
-			TLSServerName:               warpTLSServerName,
-			Insecure:                    e.options.Insecure,
+			MasqueQUICCryptoTLS:         quicTLS,
+			MasqueTCPDialTLS:            tcpDialTLS,
 			ConnectIPDatagramCeiling:    e.options.MasqueEndpointOptions.MTU,
 			QUICExperimental:            toTransportQUICExperimental(e.options.QUICExperimental),
 			Chain:                       chain,

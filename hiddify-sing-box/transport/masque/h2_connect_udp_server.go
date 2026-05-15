@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/quic-go/quic-go/quicvarint"
 )
@@ -20,9 +21,23 @@ func isServeH2ConnectUDPTerminalConnErr(err error) bool {
 	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return true
 	}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		var errno syscall.Errno
+		if errors.As(e, &errno) {
+			switch errno {
+			case syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH,
+				syscall.ECONNRESET, syscall.ENETRESET:
+				return true
+			}
+		}
+	}
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "use of closed network connection") ||
-		strings.Contains(s, "pipe is being closed")
+		strings.Contains(s, "pipe is being closed") ||
+		strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "host unreachable") ||
+		strings.Contains(s, "network unreachable") ||
+		strings.Contains(s, "no route to host")
 }
 
 // ServeH2ConnectUDP relays UDP payloads over an established HTTP/2 CONNECT-UDP stream using
@@ -37,11 +52,20 @@ func ServeH2ConnectUDP(w http.ResponseWriter, r *http.Request, conn *net.UDPConn
 	var wg sync.WaitGroup
 	var closeUDP sync.Once
 	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
+	var shutdownBody sync.Once
+	shutdownRelay := func() {
+		shutdownBody.Do(func() {
+			if r.Body != nil {
+				_ = r.Body.Close()
+			}
+		})
+	}
 
 	var upErr, downErr error
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		defer shutdownRelay()
 		defer closeUDPConn()
 		br := bufio.NewReader(r.Body)
 		for {
@@ -78,6 +102,7 @@ func ServeH2ConnectUDP(w http.ResponseWriter, r *http.Request, conn *net.UDPConn
 	}()
 	go func() {
 		defer wg.Done()
+		defer shutdownRelay()
 		defer closeUDPConn()
 		buf := make([]byte, h2ConnectUDPServerUDPReadBuf)
 		for {
@@ -96,5 +121,7 @@ func ServeH2ConnectUDP(w http.ResponseWriter, r *http.Request, conn *net.UDPConn
 		}
 	}()
 	wg.Wait()
-	return errors.Join(upErr, downErr)
+	joined := errors.Join(upErr, downErr)
+	_ = http.NewResponseController(w).Flush()
+	return joined
 }

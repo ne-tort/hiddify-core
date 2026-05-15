@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -24,26 +25,25 @@ import (
 // Used by CONNECT-IP DialHTTP2 and by sing-box MASQUE (CONNECT-UDP / CONNECT-stream over HTTP/2).
 func NewH2ExtendedConnectRequestContext(parent context.Context) (context.Context, func(detach bool)) {
 	reqCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	var detached atomic.Bool
 	stopRelay := make(chan struct{})
 	go func() {
 		select {
 		case <-stopRelay:
 			return
 		case <-parent.Done():
-			// If stop(detach:true) ran first it closed(stopRelay); with parent cancelled,
-			// the outer select can pick parent.Done arbitrarily — prefer stopRelay readiness
-			// so handshake-detached streams are not canceled by the deferred dial-context.
-			select {
-			case <-stopRelay:
+			if detached.Load() {
 				return
-			default:
-				cancel()
 			}
+			cancel()
 		}
 	}()
 	var once sync.Once
 	return reqCtx, func(detach bool) {
 		once.Do(func() {
+			if detach {
+				detached.Store(true)
+			}
 			close(stopRelay)
 			if !detach {
 				cancel()

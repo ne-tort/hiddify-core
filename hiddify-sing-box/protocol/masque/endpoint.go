@@ -105,6 +105,11 @@ func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.Masq
 			o.TCPTransport = option.MasqueTCPTransportConnectStream
 		}
 	}
+	if o.OutboundTLS == nil {
+		o.OutboundTLS = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
+	} else if !o.OutboundTLS.Enabled {
+		o.OutboundTLS.Enabled = true
+	}
 	return o
 }
 
@@ -124,42 +129,6 @@ func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUI
 		DisablePathMTUDiscovery:    o.DisablePathMTUDiscovery,
 	}
 	return out
-}
-
-func validateMasqueClientTLSMaterial(o option.MasqueEndpointOptions) error {
-	cPem := strings.TrimSpace(o.ClientTLSCertPEM)
-	kPem := strings.TrimSpace(o.ClientTLSKeyPEM)
-	cB64 := strings.TrimSpace(o.ClientTLSCertB64)
-	kB64 := strings.TrimSpace(o.ClientTLSKeyB64)
-	cPath := strings.TrimSpace(o.ClientTLSCert)
-	kPath := strings.TrimSpace(o.ClientTLSKey)
-
-	if (cPem != "") != (kPem != "") {
-		return E.New("masque: client_tls_cert_pem and client_tls_key_pem must both be set or both empty")
-	}
-	if (cB64 != "") != (kB64 != "") {
-		return E.New("masque: client_tls_cert_b64 and client_tls_key_b64 must both be set or both empty")
-	}
-	if (cPath != "") != (kPath != "") {
-		return E.New("masque: client_tls_cert and client_tls_key must both be set or both empty")
-	}
-	pemOK := cPem != "" && kPem != ""
-	b64OK := cB64 != "" && kB64 != ""
-	pathOK := cPath != "" && kPath != ""
-	n := 0
-	if pemOK {
-		n++
-	}
-	if b64OK {
-		n++
-	}
-	if pathOK {
-		n++
-	}
-	if n > 1 {
-		return E.New("masque: use only one of client_tls_cert_pem+key_pem, client_tls_cert_b64+key_b64, or client_tls_cert+key file paths")
-	}
-	return nil
 }
 
 func validateMasqueOptions(o option.MasqueEndpointOptions) error {
@@ -206,16 +175,23 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	if strings.TrimSpace(o.ClientBasicUsername) != "" && o.ClientBasicPassword == "" {
 		return E.New("masque: client_basic_password is required when client_basic_username is set")
 	}
-	if err := validateMasqueClientTLSMaterial(o); err != nil {
+	outForTLS := o.OutboundTLS
+	if outForTLS == nil {
+		outForTLS = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
+	} else {
+		dup := *outForTLS
+		if !dup.Enabled {
+			dup.Enabled = true
+		}
+		outForTLS = &dup
+	}
+	if err := validateMasqueOutboundTLSWithHTTPLayer(outForTLS, httpLayerNorm); err != nil {
 		return err
 	}
 
 	// Client mode
 	if strings.TrimSpace(o.Listen) != "" || o.ListenPort != 0 {
 		return E.New("masque: listen/listen_port are server-only")
-	}
-	if strings.TrimSpace(o.Certificate) != "" || strings.TrimSpace(o.Key) != "" {
-		return E.New("masque: certificate/key are server-only")
 	}
 	if o.AllowPrivateTargets || len(o.AllowedTargetPorts) > 0 || len(o.BlockedTargetPorts) > 0 {
 		return E.New("masque: allow_private_targets / allowed_target_ports / blocked_target_ports are server-only")
@@ -359,8 +335,8 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if o.ListenPort == 0 {
 		return E.New("masque server: listen_port is required")
 	}
-	if strings.TrimSpace(o.Certificate) == "" || strings.TrimSpace(o.Key) == "" {
-		return E.New("masque server: certificate and key are required")
+	if o.InboundTLS == nil {
+		return E.New("masque server: tls is required")
 	}
 	if strings.TrimSpace(o.TransportMode) != "" {
 		return E.New("masque server: transport_mode is client-only")
@@ -380,10 +356,8 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if strings.TrimSpace(o.ClientBasicUsername) != "" || o.ClientBasicPassword != "" {
 		return E.New("masque server: client_basic_username / client_basic_password are client-only")
 	}
-	if strings.TrimSpace(o.ClientTLSCert) != "" || strings.TrimSpace(o.ClientTLSKey) != "" ||
-		strings.TrimSpace(o.ClientTLSCertPEM) != "" || strings.TrimSpace(o.ClientTLSKeyPEM) != "" ||
-		strings.TrimSpace(o.ClientTLSCertB64) != "" || strings.TrimSpace(o.ClientTLSKeyB64) != "" {
-		return E.New("masque server: client_tls_* fields are client-only")
+	if o.OutboundTLS != nil {
+		return E.New("masque server: outbound_tls is client-only")
 	}
 	if err := validateMasqueServerAuthOptions(o); err != nil {
 		return err
