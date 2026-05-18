@@ -22,9 +22,9 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 )
 
-// bodyCopyBufferSize: ClientConn.sendRequestBody (io.CopyBuffer). 8 MiB matches streamConn
-// ReadFrom upload; upload pipe flush policy (h3MasqueBufferedPipeWriter) handles duplex ACKs.
-const bodyCopyBufferSize = 8 * 1024 * 1024
+// bodyCopyBufferSize: ClientConn.sendRequestBody (io.CopyBuffer). 512 KiB matches MASQUE upload
+// bufio (h3MasqueBufferedPipeWriter); 8 MiB here stalled pipe drain and capped bench tcp_up.
+const bodyCopyBufferSize = 512 * 1024
 
 type requestWriter struct {
 	mutex     sync.Mutex

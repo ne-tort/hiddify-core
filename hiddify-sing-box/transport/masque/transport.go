@@ -46,8 +46,8 @@ const cloudflareLegacyH3DatagramSettingID uint64 = 0x276
 // inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
 const defaultUDPInitialPacketSize uint16 = 1420
 
-// masqueH3ConnectStreamBufSize coalesces CONNECT-stream upload writes before the io.Pipe.
-const masqueH3ConnectStreamBufSize = masqueConnectStreamReadCoalesceTarget
+// masqueH3ConnectStreamUploadBufSize is the upload-side bufio before io.Pipe (not the 8 MiB download coalesce).
+const masqueH3ConnectStreamUploadBufSize = 512 * 1024
 
 // masqueH3ConnectStreamFlushImmediateMax extends the upload fast-flush path beyond bare control
 // writes up through MSS-ish relay chunks from TUN/TCP (~≤4 KiB typical IPv4 MSS slack).
@@ -78,7 +78,7 @@ type h3MasqueBufferedPipeWriter struct {
 
 func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWriter {
 	return &h3MasqueBufferedPipeWriter{
-		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamBufSize),
+		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamUploadBufSize),
 		inner: inner,
 	}
 }
@@ -132,7 +132,7 @@ func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	if !w.firstFlightFlush && buffered <= masqueH3ConnectStreamFirstFlightFlushMax {
 		return true
 	}
-	if buffered >= masqueH3ConnectStreamBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
+	if buffered >= masqueH3ConnectStreamUploadBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
 		return true
 	}
 	// Upload (TUN ReadFrom): streamConn passes up to masqueConnectStreamReadCoalesceTarget per read;
