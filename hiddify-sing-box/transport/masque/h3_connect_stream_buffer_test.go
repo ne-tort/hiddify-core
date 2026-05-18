@@ -47,7 +47,7 @@ func TestH3MasqueBufferedPipeWriterFlushesMediumChunks(t *testing.T) {
 	}
 }
 
-func TestH3MasqueBufferedPipeWriterFlushesEachWrite(t *testing.T) {
+func TestH3MasqueBufferedPipeWriterFlushesDuplexSizedChunks(t *testing.T) {
 	pr, pw := io.Pipe()
 	bw := newH3MasqueBufferedPipeWriter(pw)
 	readCh := make(chan []int, 1)
@@ -65,7 +65,7 @@ func TestH3MasqueBufferedPipeWriterFlushesEachWrite(t *testing.T) {
 		}
 		readCh <- reads
 	}()
-	chunk := make([]byte, 8192)
+	chunk := make([]byte, 4096)
 	for i := 0; i < 8; i++ {
 		if _, err := bw.Write(chunk); err != nil {
 			t.Fatalf("write %d: %v", i, err)
@@ -76,7 +76,7 @@ func TestH3MasqueBufferedPipeWriterFlushesEachWrite(t *testing.T) {
 	}
 	got := <-readCh
 	if len(got) < 8 {
-		t.Fatalf("expected per-write flush (duplex ACK path), got %d reads %v", len(got), got)
+		t.Fatalf("expected per-write flush for <=4KiB duplex chunks, got %d reads %v", len(got), got)
 	}
 	for i, n := range got[:8] {
 		if n != len(chunk) {
@@ -85,7 +85,33 @@ func TestH3MasqueBufferedPipeWriterFlushesEachWrite(t *testing.T) {
 	}
 }
 
-func TestH3MasqueBufferedPipeWriterReadFromFlushesEachSlice(t *testing.T) {
+func TestH3MasqueBufferedPipeWriterFlushesAtFlushBulk(t *testing.T) {
+	pr, pw := io.Pipe()
+	bw := newH3MasqueBufferedPipeWriter(pw)
+	readCh := make(chan int, 1)
+	go func() {
+		buf := make([]byte, 128*1024)
+		n, err := pr.Read(buf)
+		if err != nil && err != io.EOF {
+			t.Errorf("read: %v", err)
+		}
+		readCh <- n
+	}()
+	chunk := make([]byte, 8192)
+	for i := 0; i < 8; i++ {
+		if _, err := bw.Write(chunk); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if err := bw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if n := <-readCh; n != 8*8192 {
+		t.Fatalf("expected single %d-byte bulk flush, got %d", 8*8192, n)
+	}
+}
+
+func TestH3MasqueBufferedPipeWriterReadFromDeliversPayload(t *testing.T) {
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { _ = pw.Close() })
 	readCh := make(chan int, 1)

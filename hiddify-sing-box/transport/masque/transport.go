@@ -46,39 +46,29 @@ const cloudflareLegacyH3DatagramSettingID uint64 = 0x276
 // inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
 const defaultUDPInitialPacketSize uint16 = 1420
 
-// masqueH3ConnectStreamUploadBufSize is the upload-side bufio before io.Pipe (not the 8 MiB download coalesce).
-const masqueH3ConnectStreamUploadBufSize = 512 * 1024
+// masqueH3ConnectStreamBufSize — upload-side bufio before io.Pipe (pre-0726b57b used 256 KiB; 8 MiB regressed tcp_up).
+const masqueH3ConnectStreamBufSize = 256 * 1024
 
-// masqueH3ConnectStreamFlushImmediateMax extends the upload fast-flush path beyond bare control
-// writes up through MSS-ish relay chunks from TUN/TCP (~≤4 KiB typical IPv4 MSS slack).
-// Reverse TCP benches (iperf -R) need ACK-sized segments delivered promptly; the prior ≤512 B-only
-// heuristic left [513, 8192) byte chunks trapped until FlushBulk (~7 MiB), starving download.
-// Writes larger than this keep FlushBulk batching (see TestH3MasqueBufferedPipeWriterCoalesces8KWrites).
-const masqueH3ConnectStreamFlushImmediateMax = 4096
+// masqueH3ConnectStreamFlushSmall — handshake/control only; bulk iperf chunks batch until FlushBulk.
+const masqueH3ConnectStreamFlushSmall = 512
 
-// masqueH3ConnectStreamFlushBulk — push upload bytes to the HTTP/3 request body (io.Pipe) so
-// quic-go sendRequestBody can read. 7 MiB (8 MiB−1 MiB) regressed bench tcp_up (~30 vs ~90+ Mbit/s);
-// 256 KiB matches the pre–download-pump era (64 KiB) while keeping fewer flushes than per-MSS.
-const masqueH3ConnectStreamFlushBulk = 256 * 1024
+// masqueH3ConnectStreamFlushBulk — push upload to the pipe / quic-go sendRequestBody (9bf058bc: 64 KiB).
+const masqueH3ConnectStreamFlushBulk = 64 * 1024
 
-// masqueH3ConnectStreamFirstFlightFlushMax flushes the first CONNECT-stream upload payload even
-// when TUN/TCP coalesced control bytes into a chunk larger than the steady-state immediate threshold.
-// Without this, protocols that wait for a server response after a small first request (iperf3 control,
-// TLS ClientHello bursts, etc.) can sit behind FlushBulk and time out with CONNECT status=200.
-const masqueH3ConnectStreamFirstFlightFlushMax = 128 * 1024
+// masqueH3ConnectStreamFlushDuplexMax — during iperf -R, flush ≤4 KiB upload chunks promptly (ACK path).
+const masqueH3ConnectStreamFlushDuplexMax = 4096
 
 // h3MasqueBufferedPipeWriter wraps the upload-side *io.PipeWriter (same stack as H2 CONNECT-stream).
 // The bare pipe does not implement SetWriteDeadline; streamConn stores write deadlines in
 // h2PipeWriteDL and tears down the pipe on expiry (parity across http_layer h2/h3).
 type h3MasqueBufferedPipeWriter struct {
-	bw               *bufio.Writer
-	inner            io.WriteCloser
-	firstFlightFlush bool
+	bw    *bufio.Writer
+	inner io.WriteCloser
 }
 
 func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWriter {
 	return &h3MasqueBufferedPipeWriter{
-		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamUploadBufSize),
+		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamBufSize),
 		inner: inner,
 	}
 }
@@ -129,22 +119,13 @@ func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	if buffered == 0 {
 		return false
 	}
-	if !w.firstFlightFlush && buffered <= masqueH3ConnectStreamFirstFlightFlushMax {
+	if buffered >= masqueH3ConnectStreamBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
 		return true
 	}
-	if buffered >= masqueH3ConnectStreamUploadBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
+	if chunkLen <= masqueH3ConnectStreamFlushDuplexMax && buffered < masqueH3ConnectStreamFlushBulk {
 		return true
 	}
-	// Upload (TUN ReadFrom): streamConn passes up to masqueConnectStreamReadCoalesceTarget per read;
-	// holding chunks >8 KiB until FlushBulk (~7 MiB) capped bench tcp_up (~30 Mbit/s vs ~90+).
-	// Duplex download (iperf -R): still flush MSS-sized segments promptly.
-	if chunkLen > masqueH3ConnectStreamFlushImmediateMax {
-		return true
-	}
-	if chunkLen <= masqueH3ConnectStreamFlushImmediateMax {
-		return true
-	}
-	return false
+	return chunkLen <= masqueH3ConnectStreamFlushSmall && buffered <= 2*masqueH3ConnectStreamFlushSmall
 }
 
 func (w *h3MasqueBufferedPipeWriter) Write(p []byte) (int, error) {
@@ -153,9 +134,6 @@ func (w *h3MasqueBufferedPipeWriter) Write(p []byte) (int, error) {
 		return n, err
 	}
 	flush := w.shouldFlushAfterWrite(len(p))
-	if n > 0 && !w.firstFlightFlush {
-		w.firstFlightFlush = true
-	}
 	if flush {
 		if flushErr := w.bw.Flush(); flushErr != nil {
 			return n, flushErr
@@ -190,6 +168,7 @@ func (w *h3MasqueBufferedPipeWriter) ReadFrom(r io.Reader) (int64, error) {
 		}
 		if er != nil {
 			if errors.Is(er, io.EOF) {
+				_ = w.bw.Flush()
 				return written, nil
 			}
 			return written, er
@@ -3964,8 +3943,6 @@ type streamConn struct {
 
 func (*streamConn) RouteConnectionCopyWriterTo() {}
 
-func (*streamConn) RouteConnectionCopyReaderFrom() {}
-
 // wrapConnectStreamDataplaneErr tags post-handshake CONNECT-stream faults (H2 Extended CONNECT vs HTTP/3 body)
 // so nested library text ("http2:", "handshake", "Extended CONNECT", …) does not drive http_layer_fallback
 // or handshake-oriented metrics (parity with CONNECT-UDP / CONNECT-IP dataplane markers).
@@ -4263,8 +4240,6 @@ var _ io.WriterTo = (*streamConn)(nil)
 
 // Assert streamConn opts into route.ConnectionManager io.WriterTo bulk download for MASQUE CONNECT-stream.
 var _ C.RouteConnectionCopyWriterTo = (*streamConn)(nil)
-
-var _ C.RouteConnectionCopyReaderFrom = (*streamConn)(nil)
 
 // Assert sing bufio.N.ExtendedReader so NewExtendedReader uses ReadBuffer (large coalesce) instead of Read(~32 KiB).
 var _ interface {
