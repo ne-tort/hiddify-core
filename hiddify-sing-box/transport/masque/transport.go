@@ -57,11 +57,9 @@ const masqueH3ConnectStreamBufSize = masqueConnectStreamReadCoalesceTarget
 const masqueH3ConnectStreamFlushImmediateMax = 4096
 
 // masqueH3ConnectStreamFlushBulk — push upload bytes to the HTTP/3 request body (io.Pipe) so
-// quic-go sendRequestBody can read; without this, medium iperf chunks could sit in bufio
-// until the full masqueH3ConnectStreamBufSize fills. Flush ~1 MiB below that cap (same ratio
-// as the old 4/3 MiB split) — fewer Flush calls vs every small Write, yet leaves headroom vs
-// a full-window stall on the pipe read side vs download ACKs on the bench.
-const masqueH3ConnectStreamFlushBulk = masqueConnectStreamReadCoalesceTarget - (1 << 20)
+// quic-go sendRequestBody can read. 7 MiB (8 MiB−1 MiB) regressed bench tcp_up (~30 vs ~90+ Mbit/s);
+// 256 KiB matches the pre–download-pump era (64 KiB) while keeping fewer flushes than per-MSS.
+const masqueH3ConnectStreamFlushBulk = 256 * 1024
 
 // masqueH3ConnectStreamFirstFlightFlushMax flushes the first CONNECT-stream upload payload even
 // when TUN/TCP coalesced control bytes into a chunk larger than the steady-state immediate threshold.
@@ -3709,7 +3707,6 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		req.Header = make(http.Header)
 		setMasqueAuthorizationHeader(req.Header, options)
 		pr, pw := io.Pipe()
-		uploadBridge := newConnectStreamUploadBridge(pw)
 		req.Body = pr
 		req.ContentLength = -1
 		roundTripper := s.getTCPRoundTripper(tcpHTTP)
@@ -3717,7 +3714,6 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
-			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
@@ -3740,7 +3736,6 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
-			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -3753,7 +3748,6 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
-			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -3764,7 +3758,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
 		sc := &streamConn{
 			reader: newH3MasqueResponseReadCloser(resp.Body),
-			writer: newH3MasqueBufferedPipeWriter(uploadBridge),
+			writer: newH3MasqueBufferedPipeWriter(pw),
 			ctx:    streamCtx,
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
@@ -4288,6 +4282,26 @@ func (c *streamConn) Write(p []byte) (int, error) {
 // connection is the upload destination — bulk data flows through bufio.Writer.ReadFrom instead
 // of many small Write calls (major win for MASQUE CONNECT-stream upload / iperf).
 func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
+	if c.h2PipeWriteDL.writeTimeoutExceeded() {
+		return 0, errors.Join(ErrTCPConnectStreamFailed, context.DeadlineExceeded)
+	}
+	wNanos := c.h2PipeWriteDL.write.Load()
+	if wNanos != 0 && time.Now().UnixNano() > wNanos {
+		return 0, errors.Join(ErrTCPConnectStreamFailed, context.DeadlineExceeded)
+	}
+	// Bulk upload: delegate to h3MasqueBufferedPipeWriter.ReadFrom (flush-aware bufio) instead of
+	// writeConnectStreamPipeUploadLocked + 8 MiB staging (and avoid the upload-bridge copy/wait).
+	if wNanos == 0 && c.relayDownloadBusy.Load() == 0 {
+		if rf, ok := c.writer.(io.ReaderFrom); ok {
+			c.h2PipeWriteMu.Lock()
+			n, err := rf.ReadFrom(r)
+			c.h2PipeWriteMu.Unlock()
+			if err != nil {
+				return n, c.connectStreamFinishReadFromWriteError(err)
+			}
+			return n, nil
+		}
+	}
 	bp := masqueStreamUploadReadFromBufPool.Get().(*[]byte)
 	defer masqueStreamUploadReadFromBufPool.Put(bp)
 	buf := *bp
@@ -4299,7 +4313,7 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 		if c.h2PipeWriteDL.writeTimeoutExceeded() {
 			return written, errors.Join(ErrTCPConnectStreamFailed, context.DeadlineExceeded)
 		}
-		wNanos := c.h2PipeWriteDL.write.Load()
+		wNanos = c.h2PipeWriteDL.write.Load()
 		if wNanos != 0 && time.Now().UnixNano() > wNanos {
 			return written, errors.Join(ErrTCPConnectStreamFailed, context.DeadlineExceeded)
 		}

@@ -59,9 +59,10 @@ const masqueRelayTCPDownloadFlushEvery = 32 * 1024
 // masqueRelayTCPDownloadReadLen: TCP read size for relayDownloadCopy (not the 8 MiB upload copy).
 const masqueRelayTCPDownloadReadLen = 512 * 1024
 
-// masqueRelayTCPUploadReadLen: read CONNECT request body in small slices so client TCP ACKs
-// (iperf -R) reach the onward TCP socket promptly instead of waiting behind 512 KiB reads.
-const masqueRelayTCPUploadReadLen = 4 * 1024
+// masqueRelayTCPUploadReadLen: bulk read of CONNECT request body toward onward TCP (client upload).
+// 4 KiB slices were for iperf -R ACK promptness on the reverse path; they capped server-side drain
+// on plain upload benches. Duplex -R still uses relayDownloadCopy flush batching on the response leg.
+const masqueRelayTCPUploadReadLen = 512 * 1024
 
 var masqueRelayTCPUploadBufPool = sync.Pool{
 	New: func() any {
