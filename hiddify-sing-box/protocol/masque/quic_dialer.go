@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -213,6 +215,44 @@ type connectedPacketConn struct {
 	remoteAddr net.Addr
 }
 
+// unwrapMasqueQUICUnderlyingConn walks sing-box UDP dial wrappers until SetReadBuffer /
+// SetWriteBuffer / SyscallConn are available on the kernel *net.UDPConn.
+func unwrapMasqueQUICUnderlyingConn(c net.Conn) net.Conn {
+	for c != nil {
+		if _, ok := c.(interface {
+			SetReadBuffer(int) error
+			SetWriteBuffer(int) error
+		}); ok {
+			return c
+		}
+		type unwrapper interface {
+			Unwrap() net.Conn
+		}
+		if u, ok := c.(unwrapper); ok {
+			next := u.Unwrap()
+			if next == nil || next == c {
+				break
+			}
+			c = next
+			continue
+		}
+		// sing-box conntrack.Conn and similar wrappers expose the kernel conn via Upstream().
+		type upstreamer interface {
+			Upstream() any
+		}
+		if u, ok := c.(upstreamer); ok {
+			next, ok := u.Upstream().(net.Conn)
+			if !ok || next == nil || next == c {
+				break
+			}
+			c = next
+			continue
+		}
+		break
+	}
+	return c
+}
+
 func masqueQUICDialerTraceEnabled() bool {
 	return strings.TrimSpace(os.Getenv("MASQUE_TRACE_QUIC_DIAL")) == "1" ||
 		strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_QUIC_TRACE")) == "1"
@@ -264,4 +304,45 @@ func (c *connectedPacketConn) Close() error {
 		return err
 	}
 	return nil
+}
+
+// SetReadBuffer forwards kernel UDP SO_RCVBUF tuning to the dialed socket so quic-go can apply
+// protocol.DesiredReceiveBufferSize (see replace/quic-go-patched/sys_conn_buffers.go). Without this,
+// setReceiveBuffer sees only connectedPacketConn and MASQUE runs with default ~208 KiB RX buffers.
+func (c *connectedPacketConn) SetReadBuffer(n int) error {
+	if c == nil || c.Conn == nil {
+		return fmt.Errorf("connectedPacketConn: nil conn")
+	}
+	under := unwrapMasqueQUICUnderlyingConn(c.Conn)
+	if x, ok := under.(interface{ SetReadBuffer(int) error }); ok {
+		return x.SetReadBuffer(n)
+	}
+	return fmt.Errorf("connectedPacketConn: SetReadBuffer not supported for %T", c.Conn)
+}
+
+// SetWriteBuffer forwards SO_SNDBUF for QUIC send path (DesiredSendBufferSize).
+func (c *connectedPacketConn) SetWriteBuffer(n int) error {
+	if c == nil || c.Conn == nil {
+		return fmt.Errorf("connectedPacketConn: nil conn")
+	}
+	under := unwrapMasqueQUICUnderlyingConn(c.Conn)
+	if x, ok := under.(interface{ SetWriteBuffer(int) error }); ok {
+		return x.SetWriteBuffer(n)
+	}
+	return fmt.Errorf("connectedPacketConn: SetWriteBuffer not supported for %T", c.Conn)
+}
+
+// SyscallConn allows quic-go to inspect the real buffer sizes after SetReadBuffer/SetWriteBuffer
+// and to use RCVBUFFORCE on Linux when raising SO_RCVBUF.
+func (c *connectedPacketConn) SyscallConn() (syscall.RawConn, error) {
+	if c == nil || c.Conn == nil {
+		return nil, fmt.Errorf("connectedPacketConn: nil conn")
+	}
+	under := unwrapMasqueQUICUnderlyingConn(c.Conn)
+	if x, ok := under.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	}); ok {
+		return x.SyscallConn()
+	}
+	return nil, fmt.Errorf("connectedPacketConn: SyscallConn not supported for %T", c.Conn)
 }

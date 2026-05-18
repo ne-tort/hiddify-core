@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -46,6 +47,12 @@ const (
 	// h2ConnectUDPServerUDPReadBuf is the server relay UDP recv buffer: must hold a full kernel
 	// datagram; net.UDPConn.Read truncates without error when the buffer is smaller than the packet.
 	h2ConnectUDPServerUDPReadBuf = 65535
+	// h2ConnectUDPResponseBodyBufSize coalesces HTTP/2 CONNECT-UDP response-body reads for RFC 9297
+	// capsule parsing (parity ServeH2ConnectUDP br and masque-go prefetch).
+	h2ConnectUDPResponseBodyBufSize = 64 * 1024
+	// h2ConnectUDPMinDeliveredUDPPayload is the smallest DNS response header (RFC 1035). Shorter
+	// non-empty downlink payloads are framing slop or kernel ICMP debris — drop and keep parsing.
+	h2ConnectUDPMinDeliveredUDPPayload = 12
 )
 
 // errMasqueH2ConnectUDPOversizedDeclared tags rejections of hostile capsule length varints before any
@@ -72,7 +79,23 @@ func writeAllIOWriter(w io.Writer, p []byte) (int, error) {
 	return nn, nil
 }
 
-func writeUDPH2ConnectDatagramCapsule(w io.Writer, flusher http.Flusher, udpPayload []byte) error {
+func flushH2ConnectUDPResponse(w io.Writer) {
+	if w == nil {
+		return
+	}
+	// Prefer ResponseController (connect-ip-go flushHTTPResponseBody): on HTTP/2 Extended CONNECT
+	// http.Flusher alone may not push RFC 9297 capsules to the peer (bench UDP probe timeout).
+	if rw, ok := w.(http.ResponseWriter); ok {
+		if err := http.NewResponseController(rw).Flush(); err == nil || errors.Is(err, http.ErrNotSupported) {
+			return
+		}
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func writeUDPH2ConnectDatagramCapsule(w io.Writer, udpPayload []byte) error {
 	// QUIC/H3 CONNECT-UDP path (proxiedConn.WriteTo / SendDatagram) sends a length-1 QUIC datagram when
 	// the UDP payload is empty (RFC 9297 payload is still one context-id byte); keep parity for H2 relays.
 	dgram := make([]byte, 1+len(udpPayload))
@@ -85,8 +108,10 @@ func writeUDPH2ConnectDatagramCapsule(w io.Writer, flusher http.Flusher, udpPayl
 	if _, err := writeAllIOWriter(w, buf.Bytes()); err != nil {
 		return err
 	}
-	if flusher != nil {
-		flusher.Flush()
+	if rw, ok := w.(http.ResponseWriter); ok {
+		flushH2ConnectUDPResponse(rw)
+	} else {
+		flushH2ConnectUDPRequestBody(w)
 	}
 	return nil
 }
@@ -94,9 +119,9 @@ func writeUDPH2ConnectDatagramCapsule(w io.Writer, flusher http.Flusher, udpPayl
 // writeUDPPayloadAsH2DatagramCapsules sends one UDP payload (possibly larger than one RFC 9297
 // DATAGRAM capsule allows) as a sequence of capsules, preserving all bytes — parity with the
 // client-side masqueUDPDatagramSplitConn chunk size and ServeH2ConnectUDP downlink framing.
-func writeUDPPayloadAsH2DatagramCapsules(w io.Writer, flusher http.Flusher, udpPayload []byte) error {
+func writeUDPPayloadAsH2DatagramCapsules(w io.Writer, udpPayload []byte) error {
 	if len(udpPayload) == 0 {
-		return writeUDPH2ConnectDatagramCapsule(w, flusher, nil)
+		return writeUDPH2ConnectDatagramCapsule(w, nil)
 	}
 	step := h2ConnectUDPMaxUDPPayloadPerDatagramCapsule
 	for offset := 0; offset < len(udpPayload); {
@@ -104,7 +129,7 @@ func writeUDPPayloadAsH2DatagramCapsules(w io.Writer, flusher http.Flusher, udpP
 		if end > len(udpPayload) {
 			end = len(udpPayload)
 		}
-		if err := writeUDPH2ConnectDatagramCapsule(w, flusher, udpPayload[offset:end]); err != nil {
+		if err := writeUDPH2ConnectDatagramCapsule(w, udpPayload[offset:end]); err != nil {
 			return err
 		}
 		offset = end
@@ -201,16 +226,34 @@ func masqueClientH2TLSConfig(opts ClientOptions) *tls.Config {
 	return cfg
 }
 
+// h2UDPDownlinkItem is one CONNECT-UDP downlink datagram delivered by the background pump.
+type h2UDPDownlinkItem struct {
+	payload           []byte
+	err               error
+	icmpPortUnreachable bool
+}
+
 type h2ConnectUDPPacketConn struct {
 	reqPipeR *io.PipeReader
 	reqBody  io.WriteCloser
 	resp     *http.Response
 
-	// Mutex for ReadFrom: response body is not safe for concurrent reads; parity with connectIPUDPPacketConn.readMu.
-	readMu    sync.Mutex
-	writeMu   sync.Mutex
+	// respBodyBuf coalesces HTTP/2 response-body reads for RFC 9297 capsule framing (parity ServeH2ConnectUDP br).
+	respBodyBuf *bufio.Reader
+
+	writeMu sync.Mutex // uplink DATAGRAM capsules (request body)
+	readMu  sync.Mutex // downlink capsule parse (response body; connect-ip-go h2CapsulePipeStream parity)
+
+	// downlinkCh is set only for dialed CONNECT-UDP tunnels. A background pump drains the HTTP/2
+	// response body while uplink WriteTo runs so the server can flush ICMP/refused capsules without
+	// waiting for ReadFrom (bench dig timeout). Unit tests leave downlinkCh nil (sync ReadFrom).
+	downlinkCh chan h2UDPDownlinkItem
+
 	deadlines connDeadlines
 	closed    atomic.Bool
+
+	primeOnce sync.Once
+	primeErr  error
 
 	localAddr  net.Addr
 	remoteAddr net.Addr
@@ -251,6 +294,103 @@ func (c *h2ConnectUDPPacketConn) Close() error {
 	return nil
 }
 
+func (c *h2ConnectUDPPacketConn) runH2ConnectUDPDownlinkPump() {
+	defer close(c.downlinkCh)
+	for {
+		if c.closed.Load() {
+			return
+		}
+		c.readMu.Lock()
+		payload, err := c.readH2ConnectUDPDatagramLocked(context.Background())
+		c.readMu.Unlock()
+		if c.closed.Load() && err != nil {
+			return
+		}
+		item := h2UDPDownlinkItem{payload: payload, err: err}
+		if errors.Is(err, ErrUDPPortUnreachable) {
+			item.err = nil
+			item.icmpPortUnreachable = true
+		}
+		select {
+		case c.downlinkCh <- item:
+		default:
+			c.downlinkCh <- item
+		}
+		if err != nil && !errors.Is(err, ErrUDPPortUnreachable) {
+			return
+		}
+	}
+}
+
+func (c *h2ConnectUDPPacketConn) primeH2ConnectUDPStream() error {
+	if c == nil || c.reqBody == nil {
+		return nil
+	}
+	c.primeOnce.Do(func() {
+		uw := &h2UDPUploadWriter{c: c}
+		if err := writeUDPPayloadAsH2DatagramCapsules(uw, nil); err != nil {
+			c.primeErr = fmt.Errorf("masque h2 dataplane connect-udp stream prime: %w", err)
+		}
+	})
+	return c.primeErr
+}
+
+// readH2ConnectUDPDatagramLocked reads the next RFC 9297 DATAGRAM capsule on the CONNECT-UDP response
+// body. Caller must hold readMu. A zero-length UDP payload signals ICMP port-unreachable (bench dig).
+func (c *h2ConnectUDPPacketConn) readH2ConnectUDPDatagramLocked(ctx context.Context) ([]byte, error) {
+	if c == nil || c.resp == nil || c.resp.Body == nil {
+		return nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
+	}
+	for {
+		if c.closed.Load() {
+			return nil, net.ErrClosed
+		}
+		ct, r, err := c.awaitParseH2UDPResponseCapsule(ctx)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, err
+			}
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			_ = c.Close()
+			return nil, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", err)
+		}
+		if ct != capsuleTypeDatagram {
+			if discardErr := c.awaitDrainNonDatagramCapsule(ctx, r); discardErr != nil {
+				if errors.Is(discardErr, os.ErrDeadlineExceeded) || errors.Is(discardErr, context.Canceled) {
+					return nil, discardErr
+				}
+				_ = c.Close()
+				return nil, fmt.Errorf("masque h2 dataplane connect-udp non-datagram capsule drain: %w", discardErr)
+			}
+			continue
+		}
+		payload, err := c.awaitReadLimitedCapsulePayload(ctx, r)
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+			_ = c.Close()
+			return nil, fmt.Errorf("masque h2 dataplane connect-udp capsule body: %w", err)
+		}
+		udpPayload, ok, perr := ParseMasqueHTTPDatagramUDP(payload)
+		if perr != nil || !ok {
+			continue
+		}
+		if len(udpPayload) == 0 {
+			return nil, newUDPPortUnreachableError(c.remoteAddr)
+		}
+		// Dialed tunnels only: drop sub-DNS-header slop (bench dig to TCP-only port).
+		if c.downlinkCh != nil && len(udpPayload) < h2ConnectUDPMinDeliveredUDPPayload {
+			continue
+		}
+		dup := make([]byte, len(udpPayload))
+		copy(dup, udpPayload)
+		return dup, nil
+	}
+}
+
 // h2UDPResponseCapsuleResult is the asynchronous result of framing one RFC 9297 capsule header on the CONNECT-UDP HTTP/2 response body.
 type h2UDPResponseCapsuleResult struct {
 	ct  http3.CapsuleType
@@ -258,14 +398,37 @@ type h2UDPResponseCapsuleResult struct {
 	err error
 }
 
-func (c *h2ConnectUDPPacketConn) awaitParseH2UDPResponseCapsule(ctx context.Context) (http3.CapsuleType, io.Reader, error) {
+func (c *h2ConnectUDPPacketConn) responseBodyReader() *bufio.Reader {
+	if c.respBodyBuf == nil {
+		c.respBodyBuf = bufio.NewReaderSize(c.resp.Body, h2ConnectUDPResponseBodyBufSize)
+	}
+	return c.respBodyBuf
+}
+
+// Read implements net.PacketConn via ReadFrom so stacks that only call Read (not ReadFrom) still
+// receive CONNECT-UDP downlink datagrams (bench dig / DNS over TUN).
+func (c *h2ConnectUDPPacketConn) Read(p []byte) (int, error) {
+	n, _, err := c.ReadFrom(p)
+	return n, err
+}
+
+func (c *h2ConnectUDPPacketConn) parseH2UDPResponseCapsuleFromBody() (http3.CapsuleType, io.Reader, error) {
 	if c.resp == nil || c.resp.Body == nil {
 		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
 	}
-	body := c.resp.Body
+	return parseH2ConnectUDPCapsule(quicvarint.NewReader(c.responseBodyReader()))
+}
+
+func (c *h2ConnectUDPPacketConn) awaitParseH2UDPResponseCapsule(ctx context.Context) (http3.CapsuleType, io.Reader, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		return c.parseH2UDPResponseCapsuleFromBody()
+	}
 	ch := make(chan h2UDPResponseCapsuleResult, 1)
 	go func() {
-		ct, cr, cerr := parseH2ConnectUDPCapsule(quicvarint.NewReader(body))
+		ct, cr, cerr := c.parseH2UDPResponseCapsuleFromBody()
 		ch <- h2UDPResponseCapsuleResult{ct: ct, r: cr, err: cerr}
 	}()
 	select {
@@ -390,10 +553,13 @@ func (w *h2UDPUploadWriter) Write(b []byte) (int, error) {
 	return n, nil
 }
 
-func (c *h2ConnectUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	c.readMu.Lock()
-	defer c.readMu.Unlock()
-
+func (c *h2ConnectUDPPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if c.resp == nil || c.resp.Body == nil {
+		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
+	}
+	if c.closed.Load() {
+		return 0, nil, net.ErrClosed
+	}
 	ctx := context.Background()
 	readCancel := func() {}
 	if v := c.deadlines.read.Load(); v != 0 {
@@ -404,61 +570,46 @@ func (c *h2ConnectUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	}
 	defer readCancel()
 
-	for {
-		if c.closed.Load() {
-			return 0, nil, net.ErrClosed
-		}
-		if ctx.Err() != nil {
-			switch {
-			case errors.Is(ctx.Err(), context.Canceled):
-				return 0, nil, context.Canceled
-			default:
-				return 0, nil, os.ErrDeadlineExceeded
-			}
-		}
-		ct, r, err := c.awaitParseH2UDPResponseCapsule(ctx)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return 0, nil, err
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return 0, nil, err
-			}
-			// After a successful CONNECT-UDP, any capsule framing fault leaves the HTTP/2 body stream
-			// misaligned; close the tunnel instead of leaving a half-synced reader for further ReadFrom calls.
+	if c.downlinkCh != nil {
+		select {
+		case <-ctx.Done():
 			_ = c.Close()
-			// Use "dataplane" wording so the message does not contain "masque h2:" (handshake class);
-			// overlay fallback should not trigger on corrupt streams after a successful CONNECT-UDP.
-			return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", err)
-		}
-		if ct != capsuleTypeDatagram {
-			discardErr := c.awaitDrainNonDatagramCapsule(ctx, r)
-			if discardErr != nil {
-				if errors.Is(discardErr, os.ErrDeadlineExceeded) || errors.Is(discardErr, context.Canceled) {
-					return 0, nil, discardErr
+			if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
+				return 0, nil, ce
+			}
+			return 0, nil, os.ErrDeadlineExceeded
+		case item, ok := <-c.downlinkCh:
+			if !ok {
+				return 0, nil, net.ErrClosed
+			}
+			if item.err != nil {
+				if c.deadlines.read.Load() != 0 && (errors.Is(item.err, os.ErrDeadlineExceeded) || errors.Is(item.err, context.Canceled)) {
+					_ = c.Close()
 				}
-				_ = c.Close()
-				return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp non-datagram capsule drain: %w", discardErr)
+				return 0, nil, item.err
 			}
-			continue
-		}
-		payload, err := c.awaitReadLimitedCapsulePayload(ctx, r)
-		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return 0, nil, err
+			if item.icmpPortUnreachable {
+				return 0, c.remoteAddr, newUDPPortUnreachableError(c.remoteAddr)
 			}
-			_ = c.Close()
-			return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp capsule body: %w", err)
+			n := copy(p, item.payload)
+			return n, c.remoteAddr, nil
 		}
-		udpPayload, ok, perr := ParseMasqueHTTPDatagramUDP(payload)
-		// Parity with masque-go proxiedConn.ReadFrom: unreliable MASQUE datagrams — malformed HTTP
-		// Datagram payload must not tear down the CONNECT-UDP stream (continue like H3 goto start).
-		if perr != nil || !ok {
-			continue
-		}
-		n = copy(p, udpPayload)
-		return n, c.remoteAddr, nil
 	}
+
+	c.readMu.Lock()
+	payload, err := c.readH2ConnectUDPDatagramLocked(ctx)
+	c.readMu.Unlock()
+	if err != nil {
+		if errors.Is(err, ErrUDPPortUnreachable) {
+			return 0, c.remoteAddr, newUDPPortUnreachableError(c.remoteAddr)
+		}
+		if c.deadlines.read.Load() != 0 && (errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			_ = c.Close()
+		}
+		return 0, nil, err
+	}
+	n := copy(p, payload)
+	return n, c.remoteAddr, nil
 }
 
 func (c *h2ConnectUDPPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
@@ -477,9 +628,8 @@ func (c *h2ConnectUDPPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if c.deadlines.writeTimeoutExceeded() {
 		return 0, os.ErrDeadlineExceeded
 	}
-
 	uw := &h2UDPUploadWriter{c: c}
-	if err := writeUDPPayloadAsH2DatagramCapsules(uw, nil, p); err != nil {
+	if err := writeUDPPayloadAsH2DatagramCapsules(uw, p); err != nil {
 		// Match ReadFrom capsule reader / connect-ip writeToStream (connectIPH2CapsulePipeCleanUploadTermination):
 		// plain stream end or pipe half-close — no Close(), no wrapper (avoid false http_layer_fallback).
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
@@ -491,6 +641,7 @@ func (c *h2ConnectUDPPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		_ = c.Close()
 		return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 	}
+	flushH2ConnectUDPRequestBody(c.reqBody)
 	return len(p), nil
 }
 
@@ -579,74 +730,108 @@ func proxyStatusNextHopUDP(rsp *http.Response) *net.UDPAddr {
 	return &net.UDPAddr{IP: ip, Port: portNum}
 }
 
-func (s *coreSession) ensureH2UDPTransport(ctx context.Context) (*http2.Transport, error) {
-	if s.options.TCPDial == nil {
-		return nil, fmt.Errorf("masque h2: tcp dialer is not configured")
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, context.Cause(ctx)
-	}
-	s.h2UdpMu.Lock()
-	defer s.h2UdpMu.Unlock()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, context.Cause(ctx)
-	}
-	if s.h2UdpTransport != nil {
-		return s.h2UdpTransport, nil
-	}
+func (s *coreSession) newMasqueClientH2Transport() *http2.Transport {
 	tlsConf := masqueClientH2TLSConfig(s.options)
-	// Keep HTTP authority/SNI semantics from request URL, but route the TCP socket to DialPeer when set
-	// (parity with H3 path using masqueQuicDialCandidateHost / endpoint_v4 from WARP profile).
 	dialOverrideHost := strings.TrimSpace(masqueQuicDialCandidateHost(s.options))
 	alternateDialHost := ""
 	if strings.EqualFold(strings.TrimSpace(s.options.WarpConnectIPProtocol), "cf-connect-ip") {
 		alternateDialHost = warpMasqueH2AlternateDialHost(dialOverrideHost)
 	}
-	tr := &http2.Transport{
-		TLSClientConfig: tlsConf,
-		// Parity with http3.Transport DisableCompression: default H2 adds Accept-Encoding: gzip and may
-		// transparently decompress Response.Body — fatal for Extended CONNECT capsule/datagram streams.
-		DisableCompression: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			dialHostCandidates := h2DialHostCandidates(strings.TrimSpace(s.options.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost)
-			var lastErr error
-			for _, candidateHost := range dialHostCandidates {
-				dialAddr := addr
-				if candidateHost != "" {
-					if _, p, splitErr := net.SplitHostPort(addr); splitErr == nil {
-						dialAddr = net.JoinHostPort(candidateHost, p)
-					}
+	dialTLS := func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+		dialHostCandidates := h2DialHostCandidates(strings.TrimSpace(s.options.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost)
+		var lastErr error
+		for _, candidateHost := range dialHostCandidates {
+			dialAddr := addr
+			if candidateHost != "" {
+				if _, p, splitErr := net.SplitHostPort(addr); splitErr == nil {
+					dialAddr = net.JoinHostPort(candidateHost, p)
 				}
-				if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-					log.Printf("masque h2 tcp dial attempt network=%s addr=%s candidate=%q", network, dialAddr, candidateHost)
-				}
-				conn, err := s.options.TCPDial(ctx, network, dialAddr)
+			}
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque h2 tcp dial attempt network=%s addr=%s candidate=%q", network, dialAddr, candidateHost)
+			}
+			conn, err := s.options.TCPDial(ctx, network, dialAddr)
+			if err != nil {
+				lastErr = fmt.Errorf("masque h2: tcp dial %s %s: %w", network, dialAddr, err)
+				continue
+			}
+			if s.options.MasqueTCPDialTLS != nil {
+				tlsConn, err := s.options.MasqueTCPDialTLS(ctx, conn, cfg.NextProtos, dialAddr)
 				if err != nil {
-					lastErr = fmt.Errorf("masque h2: tcp dial %s %s: %w", network, dialAddr, err)
-					continue
-				}
-				if s.options.MasqueTCPDialTLS != nil {
-					tlsConn, err := s.options.MasqueTCPDialTLS(ctx, conn, cfg.NextProtos, dialAddr)
-					if err != nil {
-						_ = conn.Close()
-						lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
-						continue
-					}
-					return tlsConn, nil
-				}
-				tlsConn := tls.Client(conn, cfg)
-				if err := tlsConn.HandshakeContext(ctx); err != nil {
 					_ = conn.Close()
 					lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
 					continue
 				}
 				return tlsConn, nil
 			}
-			return nil, lastErr
-		},
+			tlsConn := tls.Client(conn, cfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				_ = conn.Close()
+				lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
+				continue
+			}
+			return tlsConn, nil
+		}
+		return nil, lastErr
 	}
-	s.h2UdpTransport = tr
+	tr, err := newMasqueBulkHTTP2Transport(tlsConf, dialTLS)
+	if err != nil {
+		tr = &http2.Transport{
+			TLSClientConfig:    tlsConf,
+			DisableCompression: true,
+			DialTLSContext:     dialTLS,
+		}
+		applyMasqueBulkHTTP2TransportDefaults(tr)
+	}
+	return tr
+}
+
+func (s *coreSession) ensureH2TransportCached(ctx context.Context, mu *sync.Mutex, slot **http2.Transport) (*http2.Transport, error) {
+	if s.options.TCPDial == nil {
+		return nil, fmt.Errorf("masque h2: tcp dialer is not configured")
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, context.Cause(ctx)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, context.Cause(ctx)
+	}
+	if *slot != nil {
+		return *slot, nil
+	}
+	tr := s.newMasqueClientH2Transport()
+	*slot = tr
 	return tr, nil
+}
+
+func (s *coreSession) ensureH2UDPTransport(ctx context.Context) (*http2.Transport, error) {
+	return s.ensureH2TransportCached(ctx, &s.h2UdpMu, &s.h2UdpTransport)
+}
+
+// ensureH2ConnectStreamTransport uses a dedicated HTTP/2 client pool from CONNECT-UDP/IP so a
+// saturated CONNECT-stream iperf run does not exhaust connection-level flow control before the
+// post-TCP UDP probe (bench §15.3a).
+func (s *coreSession) ensureH2ConnectStreamTransport(ctx context.Context) (*http2.Transport, error) {
+	return s.ensureH2TransportCached(ctx, &s.h2ConnectStreamMu, &s.h2ConnectStreamTransport)
+}
+
+func closeH2MasqueClientTransport(tr *http2.Transport) {
+	if tr != nil {
+		tr.CloseIdleConnections()
+	}
+}
+
+func (s *coreSession) closeAllH2ClientTransports() {
+	s.h2UdpMu.Lock()
+	closeH2MasqueClientTransport(s.h2UdpTransport)
+	s.h2UdpTransport = nil
+	s.h2UdpMu.Unlock()
+	s.h2ConnectStreamMu.Lock()
+	closeH2MasqueClientTransport(s.h2ConnectStreamTransport)
+	s.h2ConnectStreamTransport = nil
+	s.h2ConnectStreamMu.Unlock()
 }
 
 func h2DialHostCandidates(connectProto string, dialOverrideHost string, alternateDialHost string) []string {
@@ -696,16 +881,20 @@ func warpMasqueH2AlternateDialHost(host string) string {
 	return netip.AddrFrom4(v4).String()
 }
 
-// resetH2UDPTransportLockedAssumeMu closes the cached HTTP/2 client transport shared by CONNECT-UDP,
-// CONNECT-IP, and H2 CONNECT-stream so the next dial establishes a fresh TLS+H2 connection pool.
-// Caller must hold s.mu.
+// resetH2UDPTransportLockedAssumeMu closes the CONNECT-UDP/IP HTTP/2 pool. Caller must hold s.mu.
 func (s *coreSession) resetH2UDPTransportLockedAssumeMu() {
 	s.h2UdpMu.Lock()
-	if s.h2UdpTransport != nil {
-		s.h2UdpTransport.CloseIdleConnections()
-		s.h2UdpTransport = nil
-	}
+	closeH2MasqueClientTransport(s.h2UdpTransport)
+	s.h2UdpTransport = nil
 	s.h2UdpMu.Unlock()
+}
+
+// resetH2ConnectStreamTransportLockedAssumeMu closes the CONNECT-stream HTTP/2 pool. Caller must hold s.mu.
+func (s *coreSession) resetH2ConnectStreamTransportLockedAssumeMu() {
+	s.h2ConnectStreamMu.Lock()
+	closeH2MasqueClientTransport(s.h2ConnectStreamTransport)
+	s.h2ConnectStreamTransport = nil
+	s.h2ConnectStreamMu.Unlock()
 }
 
 func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
@@ -753,12 +942,16 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 		_ = pipeR.Close()
 		return nil, fmt.Errorf("masque h2: new connect-udp request: %w", err)
 	}
-	req.Proto = h2ConnectUDPProto
-	req.ProtoMajor = 2
-	req.ProtoMinor = 0
+	// Parity h2_connect_stream / connect-ip-go DialHTTP2: RFC 8441 uses :protocol only; do not set
+	// req.Proto to "connect-udp" — x/net/http2 treats non-HTTP Proto as a plain (non-Extended) CONNECT
+	// and the request DATAGRAM body never reaches the server (bench dig timeout, TCP stream OK).
+	req.Header = make(http.Header)
 	req.Header.Set(":protocol", h2ConnectUDPProto)
 	req.Header.Set(http3.CapsuleProtocolHeader, capsuleProtoHeaderValueH2)
 	setMasqueAuthorizationHeader(req.Header, s.options)
+	if u.Host != "" {
+		req.Host = u.Host
+	}
 	req.ContentLength = -1
 
 	resp, err := tr.RoundTrip(req)
@@ -802,12 +995,24 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 		raddr = masqueUDPAddr{s: net.JoinHostPort(nh.IP.String(), strconv.Itoa(nh.Port))}
 	}
 
-	conn := &h2ConnectUDPPacketConn{
+	pc := &h2ConnectUDPPacketConn{
 		reqPipeR:   pipeR,
-		reqBody:    pipeW,
+		reqBody:    newH2ConnectUDPRequestBodyWriter(pipeW),
 		resp:       resp,
 		localAddr:  masqueUDPAddr{s: dialAddr},
 		remoteAddr: raddr,
+		downlinkCh: make(chan h2UDPDownlinkItem, 64),
 	}
-	return conn, nil
+	// Drain the response body before any uplink DATA (prime / WriteTo): on WAN paths HTTP/2
+	// flow control deadlocks if request capsules are written while the peer response is idle.
+	go pc.runH2ConnectUDPDownlinkPump()
+	// Prime at dial, not first WriteTo: TUN packetConnectionCopy may start ReadFrom (download)
+	// before the upload goroutine runs WriteTo; without an early empty DATAGRAM the server
+	// downlink stays blocked on onward UDP Read while the client pump waits on response DATA.
+	if err := pc.primeH2ConnectUDPStream(); err != nil {
+		_ = pc.Close()
+		return nil, err
+	}
+	return pc, nil
 }
+

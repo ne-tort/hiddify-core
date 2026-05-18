@@ -22,9 +22,9 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 )
 
-// Raised from 8 KiB for MASQUE CONNECT-stream / bulk upload (iperf, TCP relay): the default
-// capped http3.ClientConn.sendRequestBody throughput when the request body already coalesces.
-const bodyCopyBufferSize = 256 * 1024
+// bodyCopyBufferSize: ClientConn.sendRequestBody (io.CopyBuffer). 8 MiB matches streamConn
+// ReadFrom upload; upload pipe flush policy (h3MasqueBufferedPipeWriter) handles duplex ACKs.
+const bodyCopyBufferSize = 8 * 1024 * 1024
 
 type requestWriter struct {
 	mutex     sync.Mutex

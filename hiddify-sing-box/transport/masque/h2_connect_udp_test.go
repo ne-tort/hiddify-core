@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"runtime"
 	"testing"
 	"time"
 
@@ -545,6 +546,148 @@ func TestIsMasqueHTTPLayerSwitchableFailure(t *testing.T) {
 	}
 }
 
+func TestH2ConnectUDPPacketConnReadFromEmptyDatagramICMPRefused(t *testing.T) {
+	var wb bytes.Buffer
+	if err := writeUDPH2ConnectDatagramCapsule(&wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := &h2ConnectUDPPacketConn{
+		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
+		remoteAddr: masqueUDPAddr{s: "192.0.2.3:5201"},
+	}
+	n, _, err := c.ReadFrom(make([]byte, 64))
+	require.Equal(t, 0, n)
+	require.ErrorIs(t, err, ErrUDPPortUnreachable)
+}
+
+func TestH2ConnectUDPPacketConnReadFromDropsShortNonICMPPayload(t *testing.T) {
+	var wb bytes.Buffer
+	// DATAGRAM capsule: context id 0 + 4-byte slop (< DNS header) then empty ICMP.
+	if err := writeUDPH2ConnectDatagramCapsule(&wb, []byte{0xde, 0xad, 0xbe, 0xef}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeUDPH2ConnectDatagramCapsule(&wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := &h2ConnectUDPPacketConn{
+		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
+		remoteAddr: masqueUDPAddr{s: "192.0.2.3:5201"},
+		downlinkCh: make(chan h2UDPDownlinkItem, 2),
+	}
+	go c.runH2ConnectUDPDownlinkPump()
+	n, _, err := c.ReadFrom(make([]byte, 64))
+	require.Equal(t, 0, n)
+	require.ErrorIs(t, err, ErrUDPPortUnreachable)
+}
+
+// TestH2ConnectUDPReadBeforeWriteMatchesTUNOrder verifies dial-time stream prime lets a download
+// goroutine block on ReadFrom before the upload goroutine WriteTo (packetConnectionCopy parity).
+func TestH2ConnectUDPReadBeforeWriteMatchesTUNOrder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("connected UDP ICMP port-unreachable is unreliable on Windows")
+	}
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tcpLn.Close() })
+	tcpPort := tcpLn.Addr().(*net.TCPAddr).Port
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	tpl, err := uritemplate.New(rawTpl)
+	require.NoError(t, err)
+
+	s := &coreSession{
+		options: ClientOptions{
+			Server:              "127.0.0.1",
+			ServerPort:          uint16(proxyPort),
+			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	inner, err := s.dialUDPOverHTTP2(ctx, tpl, net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpPort)))
+	require.NoError(t, err)
+	defer inner.Close()
+	pc := newMasqueUDPDatagramSplitConn(inner, 1200, option.MasqueHTTPLayerH2)
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, _, rerr := pc.ReadFrom(buf)
+		if rerr != nil {
+			errCh <- rerr
+			return
+		}
+		if n != 0 {
+			errCh <- fmt.Errorf("expected icmp empty read, got %d bytes", n)
+			return
+		}
+		errCh <- nil
+	}()
+	time.Sleep(30 * time.Millisecond)
+	dnsLike := bytes.Repeat([]byte{0xab}, 40)
+	_, werr := pc.WriteTo(dnsLike, nil)
+	require.NoError(t, werr)
+	select {
+	case rerr := <-errCh:
+		require.ErrorIs(t, rerr, ErrUDPPortUnreachable)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadFrom blocked past upload (TUN order deadlock)")
+	}
+}
+
+// Kernel ICMP port-unreachable on a connected UDP socket to a TCP-only port must surface as ECONNREFUSED
+// on ReadFrom (bench UDP probe parity with H3 / masque-go transient read handling on the server).
+func TestH2ConnectUDPPortUnreachableRoundTripInProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("connected UDP ICMP port-unreachable is unreliable on Windows; bench runs on Linux")
+	}
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tcpLn.Close() })
+	tcpPort := tcpLn.Addr().(*net.TCPAddr).Port
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	tpl, err := uritemplate.New(rawTpl)
+	require.NoError(t, err)
+
+	s := &coreSession{
+		options: ClientOptions{
+			Server:              "127.0.0.1",
+			ServerPort:          uint16(proxyPort),
+			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	pc, err := s.dialUDPOverHTTP2(ctx, tpl, net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpPort)))
+	require.NoError(t, err)
+	defer pc.Close()
+
+	_, err = pc.WriteTo([]byte{0x00, 0x01, 0x02}, nil)
+	require.NoError(t, err)
+
+	buf := make([]byte, 256)
+	n, _, err := pc.ReadFrom(buf)
+	require.Equal(t, 0, n)
+	require.ErrorIs(t, err, ErrUDPPortUnreachable)
+}
+
 // startInProcessH2UDPConnectProxy serves HTTPS + HTTP/2 with RFC 8441 CONNECT-UDP and relays UDP via ServeH2ConnectUDP.
 func startInProcessH2UDPConnectProxy(t *testing.T) int {
 	t.Helper()
@@ -573,6 +716,7 @@ func startInProcessH2UDPConnectProxy(t *testing.T) int {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
+		_ = http.NewResponseController(w).EnableFullDuplex()
 		w.Header().Set(http3.CapsuleProtocolHeader, CapsuleProtocolHeaderValueH2())
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {

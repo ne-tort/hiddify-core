@@ -126,8 +126,14 @@ func TestCubicSenderPacing(t *testing.T) {
 	sender.rttStats.UpdateRTT(10*time.Millisecond, 0)
 	sender.clock.Advance(time.Hour)
 
-	// Fill the send window with data, then verify that we can't send.
-	sender.SendAvailableSendWindow()
+	// Production MASQUE raises pacing burst above icwnd (see maxBurstSizePackets); draining only
+	// cwnd may leave pacing tokens — finish burst allowance before expecting TimeUntilSend > 0.
+	for sender.sender.HasPacingBudget(monotime.Time(*sender.clock)) {
+		sender.sender.OnPacketSent(monotime.Time(*sender.clock), sender.bytesInFlight, sender.packetNumber, maxDatagramSize, true)
+		sender.packetNumber++
+		sender.bytesInFlight += maxDatagramSize
+	}
+
 	sender.AckNPackets(1)
 
 	// Check that we can't send immediately due to pacing

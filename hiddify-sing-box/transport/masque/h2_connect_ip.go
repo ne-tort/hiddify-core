@@ -4,10 +4,28 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 
 	connectip "github.com/quic-go/connect-ip-go"
 )
+
+func masqueConnectIPDialOptions(opts ClientOptions) connectip.DialOptions {
+	dopts := connectip.DialOptions{}
+	if u := strings.TrimSpace(opts.ClientBasicUsername); u != "" {
+		dopts.ExtraRequestHeaders = make(http.Header)
+		dopts.ExtraRequestHeaders.Set("Authorization", masqueClientBasicAuthHeader(u, opts.ClientBasicPassword))
+	} else if tok := strings.TrimSpace(opts.ServerToken); tok != "" {
+		dopts.BearerToken = tok
+	}
+	if wp := strings.TrimSpace(opts.WarpConnectIPProtocol); wp != "" {
+		dopts.ExtendedConnectProtocol = wp
+		if strings.EqualFold(wp, "cf-connect-ip") {
+			dopts.HTTP2LegacyConnect = true
+		}
+	}
+	return dopts
+}
 
 func (s *coreSession) dialConnectIPHTTP2(ctx context.Context) (*connectip.Conn, error) {
 	dialAddr := masqueConnectIPOverlayDialAddr(s.options)
@@ -35,15 +53,7 @@ func (s *coreSession) dialConnectIPHTTP2(ctx context.Context) (*connectip.Conn, 
 	}
 	rt := s.getTCPRoundTripper(tr)
 
-	opts := connectip.DialOptions{
-		BearerToken: strings.TrimSpace(s.options.ServerToken),
-	}
-	if wp := strings.TrimSpace(s.options.WarpConnectIPProtocol); wp != "" {
-		opts.ExtendedConnectProtocol = wp
-		if strings.EqualFold(wp, "cf-connect-ip") {
-			opts.HTTP2LegacyConnect = true
-		}
-	}
+	opts := masqueConnectIPDialOptions(s.options)
 	conn, rsp, err := connectip.DialHTTP2(ctx, rt, s.templateIP, opts)
 	if err != nil {
 		if altHost != "" && isMasqueH2ExtendedConnectUnsupportedByPeer(err) {
@@ -54,6 +64,9 @@ func (s *coreSession) dialConnectIPHTTP2(ctx context.Context) (*connectip.Conn, 
 	}
 	s.logCfConnectIPHTTPResponse(rsp)
 	if err := s.warpMasqueConnectIPBootstrap(conn); err != nil {
+		return nil, err
+	}
+	if err := s.genericMasqueConnectIPBootstrap(conn); err != nil {
 		return nil, err
 	}
 	return conn, nil

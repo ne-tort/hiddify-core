@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -16,6 +17,7 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
+	tmasque "github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -303,7 +305,46 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 		break
 	}
 
-	_, err := bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+	// MASQUE CONNECT-stream streamConn implements io.WriterTo with large HTTP/2/3 body reads; sing
+	// bufio.CopyWithCounters only uses ReadBuffer and small sink buffers unless we take WriterTo.
+	// It also implements io.ReaderFrom so upload can bulk-read from TUN (parity with std io.Copy).
+	// Prefer explicit WriterTo/ReadFrom when advertised: avoids choosing the splice path when a
+	// wrapper still exposes syscall.Conn on an inner fd, and keeps MASQUE bulk semantics first.
+	var err error
+	if wt, ok := sourceReader.(interface {
+		io.WriterTo
+		C.RouteConnectionCopyWriterTo
+	}); ok {
+		traceRouteConnectionCopyBranch("writer_to", direction, sourceReader, destinationWriter)
+		var written int64
+		written, err = wt.WriteTo(destinationWriter)
+		if written > 0 {
+			for _, counter := range readCounters {
+				counter(written)
+			}
+			for _, counter := range writeCounters {
+				counter(written)
+			}
+		}
+	} else if rf, ok := destinationWriter.(interface {
+		io.ReaderFrom
+		C.RouteConnectionCopyReaderFrom
+	}); ok {
+		traceRouteConnectionCopyBranch("reader_from", direction, sourceReader, destinationWriter)
+		var read int64
+		read, err = rf.ReadFrom(sourceReader)
+		if read > 0 {
+			for _, counter := range readCounters {
+				counter(read)
+			}
+			for _, counter := range writeCounters {
+				counter(read)
+			}
+		}
+	} else {
+		traceRouteConnectionCopyBranch("copy_counters", direction, sourceReader, destinationWriter)
+		_, err = bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+	}
 	if err != nil {
 		common.Close(source, destination)
 	} else if duplexDst, isDuplex := destination.(N.WriteCloser); isDuplex {
@@ -335,6 +376,22 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 			m.logger.TraceContext(ctx, "connection download closed")
 		}
 	}
+}
+
+func traceRouteConnectionCopyBranch(branch string, direction bool, sourceReader io.Reader, destinationWriter io.Writer) {
+	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_COPY")) != "1" {
+		return
+	}
+	dir := "upload"
+	if direction {
+		dir = "download"
+	}
+	_, sourceWriterTo := sourceReader.(io.WriterTo)
+	_, sourceWriterToMarker := sourceReader.(C.RouteConnectionCopyWriterTo)
+	_, destReaderFrom := destinationWriter.(io.ReaderFrom)
+	_, destReaderFromMarker := destinationWriter.(C.RouteConnectionCopyReaderFrom)
+	fmt.Fprintf(os.Stderr, "MASQUE_COPY branch=%s direction=%s source_type=%T destination_type=%T source_writer_to=%t source_marker=%t destination_reader_from=%t destination_marker=%t\n",
+		branch, dir, sourceReader, destinationWriter, sourceWriterTo, sourceWriterToMarker, destReaderFrom, destReaderFromMarker)
 }
 
 func (m *ConnectionManager) connectionCopyEarlyWrite(source net.Conn, destination io.Writer, readHandshake bool, writeHandshake bool) error {
@@ -379,7 +436,12 @@ func (m *ConnectionManager) connectionCopyEarlyWrite(source net.Conn, destinatio
 }
 
 func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.PacketReader, destination N.PacketWriter, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
-	_, err := bufio.CopyPacket(destination, source)
+	var err error
+	if direction {
+		err = copyPacketDownload(ctx, source, destination)
+	} else {
+		_, err = bufio.CopyPacket(destination, source)
+	}
 	if !direction {
 		if err == nil {
 			m.logger.DebugContext(ctx, "packet upload finished")
@@ -401,4 +463,60 @@ func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.P
 		onClose(err)
 	}
 	common.Close(source, destination)
+}
+
+// packetRelayMuxHeadroom is reserved before WritePacket on muxed inbounds (e.g. vmess serverMux)
+// that call ExtendHeader on the relay buffer; a full 16 KiB ReadPacket leaves FreeLen()==0 and panics.
+const packetRelayMuxHeadroom = 32
+
+// copyPacketDownload relays masque/outbound UDP to the TUN inbound side. CONNECT-UDP ICMP
+// (ErrUDPPortUnreachable) must not tear down the relay — keep draining like H3 proxiedConn.
+func copyPacketDownload(ctx context.Context, source N.PacketReader, destination N.PacketWriter) error {
+	buffer := buf.NewPacket()
+	defer buffer.Release()
+	for {
+		buffer.Reset()
+		destinationAddr, err := source.ReadPacket(buffer)
+		if err != nil {
+			if tmasque.IsUDPPortUnreachable(err) {
+				remote := tmasque.UDPPortUnreachableRemote(err, destinationAddr)
+				if !remote.IsValid() {
+					if pc, ok := destination.(interface{ RemoteAddr() net.Addr }); ok && pc.RemoteAddr() != nil {
+						remote = M.SocksaddrFromNet(pc.RemoteAddr()).Unwrap()
+					}
+				}
+				deliverUDPPortUnreachableToTUN(destination, remote)
+				continue
+			}
+			if E.IsClosedOrCanceled(err) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			default:
+			}
+			return err
+		}
+		if buffer.IsEmpty() {
+			continue
+		}
+		// Mux inbounds prepend via ExtendHeader (leading space). A full 16 KiB ReadPacket has
+		// start==0; cloning with Write() alone leaves no leading space and still panics in vmess mux.
+		if buffer.Start() < packetRelayMuxHeadroom || buffer.FreeLen() < packetRelayMuxHeadroom {
+			clone := buf.NewPacket()
+			payloadLen := buffer.Len()
+			clone.Resize(packetRelayMuxHeadroom, payloadLen)
+			copy(clone.Bytes(), buffer.Bytes())
+			err := destination.WritePacket(clone, destinationAddr)
+			clone.Release()
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if err := destination.WritePacket(buffer, destinationAddr); err != nil {
+			return err
+		}
+	}
 }

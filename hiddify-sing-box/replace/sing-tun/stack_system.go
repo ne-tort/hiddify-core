@@ -863,6 +863,10 @@ type systemUDPPacketWriter4 struct {
 	txChecksumOffload bool
 }
 
+func (w *systemUDPPacketWriter4) WriteUDPPortUnreachable(_ M.Socksaddr) error {
+	return writeIPv4ICMPPortUnreachable(w.tun, w.frontHeadroom, 0, w.header)
+}
+
 func (w *systemUDPPacketWriter4) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
 	newPacket := buf.NewSize(w.frontHeadroom + len(w.header) + buffer.Len())
 	defer newPacket.Release()
@@ -899,6 +903,10 @@ type systemUDPPacketWriter6 struct {
 	header            []byte
 	source            netip.AddrPort
 	txChecksumOffload bool
+}
+
+func (w *systemUDPPacketWriter6) WriteUDPPortUnreachable(_ M.Socksaddr) error {
+	return writeIPv6ICMPPortUnreachable(w.tun, w.frontHeadroom, 0, w.header)
 }
 
 func (w *systemUDPPacketWriter6) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {

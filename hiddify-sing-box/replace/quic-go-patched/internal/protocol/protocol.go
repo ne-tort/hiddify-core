@@ -142,8 +142,8 @@ const DefaultActiveConnectionIDLimit = 2
 // MaxAckDelayExponent is the maximum ack delay exponent
 const MaxAckDelayExponent = 20
 
-// DefaultMaxAckDelay is the default max_ack_delay
-const DefaultMaxAckDelay = 25 * time.Millisecond
+// DefaultMaxAckDelay is the default max_ack_delay (aligned with MaxAckDelay in params.go).
+const DefaultMaxAckDelay = 10 * time.Millisecond
 
 // MaxMaxAckDelay is the maximum max_ack_delay
 const MaxMaxAckDelay = (1<<14 - 1) * time.Millisecond

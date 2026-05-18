@@ -365,6 +365,9 @@ type udpDatagramWriter struct {
 	msgs4   []ipv4.Message
 	msgs6   []ipv6.Message
 	enabled bool
+	// icmpRelay sends an empty CONNECT-UDP HTTP/3 DATAGRAM when kernel Write surfaces ICMP
+	// port-unreachable (bench dig to TCP-only port; parity H2 ServeH2ConnectUDP uplink).
+	icmpRelay func() error
 	// Keep fallback backoff state across consecutive batches, otherwise
 	// repeated transient socket pressure can busy-spin at batch boundaries.
 	sendBackoff transientPressureBackoff
@@ -422,8 +425,30 @@ func isTransientUDPSendError(err error) bool {
 		errors.Is(err, syscall.ECONNRESET)
 }
 
+// isICMPPortUnreachableUDPRead reports connected-UDP reads where the kernel delivered ICMP
+// destination-unreachable with no payload. Relay an empty HTTP/3 DATAGRAM so the client can
+// surface ErrICMPPortUnreachable (bench UDP probe parity with H2 empty RFC 9297 DATAGRAM).
+func isICMPPortUnreachableUDPRead(n int, err error) bool {
+	if err == nil || n > 0 {
+		return false
+	}
+	return isICMPPortUnreachableUDPSyscall(err)
+}
+
+func isICMPPortUnreachableUDPSyscall(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
+}
+
 func isTransientUDPReadError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isICMPPortUnreachableUDPRead(0, err) {
 		return false
 	}
 	var netErr net.Error
@@ -480,6 +505,13 @@ func isHTTPDatagramTooLargeError(err error) bool {
 
 func (w *udpDatagramWriter) writePayload(payload []byte) error {
 	_, err := w.conn.Write(payload)
+	if err != nil && w.icmpRelay != nil && isICMPPortUnreachableUDPSyscall(err) {
+		relayErr := w.icmpRelay()
+		if relayErr == nil || isTransientHTTPDatagramSendError(relayErr) {
+			return nil
+		}
+		return relayErr
+	}
 	return err
 }
 
@@ -839,6 +871,9 @@ func (s *Proxy) proxyConnSend(conn *net.UDPConn, str proxyDatagramReceiveStream)
 	}
 	var payloadBatch [proxyConnUDPSendBatchMax][]byte
 	writer := newUDPDatagramWriter(conn)
+	if sender, ok := any(str).(interface{ SendDatagram([]byte) error }); ok {
+		writer.icmpRelay = func() error { return sender.SendDatagram(contextIDZero) }
+	}
 	if dr, ok := any(str).(tryDrainHTTPDatagrams); ok {
 		drainer = dr
 	}
@@ -1165,6 +1200,19 @@ func (s *Proxy) proxyConnReceive(conn *net.UDPConn, str *http3.Stream) error {
 				flushOversizedReadDrops()
 				flushOversizedHTTPSendDrops()
 				return nil
+			}
+			if isICMPPortUnreachableUDPRead(n, err) {
+				if sendErr := str.SendDatagram(contextIDZero); sendErr != nil && !isTransientHTTPDatagramSendError(sendErr) {
+					flushTransientReadDrops()
+					flushTransientSendDrops()
+					flushOversizedReadDrops()
+					flushOversizedHTTPSendDrops()
+					return sendErr
+				}
+				flushTransientReadDrops()
+				readBackoff.onProgress()
+				sendBackoff.onProgress()
+				continue
 			}
 			if isTransientUDPReadError(err) {
 				// UDP is best-effort: transient socket/read pressure should not

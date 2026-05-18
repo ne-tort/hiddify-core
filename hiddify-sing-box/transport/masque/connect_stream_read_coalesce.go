@@ -2,10 +2,30 @@ package masque
 
 import "io"
 
-// masqueConnectStreamReadCoalesceTarget caps how many bytes one net.Conn.Read tries to
-// pull from the HTTP/2/3 CONNECT-stream body. quic-go often delivers small DATA chunks;
-// coalescing cuts per-chunk overhead in TUN/TCP relay without bufio.Reader's single-fill cap.
-const masqueConnectStreamReadCoalesceTarget = 32 * 1024
+// masqueConnectStreamReadCoalesceTarget caps how many bytes one net.Conn.Read (or one
+// streamConn.WriteTo iteration) tries to pull from the HTTP/2/3 CONNECT-stream body.
+// quic-go often delivers small DATA chunks; coalescing cuts per-chunk overhead in TUN/TCP relay.
+// 8 MiB aligns with protocol/masque relayCopyBuffered and http3 bodyCopyBufferSize — fewer DATA
+// / syscall iterations on saturated download paths versus 4 MiB (same bench, upload≫download).
+const masqueConnectStreamReadCoalesceTarget = 8 * 1024 * 1024
+
+// masqueConnectStreamReadCoalescePerCall caps one coalesceConnectStreamRead / WriteTo
+// iteration (avoids blocking until full masqueConnectStreamReadCoalesceTarget). Sized for
+// steady pipelining once upload-side pipe flushes are prompt (see h3MasqueBufferedPipeWriter).
+const masqueConnectStreamReadCoalescePerCall = 1024 * 1024
+
+// masqueConnectStreamReadCoalesceContinueMin: only attempt follow-up inner Reads after the
+// first chunk when the first read already returned at least this many bytes. Otherwise a
+// second Read can block forever waiting to fill the caller's buffer (e.g. 4-byte "pong"
+// into reply[8]) — net.Conn expects not to stall after delivering available payload.
+// 512 keeps control-sized tails safe while coalescing common ~0.5–1 KiB first QUIC/H3 DATA
+// slices into fewer TUN writes than 1024 (download asymmetry on bench).
+const masqueConnectStreamReadCoalesceContinueMin = 512
+
+// masqueConnectStreamReadCoalesceBulkMinLen: streamConn.WriteTo / ReadBuffer scratch (≥32 KiB).
+// Follow-up Reads with continueMin=1 belong only on that path — on smaller caller buffers a
+// blocking second Read after ~256 B of iperf banner stalls upload (bench: iperf3 interrupt).
+const masqueConnectStreamReadCoalesceBulkMinLen = 32 * 1024
 
 func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
 	if len(p) == 0 {
@@ -16,7 +36,30 @@ func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
 		return 0, err
 	}
 	total := n
+	if err != nil {
+		if total > 0 && err == io.EOF {
+			return total, nil
+		}
+		return total, err
+	}
+	continueMin := masqueConnectStreamReadCoalesceContinueMin
+	if len(p) >= masqueConnectStreamReadCoalesceBulkMinLen {
+		// iperf banners / control tails on the response stream are often <512 B; a blocking
+		// follow-up Read here stalls HTTP/3 upload on the same QUIC stream (0 B bench upload).
+		if total < masqueConnectStreamReadCoalesceContinueMin {
+			return total, nil
+		}
+		continueMin = 1
+	} else if total >= masqueConnectStreamReadCoalesceContinueMin {
+		continueMin = 1
+	}
+	if total < continueMin {
+		return total, nil
+	}
 	goal := len(p)
+	if goal > masqueConnectStreamReadCoalescePerCall {
+		goal = masqueConnectStreamReadCoalescePerCall
+	}
 	if goal > masqueConnectStreamReadCoalesceTarget {
 		goal = masqueConnectStreamReadCoalesceTarget
 	}

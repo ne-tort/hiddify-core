@@ -29,6 +29,7 @@ func recordTCPFallback() {
 func recordConnectIPStackReady(ready bool) {
 	if ready {
 		masqueConnectIPStackReady.Add(1)
+		emitConnectIPObservabilityEvent("connect_ip_stack_ready")
 		return
 	}
 	masqueConnectIPStackNotReady.Add(1)

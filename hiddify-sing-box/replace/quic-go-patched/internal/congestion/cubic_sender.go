@@ -17,7 +17,10 @@ const (
 	maxBurstPackets            = 3
 	renoBeta                   = 0.7 // Reno backoff factor.
 	minCongestionWindowPackets = 2
-	initialCongestionWindow    = 32
+	// initialCongestionWindow is in packets (times maxDatagramSize bytes in NewCubicSender).
+	// MASQUE paths are often single fat streams over higher-RTT paths; a small icwnd leaves bulk
+	// download pacing-limited until cwnd grows — raise floor (RFC 9002 minimum is 10 × max_datagram).
+	initialCongestionWindow = 192
 )
 
 type cubicSender struct {

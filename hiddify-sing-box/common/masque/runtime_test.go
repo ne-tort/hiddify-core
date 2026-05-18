@@ -415,6 +415,7 @@ func TestRuntimeDegradedNotReadyPreservesCapabilityClassForTCPBoundary(t *testin
 func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {
 	rt := NewRuntime(testFactory{session: &testSession{ip: &testIPSession{}}}, RuntimeOptions{
 		TransportMode: "connect_ip",
+		TCPTransport:  "connect_ip",
 	})
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("start runtime: %v", err)
@@ -425,6 +426,30 @@ func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {
 	}
 	if ip == nil {
 		t.Fatal("expected non-nil ip session")
+	}
+}
+
+func TestRuntimeConnectIPHybridDefersIPPlaneUntilOpen(t *testing.T) {
+	ts := &testSession{ip: &testIPSession{}}
+	rt := NewRuntime(testFactory{session: ts}, RuntimeOptions{
+		TransportMode: "connect_ip",
+		TCPTransport:  "connect_stream",
+	})
+	if err := rt.Start(context.Background()); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	if ts.openIPCalls.Load() != 0 {
+		t.Fatalf("hybrid start must not open CONNECT-IP eagerly, open calls=%d", ts.openIPCalls.Load())
+	}
+	ip, err := rt.OpenIPSession(context.Background())
+	if err != nil {
+		t.Fatalf("open ip session: %v", err)
+	}
+	if ip == nil {
+		t.Fatal("expected non-nil ip session")
+	}
+	if ts.openIPCalls.Load() != 1 {
+		t.Fatalf("expected lazy OpenIPSession, open calls=%d", ts.openIPCalls.Load())
 	}
 }
 

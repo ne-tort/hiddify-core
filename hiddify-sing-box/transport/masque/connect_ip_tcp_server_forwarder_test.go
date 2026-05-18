@@ -15,6 +15,22 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+func TestConnectIPTCPForwarderMaxSegmentPayloadFitsDatagramCeiling(t *testing.T) {
+	t.Parallel()
+	maxSeg := connectIPTCPForwarderMaxSegmentPayload(1460)
+	const tcpHdrBudget = header.TCPMinimumSize + 12
+	wantCap := connectIPTCPForwarderMaxIPv4Datagram - header.IPv4MinimumSize - tcpHdrBudget
+	if maxSeg > wantCap {
+		t.Fatalf("maxSeg=%d want <= %d (gVisor CONNECT-IP MTU)", maxSeg, wantCap)
+	}
+	if maxSeg >= 1440 {
+		t.Fatalf("maxSeg=%d still near wire MSS; expected clamp for 1372 B datagram path", maxSeg)
+	}
+	if maxSeg < 512 {
+		t.Fatalf("maxSeg=%d too small", maxSeg)
+	}
+}
+
 func TestBuildIPv4TCPPacketChecksumValid(t *testing.T) {
 	t.Parallel()
 	opts := buildSynAckTCPOptions(header.TCPSynOptions{MSS: 1460, WS: 7, TS: true, TSVal: 42})

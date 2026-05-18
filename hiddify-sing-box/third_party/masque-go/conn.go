@@ -90,6 +90,10 @@ type proxiedConn struct {
 
 var _ net.PacketConn = &proxiedConn{}
 
+// ErrICMPPortUnreachable is returned from ReadFrom when the relay delivered ICMP
+// destination-unreachable as an empty CONNECT-UDP payload (context id 0, zero UDP bytes).
+var ErrICMPPortUnreachable = errors.New("masque connect-udp icmp port unreachable")
+
 func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	c := &proxiedConn{
 		str:           str,
@@ -245,6 +249,9 @@ start:
 			c.extendPrefetchFromTry()
 		}
 		goto start
+	}
+	if len(payload) == 0 {
+		return 0, c.remoteAddr, ErrICMPPortUnreachable
 	}
 	// If b is too small, additional bytes are discarded.
 	// This mirrors the behavior of large UDP datagrams received on a UDP socket (on Linux).

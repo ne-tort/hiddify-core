@@ -22,7 +22,6 @@ import (
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/http2"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/common/dialer"
@@ -38,6 +37,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 	"github.com/yosida95/uritemplate/v3"
+	"golang.org/x/net/http2"
 )
 
 // connectIPServerParseDropTotal counts inbound CONNECT-IP packets dropped at the
@@ -46,12 +46,42 @@ var connectIPServerParseDropTotal atomic.Uint64
 
 // masqueRelayTCPCopyBufLen is larger than io.Copy's default (32 KiB) to cut syscall /
 // framing overhead on CONNECT-stream bulk relay (H2/H3 response body ↔ target TCP).
-const masqueRelayTCPCopyBufLen = 512 * 1024
+// Keep aligned with transport/masque masqueConnectStreamReadCoalesceTarget (8 MiB).
+const masqueRelayTCPCopyBufLen = 8 * 1024 * 1024
+
+// masqueRelayTCPRequestBodyBufioSize coalesces HTTP/2–3 request-body reads before onward TCP (upload).
+const masqueRelayTCPRequestBodyBufioSize = 1024 * 1024
+
+// masqueRelayTCPDownloadFlushEvery: flush download response DATA on this byte budget (fallback
+// when not using relayDownloadCopy). 1 MiB batching left 4 KiB–1 MiB dead zone per Write.
+const masqueRelayTCPDownloadFlushEvery = 32 * 1024
+
+// masqueRelayTCPDownloadReadLen: TCP read size for relayDownloadCopy (not the 8 MiB upload copy).
+const masqueRelayTCPDownloadReadLen = 512 * 1024
+
+// masqueRelayTCPDownloadFlushBatch: flush HTTP response after this many bytes per relay cycle.
+// Per-read flush at 64 KiB caps goodput ≈ chunk/RTT (~15 Mbit/s at 35–40 ms RTT).
+const masqueRelayTCPDownloadFlushBatch = 512 * 1024
+
+var masqueRelayTCPDownloadBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, masqueRelayTCPDownloadReadLen)
+		return &b
+	},
+}
+
+// masqueRelayTCPResponseFlushEvery: CONNECT-stream download — batch HTTP/2–3 flushes to one per
+// relayCopyBuffered read (8 MiB TCP slice). First-flight and sub-4KiB tails still flush immediately.
+const masqueRelayTCPResponseFlushEvery = masqueRelayTCPCopyBufLen
+
+// masqueRelayTCPResponseFlushImmediate: first-flight / small tail flush so iperf banners and
+// other sub-4KiB server→client payloads are not held behind masqueRelayTCPResponseFlushEvery
+// (TUN bench deadlock: client waits for banner, server waits for client upload).
+const masqueRelayTCPResponseFlushImmediate = 4096
 
 // masqueRelayTCPKernelBuf is a best-effort SO_RCVBUF/SO_SNDBUF for the onward TCP
 // dial to the MASQUE template target (kernel caps still apply).
-const masqueRelayTCPKernelBuf = 4 << 20
-
+const masqueRelayTCPKernelBuf = 16 << 20
 
 var masqueRelayTCPCopyBufPool = sync.Pool{
 	New: func() any {
@@ -64,6 +94,80 @@ func relayCopyBuffered(dst io.Writer, src io.Reader) (int64, error) {
 	bp := masqueRelayTCPCopyBufPool.Get().(*[]byte)
 	defer masqueRelayTCPCopyBufPool.Put(bp)
 	return io.CopyBuffer(dst, src, *bp)
+}
+
+// relayDownloadCopy relays onward TCP → HTTP response with batched flushes (not every 64 KiB read).
+func relayDownloadCopy(out *flushWriter, src io.Reader) (int64, error) {
+	bp := masqueRelayTCPDownloadBufPool.Get().(*[]byte)
+	defer masqueRelayTCPDownloadBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	var sinceFlush int
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := out.writeRaw(buf[:nr])
+			written += int64(nw)
+			if ew != nil {
+				return written, ew
+			}
+			if nw < nr {
+				return written, io.ErrShortWrite
+			}
+			sinceFlush += nw
+			needFlush := !out.firstFlushDone ||
+				sinceFlush >= masqueRelayTCPDownloadFlushBatch ||
+				nw <= masqueRelayTCPResponseFlushImmediate
+			if needFlush {
+				out.firstFlushDone = true
+				if err := out.flushWithReason("relay_read"); err != nil {
+					return written, err
+				}
+				sinceFlush = 0
+			}
+		}
+		if er != nil {
+			if errors.Is(er, io.EOF) {
+				return written, nil
+			}
+			return written, er
+		}
+		if nr == 0 {
+			return written, nil
+		}
+	}
+}
+
+// relayUploadCopy drains the CONNECT-stream request body to onward TCP in download-sized
+// chunks (symmetric with relayDownloadCopy). Shared by H2/H3 server relay.
+func relayUploadCopy(dst io.Writer, src io.ReadCloser) (int64, error) {
+	defer src.Close()
+	bp := masqueRelayTCPDownloadBufPool.Get().(*[]byte)
+	defer masqueRelayTCPDownloadBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			written += int64(nw)
+			if ew != nil {
+				return written, ew
+			}
+			if nw < nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if errors.Is(er, io.EOF) {
+				return written, nil
+			}
+			return written, er
+		}
+		if nr == 0 {
+			return written, nil
+		}
+	}
 }
 
 func tuneMasqueRelayTCPOutbound(c net.Conn) {
@@ -288,7 +392,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		e.logger.DebugContext(r.Context(), fmt.Sprintf("masque connect-ip route dispatch router_type=%T destination=dynamic", e.router))
 		// TUN-only hard switch: CONNECT-IP runs as packet-plane forwarding only.
 		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
-		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger, e.options)
+		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger, e.options, e.dialer)
 	})
 	tcpRelaxedAuthority := masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldTCP)
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
@@ -370,7 +474,7 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		ReadTimeout:       0,
 		WriteTimeout:      0,
 	}
-	if err := http2.ConfigureServer(http2Srv, &http2.Server{}); err != nil {
+	if err := http2.ConfigureServer(http2Srv, TM.MasqueBulkHTTP2ServerConfig()); err != nil {
 		return E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
 	}
 	e.http2Server = http2Srv
@@ -439,7 +543,7 @@ func masqueConnectIPDataplaneContext(reqCtx context.Context) context.Context {
 // so ending the handler does not close the QUIC stream. On HTTP/2 Extended CONNECT there is no
 // hijack; if the handler returned immediately, net/http would finalize the response and tear down
 // the CONNECT stream while RoutePacketConnectionEx goroutines were still running.
-func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *connectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger, opts option.MasqueEndpointOptions) {
+func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *connectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger, opts option.MasqueEndpointOptions, onwardDialer net.Dialer) {
 	done := make(chan struct{})
 	var once sync.Once
 	notify := func() { once.Do(func() { close(done) }) }
@@ -450,23 +554,23 @@ func routeMasqueConnectIPBlocked(router adapter.Router, reqCtx context.Context, 
 		_ = packetConn.Close()
 		notify()
 	}
-	if router == nil {
-		fwdCtx := masqueConnectIPDataplaneContext(reqCtx)
-		go func() {
-			err := TM.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, packetConn.conn, TM.ConnectIPTCPForwarderOptions{
-				AllowPrivateTargets: opts.AllowPrivateTargets,
-				AllowedTargetPorts:  opts.AllowedTargetPorts,
-				BlockedTargetPorts:  opts.BlockedTargetPorts,
-			})
-			onClose(err)
-		}()
-		<-done
-		return
+	// TCP inside CONNECT-IP is raw IPv4/TCP on connectip.Conn. RoutePacketConnectionEx models UDP
+	// extracted payloads (metadata.Network=UDP) and drops TCP SYNs in connectIPNetPacketConn.ReadPacket,
+	// which tears down the QUIC/H3 session (bench connect-ip iperf FAIL, ingress_read_closed).
+	// Terminate IPv4/TCP in the S2 packet-plane forwarder on the live connectip.Conn instead.
+	_ = router
+	_ = metadata
+	fwdCtx := masqueConnectIPDataplaneContext(reqCtx)
+	fwdOpts := TM.ConnectIPTCPForwarderOptions{
+		AllowPrivateTargets: opts.AllowPrivateTargets,
+		AllowedTargetPorts:  opts.AllowedTargetPorts,
+		BlockedTargetPorts:  opts.BlockedTargetPorts,
+		Dialer:              onwardDialer,
 	}
-	// Match router==nil branch: dataplane must not inherit HTTP request cancellation.
-	// Router.RoutePacketConnectionEx forwards this ctx to matchRule / outbound packet handlers (see route/route.go).
-	routeCtx := masqueConnectIPDataplaneContext(reqCtx)
-	routePacketConnectionExBypassTunnelWrapper(router, routeCtx, packetConn, metadata, onClose, logger)
+	go func() {
+		err := TM.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, packetConn.conn, fwdOpts)
+		onClose(err)
+	}()
 	<-done
 }
 
@@ -679,6 +783,8 @@ func (e *ServerEndpoint) handleMasqueConnectUDP(w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	// RFC 8441 CONNECT-UDP: relay reads request DATAGRAM capsules while writing the response body.
+	_ = http.NewResponseController(w).EnableFullDuplex()
 	w.Header().Set(http3.CapsuleProtocolHeader, TM.CapsuleProtocolHeaderValueH2())
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
@@ -767,8 +873,15 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	debugf("masque tcp connect dial start host=%s resolved_host=%s port=%s", targetHost, resolvedHost, targetPort)
-	targetConn, dialErr := e.dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedHost, targetPort))
+	portNum, portErr := strconv.ParseUint(targetPort, 10, 16)
+	if portErr != nil || portNum == 0 || portNum > 65535 {
+		debugf("masque tcp connect parse denied status=400 error_class=misconfig err=invalid_port port=%s", targetPort)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	dialAddr := TM.MasqueOnwardTCPDialAddr(resolvedHost, uint16(portNum))
+	debugf("masque tcp connect dial start host=%s resolved_host=%s port=%s dial_addr=%s", targetHost, resolvedHost, targetPort, dialAddr)
+	targetConn, dialErr := e.dialer.DialContext(r.Context(), "tcp", dialAddr)
 	if dialErr != nil {
 		debugf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, TM.ClassifyError(errors.Join(TM.ErrTCPDial, dialErr)), dialErr)
 		w.WriteHeader(http.StatusBadGateway)
@@ -776,6 +889,10 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 	}
 	tuneMasqueRelayTCPOutbound(targetConn)
 	defer targetConn.Close()
+	// RFC 8441 CONNECT-stream: relay onward TCP→response while request body may still be idle
+	// (iperf3 waits for server banner before sending). Without full-duplex the HTTP stack can
+	// block response DATA until the request body is consumed (TUN bench hang at 0 Mbit/s).
+	_ = http.NewResponseController(w).EnableFullDuplex()
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -849,27 +966,74 @@ func allowTCPPort(portRaw string, allowList []uint16, denyList []uint16) bool {
 	return false
 }
 
+// primeRelayTCPDownloadChunk reads the first onward-TCP segment when the target sends before the
+// client (e.g. legacy servers). iperf3 sends first on the TCP session — a timeout with no bytes is
+// normal and must not abort the relay.
+func primeRelayTCPDownloadChunk(conn net.Conn) ([]byte, error) {
+	buf := make([]byte, 4096)
+	if d, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = d.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+		defer func() { _ = d.SetReadDeadline(time.Time{}) }()
+	}
+	n, err := conn.Read(buf)
+	if n > 0 {
+		return buf[:n], nil
+	}
+	if err == nil {
+		return nil, nil
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return nil, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return nil, err
+}
+
 func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter io.Writer) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	var flusher http.Flusher
+	if f, ok := responseWriter.(http.Flusher); ok {
+		flusher = f
+	}
+	out := newFlushWriter(responseWriter, flusher)
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
+	// Upload first so onward targets that wait for client bytes (unit tests) do not deadlock
+	// with download priming. iperf3 sends its banner without client data.
 	go func() {
-		_, err := relayCopyBuffered(targetConn, reqBody)
+		// Small reads + prompt TCP writes keep HTTP/2–3 request stream drained during download
+		// (relayCopyBuffered 8 MiB rounds delayed client ACKs and capped tcp_down on bench).
+		_, err := relayUploadCopy(targetConn, reqBody)
 		if cw, ok := targetConn.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 		uploadErrCh <- err
 	}()
 	go func() {
-		// Complete partial writes regardless of Flush support — same hazard as Flush-wrapped path.
-		var flusher http.Flusher
-		if f, ok := responseWriter.(http.Flusher); ok {
-			flusher = f
+		if prime, err := primeRelayTCPDownloadChunk(targetConn); err != nil {
+			downloadErrCh <- err
+			return
+		} else if len(prime) > 0 {
+			if _, err := out.Write(prime); err != nil {
+				downloadErrCh <- err
+				return
+			}
+			if err := out.flushWithReason("prime"); err != nil {
+				downloadErrCh <- err
+				return
+			}
 		}
-		out := &flushWriter{w: responseWriter, f: flusher}
-		defer out.flush()
-		_, err := relayCopyBuffered(out, targetConn)
+		// Write through flushWriter directly: bufio.Writer can hold follow-up control bytes (iperf3
+		// sends 1-2 byte server replies during setup) until MiB-scale buffering or relay teardown.
+		// flushWriter still batches bulk response DATA by threshold while preserving tiny first flights.
+		_, err := relayDownloadCopy(out, targetConn)
+		if flushErr := out.flushWithReason("relay_done"); err == nil {
+			err = flushErr
+		}
 		downloadErrCh <- err
 	}()
 	select {
@@ -893,19 +1057,41 @@ func relayTCPBidirectional(ctx context.Context, targetConn net.Conn, reqBody io.
 type flushWriter struct {
 	w io.Writer
 	// Optional; CONNECT responses often implement http.Flusher for incremental frames.
-	f http.Flusher
+	f              http.Flusher
+	pendingFlush   int
+	firstFlushDone bool
+}
+
+func newFlushWriter(w io.Writer, f http.Flusher) *flushWriter {
+	return &flushWriter{w: w, f: f}
 }
 
 func (w *flushWriter) flush() {
+	_ = w.flushWithReason("explicit")
+}
+
+func (w *flushWriter) flushWithReason(reason string) error {
+	if w == nil || w.w == nil {
+		return nil
+	}
+	traceRelayFlush(reason, w.pendingFlush, w.firstFlushDone)
+	// HTTP/3: ResponseController.Flush. HTTP/2 Extended CONNECT: ResponseController may return
+	// nil without pushing DATA; always hit http.Flusher when present (shared h2/h3 relay path).
+	var rcErr error
+	if rw, ok := w.w.(http.ResponseWriter); ok {
+		rcErr = http.NewResponseController(rw).Flush()
+	}
 	if w.f != nil {
 		w.f.Flush()
 	}
+	w.pendingFlush = 0
+	if w.f == nil && rcErr != nil && !errors.Is(rcErr, http.ErrNotSupported) {
+		return rcErr
+	}
+	return nil
 }
 
-func (w *flushWriter) Write(p []byte) (int, error) {
-	// Underlying ResponseWriter implementations may legally return partial progress
-	// with a nil error; io.Copy rejects that (ErrShortWrite). Drain the full slice
-	// (parity transport/masque writeAllIOWriter on stream bodies).
+func (w *flushWriter) writeRaw(p []byte) (int, error) {
 	nn := 0
 	for nn < len(p) {
 		n, err := w.w.Write(p[nn:])
@@ -917,12 +1103,63 @@ func (w *flushWriter) Write(p []byte) (int, error) {
 			return nn, io.ErrShortWrite
 		}
 	}
-	// One flush per io.Copy chunk avoids H2/H3 response body fragmentation where the
-	// stack performs many short writes (each would otherwise flush and cap throughput).
-	if nn > 0 && w.f != nil {
-		w.f.Flush()
+	return nn, nil
+}
+
+func (w *flushWriter) Write(p []byte) (int, error) {
+	// Underlying ResponseWriter implementations may legally return partial progress
+	// with a nil error; io.Copy rejects that (ErrShortWrite). Drain the full slice
+	// (parity transport/masque writeAllIOWriter on stream bodies).
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Bulk relay slices go straight to the HTTP response body; HTTP/2–3 flushes are batched by
+	// pendingFlush so we do not add a second bufio layer on top of relayCopyBuffered.
+	nn, err := w.writeRaw(p)
+	if err != nil {
+		return nn, err
+	}
+	// Coalesce HTTP/2–3 flushes: relayCopyBuffered forwards TCP slice sizes (often << 1 MiB).
+	// Use flush() (ResponseController on HTTP/3), not http.Flusher alone — H3 may no-op Flusher
+	// and hold download DATA until the next 8 MiB relayCopyBuffered round (bench upload≫download).
+	if nn > 0 {
+		w.pendingFlush += nn
+		traceRelayFlushWrite(nn, w.pendingFlush, w.firstFlushDone)
+		switch {
+		case !w.firstFlushDone && w.pendingFlush > 0:
+			if err := w.flushWithReason("first_flight"); err != nil {
+				return nn, err
+			}
+			w.firstFlushDone = true
+		case w.pendingFlush >= masqueRelayTCPResponseFlushEvery:
+			if err := w.flushWithReason("threshold"); err != nil {
+				return nn, err
+			}
+		case w.pendingFlush >= masqueRelayTCPDownloadFlushEvery:
+			if err := w.flushWithReason("relay_chunk"); err != nil {
+				return nn, err
+			}
+		case w.pendingFlush <= masqueRelayTCPResponseFlushImmediate:
+			if err := w.flushWithReason("immediate"); err != nil {
+				return nn, err
+			}
+		}
 	}
 	return nn, nil
+}
+
+func traceRelayFlushWrite(n int, pending int, firstDone bool) {
+	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_RELAY_FLUSH")) != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "MASQUE_RELAY_FLUSH event=write n=%d pending=%d first_done=%t\n", n, pending, firstDone)
+}
+
+func traceRelayFlush(reason string, pending int, firstDone bool) {
+	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_RELAY_FLUSH")) != "1" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "MASQUE_RELAY_FLUSH event=flush reason=%s pending=%d first_done=%t\n", reason, pending, firstDone)
 }
 
 type connectIPNetPacketConn struct {

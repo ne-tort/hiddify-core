@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -56,7 +57,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 			return nil, errors.Join(ErrTCPConnectStreamFailed, context.Cause(ctx))
 		default:
 		}
-		tr, err := s.ensureH2UDPTransport(ctx)
+		tr, err := s.ensureH2ConnectStreamTransport(ctx)
 		if err != nil {
 			return nil, errors.Join(ErrTCPConnectStreamFailed, err)
 		}
@@ -126,7 +127,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		// short-lived dial ctx while Request.Context is WithoutCancel — using the dial ctx here would
 		// mis-attribute transport errors via context.Cause after the handshake when the dial op ended.
 		return &streamConn{
-			reader:       newH3MasqueResponseReadCloser(newH2ConnectStreamResponseBody(resp.Body)),
+			reader:       newH2ConnectStreamResponseBody(resp.Body),
 			writer:       newH3MasqueBufferedPipeWriter(pw),
 			h2UploadPipe: pr,
 			ctx:          streamCtx,
@@ -140,12 +141,17 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 	return nil, ErrTCPConnectStreamFailed
 }
 
+// h2ConnectStreamResponseBodyBufSize: align with streamConn coalesce target so bufio does not
+// cap bulk Read into the 8 MiB WriteTo scratch (64 KiB bufio capped bench download ~15 Mbit/s).
+const h2ConnectStreamResponseBodyBufSize = masqueConnectStreamReadCoalesceTarget
+
 // h2ConnectStreamResponseBody wraps the HTTP/2 CONNECT response body (typically
 // golang.org/x/net/http2.transportResponseBody), which does not implement SetReadDeadline.
 // Without this, streamConn.SetReadDeadline would hit ErrDeadlineUnsupported on download I/O
 // while upload-side pipe writes already honor deadlines (parity: h2ConnectUDPPacketConn).
 type h2ConnectStreamResponseBody struct {
 	r  io.ReadCloser
+	br *bufio.Reader
 	dl connDeadlines
 	mu sync.Mutex // serializes Read
 }
@@ -163,6 +169,9 @@ func (w *h2ConnectStreamResponseBody) SetReadDeadline(t time.Time) error {
 }
 
 func (w *h2ConnectStreamResponseBody) Read(p []byte) (int, error) {
+	if w == nil || w.r == nil {
+		return 0, io.EOF
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dl.readTimeoutExceeded() {
@@ -170,7 +179,7 @@ func (w *h2ConnectStreamResponseBody) Read(p []byte) (int, error) {
 	}
 	rNanos := w.dl.read.Load()
 	if rNanos == 0 {
-		return w.r.Read(p)
+		return w.responseBodyReader().Read(p)
 	}
 	if time.Now().UnixNano() > rNanos {
 		return 0, os.ErrDeadlineExceeded
@@ -206,6 +215,13 @@ func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context
 	case got := <-ch:
 		return got.n, got.err
 	}
+}
+
+func (w *h2ConnectStreamResponseBody) responseBodyReader() io.Reader {
+	if w.br == nil {
+		w.br = bufio.NewReaderSize(w.r, h2ConnectStreamResponseBodyBufSize)
+	}
+	return w.br
 }
 
 func (w *h2ConnectStreamResponseBody) Close() error {

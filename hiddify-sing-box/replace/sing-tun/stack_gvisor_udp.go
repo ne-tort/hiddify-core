@@ -88,6 +88,9 @@ type UDPBackWriter struct {
 	source        tcpip.Address
 	sourcePort    uint16
 	sourceNetwork tcpip.NetworkProtocolNumber
+	// lastRemote* is the last onward destination passed to WritePacket (MASQUE egress peer).
+	lastRemote     tcpip.Address
+	lastRemotePort uint16
 }
 
 func (w *UDPBackWriter) HandshakeSuccess() error {
@@ -112,10 +115,80 @@ func (w *UDPBackWriter) HandshakeFailure(err error) error {
 	return wErr
 }
 
+// WriteUDPPortUnreachable injects ICMP port-unreachable for the flow bound to this writer
+// (MASQUE CONNECT-UDP empty DATAGRAM after handshake success).
+func (w *UDPBackWriter) WriteUDPPortUnreachable(remote M.Socksaddr) error {
+	w.access.Lock()
+	defer w.access.Unlock()
+	if w.packet != nil {
+		pkt := w.packet.IncRef()
+		defer pkt.DecRef()
+		return gWriteUnreachable(w.stack, pkt)
+	}
+	if !remote.IsValid() && w.lastRemote.Len() > 0 {
+		remote = M.SocksaddrFrom(AddrFromAddress(w.lastRemote), w.lastRemotePort)
+	}
+	if !remote.IsIP() {
+		return E.Cause(os.ErrInvalid, "invalid remote for icmp feedback")
+	}
+	return w.writeSyntheticPortUnreachable(remote)
+}
+
+func (w *UDPBackWriter) writeSyntheticPortUnreachable(remote M.Socksaddr) error {
+	remoteAddr := AddressFromAddr(remote.Addr)
+	remotePort := remote.Port
+	payload := buffer.MakeWithData(nil)
+	defer payload.Release()
+	reserveHdr := header.IPv6MinimumSize
+	if w.sourceNetwork == header.IPv4ProtocolNumber {
+		reserveHdr = header.IPv4MinimumSize
+	}
+	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		ReserveHeaderBytes: header.UDPMinimumSize + reserveHdr,
+		Payload:            payload,
+	})
+	defer packet.DecRef()
+	packet.TransportProtocolNumber = header.UDPProtocolNumber
+	udpHdr := header.UDP(packet.TransportHeader().Push(header.UDPMinimumSize))
+	udpHdr.Encode(&header.UDPFields{
+		SrcPort: w.sourcePort,
+		DstPort: remotePort,
+		Length:  header.UDPMinimumSize,
+	})
+	packet.NetworkProtocolNumber = w.sourceNetwork
+	if w.sourceNetwork == header.IPv4ProtocolNumber {
+		ipv4Hdr := header.IPv4(packet.NetworkHeader().Push(header.IPv4MinimumSize))
+		totalLen := uint16(header.IPv4MinimumSize + header.UDPMinimumSize)
+		ipv4Hdr.Encode(&header.IPv4Fields{
+			TotalLength: totalLen,
+			ID:          0,
+			TTL:         64,
+			Protocol:    uint8(header.UDPProtocolNumber),
+			SrcAddr:     w.source,
+			DstAddr:     remoteAddr,
+		})
+	} else {
+		ipv6Hdr := header.IPv6(packet.NetworkHeader().Push(header.IPv6MinimumSize))
+		ipv6Hdr.Encode(&header.IPv6Fields{
+			PayloadLength:     header.UDPMinimumSize,
+			TransportProtocol: header.UDPProtocolNumber,
+			HopLimit:          64,
+			SrcAddr:           w.source,
+			DstAddr:           remoteAddr,
+		})
+	}
+	return gWriteUnreachable(w.stack, packet)
+}
+
 func (w *UDPBackWriter) WritePacket(packetBuffer *buf.Buffer, destination M.Socksaddr) error {
 	if !destination.IsIP() {
 		return E.Cause(os.ErrInvalid, "invalid destination")
-	} else if destination.IsIPv4() && w.sourceNetwork == header.IPv6ProtocolNumber {
+	}
+	w.access.Lock()
+	w.lastRemote = AddressFromAddr(destination.Addr)
+	w.lastRemotePort = destination.Port
+	w.access.Unlock()
+	if destination.IsIPv4() && w.sourceNetwork == header.IPv6ProtocolNumber {
 		destination = M.SocksaddrFrom(netip.AddrFrom16(destination.Addr.As16()), destination.Port)
 	} else if destination.IsIPv6() && (w.sourceNetwork == header.IPv4ProtocolNumber) {
 		return E.New("send IPv6 packet to IPv4 connection")

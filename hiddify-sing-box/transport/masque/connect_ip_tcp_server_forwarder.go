@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -23,6 +24,30 @@ import (
 )
 
 const connectIPTCPForwarderICMPRelayMax = 8
+
+// connectIPTCPForwarderRemoteReadBuf is the bulk read from the onward TCP dial (iperf, etc.).
+// Segmentation to client MSS still happens per IPv4/TCP packet on the CONNECT-IP plane.
+// 8 MiB matches masqueConnectStreamReadCoalesceTarget / server relayCopyBuffered.
+const connectIPTCPForwarderRemoteReadBuf = 8 << 20
+
+// connectIPTCPForwarderRemoteWriteBuf coalesces proxied client segments before onward TCP writes.
+const connectIPTCPForwarderRemoteWriteBuf = 2 << 20
+
+// connectIPTCPForwarderKernelBuf matches protocol/masque masqueRelayTCPKernelBuf for relay dials.
+const connectIPTCPForwarderKernelBuf = 16 << 20
+
+// connectIPTCPForwarderMaxIPv4Datagram caps one CONNECT-IP IPv4 datagram from the forwarder.
+// Must fit the client gVisor link MTU (ConnectIPDatagramCeiling − connectIPTCPHTTP3DatagramSlack,
+// default 1500−128). Using the raw 1500 B ceiling still oversizes segments vs the stack MTU.
+const connectIPTCPForwarderMaxIPv4Datagram = defaultConnectIPDatagramCeilingMax - 128
+
+func tuneConnectIPTCPForwarderRemote(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetReadBuffer(connectIPTCPForwarderKernelBuf)
+		_ = tc.SetWriteBuffer(connectIPTCPForwarderKernelBuf)
+	}
+}
 
 // ConnectIPTCPForwarderOptions carries generic MASQUE server policy knobs reused by the
 // CONNECT-IP IPv4/TCP packet-plane forwarder (S2 path).
@@ -171,6 +196,10 @@ func (f *connectIPTCPForwarder) shutdownSessions() {
 func (f *connectIPTCPForwarder) writeRaw(pkt []byte) error {
 	f.wMu.Lock()
 	defer f.wMu.Unlock()
+	return f.writeRawLocked(pkt)
+}
+
+func (f *connectIPTCPForwarder) writeRawLocked(pkt []byte) error {
 	p := RewriteConnectIPOutgoingPeerDst(pkt, f.conn.CurrentPeerPrefixes())
 	for i := 0; i < connectIPTCPForwarderICMPRelayMax; i++ {
 		icmp, err := f.conn.WritePacket(p)
@@ -226,6 +255,37 @@ func forwarderAllowDestIP(addr netip.Addr, allowPrivate bool) error {
 	return nil
 }
 
+// connectIPForwarderDialAddr maps the proxied IPv4 destination to a host TCP dial target.
+// When the client targets this host's own public/local address (bench iperf on the MASQUE VPS),
+// hairpin via 127.0.0.1 avoids broken same-IP egress that often RSTs CONNECT-IP TCP.
+func connectIPForwarderDialAddr(dstIP netip.Addr, port uint16) string {
+	if dstIP.IsValid() {
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, iface := range ifaces {
+				addrs, err := iface.Addrs()
+				if err != nil {
+					continue
+				}
+				for _, a := range addrs {
+					var ip netip.Addr
+					switch v := a.(type) {
+					case *net.IPNet:
+						ip, _ = netip.AddrFromSlice(v.IP)
+					case *net.IPAddr:
+						ip, _ = netip.AddrFromSlice(v.IP)
+					}
+					ip = ip.Unmap()
+					if ip.IsValid() && ip == dstIP {
+						return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+					}
+				}
+			}
+		}
+	}
+	return net.JoinHostPort(dstIP.String(), strconv.Itoa(int(port)))
+}
+
 func forwarderAllowPort(port uint16, allowList []uint16, denyList []uint16) bool {
 	for _, d := range denyList {
 		if d == port {
@@ -274,7 +334,10 @@ func (f *connectIPTCPForwarder) handleSyn(ctx context.Context, _ []byte, iph hea
 		mss = 1460
 	}
 
-	dialAddr := net.JoinHostPort(dstIP.String(), strconv.Itoa(int(tc.DestinationPort())))
+	dialAddr := connectIPForwarderDialAddr(dstIP, tc.DestinationPort())
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: syn %s:%d -> dial %s", flow.srcAddr, flow.srcPort, dialAddr)
+	}
 	remote, dialErr := f.o.Dialer.DialContext(ctx, "tcp", dialAddr)
 	if dialErr != nil {
 		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
@@ -283,6 +346,7 @@ func (f *connectIPTCPForwarder) handleSyn(ctx context.Context, _ []byte, iph hea
 		_ = f.sendRST(iph, tc, irs+1)
 		return
 	}
+	tuneConnectIPTCPForwarderRemote(remote)
 	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
 		log.Printf("masque connect_ip forwarder: syn dial ok %s", dialAddr)
 	}
@@ -298,6 +362,7 @@ func (f *connectIPTCPForwarder) handleSyn(ctx context.Context, _ []byte, iph hea
 		f:          f,
 		flow:       flow,
 		remote:     remote,
+		outbound:   bufio.NewWriterSize(remote, connectIPTCPForwarderRemoteWriteBuf),
 		irs:        irs,
 		iss:        iss,
 		rcvNxt:     irs + 1,
@@ -309,7 +374,7 @@ func (f *connectIPTCPForwarder) handleSyn(ctx context.Context, _ []byte, iph hea
 	s.synAckOpts = buildSynAckTCPOptions(synOpts)
 
 	s.add()
-	if err := s.sendSynAck(iph, tc); err != nil {
+	if err := s.sendSynAck(ctx, iph, tc); err != nil {
 		s.close()
 		return
 	}
@@ -327,6 +392,7 @@ type tcpForwardSession struct {
 	f      *connectIPTCPForwarder
 	flow   tcp4Tuple
 	remote net.Conn
+	outbound *bufio.Writer
 
 	mu sync.Mutex
 
@@ -334,6 +400,9 @@ type tcpForwardSession struct {
 	rcvNxt     uint32
 	sndNxt     uint32
 	established bool
+	// synAckSent is set after the forwarder answered SYN; remote→client relay may start before
+	// the client's final ACK (gVisor can complete the handshake while server ReadPacket lags).
+	synAckSent bool
 
 	clientMSS uint16
 
@@ -354,6 +423,9 @@ func (s *tcpForwardSession) close() {
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
+	if s.outbound != nil {
+		_ = s.outbound.Flush()
+	}
 	_ = s.remote.Close()
 	s.f.dropFlow(s.flow)
 }
@@ -369,10 +441,14 @@ func (s *tcpForwardSession) onRetransmittedSyn(tc header.TCP) {
 	}
 	pkt := buildIPv4TCPPacket(s.flow.dstAddr, s.flow.srcAddr, s.flow.dstPort, s.flow.srcPort,
 		s.iss, s.irs+1, header.TCPFlagSyn|header.TCPFlagAck, 65535, nil, s.synAckOpts)
-	_ = s.f.writeRaw(pkt)
+	if err := s.f.writeRaw(pkt); err != nil {
+		return
+	}
+	s.synAckSent = true
+	s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(context.Background()) })
 }
 
-func (s *tcpForwardSession) sendSynAck(iph header.IPv4, tc header.TCP) error {
+func (s *tcpForwardSession) sendSynAck(ctx context.Context, iph header.IPv4, tc header.TCP) error {
 	pkt := buildIPv4TCPPacket(
 		iph.DestinationAddress(), iph.SourceAddress(),
 		tc.DestinationPort(), tc.SourcePort(),
@@ -382,7 +458,16 @@ func (s *tcpForwardSession) sendSynAck(iph header.IPv4, tc header.TCP) error {
 		nil,
 		s.synAckOpts,
 	)
-	return s.f.writeRaw(pkt)
+	if err := s.f.writeRaw(pkt); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.synAckSent = true
+	s.mu.Unlock()
+	// Start onward→client relay as soon as SYN-ACK is on the wire; waiting for the client's
+	// bare ACK before pumpRemoteToClient left iperf uploads stalled (bench connect-ip-h3).
+	s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(ctx) })
+	return nil
 }
 
 func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph header.IPv4, tc header.TCP, ipHdrLen, tcpHdrLen int) {
@@ -400,28 +485,33 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 	}
 
 	if !s.established {
-		if flags&header.TCPFlagAck != 0 && ack == s.iss+1 && flags&header.TCPFlagSyn == 0 {
+		if flags&header.TCPFlagAck != 0 && ack >= s.iss+1 && flags&header.TCPFlagSyn == 0 {
 			s.established = true
 			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
 				log.Printf("masque connect_ip forwarder: handshake established %s:%d -> %s:%d",
 					s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
-			s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(ctx) })
 		}
 	}
 
 	payload := pkt[ipHdrLen+tcpHdrLen:]
 	if len(payload) > 0 {
-		if !s.established {
+		if !s.established && !s.synAckSent {
 			return
 		}
 		if seq != s.rcvNxt {
 			_ = s.sendAckOnly()
 			return
 		}
-		if _, err := s.remote.Write(payload); err != nil {
+		if _, err := s.outbound.Write(payload); err != nil {
 			go s.close()
 			return
+		}
+		if s.outbound.Buffered() >= connectIPTCPForwarderRemoteWriteBuf/2 {
+			if err := s.outbound.Flush(); err != nil {
+				go s.close()
+				return
+			}
 		}
 		s.rcvNxt += uint32(len(payload))
 		_ = s.sendAckOnly()
@@ -475,7 +565,12 @@ func (s *tcpForwardSession) buildTimestampOption() []byte {
 
 func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 	defer s.close()
-	buf := make([]byte, int(s.clientMSS))
+	readSz := connectIPTCPForwarderRemoteReadBuf
+	if mss := int(s.clientMSS); mss > 0 && readSz < 32*mss {
+		readSz = 32 * mss
+	}
+	buf := make([]byte, readSz)
+	maxSeg := connectIPTCPForwarderMaxSegmentPayload(s.clientMSS)
 	for {
 		select {
 		case <-ctx.Done():
@@ -496,9 +591,8 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 				return
 			}
 			chunk := n - off
-			maxData := int(s.clientMSS) - 80
-			if chunk > maxData {
-				chunk = maxData
+			if chunk > maxSeg {
+				chunk = maxSeg
 			}
 			payload := buf[off : off+chunk]
 			s.mu.Lock()
@@ -521,6 +615,27 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			off += chunk
 		}
 	}
+}
+
+// connectIPTCPForwarderMaxSegmentPayload caps one CONNECT-IP TCP segment payload (MSS minus timestamp options).
+func connectIPTCPForwarderMaxSegmentPayload(clientMSS uint16) int {
+	maxSeg := int(clientMSS)
+	if maxSeg <= 0 {
+		maxSeg = 1460
+	}
+	// buildTimestampOption adds up to 12 B TCP options on data segments.
+	if maxSeg > 12 {
+		maxSeg -= 12
+	}
+	// Full IPv4 datagram = 20 B IP + TCP hdr (incl. TS opts) + payload.
+	const tcpHdrBudget = header.TCPMinimumSize + 12
+	if cap := connectIPTCPForwarderMaxIPv4Datagram - header.IPv4MinimumSize - tcpHdrBudget; cap > 0 && maxSeg > cap {
+		maxSeg = cap
+	}
+	if maxSeg < 512 {
+		maxSeg = 512
+	}
+	return maxSeg
 }
 
 func buildSynAckTCPOptions(so header.TCPSynOptions) []byte {

@@ -1255,6 +1255,47 @@ func TestNewUDPClientSetsInitialPacketSizeBaseline(t *testing.T) {
 	}
 }
 
+func TestMasqueTCPConnectStreamAndServerQUICReceiveWindowFloors(t *testing.T) {
+	cli := masqueTCPConnectStreamQUICConfig(ClientOptions{})
+	if cli.InitialPacketSize != defaultUDPInitialPacketSize {
+		t.Fatalf("connect-stream client InitialPacketSize: got %d want %d", cli.InitialPacketSize, defaultUDPInitialPacketSize)
+	}
+	if cli.InitialStreamReceiveWindow < 128<<20 {
+		t.Fatalf("connect-stream client InitialStreamReceiveWindow: got %d want >= %d", cli.InitialStreamReceiveWindow, 128<<20)
+	}
+	if cli.MaxStreamReceiveWindow < 128<<20 {
+		t.Fatalf("connect-stream client MaxStreamReceiveWindow: got %d want >= %d", cli.MaxStreamReceiveWindow, 128<<20)
+	}
+	if cli.InitialConnectionReceiveWindow < 192<<20 {
+		t.Fatalf("connect-stream client InitialConnectionReceiveWindow: got %d want >= %d", cli.InitialConnectionReceiveWindow, 192<<20)
+	}
+	if cli.MaxConnectionReceiveWindow < 192<<20 {
+		t.Fatalf("connect-stream client MaxConnectionReceiveWindow: got %d want >= %d", cli.MaxConnectionReceiveWindow, 192<<20)
+	}
+	cliWarp := masqueTCPConnectStreamQUICConfig(ClientOptions{
+		WarpMasqueClientCert: tls.Certificate{Certificate: [][]byte{[]byte("stub")}},
+	})
+	if cliWarp.InitialPacketSize != 0 {
+		t.Fatalf("warp connect-stream InitialPacketSize: got %d want 0 (unset for Cloudflare path)", cliWarp.InitialPacketSize)
+	}
+	srv := MasqueHTTPServerQUICConfig()
+	if srv.InitialPacketSize != defaultUDPInitialPacketSize {
+		t.Fatalf("server InitialPacketSize: got %d want %d", srv.InitialPacketSize, defaultUDPInitialPacketSize)
+	}
+	if srv.InitialStreamReceiveWindow < 128<<20 {
+		t.Fatalf("server InitialStreamReceiveWindow: got %d want >= %d", srv.InitialStreamReceiveWindow, 128<<20)
+	}
+	if srv.MaxStreamReceiveWindow < 128<<20 {
+		t.Fatalf("server MaxStreamReceiveWindow: got %d want >= %d", srv.MaxStreamReceiveWindow, 128<<20)
+	}
+	if srv.InitialConnectionReceiveWindow < 192<<20 {
+		t.Fatalf("server InitialConnectionReceiveWindow: got %d want >= %d", srv.InitialConnectionReceiveWindow, 192<<20)
+	}
+	if srv.MaxConnectionReceiveWindow < 192<<20 {
+		t.Fatalf("server MaxConnectionReceiveWindow: got %d want >= %d", srv.MaxConnectionReceiveWindow, 192<<20)
+	}
+}
+
 func TestStreamConnSetWriteDeadlineAlwaysStored(t *testing.T) {
 	c := &streamConn{
 		reader: io.NopCloser(&fakeDeadlineReader{}),

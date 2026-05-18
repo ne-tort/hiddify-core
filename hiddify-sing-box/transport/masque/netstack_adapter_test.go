@@ -63,6 +63,51 @@ func (s *fatalWriteSession) Close() error {
 	return nil
 }
 
+// retryableThenOKWriteSession fails the first N WritePacket calls with a timeout-class error,
+// then accepts traffic. WriteNotify must not drop the dequeued gVisor frame on those failures.
+type retryableThenOKWriteSession struct {
+	failRemaining atomic.Int32
+	written       atomic.Int32
+}
+
+func (s *retryableThenOKWriteSession) ReadPacket(_ []byte) (int, error) {
+	return 0, net.ErrClosed
+}
+
+func (s *retryableThenOKWriteSession) WritePacket(_ []byte) ([]byte, error) {
+	if s.failRemaining.Add(-1) >= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	s.written.Add(1)
+	return nil, nil
+}
+
+func (s *retryableThenOKWriteSession) Close() error { return nil }
+
+func TestConnectIPTCPNetstackWriteNotifyRetriesSameOutboundOnTransientWrite(t *testing.T) {
+	sess := &retryableThenOKWriteSession{}
+	sess.failRemaining.Store(5)
+	stack, err := newConnectIPTCPNetstack(context.Background(), sess, connectIPTCPNetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	payload := []byte{0x45, 0x00, 0x00, 0x28}
+	if err := stack.deliverConnectIPOutboundPacket(payload); err != nil {
+		t.Fatalf("deliver outbound: %v", err)
+	}
+	if got := sess.written.Load(); got != 1 {
+		t.Fatalf("expected one successful write after retries, got %d", got)
+	}
+	if drops := connectIPCounters.netstackWriteNotifyRetryContinueDropTotal.Load(); drops != 0 {
+		t.Fatalf("unexpected write-notify continue drops: %d", drops)
+	}
+}
+
 func newPacketPipePair() (*packetPipeSession, *packetPipeSession) {
 	aToB := make(chan []byte, 256)
 	bToA := make(chan []byte, 256)

@@ -2,6 +2,7 @@ package masque
 
 import (
 	"context"
+	"net"
 	"syscall"
 	"testing"
 
@@ -89,6 +90,35 @@ func TestBuildQUICDialFuncTierAWhenNoNetworkManager(t *testing.T) {
 	}
 	if quicDial != nil {
 		t.Fatal("expected nil QUIC dial override without NetworkManager (Tier A quic.DialAddr)")
+	}
+}
+
+// upstreamWrapConn mirrors sing-box conntrack.Conn (net.Conn field + Upstream(), no Unwrap).
+type upstreamWrapConn struct {
+	net.Conn
+}
+
+func (c *upstreamWrapConn) Upstream() any { return c.Conn }
+
+func TestUnwrapMasqueQUICUnderlyingConnFollowsUpstream(t *testing.T) {
+	t.Parallel()
+	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	inner, err := net.Dial("udp", ln.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer inner.Close()
+	wrapped := &upstreamWrapConn{Conn: inner}
+	under := unwrapMasqueQUICUnderlyingConn(wrapped)
+	if _, ok := under.(interface {
+		SetReadBuffer(int) error
+		SetWriteBuffer(int) error
+	}); !ok {
+		t.Fatalf("expected kernel UDP conn under upstream wrapper, got %T", under)
 	}
 }
 

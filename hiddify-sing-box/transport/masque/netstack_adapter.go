@@ -38,6 +38,34 @@ const connectIPLinkOutboundQueueSlots = 65536
 // connectIPTCPNetstackNIC is the sole gVisor NIC for CONNECT-IP TCP (parity with sing-tun DefaultNIC).
 const connectIPTCPNetstackNIC tcpip.NICID = 1
 
+// connectIPNetstackOutboundBufPool recycles copies of gVisor packet views passed to WritePacket.
+// connect-ip-go copies the payload; we must not retain the view slice after DecRef.
+var connectIPNetstackOutboundBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
+
+func connectIPNetstackBorrowOutboundBuf(n int) []byte {
+	bp := connectIPNetstackOutboundBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) < n {
+		b = make([]byte, n)
+	} else {
+		b = b[:n]
+	}
+	return b
+}
+
+func connectIPNetstackReturnOutboundBuf(b []byte) {
+	if cap(b) > 64*1024 {
+		return
+	}
+	b = b[:0]
+	connectIPNetstackOutboundBufPool.Put(&b)
+}
+
 func masqueConnectIPNetstackDebug() bool {
 	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
 }
@@ -193,9 +221,13 @@ func (f connectIPTCPNetstackFactory) New(ctx context.Context, session IPPacketSe
 			// link MTU below the CONNECT-IP ceiling so full IP frames still fit with context-id + QUIC/crypto
 			// overhead. HTTP/2 CONNECT-IP uses stream capsules only — no QUIC datagram slack (see overlayH2).
 			if !connectIPSession.overlayH2 {
-				const connectIPTCPHTTP3DatagramSlack = 192
-				if mtu > connectIPTCPHTTP3DatagramSlack+576 {
-					mtu -= connectIPTCPHTTP3DatagramSlack
+				// Room for RFC 9297 context id + QUIC short-header/crypto inside one DATAGRAM frame.
+				slack := connectIPSession.tcpDatagramSlack
+				if slack <= 0 {
+					slack = 128
+				}
+				if mtu > slack+576 {
+					mtu -= slack
 				}
 			}
 		}
@@ -606,8 +638,6 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 }
 
 // Future work (egress reliability):
-// - B2: on retryable WritePacket failure, avoid silently dropping the dequeued outbound (this continue);
-//   options: bounded re-send of same slice, or netstack-facing re-queue if the channel.Endpoint contract allows.
 // - B3: if HoL appears on H2 capsule path (single writeMu + writeToStream), consider a small buffered
 //   writes channel or splitting control vs bulk after slow-iteration metrics implicate that path.
 
@@ -638,9 +668,36 @@ func maybeSampleSlowNetstackWriteNotifyIteration(start time.Time, threshold time
 	}
 }
 
+// deliverConnectIPOutboundPacket retries transient CONNECT-IP WritePacket failures on the same
+// frame until success or a non-retryable error. Callers must pass an owned buffer (gVisor view
+// slices are invalid after packet.DecRef).
+func (s *connectIPTCPNetstack) deliverConnectIPOutboundPacket(payload []byte) error {
+	const maxPersist = 128
+	var icmp []byte
+	var err error
+	for attempt := 0; attempt < maxPersist; attempt++ {
+		icmp, err = s.writePacketWithRetry(payload)
+		if err == nil {
+			if len(icmp) > 0 {
+				s.injectPacket(icmp)
+			}
+			return nil
+		}
+		if !isRetryablePacketWriteError(err) {
+			return err
+		}
+		backoff := attempt
+		if backoff > 15 {
+			backoff = 15
+		}
+		time.Sleep(time.Duration(1+backoff) * time.Millisecond)
+	}
+	incConnectIPWriteFailReason("retry_exhausted")
+	incConnectIPSessionReset("write_fail_retry_exhausted")
+	return err
+}
+
 func (s *connectIPTCPNetstack) WriteNotify() {
-	consecutiveRetryableFailures := 0
-	const retryableFailureLimit = 32
 	slowThresh := connectIPSlowNetstackWriteNotifyThreshold()
 	for {
 		iterStart := time.Now()
@@ -656,32 +713,21 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 			continue
 		}
 		connectIPCounters.netstackWriteDequeuedTotal.Add(1)
-		icmp, err := s.writePacketWithRetry(outbound)
+		payload := connectIPNetstackBorrowOutboundBuf(len(outbound))
+		copy(payload, outbound)
 		packet.DecRef()
-		if err != nil {
+		if err := s.deliverConnectIPOutboundPacket(payload); err != nil {
 			if isRetryablePacketWriteError(err) {
-				consecutiveRetryableFailures++
 				incConnectIPWriteFailReason("retryable")
-				if consecutiveRetryableFailures < retryableFailureLimit {
-					connectIPCounters.netstackWriteNotifyRetryContinueDropTotal.Add(1)
-					time.Sleep(2 * time.Millisecond)
-					maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
-					continue
-				}
-				incConnectIPWriteFailReason("retry_exhausted")
-				incConnectIPSessionReset("write_fail_retry_exhausted")
 			} else {
 				incConnectIPWriteFailReason("fatal")
 				incConnectIPSessionReset("write_fail_fatal")
 			}
 			s.failWithError(errors.Join(ErrTransportInit, err))
+			connectIPNetstackReturnOutboundBuf(payload)
 			return
 		}
-		consecutiveRetryableFailures = 0
-		// Preserve CONNECT-IP PMTU feedback loop (DatagramTooLarge -> ICMP PTB).
-		if len(icmp) > 0 {
-			s.injectPacket(icmp)
-		}
+		connectIPNetstackReturnOutboundBuf(payload)
 		maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 	}
 }

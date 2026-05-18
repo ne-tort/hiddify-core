@@ -18,14 +18,14 @@ func TestPacerPacing(t *testing.T) {
 	now := monotime.Now()
 	require.Zero(t, p.TimeUntilSend())
 	budget := p.Budget(now)
-	require.Equal(t, maxBurstSizePackets*initialMaxDatagramSize, budget)
+	require.Equal(t, maxBurstSizePackets*pacerInitialDatagramSize, budget)
 
 	// consume the initial budget by sending packets
 	for budget > 0 {
 		require.Zero(t, p.TimeUntilSend())
 		require.Equal(t, budget, p.Budget(now))
-		p.SentPacket(now, initialMaxDatagramSize)
-		budget -= initialMaxDatagramSize
+		p.SentPacket(now, pacerInitialDatagramSize)
+		budget -= pacerInitialDatagramSize
 	}
 
 	// now packets are being paced
@@ -57,7 +57,7 @@ func TestPacerPacing(t *testing.T) {
 	// we should have accumulated budget to send a burst now
 	require.Equal(t, 5*initialMaxDatagramSize, p.Budget(now.Add(4*time.Second/50)))
 	// but the budget is capped at the max burst size
-	require.Equal(t, maxBurstSizePackets*initialMaxDatagramSize, p.Budget(now.Add(time.Hour)))
+	require.Equal(t, maxBurstSizePackets*pacerInitialDatagramSize, p.Budget(now.Add(time.Hour)))
 	p.SentPacket(now, initialMaxDatagramSize)
 	require.Zero(t, p.Budget(now))
 
@@ -96,14 +96,16 @@ func TestPacerFastPacing(t *testing.T) {
 		p.SentPacket(now, initialMaxDatagramSize)
 	}
 
-	// If we were pacing by packet, we'd expect the next packet to send in 1/10ms.
+	// If we were pacing by packet, we'd expect the next packet to send in sub-ms intervals.
 	// However, we don't want to arm the pacing timer for less than 1ms,
-	// so we wait for 1ms, and then send 10 packets in a burst.
+	// so we wait for 1ms; tokens accrued in that interval often fill ~10 × MSS before hitting
+	// maxBurstSizePackets (large BW × 1ms still caps below 32 packets).
 	require.Equal(t, time.Millisecond, p.TimeUntilSend().Sub(now))
-	require.Equal(t, 10*initialMaxDatagramSize, p.Budget(now.Add(time.Millisecond)))
+	const refillPacketsPerMs = 10
+	require.Equal(t, refillPacketsPerMs*initialMaxDatagramSize, p.Budget(now.Add(time.Millisecond)))
 
 	now = now.Add(time.Millisecond)
-	for range 10 {
+	for range refillPacketsPerMs {
 		require.NotZero(t, p.Budget(now))
 		p.SentPacket(now, initialMaxDatagramSize)
 	}
@@ -124,7 +126,11 @@ func TestPacerNoOverflows(t *testing.T) {
 		burstCount++
 		p.SentPacket(now, initialMaxDatagramSize)
 	}
-	require.Equal(t, maxBurstSizePackets, burstCount)
+	// Burst budget uses pacingMSS (1420) while packets are 1280 B.
+	maxPackets := int(maxBurstSizePackets * pacerInitialDatagramSize / initialMaxDatagramSize)
+	if burstCount < maxBurstSizePackets || burstCount > maxPackets+1 {
+		t.Fatalf("burstCount=%d want between %d and %d", burstCount, maxBurstSizePackets, maxPackets+1)
+	}
 	require.Zero(t, p.Budget(now))
 
 	next := p.TimeUntilSend()

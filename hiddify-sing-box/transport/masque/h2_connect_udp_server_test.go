@@ -96,7 +96,7 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 
 func TestWriteUDPPayloadAsH2DatagramCapsulesEmpty(t *testing.T) {
 	var wire bytes.Buffer
-	if err := writeUDPPayloadAsH2DatagramCapsules(&wire, nil, nil); err != nil {
+	if err := writeUDPPayloadAsH2DatagramCapsules(&wire, nil); err != nil {
 		t.Fatal(err)
 	}
 	ct, cr, err := parseH2ConnectUDPCapsule(quicvarint.NewReader(bytes.NewReader(wire.Bytes())))
@@ -123,7 +123,7 @@ func TestWriteUDPPayloadAsH2DatagramCapsulesSplitsLargePayload(t *testing.T) {
 	total := h2ConnectUDPMaxUDPPayloadPerDatagramCapsule*2 + 50
 	payload := bytes.Repeat([]byte{'z'}, total)
 	var wire bytes.Buffer
-	if err := writeUDPPayloadAsH2DatagramCapsules(&wire, nil, payload); err != nil {
+	if err := writeUDPPayloadAsH2DatagramCapsules(&wire, payload); err != nil {
 		t.Fatal(err)
 	}
 	r := quicvarint.NewReader(bytes.NewReader(wire.Bytes()))
@@ -159,7 +159,7 @@ func TestWriteUDPPayloadAsH2DatagramCapsulesSplitsLargePayload(t *testing.T) {
 
 func TestWriteUDPH2ConnectDatagramCapsuleZeroLengthUDP(t *testing.T) {
 	var buf bytes.Buffer
-	if err := writeUDPH2ConnectDatagramCapsule(&buf, nil, nil); err != nil {
+	if err := writeUDPH2ConnectDatagramCapsule(&buf, nil); err != nil {
 		t.Fatal(err)
 	}
 	ct, cr, err := parseH2ConnectUDPCapsule(quicvarint.NewReader(bytes.NewReader(buf.Bytes())))

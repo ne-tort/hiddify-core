@@ -3,10 +3,12 @@ package protocol
 import "time"
 
 // DesiredReceiveBufferSize is the kernel UDP receive buffer size that we'd like to use.
-const DesiredReceiveBufferSize = (1 << 20) * 7 // 7 MB
+// 16 MiB aligns with sing-box MASQUE relay TCP SO_RCVBUF tuning and cuts kernel drops on
+// high-BDP fat-stream paths when syscalls batch behind userspace drain.
+const DesiredReceiveBufferSize = (1 << 20) * 16 // 16 MB
 
 // DesiredSendBufferSize is the kernel UDP send buffer size that we'd like to use.
-const DesiredSendBufferSize = (1 << 20) * 7 // 7 MB
+const DesiredSendBufferSize = (1 << 20) * 16 // 16 MB
 
 // InitialPacketSize is the initial (before Path MTU discovery) maximum packet size used.
 const InitialPacketSize = 1280
@@ -33,8 +35,9 @@ const DefaultMaxReceiveStreamFlowControlWindow = 6 * (1 << 20) // 6 MB
 // DefaultMaxReceiveConnectionFlowControlWindow is the default connection-level flow control window for receiving data
 const DefaultMaxReceiveConnectionFlowControlWindow = 15 * (1 << 20) // 15 MB
 
-// WindowUpdateThreshold is the fraction of the receive window that has to be consumed before an higher offset is advertised to the client
-const WindowUpdateThreshold = 0.25
+// WindowUpdateThreshold is the fraction of the receive window that has to be consumed before an higher offset is advertised to the client.
+// MASQUE CONNECT-stream bench: at 0.15 and ~512 KiB default stream windows, updates land ~77 KiB apart (~15 Mbit/s at 35–40 ms RTT).
+const WindowUpdateThreshold = 0.05
 
 // DefaultMaxIncomingStreams is the maximum number of streams that a peer may open
 const DefaultMaxIncomingStreams = 100
@@ -46,7 +49,9 @@ const DefaultMaxIncomingUniStreams = 100
 const MaxServerUnprocessedPackets = 1024
 
 // MaxConnUnprocessedPackets is the max number of packets stored in each connection that are not yet processed.
-const MaxConnUnprocessedPackets = 256
+// Raised for MASQUE fat single-stream paths: a full queue drops incoming datagrams (handlePacket) under momentary
+// userspace lag — retransmits and collapsed throughput; 1024 tracks higher BDP bursts without proportional CPU gain.
+const MaxConnUnprocessedPackets = 1024
 
 // SkipPacketInitialPeriod is the initial period length used for packet number skipping to prevent an Optimistic ACK attack.
 // Every time a packet number is skipped, the period is doubled, up to SkipPacketMaxPeriod.
@@ -147,7 +152,10 @@ const AckDelayExponent = 3
 const TimerGranularity = time.Millisecond
 
 // MaxAckDelay is the maximum time by which we delay sending ACKs.
-const MaxAckDelay = 25 * time.Millisecond
+// MASQUE CONNECT-stream benches showed upload≫download while sharing one fat bidi
+// HTTP/3 stream: a tighter ACK delay helps the bulk sender (response body → client)
+// advance cwnd when the receiver is CPU- or syscall-bound and defers ACK batches.
+const MaxAckDelay = 10 * time.Millisecond
 
 // MaxAckDelayInclGranularity is the max_ack_delay including the timer granularity.
 // This is the value that should be advertised to the peer.

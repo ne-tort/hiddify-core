@@ -8,7 +8,17 @@ import (
 	"github.com/quic-go/quic-go/internal/protocol"
 )
 
-const maxBurstSizePackets = 10
+// Default quic-go uses 10; MASQUE single-stream bulk paths often run cwnd ≫ 10 × MSS while the
+// token bucket still capped bursts here — pacing becomes the bottleneck until BW estimate catches up.
+// A larger floor lets slow-start / Cubic fill fat pipes on download (server→client) without
+// stalling on artificial 10-packet bursts (still bounded by cwnd and congestion).
+// Align with MASQUE cubic initialCongestionWindow (192 packets): 48×MSS/RTT caps download ~15 Mbit/s.
+const maxBurstSizePackets = 192
+
+// pacerInitialDatagramSize is the MSS used for burst budgeting before PMTU discovery updates
+// SetMaxDatagramSize. Align with MASQUE CONNECT-stream first flight (1420 B), not protocol.InitialPacketSize (1280):
+// 48×1280 B / RTT caps server→client download near ~15 Mbit/s on typical RTT until the path uses 1420.
+const pacerInitialDatagramSize = protocol.ByteCount(1420)
 
 // The pacer implements a token bucket pacing algorithm.
 type pacer struct {
@@ -61,10 +71,18 @@ func (p *pacer) Budget(now monotime.Time) protocol.ByteCount {
 	return min(p.maxBurstSize(), budget)
 }
 
+func (p *pacer) pacingMSS() protocol.ByteCount {
+	// Until PMTU raises maxDatagramSize, use MASQUE first-flight MSS for burst budgeting.
+	if p.maxDatagramSize < pacerInitialDatagramSize {
+		return pacerInitialDatagramSize
+	}
+	return p.maxDatagramSize
+}
+
 func (p *pacer) maxBurstSize() protocol.ByteCount {
 	return max(
 		p.timeScaledBandwidth(uint64((protocol.MinPacingDelay + protocol.TimerGranularity).Nanoseconds())),
-		maxBurstSizePackets*p.maxDatagramSize,
+		maxBurstSizePackets*p.pacingMSS(),
 	)
 }
 
