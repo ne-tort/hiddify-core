@@ -38,7 +38,9 @@ func newConnectStreamUploadBridge(inner io.WriteCloser) *connectStreamUploadBrid
 }
 
 func (b *connectStreamUploadBridge) pump() {
-	buf := make([]byte, masqueConnectStreamUploadDuringDownloadReadLen)
+	bp := masqueStreamUploadReadFromBufPool.Get().(*[]byte)
+	defer masqueStreamUploadReadFromBufPool.Put(bp)
+	buf := *bp
 	for {
 		n, done := b.takeLocked(buf)
 		if n > 0 {

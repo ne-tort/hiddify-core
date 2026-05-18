@@ -85,16 +85,6 @@ func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWr
 	}
 }
 
-// beginConnectStreamDownloadDrain starts background response-body drain as soon as the
-// CONNECT tunnel is up (before route/conn WriteTo) so QUIC can accept server DATA while
-// the upload leg is still sending iperf/TLS control bytes.
-func (c *streamConn) beginConnectStreamDownloadDrain() {
-	if c == nil {
-		return
-	}
-	_ = c.downloadFeedReader()
-}
-
 // h3MasqueResponseReadCloser wraps the CONNECT-stream response body. Unlike bufio.Reader,
 // it does not cap a single Read to one underlying chunk (bufio only fill()s once per Read
 // when len(p) < buf size), which capped iperf download to ~8–12 Mbit/s on HTTP/3 DATA frames.
@@ -147,8 +137,13 @@ func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	if buffered >= masqueH3ConnectStreamBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
 		return true
 	}
-	// Duplex download (iperf -R): prompt flush for TUN/TCP segments through 8 KiB (iperf relay / ACK).
-	if chunkLen <= 8192 {
+	// Upload (TUN ReadFrom): streamConn passes up to masqueConnectStreamReadCoalesceTarget per read;
+	// holding chunks >8 KiB until FlushBulk (~7 MiB) capped bench tcp_up (~30 Mbit/s vs ~90+).
+	// Duplex download (iperf -R): still flush MSS-sized segments promptly.
+	if chunkLen > masqueH3ConnectStreamFlushImmediateMax {
+		return true
+	}
+	if chunkLen <= masqueH3ConnectStreamFlushImmediateMax {
 		return true
 	}
 	return false
@@ -3774,7 +3769,6 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
 		}
-		sc.beginConnectStreamDownloadDrain()
 		return sc, nil
 	}
 	if lastRoundTripErr != nil {

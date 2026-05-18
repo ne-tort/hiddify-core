@@ -139,7 +139,6 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 			local:        &net.TCPAddr{},
 			remote:       remoteAddr,
 		}
-		sc.beginConnectStreamDownloadDrain()
 		return sc, nil
 	}
 	if lastRoundTripErr != nil {
