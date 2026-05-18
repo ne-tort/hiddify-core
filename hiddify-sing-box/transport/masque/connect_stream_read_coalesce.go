@@ -27,6 +27,72 @@ const masqueConnectStreamReadCoalesceContinueMin = 512
 // blocking second Read after ~256 B of iperf banner stalls upload (bench: iperf3 interrupt).
 const masqueConnectStreamReadCoalesceBulkMinLen = 32 * 1024
 
+// connectStreamReadBuffered reports whether r may return more bytes without blocking on I/O.
+type connectStreamReadBuffered interface {
+	ConnectStreamReadBuffered() bool
+}
+
+func connectStreamReaderHasBuffered(r io.Reader) bool {
+	for r != nil {
+		switch x := r.(type) {
+		case connectStreamReadBuffered:
+			return x.ConnectStreamReadBuffered()
+		case *h3MasqueResponseReadCloser:
+			r = x.inner
+			continue
+		case *h2ConnectStreamResponseBody:
+			return x.connectStreamReadBuffered()
+		case *connectStreamDownloadFeeder:
+			return x.ConnectStreamReadBuffered()
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// coalesceConnectStreamReadFeeder is used only by connectStreamDownloadFeeder (background drain).
+// Follow-up Reads run only while ConnectStreamReadBuffered — a blocking read for the next in-flight
+// DATA frame on the same HTTP/3 CONNECT stream stalls duplex upload (bench iperf3 interrupt).
+func coalesceConnectStreamReadFeeder(r io.Reader, p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n, err := r.Read(p)
+	if n == 0 {
+		return 0, err
+	}
+	total := n
+	if err != nil {
+		if total > 0 && err == io.EOF {
+			return total, nil
+		}
+		return total, err
+	}
+	goal := len(p)
+	if goal > masqueConnectStreamReadCoalescePerCall {
+		goal = masqueConnectStreamReadCoalescePerCall
+	}
+	if goal > masqueConnectStreamReadCoalesceTarget {
+		goal = masqueConnectStreamReadCoalesceTarget
+	}
+	for total < goal && err == nil {
+		if !connectStreamReaderHasBuffered(r) {
+			break
+		}
+		nn, err2 := r.Read(p[total:])
+		err = err2
+		if nn <= 0 {
+			break
+		}
+		total += nn
+	}
+	if total > 0 && err == io.EOF {
+		return total, nil
+	}
+	return total, err
+}
+
 func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -64,6 +130,9 @@ func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
 		goal = masqueConnectStreamReadCoalesceTarget
 	}
 	for total < goal && err == nil {
+		if !connectStreamReaderHasBuffered(r) {
+			break
+		}
 		nn, err2 := r.Read(p[total:])
 		err = err2
 		if nn <= 0 {

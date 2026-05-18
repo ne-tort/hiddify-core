@@ -71,49 +71,92 @@ func newStream(
 }
 
 func (s *Stream) Read(b []byte) (int, error) {
-	if s.bytesRemainingInFrame == 0 {
-	parseLoop:
-		for {
-			frame, err := s.frameParser.ParseNext(s.qlogger)
-			if err != nil {
-				return 0, err
-			}
-			switch f := frame.(type) {
-			case *dataFrame:
-				if s.parsedTrailer {
-					return 0, errors.New("DATA frame received after trailers")
+	if len(b) == 0 {
+		return 0, nil
+	}
+	var total int
+	var err error
+	for total < len(b) {
+		if s.bytesRemainingInFrame == 0 {
+		parseLoop:
+			for {
+				frame, err := s.frameParser.ParseNext(s.qlogger)
+				if err != nil {
+					return total, err
 				}
-				s.bytesRemainingInFrame = f.Length
-				break parseLoop
-			case *headersFrame:
-				if s.parsedTrailer {
-					maybeQlogInvalidHeadersFrame(s.qlogger, s.StreamID(), f.Length)
-					return 0, errors.New("additional HEADERS frame received after trailers")
+				switch f := frame.(type) {
+				case *dataFrame:
+					if s.parsedTrailer {
+						return total, errors.New("DATA frame received after trailers")
+					}
+					s.bytesRemainingInFrame = f.Length
+					break parseLoop
+				case *headersFrame:
+					if s.parsedTrailer {
+						maybeQlogInvalidHeadersFrame(s.qlogger, s.StreamID(), f.Length)
+						return total, errors.New("additional HEADERS frame received after trailers")
+					}
+					s.parsedTrailer = true
+					if total > 0 {
+						return total, nil
+					}
+					return 0, s.parseTrailer(s.datagramStream, f)
+				default:
+					s.conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
+					// parseNextFrame skips over unknown frame types
+					// Therefore, this condition is only entered when we parsed another known frame type.
+					return total, fmt.Errorf("peer sent an unexpected frame: %T", f)
 				}
-				s.parsedTrailer = true
-				return 0, s.parseTrailer(s.datagramStream, f)
-			default:
-				s.conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
-				// parseNextFrame skips over unknown frame types
-				// Therefore, this condition is only entered when we parsed another known frame type.
-				return 0, fmt.Errorf("peer sent an unexpected frame: %T", f)
 			}
 		}
-	}
 
-	var n int
-	var err error
-	if s.bytesRemainingInFrame < uint64(len(b)) {
-		n, err = s.datagramStream.Read(b[:s.bytesRemainingInFrame])
-	} else {
-		n, err = s.datagramStream.Read(b)
+		chunk := b[total:]
+		var n int
+		if s.bytesRemainingInFrame < uint64(len(chunk)) {
+			n, err = s.datagramStream.Read(chunk[:s.bytesRemainingInFrame])
+		} else {
+			n, err = s.datagramStream.Read(chunk)
+		}
+		s.bytesRemainingInFrame -= uint64(n)
+		total += n
+		if err != nil {
+			if total > 0 && err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+		if n == 0 {
+			break
+		}
+		// Keep draining the current DATA frame while the caller buffer has room — returning
+		// after a partial QUIC chunk capped MASQUE CONNECT-stream download at ~64 KiB/RTT.
+		if s.bytesRemainingInFrame > 0 {
+			continue
+		}
+		if !s.hasQueuedReadData() {
+			break
+		}
 	}
-	s.bytesRemainingInFrame -= uint64(n)
-	return n, err
+	return total, nil
 }
 
 func (s *Stream) hasMoreData() bool {
 	return s.bytesRemainingInFrame > 0
+}
+
+// hasQueuedReadData is true when another Read on this HTTP/3 stream can progress without
+// waiting for a new QUIC packet (partial DATA frame or queued STREAM payload).
+func (s *Stream) hasQueuedReadData() bool {
+	if s.bytesRemainingInFrame > 0 {
+		return true
+	}
+	if s.datagramStream == nil {
+		return false
+	}
+	if qs := s.datagramStream.QUICStream(); qs != nil {
+		return qs.HasReceiveDataQueued()
+	}
+	return false
 }
 
 func (s *Stream) Write(b []byte) (int, error) {

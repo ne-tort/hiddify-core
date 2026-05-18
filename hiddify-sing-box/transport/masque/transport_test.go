@@ -1324,7 +1324,7 @@ func TestStreamConnWriteH3PipeUploadRespectsWriteDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	// No reader on pr: flushes from bufio block on the pipe; deadline must unblock Write.
-	data := make([]byte, masqueH3ConnectStreamBufSize+64*1024)
+	data := make([]byte, masqueConnectStreamReadCoalesceTarget+64*1024)
 	errCh := make(chan error, 1)
 	go func() {
 		_, err := c.Write(data)
@@ -4340,6 +4340,7 @@ type recordingIPPacketSession struct {
 	lastWrite  []byte
 	writes     [][]byte
 	readPacket []byte
+	writeICMP  []byte
 }
 
 func (s *recordingIPPacketSession) ReadPacket(buffer []byte) (int, error) {
@@ -4355,10 +4356,65 @@ func (s *recordingIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 	packet := append([]byte(nil), buffer...)
 	s.lastWrite = packet
 	s.writes = append(s.writes, packet)
-	return nil, nil
+	if len(s.writeICMP) == 0 {
+		return nil, nil
+	}
+	return append([]byte(nil), s.writeICMP...), nil
 }
 
 func (s *recordingIPPacketSession) Close() error { return nil }
+
+func TestParseICMPPortUnreachablePeerIPv4(t *testing.T) {
+	orig, err := buildIPv4UDPPacket(
+		netip.MustParseAddr("198.18.0.2"),
+		53000,
+		netip.MustParseAddr("10.200.0.2"),
+		5601,
+		[]byte("dns"),
+	)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	icmpPkt := make([]byte, 20+8+len(orig))
+	icmpPkt[0] = 0x45
+	icmpPkt[9] = 1
+	icmpPkt[20] = 3
+	icmpPkt[21] = 3
+	copy(icmpPkt[28:], orig)
+	peer, port, ok := parseICMPPortUnreachablePeer(icmpPkt)
+	if !ok || peer != netip.MustParseAddr("10.200.0.2") || port != 5601 {
+		t.Fatalf("parse: peer=%v port=%d ok=%v", peer, port, ok)
+	}
+}
+
+func TestConnectIPUDPBridgeICMPPortUnreachableFromWrite(t *testing.T) {
+	orig, err := buildIPv4UDPPacket(
+		netip.MustParseAddr("198.18.0.2"),
+		53000,
+		netip.MustParseAddr("10.200.0.2"),
+		5601,
+		[]byte("dns"),
+	)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	icmpPkt := make([]byte, 20+8+len(orig))
+	icmpPkt[0] = 0x45
+	icmpPkt[9] = 1
+	icmpPkt[20] = 3
+	icmpPkt[21] = 3
+	copy(icmpPkt[28:], orig)
+	rec := &recordingIPPacketSession{writeICMP: icmpPkt}
+	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
+	dst := &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601}
+	if _, err := conn.WriteTo([]byte("q"), dst); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, _, err = conn.ReadFrom(make([]byte, 64))
+	if !errors.Is(err, ErrUDPPortUnreachable) {
+		t.Fatalf("read: %v want ErrUDPPortUnreachable", err)
+	}
+}
 
 func TestParseICMPPTBHopMTUIPv4(t *testing.T) {
 	pkt := make([]byte, 28)

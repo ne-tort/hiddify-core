@@ -65,12 +65,33 @@ func (c *connectionFlowController) AddBytesRead(n protocol.ByteCount) (hasWindow
 	return c.hasWindowUpdate()
 }
 
+func (c *connectionFlowController) shouldQueueWindowUpdateOnReceive() bool {
+	if c.highestReceived > c.bytesRead {
+		return true
+	}
+	bytesRemaining := c.receiveWindow - c.highestReceived
+	return bytesRemaining <= protocol.ByteCount(float64(c.receiveWindowSize)*(1-protocol.WindowUpdateThreshold))
+}
+
+// ShouldQueueMaxData reports whether MAX_DATA should be sent soon (see stream_flow_controller).
+func (c *connectionFlowController) ShouldQueueMaxData() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.shouldQueueWindowUpdateOnReceive()
+}
+
 func (c *connectionFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteCount {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
+	if !c.hasWindowUpdate() && !c.shouldQueueWindowUpdateOnReceive() {
+		return 0
+	}
+
 	oldWindowSize := c.receiveWindowSize
-	offset := c.getWindowUpdate(now)
+	c.maybeAdjustWindowSize(now)
+	c.receiveWindow = c.bytesRead + c.receiveWindowSize
+	offset := c.receiveWindow
 	if c.logger.Debug() && oldWindowSize < c.receiveWindowSize {
 		c.logger.Debugf("Increasing receive flow control window for the connection to %d kB", c.receiveWindowSize/(1<<10))
 	}

@@ -57,6 +57,16 @@ func (r *body) checkContentLengthViolation() error {
 	return nil
 }
 
+// ConnectStreamReadBuffered reports bytes already available inside the current HTTP/3 DATA
+// frame (no further QUIC read required). MASQUE CONNECT-stream coalescing uses this to avoid
+// blocking follow-up Reads that stall duplex upload on the same QUIC stream.
+func (r *body) ConnectStreamReadBuffered() bool {
+	if r == nil || r.str == nil {
+		return false
+	}
+	return r.str.hasQueuedReadData()
+}
+
 func (r *body) Read(b []byte) (int, error) {
 	if err := r.checkContentLengthViolation(); err != nil {
 		return 0, err
@@ -120,6 +130,10 @@ func (r *hijackableBody) Read(b []byte) (int, error) {
 		r.requestDone()
 	}
 	return n, maybeReplaceError(err)
+}
+
+func (r *hijackableBody) ConnectStreamReadBuffered() bool {
+	return (&r.body).ConnectStreamReadBuffered()
 }
 
 // SetReadDeadline forwards to the QUIC stream so net.Conn wrappers (e.g. MASQUE

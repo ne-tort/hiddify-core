@@ -117,6 +117,11 @@ func (s *Stream) Read(p []byte) (int, error) {
 	return s.receiveStr.Read(p)
 }
 
+// HasReceiveDataQueued is true when the receive side already holds the next byte(s).
+func (s *Stream) HasReceiveDataQueued() bool {
+	return s.receiveStr.HasQueuedData()
+}
+
 // Peek fills b with stream data, without consuming the stream data.
 // It blocks until len(b) bytes are available, or an error occurs.
 // It respects the stream deadline set by SetReadDeadline.

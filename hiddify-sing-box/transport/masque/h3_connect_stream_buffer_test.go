@@ -258,6 +258,10 @@ func (c *chunkedReadCloser) Read(p []byte) (int, error) {
 
 func (c *chunkedReadCloser) Close() error { return nil }
 
+func (c *chunkedReadCloser) ConnectStreamReadBuffered() bool {
+	return c.left > 0
+}
+
 type panicOnSecondRead struct {
 	payload []byte
 	reads   int
@@ -289,11 +293,15 @@ func (c *trackingReadCloser) Read(p []byte) (int, error) {
 
 func (c *trackingReadCloser) Close() error { return nil }
 
+func (c *trackingReadCloser) ConnectStreamReadBuffered() bool {
+	return c.offset < len(c.payload)
+}
+
 func TestStreamConnWriteToFullPayload(t *testing.T) {
 	const total = masqueConnectStreamReadCoalesceTarget + 37_000
 	inner := &chunkedReadCloser{chunk: 1000, chunks: (total + 999) / 1000, left: total}
 	c := &streamConn{
-		reader: io.NopCloser(inner),
+		reader: inner,
 		writer: &fakeWriter{},
 		ctx:    context.Background(),
 		local:  &net.TCPAddr{},
@@ -320,7 +328,7 @@ func TestStreamConnReadBufferPrefetchStaging(t *testing.T) {
 	chunks := int(masqueConnectStreamReadCoalesceTarget/chunk) + 64
 	inner := &chunkedReadCloser{chunk: chunk, chunks: chunks, left: chunks * chunk}
 	c := &streamConn{
-		reader: io.NopCloser(inner),
+		reader: inner,
 		writer: &fakeWriter{},
 		ctx:    context.Background(),
 		local:  &net.TCPAddr{},

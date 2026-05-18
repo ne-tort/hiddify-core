@@ -239,6 +239,14 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			log.Printf("masque connect_ip ingress: rx n=%d ver=%d proto=%d ns=%v inflight=%d",
 				n, pkt[0]>>4, pkt[9], s.ingressTCPNetstack.Load() != nil, s.connectIPTCPInstallInflight.Load())
 		}
+		// Server CONNECT-IP UDP relay returns ICMP port-unreachable as a full IPv4 packet (not
+		// CONNECT-UDP write feedback). Deliver to UDP bridge subscribers so ReadFrom surfaces
+		// ErrUDPPortUnreachable (bench udp_deliv / dig).
+		if _, _, icmpPortUnreach := parseICMPPortUnreachablePeer(pkt); icmpPortUnreach {
+			if s.deliverIPv4UDPBridgedIngress(pkt) {
+				continue
+			}
+		}
 		if bridgeable, malformed := classifyIPv4UDPBridgeCandidate(pkt); malformed {
 			incConnectIPEngineDropReason("ingress_udp_malformed")
 			continue

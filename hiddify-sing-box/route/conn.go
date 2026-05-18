@@ -310,38 +310,60 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	// It also implements io.ReaderFrom so upload can bulk-read from TUN (parity with std io.Copy).
 	// Prefer explicit WriterTo/ReadFrom when advertised: avoids choosing the splice path when a
 	// wrapper still exposes syscall.Conn on an inner fd, and keeps MASQUE bulk semantics first.
+	_, masqueDownload := source.(interface{ C.RouteConnectionCopyWriterTo })
+	_, masqueUpload := destination.(interface{ C.RouteConnectionCopyReaderFrom })
+	if masqueDownload || masqueUpload {
+		tmasque.TuneConnectStreamTCPRelay(source)
+		tmasque.TuneConnectStreamTCPRelay(destination)
+	}
+	if masqueUpload {
+		if tc, ok := source.(net.Conn); ok {
+			sourceReader = tmasque.WrapTCPQuickAckReader(tc)
+		}
+	}
+	if masqueDownload {
+		if tc, ok := destination.(net.Conn); ok {
+			destinationWriter = tmasque.WrapTCPQuickAckWriter(tc, destinationWriter)
+		}
+	}
 	var err error
-	if wt, ok := sourceReader.(interface {
-		io.WriterTo
-		C.RouteConnectionCopyWriterTo
-	}); ok {
-		traceRouteConnectionCopyBranch("writer_to", direction, sourceReader, destinationWriter)
-		var written int64
-		written, err = wt.WriteTo(destinationWriter)
-		if written > 0 {
-			for _, counter := range readCounters {
-				counter(written)
+	var copyHandled bool
+	if !copyHandled {
+		if wt, ok := sourceReader.(interface {
+			io.WriterTo
+			C.RouteConnectionCopyWriterTo
+		}); ok {
+			traceRouteConnectionCopyBranch("writer_to", direction, sourceReader, destinationWriter)
+			var written int64
+			written, err = wt.WriteTo(destinationWriter)
+			if written > 0 {
+				for _, counter := range readCounters {
+					counter(written)
+				}
+				for _, counter := range writeCounters {
+					counter(written)
+				}
 			}
-			for _, counter := range writeCounters {
-				counter(written)
+			copyHandled = true
+		} else if rf, ok := destinationWriter.(interface {
+			io.ReaderFrom
+			C.RouteConnectionCopyReaderFrom
+		}); ok {
+			traceRouteConnectionCopyBranch("reader_from", direction, sourceReader, destinationWriter)
+			var read int64
+			read, err = rf.ReadFrom(sourceReader)
+			if read > 0 {
+				for _, counter := range readCounters {
+					counter(read)
+				}
+				for _, counter := range writeCounters {
+					counter(read)
+				}
 			}
+			copyHandled = true
 		}
-	} else if rf, ok := destinationWriter.(interface {
-		io.ReaderFrom
-		C.RouteConnectionCopyReaderFrom
-	}); ok {
-		traceRouteConnectionCopyBranch("reader_from", direction, sourceReader, destinationWriter)
-		var read int64
-		read, err = rf.ReadFrom(sourceReader)
-		if read > 0 {
-			for _, counter := range readCounters {
-				counter(read)
-			}
-			for _, counter := range writeCounters {
-				counter(read)
-			}
-		}
-	} else {
+	}
+	if !copyHandled {
 		traceRouteConnectionCopyBranch("copy_counters", direction, sourceReader, destinationWriter)
 		_, err = bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
 	}
@@ -469,8 +491,8 @@ func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.P
 // that call ExtendHeader on the relay buffer; a full 16 KiB ReadPacket leaves FreeLen()==0 and panics.
 const packetRelayMuxHeadroom = 32
 
-// copyPacketDownload relays masque/outbound UDP to the TUN inbound side. CONNECT-UDP ICMP
-// (ErrUDPPortUnreachable) must not tear down the relay — keep draining like H3 proxiedConn.
+// copyPacketDownload relays masque/outbound UDP to the TUN inbound side. CONNECT-UDP and
+// CONNECT-IP ICMP port-unreachable (ErrUDPPortUnreachable) must not tear down the relay.
 func copyPacketDownload(ctx context.Context, source N.PacketReader, destination N.PacketWriter) error {
 	buffer := buf.NewPacket()
 	defer buffer.Release()

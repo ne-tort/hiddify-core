@@ -114,15 +114,16 @@ func TestFlushWriterFlushesAtRelayChunkSize(t *testing.T) {
 	}
 }
 
-func TestRelayDownloadCopyBatchesFlushes(t *testing.T) {
+func TestRelayDownloadCopyFlushesEachRead(t *testing.T) {
 	var flushes int32
 	fw := newFlushWriter(&bytes.Buffer{}, &countingFlusher{onFlush: func() { atomic.AddInt32(&flushes, 1) }})
-	src := &chunkedReader{chunk: 64 * 1024, left: 10 * 64 * 1024}
+	const chunks = 10
+	src := &chunkedReader{chunk: 64 * 1024, left: chunks * 64 * 1024}
 	if _, err := relayDownloadCopy(fw, src); err != nil {
 		t.Fatal(err)
 	}
-	if flushes < 2 || flushes > 3 {
-		t.Fatalf("flushes=%d want first-flight + ~512KiB batch flush", flushes)
+	if flushes != chunks {
+		t.Fatalf("flushes=%d want one per relay TCP read (%d)", flushes, chunks)
 	}
 }
 

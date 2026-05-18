@@ -13,7 +13,7 @@ import (
 // A larger floor lets slow-start / Cubic fill fat pipes on download (server→client) without
 // stalling on artificial 10-packet bursts (still bounded by cwnd and congestion).
 // Align with MASQUE cubic initialCongestionWindow (192 packets): 48×MSS/RTT caps download ~15 Mbit/s.
-const maxBurstSizePackets = 192
+const maxBurstSizePackets = 512
 
 // pacerInitialDatagramSize is the MSS used for burst budgeting before PMTU discovery updates
 // SetMaxDatagramSize. Align with MASQUE CONNECT-stream first flight (1420 B), not protocol.InitialPacketSize (1280):
@@ -95,7 +95,7 @@ func (p *pacer) timeScaledBandwidth(ns uint64) protocol.ByteCount {
 		return 0
 	}
 	const nsPerSecond = 1e9
-	maxBurst := maxBurstSizePackets * p.maxDatagramSize
+	maxBurst := maxBurstSizePackets * p.pacingMSS()
 	var scaled protocol.ByteCount
 	if ns > math.MaxUint64/bw {
 		scaled = maxBurst

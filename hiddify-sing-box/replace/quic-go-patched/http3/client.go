@@ -383,7 +383,11 @@ func (r *cancelingReader) Read(b []byte) (int, error) {
 
 func (c *ClientConn) sendRequestBody(str *RequestStream, body io.ReadCloser, contentLength int64) error {
 	defer body.Close()
-	buf := make([]byte, bodyCopyBufferSize)
+	bufLen := bodyCopyBufferSize
+	if str.isConnect {
+		bufLen = bodyCopyBufferConnectSize
+	}
+	buf := make([]byte, bufLen)
 	sr := &cancelingReader{str: str, r: body}
 	if contentLength == -1 {
 		_, err := io.CopyBuffer(str, sr, buf)

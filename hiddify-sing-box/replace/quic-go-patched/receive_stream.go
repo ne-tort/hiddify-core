@@ -30,8 +30,9 @@ type ReceiveStream struct {
 	readPosInFrame     int
 	currentFrameIsLast bool // is the currentFrame the last frame on this stream
 
-	queuedStopSending   bool
-	queuedMaxStreamData bool
+	queuedStopSending    bool
+	queuedMaxStreamData  bool
+	queuedConnMaxData    bool
 
 	// Set once we read the io.EOF or the cancellation error.
 	// Note that for local cancellations, this doesn't necessarily mean that we know the final offset yet.
@@ -81,6 +82,17 @@ func (s *ReceiveStream) StreamID() protocol.StreamID {
 // Read reads data from the stream.
 // Read can be made to time out using [ReceiveStream.SetReadDeadline].
 // If the stream was canceled, the error is a [StreamError].
+// HasQueuedData reports whether Read would return bytes without blocking on the network
+// (partial current frame or further STREAM frames already in the receive queue).
+func (s *ReceiveStream) HasQueuedData() bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.currentFrame != nil && s.readPosInFrame < len(s.currentFrame) {
+		return true
+	}
+	return s.frameQueue.HasMoreData()
+}
+
 func (s *ReceiveStream) Read(p []byte) (int, error) {
 	// Concurrent use of Read is not permitted (and doesn't make any sense),
 	// but sometimes people do it anyway.
@@ -146,6 +158,11 @@ func (s *ReceiveStream) readImpl(p []byte) (hasStreamWindowUpdate bool, hasConnW
 			s.dequeueNextFrame()
 		}
 		if s.currentFrame == nil && bytesRead > 0 {
+			// Keep filling the caller buffer while the next in-order STREAM frame is already
+			// queued (HasMoreData alone is true across gaps and would busy-loop).
+			if s.frameQueue.HasReadyFrame() {
+				continue
+			}
 			return hasStreamWindowUpdate, hasConnWindowUpdate, bytesRead, s.closeForShutdownErr
 		}
 
@@ -403,9 +420,17 @@ func (s *ReceiveStream) cancelReadImpl(errorCode qerr.StreamErrorCode) (queuedNe
 func (s *ReceiveStream) handleStreamFrame(frame *wire.StreamFrame, now monotime.Time) error {
 	s.mutex.Lock()
 	err := s.handleStreamFrameImpl(frame, now)
+	queueStreamWU := s.queuedMaxStreamData
+	queueConnWU := s.queuedConnMaxData
 	completed := s.isNewlyCompleted()
 	s.mutex.Unlock()
 
+	if queueStreamWU {
+		s.sender.onHasStreamControlFrame(s.streamID, s)
+	}
+	if queueConnWU {
+		s.sender.onHasConnectionData()
+	}
 	if completed {
 		s.flowController.Abandon()
 		s.sender.onStreamCompleted(s.streamID)
@@ -426,6 +451,12 @@ func (s *ReceiveStream) handleStreamFrameImpl(frame *wire.StreamFrame, now monot
 	}
 	if err := s.frameQueue.Push(frame.Data, frame.Offset, frame.PutBack); err != nil {
 		return err
+	}
+	if s.flowController.ShouldQueueMaxStreamData() {
+		s.queuedMaxStreamData = true
+	}
+	if s.flowController.ShouldQueueConnectionMaxData() {
+		s.queuedConnMaxData = true
 	}
 	s.signalRead()
 	return nil

@@ -46,10 +46,7 @@ const cloudflareLegacyH3DatagramSettingID uint64 = 0x276
 // inside HTTP/3 DATGRAM without quic_datagram_packer_oversize_drop spikes on Docker Desktop bulk.
 const defaultUDPInitialPacketSize uint16 = 1420
 
-// masqueH3ConnectStreamBufSize coalesces small SOCKS/TCP reads and writes into fewer
-// HTTP/3 stream frames on CONNECT-stream (download: response body; upload: io.Pipe body).
-// Match masqueConnectStreamReadCoalesceTarget / server relayCopyBuffered so upload and
-// download bulk paths use the same chunking budget.
+// masqueH3ConnectStreamBufSize coalesces CONNECT-stream upload writes before the io.Pipe.
 const masqueH3ConnectStreamBufSize = masqueConnectStreamReadCoalesceTarget
 
 // masqueH3ConnectStreamFlushImmediateMax extends the upload fast-flush path beyond bare control
@@ -88,6 +85,16 @@ func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWr
 	}
 }
 
+// beginConnectStreamDownloadDrain starts background response-body drain as soon as the
+// CONNECT tunnel is up (before route/conn WriteTo) so QUIC can accept server DATA while
+// the upload leg is still sending iperf/TLS control bytes.
+func (c *streamConn) beginConnectStreamDownloadDrain() {
+	if c == nil {
+		return
+	}
+	_ = c.downloadFeedReader()
+}
+
 // h3MasqueResponseReadCloser wraps the CONNECT-stream response body. Unlike bufio.Reader,
 // it does not cap a single Read to one underlying chunk (bufio only fill()s once per Read
 // when len(p) < buf size), which capped iperf download to ~8–12 Mbit/s on HTTP/3 DATA frames.
@@ -119,6 +126,16 @@ func (r *h3MasqueResponseReadCloser) SetReadDeadline(t time.Time) error {
 	return ErrDeadlineUnsupported
 }
 
+func (r *h3MasqueResponseReadCloser) ConnectStreamReadBuffered() bool {
+	if r == nil || r.inner == nil {
+		return false
+	}
+	if b, ok := r.inner.(connectStreamReadBuffered); ok {
+		return b.ConnectStreamReadBuffered()
+	}
+	return connectStreamReaderHasBuffered(r.inner)
+}
+
 func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	buffered := w.bw.Buffered()
 	if buffered == 0 {
@@ -130,11 +147,8 @@ func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	if buffered >= masqueH3ConnectStreamBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
 		return true
 	}
-	// Duplex: never hold medium upload chunks (typical TUN/TCP segments) until FlushBulk.
-	if chunkLen > masqueH3ConnectStreamFlushImmediateMax {
-		return true
-	}
-	if chunkLen <= masqueH3ConnectStreamFlushImmediateMax {
+	// Duplex download (iperf -R): prompt flush for TUN/TCP segments through 8 KiB (iperf relay / ACK).
+	if chunkLen <= 8192 {
 		return true
 	}
 	return false
@@ -202,14 +216,23 @@ var masqueStreamUploadReadFromBufPool = sync.Pool{
 	},
 }
 
-// masqueStreamDownloadWriteToBufLen is the internal buffer for streamConn.WriteTo so io.Copy(dst, masqueConn)
-// pulls up to masqueConnectStreamReadCoalesceTarget bytes per HTTP/3 body read cycle even when dst
-// would have used small ReadFrom/Read buffers (common upload≫download asymmetry on bench).
+// masqueStreamDownloadWriteToBufLen backs the download feeder QUIC coalesce path.
 const masqueStreamDownloadWriteToBufLen = masqueConnectStreamReadCoalesceTarget
 
 var masqueStreamDownloadWriteToBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, masqueStreamDownloadWriteToBufLen)
+		return &b
+	},
+}
+
+// masqueStreamDownloadWriteToTunLen caps each streamConn.WriteTo → TUN write so gVisor/kernel TCP
+// can ACK in smaller steps and clock duplex upload (request body) on the CONNECT stream.
+const masqueStreamDownloadWriteToTunLen = 512 * 1024
+
+var masqueStreamDownloadWriteToTunPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, masqueStreamDownloadWriteToTunLen)
 		return &b
 	},
 }
@@ -1054,6 +1077,8 @@ type connectIPUDPPacketConn struct {
 	readMu           sync.Mutex
 	readBuffer       []byte
 	readScratchAddr  net.UDPAddr
+	icmpNotify       chan error // CONNECT-IP ICMP port-unreachable from WritePacket (upload) → ReadFrom (download)
+	icmpWake         chan struct{}
 	closed           atomic.Bool
 }
 
@@ -1690,6 +1715,8 @@ func newConnectIPUDPPacketConn(ctx context.Context, session IPPacketSession, cor
 		localBind:       &net.UDPAddr{IP: localIP, Port: 53000},
 		pmtuState:       pmtuState,
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
+		icmpNotify:      make(chan error, 4),
+		icmpWake:        make(chan struct{}, 1),
 	}
 	if core != nil {
 		pc.core = core
@@ -1720,6 +1747,10 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
+	if err := c.takeICMPPortUnreachable(); err != nil {
+		return 0, nil, err
+	}
+
 	if c.ingressSub != nil {
 		for {
 			if c.closed.Load() {
@@ -1728,12 +1759,22 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 			if c.deadlines.readTimeoutExceeded() {
 				return 0, nil, os.ErrDeadlineExceeded
 			}
+			if err := c.takeICMPPortUnreachable(); err != nil {
+				return 0, nil, err
+			}
 			select {
 			case <-ctx.Done():
 				return 0, nil, os.ErrDeadlineExceeded
+			case err := <-c.icmpNotify:
+				return 0, nil, err
 			case raw, ok := <-c.ingressSub.ch:
 				if !ok {
 					return 0, nil, net.ErrClosed
+				}
+				if peer, port, icmpOK := parseICMPPortUnreachablePeer(raw); icmpOK {
+					c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], peer.AsSlice()...)
+					c.readScratchAddr.Port = int(port)
+					return 0, &c.readScratchAddr, newUDPPortUnreachableError(&c.readScratchAddr)
 				}
 				connectIPCounters.engineIngressTotal.Add(1)
 				payloadOff, payloadLen, src, srcPort, parseErr := parseIPv4UDPPacketOffsets(raw)
@@ -1765,10 +1806,26 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	var sctx IPPacketSessionWithContext
 	sctx, _ = c.session.(IPPacketSessionWithContext)
 	for {
+		if err := c.takeICMPPortUnreachable(); err != nil {
+			return 0, nil, err
+		}
+		readCtx := ctx
+		if sctx != nil {
+			var cancelRead context.CancelFunc
+			readCtx, cancelRead = context.WithCancel(ctx)
+			defer cancelRead()
+			go func() {
+				select {
+				case <-c.icmpWake:
+					cancelRead()
+				case <-readCtx.Done():
+				}
+			}()
+		}
 		var raw []byte
 		if len(p) >= connectIPUDPDirectReadMin {
 			if sctx != nil {
-				n, err = sctx.ReadPacketWithContext(ctx, p)
+				n, err = sctx.ReadPacketWithContext(readCtx, p)
 			} else {
 				n, err = c.session.ReadPacket(p)
 			}
@@ -1780,17 +1837,31 @@ func (c *connectIPUDPPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 				c.readBuffer = rb
 			}
 			if sctx != nil {
-				n, err = sctx.ReadPacketWithContext(ctx, rb)
+				n, err = sctx.ReadPacketWithContext(readCtx, rb)
 			} else {
 				n, err = c.session.ReadPacket(rb)
 			}
 			raw = rb[:n]
 		}
 		if err != nil {
+			if icmpErr := c.takeICMPPortUnreachable(); icmpErr != nil {
+				return 0, nil, icmpErr
+			}
 			if errors.Is(err, context.DeadlineExceeded) {
 				return 0, nil, os.ErrDeadlineExceeded
 			}
+			if errors.Is(err, context.Canceled) {
+				if c.deadlines.readTimeoutExceeded() {
+					return 0, nil, os.ErrDeadlineExceeded
+				}
+				continue
+			}
 			return 0, nil, err
+		}
+		if peer, port, icmpOK := parseICMPPortUnreachablePeer(raw); icmpOK {
+			c.readScratchAddr.IP = append(c.readScratchAddr.IP[:0], peer.AsSlice()...)
+			c.readScratchAddr.Port = int(port)
+			return 0, &c.readScratchAddr, newUDPPortUnreachableError(&c.readScratchAddr)
 		}
 		connectIPCounters.engineIngressTotal.Add(1)
 		payloadOff, payloadLen, src, srcPort, parseErr := parseIPv4UDPPacketOffsets(raw)
@@ -1903,7 +1974,9 @@ func (c *connectIPUDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err er
 				// avoid duplicate maybeEmit per datagram (syscalls + atomic contention).
 				if len(icmp) > 0 {
 					connectIPCounters.engineICMPFeedbackTotal.Add(1)
-					if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
+					if peer, port, icmpOK := parseICMPPortUnreachablePeer(icmp); icmpOK {
+						c.notifyICMPPortUnreachable(peer, port)
+					} else if ipMTU, isV6, ok := parseICMPPTBHopMTU(icmp); ok {
 						maxPayload = c.applyPTBToUDPPayload(ipMTU, isV6)
 					} else {
 						maxPayload = c.decreasePayloadCeiling("ptb_feedback")
@@ -3641,6 +3714,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		req.Header = make(http.Header)
 		setMasqueAuthorizationHeader(req.Header, options)
 		pr, pw := io.Pipe()
+		uploadBridge := newConnectStreamUploadBridge(pw)
 		req.Body = pr
 		req.ContentLength = -1
 		roundTripper := s.getTCPRoundTripper(tcpHTTP)
@@ -3648,6 +3722,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
@@ -3670,6 +3745,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -3682,6 +3758,7 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -3690,13 +3767,15 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		tcpTracef("masque tcp connect_stream success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
 		stopReqCtxRelay(true)
 		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
-		return &streamConn{
+		sc := &streamConn{
 			reader: newH3MasqueResponseReadCloser(resp.Body),
-			writer: newH3MasqueBufferedPipeWriter(pw),
+			writer: newH3MasqueBufferedPipeWriter(uploadBridge),
 			ctx:    streamCtx,
 			local:  &net.TCPAddr{},
 			remote: remoteAddr,
-		}, nil
+		}
+		sc.beginConnectStreamDownloadDrain()
+		return sc, nil
 	}
 	if lastRoundTripErr != nil {
 		return nil, errors.Join(ErrTCPConnectStreamFailed, lastRoundTripErr)
@@ -3872,14 +3951,19 @@ func applyQUICExperimentalOptions(base *quic.Config, opts QUICExperimentalOption
 	return config
 }
 
+// masqueConnectStreamUploadDuringDownloadReadLen matches server relayUploadCopy (4 KiB):
+// while WriteTo is draining download, an 8 MiB ReadFrom on the TUN leg blocks the upload goroutine
+// and starves duplex CONNECT-stream request-body progress (bench tcp_down ~64 KiB/RTT).
+const masqueConnectStreamUploadDuringDownloadReadLen = 4 << 10
+
 type streamConn struct {
 	mu             sync.Mutex
 	readBufMu      sync.Mutex // CONNECT-stream download: coalesce + sing bufio.ReadBuffer staging (must not interleave with Read/WriteTo).
 	readStaging    []byte
 	readStagingOff int
-	downloadPumpOnce sync.Once
-	downloadPipeR    *io.PipeReader
-	downloadPipeW    *io.PipeWriter
+	downloadFeed   *connectStreamDownloadFeeder
+	downloadFeedOnce sync.Once
+	relayDownloadBusy atomic.Int32 // >0 while WriteTo is relaying response → TUN (iperf -R download)
 	h2PipeWriteMu  sync.Mutex // CONNECT-stream pipe upload (H2 Extended CONNECT + H3 request body): serializes Writes (parity h2ConnectUDPPacketConn.writeMu)
 	reader         io.ReadCloser
 	writer         io.WriteCloser
@@ -3908,9 +3992,6 @@ func (c *streamConn) wrapConnectStreamDataplaneErr(op string, err error) error {
 }
 
 func (c *streamConn) CloseRead() error {
-	if c.downloadPipeW != nil {
-		_ = c.downloadPipeW.Close()
-	}
 	c.readBufMu.Lock()
 	c.readStaging = nil
 	c.readStagingOff = 0
@@ -3918,46 +3999,6 @@ func (c *streamConn) CloseRead() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reader.Close()
-}
-
-// startDownloadPump reads the CONNECT-stream response body in the background so WriteTo can
-// keep draining TUN while QUIC receive + MAX_STREAM_DATA progress (duplex with upload ACKs).
-func (c *streamConn) startDownloadPump() {
-	c.downloadPumpOnce.Do(func() {
-		pr, pw := io.Pipe()
-		c.downloadPipeR = pr
-		c.downloadPipeW = pw
-		go c.runDownloadPump(pw)
-	})
-}
-
-func (c *streamConn) runDownloadPump(pw *io.PipeWriter) {
-	defer pw.Close()
-	body := c.connectStreamBodyReader()
-	if body == nil {
-		return
-	}
-	bp := masqueStreamDownloadWriteToBufPool.Get().(*[]byte)
-	defer masqueStreamDownloadWriteToBufPool.Put(bp)
-	scratch := *bp
-	goal := masqueConnectStreamReadCoalescePerCall
-	if goal > len(scratch) {
-		goal = len(scratch)
-	}
-	for {
-		n, err := body.Read(scratch[:goal])
-		if n > 0 {
-			if _, werr := pw.Write(scratch[:n]); werr != nil {
-				return
-			}
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				_ = pw.CloseWithError(err)
-			}
-			return
-		}
-	}
 }
 
 func (c *streamConn) CloseWrite() error {
@@ -4011,7 +4052,20 @@ func (c *streamConn) connectStreamBodyReader() io.Reader {
 	}
 }
 
-// readCoalescedInto fills dst from readStaging (if any) then coalesces from the response body.
+// downloadFeedReader returns a background-drained view of the CONNECT-stream response body.
+func (c *streamConn) downloadFeedReader() io.Reader {
+	if c == nil {
+		return nil
+	}
+	c.downloadFeedOnce.Do(func() {
+		c.downloadFeed = &connectStreamDownloadFeeder{}
+		c.downloadFeed.start(c.ctx, c.connectStreamBodyReader())
+	})
+	return c.downloadFeed
+}
+
+// readCoalescedInto fills dst from readStaging (if any) then coalesces from the download feeder.
+// The HTTP response body must only be drained via connectStreamDownloadFeeder (one consumer).
 // Caller must hold c.readBufMu.
 func (c *streamConn) readCoalescedInto(dst []byte) (int, error) {
 	total := 0
@@ -4026,12 +4080,30 @@ func (c *streamConn) readCoalescedInto(dst []byte) (int, error) {
 	if total == len(dst) {
 		return total, nil
 	}
-	nn, err := coalesceConnectStreamRead(c.connectStreamBodyReader(), dst[total:])
+	body := c.connectStreamBodyReader()
+	if body == nil {
+		return total, io.EOF
+	}
+	if c.ctx != nil {
+		if err := context.Cause(c.ctx); err != nil {
+			nn, rerr := coalesceConnectStreamRead(body, dst[total:])
+			total += nn
+			return total, rerr
+		}
+	}
+	feed := c.downloadFeedReader()
+	if feed == nil {
+		return total, io.EOF
+	}
+	nn, err := coalesceConnectStreamRead(feed, dst[total:])
 	total += nn
 	return total, err
 }
 
-// readForWriteTo fills dst for streamConn.WriteTo from the background download pump.
+// readForWriteTo fills dst for streamConn.WriteTo from the download feeder ring.
+// One blocking feed.Read per call when the ring is empty; coalesce only while
+// ConnectStreamReadBuffered (ring backlog). io.CopyBuffer on the feeder regressed
+// h3 bench tcp_down (~2.6 Mbit/s vs ~14 Mbit/s with this loop).
 func (c *streamConn) readForWriteTo(dst []byte) (int, error) {
 	c.readBufMu.Lock()
 	total := 0
@@ -4047,16 +4119,39 @@ func (c *streamConn) readForWriteTo(dst []byte) (int, error) {
 	if total == len(dst) {
 		return total, nil
 	}
-	goal := len(dst)
-	if goal > masqueConnectStreamReadCoalescePerCall {
-		goal = masqueConnectStreamReadCoalescePerCall
+	feed := c.downloadFeedReader()
+	if feed == nil {
+		if total > 0 {
+			return total, nil
+		}
+		return 0, io.EOF
 	}
-	c.startDownloadPump()
-	body := io.Reader(c.downloadPipeR)
-	if body == nil {
-		return total, io.EOF
+	f, isFeeder := feed.(*connectStreamDownloadFeeder)
+	if isFeeder {
+		if n, ok := f.tryRead(dst[total:]); ok && n > 0 {
+			total += n
+			if total == len(dst) {
+				return total, nil
+			}
+		}
 	}
-	nn, err := body.Read(dst[total:goal])
+	for total < len(dst) && connectStreamReaderHasBuffered(feed) {
+		nn, err := coalesceConnectStreamRead(feed, dst[total:])
+		total += nn
+		if err != nil {
+			if total > 0 && errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+		if nn == 0 {
+			break
+		}
+	}
+	if total >= len(dst) {
+		return total, nil
+	}
+	nn, err := feed.Read(dst[total:])
 	total += nn
 	if err != nil {
 		if total > 0 && errors.Is(err, io.EOF) {
@@ -4133,12 +4228,25 @@ func (c *streamConn) WriteTo(w io.Writer) (int64, error) {
 	if w == nil {
 		return 0, errors.New("masque connect-stream WriteTo: nil writer")
 	}
-	bp := masqueStreamDownloadWriteToBufPool.Get().(*[]byte)
-	defer masqueStreamDownloadWriteToBufPool.Put(bp)
-	buf := *bp
+	c.relayDownloadBusy.Add(1)
+	defer c.relayDownloadBusy.Add(-1)
 	var written int64
+	c.readBufMu.Lock()
+	if c.readStagingOff < len(c.readStaging) {
+		nw, werr := writeAllIOWriter(w, c.readStaging[c.readStagingOff:])
+		written += int64(nw)
+		if werr != nil {
+			c.readBufMu.Unlock()
+			return written, werr
+		}
+		c.readStaging = c.readStaging[:0]
+		c.readStagingOff = 0
+	}
+	c.readBufMu.Unlock()
+	bp := masqueStreamDownloadWriteToTunPool.Get().(*[]byte)
+	defer masqueStreamDownloadWriteToTunPool.Put(bp)
+	buf := *bp
 	for {
-		// readForWriteTo holds readBufMu only for readStaging; pipe drain is lock-free vs staging.
 		n, err := c.readForWriteTo(buf)
 		if n > 0 {
 			nw, werr := writeAllIOWriter(w, buf[:n])
@@ -4189,6 +4297,9 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	bp := masqueStreamUploadReadFromBufPool.Get().(*[]byte)
 	defer masqueStreamUploadReadFromBufPool.Put(bp)
 	buf := *bp
+	if c.relayDownloadBusy.Load() > 0 {
+		buf = buf[:masqueConnectStreamUploadDuringDownloadReadLen]
+	}
 	var written int64
 	for {
 		if c.h2PipeWriteDL.writeTimeoutExceeded() {

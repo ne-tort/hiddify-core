@@ -59,6 +59,17 @@ const masqueRelayTCPDownloadFlushEvery = 32 * 1024
 // masqueRelayTCPDownloadReadLen: TCP read size for relayDownloadCopy (not the 8 MiB upload copy).
 const masqueRelayTCPDownloadReadLen = 512 * 1024
 
+// masqueRelayTCPUploadReadLen: read CONNECT request body in small slices so client TCP ACKs
+// (iperf -R) reach the onward TCP socket promptly instead of waiting behind 512 KiB reads.
+const masqueRelayTCPUploadReadLen = 4 * 1024
+
+var masqueRelayTCPUploadBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, masqueRelayTCPUploadReadLen)
+		return &b
+	},
+}
+
 // masqueRelayTCPDownloadFlushBatch: flush HTTP response after this many bytes per relay cycle.
 // Per-read flush at 64 KiB caps goodput ≈ chunk/RTT (~15 Mbit/s at 35–40 ms RTT).
 const masqueRelayTCPDownloadFlushBatch = 512 * 1024
@@ -115,16 +126,13 @@ func relayDownloadCopy(out *flushWriter, src io.Reader) (int64, error) {
 				return written, io.ErrShortWrite
 			}
 			sinceFlush += nw
-			needFlush := !out.firstFlushDone ||
-				sinceFlush >= masqueRelayTCPDownloadFlushBatch ||
-				nw <= masqueRelayTCPResponseFlushImmediate
-			if needFlush {
-				out.firstFlushDone = true
-				if err := out.flushWithReason("relay_read"); err != nil {
-					return written, err
-				}
-				sinceFlush = 0
+			// Flush every relay read so HTTP/3 response DATA tracks TCP segments promptly.
+			// Batched 512 KiB flushes left ~64–77 KiB on the wire per RTT (~15 Mbit/s bench tcp_down).
+			out.firstFlushDone = true
+			if err := out.flushWithReason("relay_read"); err != nil {
+				return written, err
 			}
+			sinceFlush = 0
 		}
 		if er != nil {
 			if errors.Is(er, io.EOF) {
@@ -142,8 +150,8 @@ func relayDownloadCopy(out *flushWriter, src io.Reader) (int64, error) {
 // chunks (symmetric with relayDownloadCopy). Shared by H2/H3 server relay.
 func relayUploadCopy(dst io.Writer, src io.ReadCloser) (int64, error) {
 	defer src.Close()
-	bp := masqueRelayTCPDownloadBufPool.Get().(*[]byte)
-	defer masqueRelayTCPDownloadBufPool.Put(bp)
+	bp := masqueRelayTCPUploadBufPool.Get().(*[]byte)
+	defer masqueRelayTCPUploadBufPool.Put(bp)
 	buf := *bp
 	var written int64
 	for {

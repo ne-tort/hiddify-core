@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/checksum"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -49,6 +48,14 @@ func tuneConnectIPTCPForwarderRemote(c net.Conn) {
 	}
 }
 
+// connectIPPacketPlaneConn is the CONNECT-IP session packet I/O surface used by the S2 forwarder.
+type connectIPPacketPlaneConn interface {
+	ReadPacket([]byte) (int, error)
+	WritePacket([]byte) ([]byte, error)
+	Close() error
+	CurrentPeerPrefixes() []netip.Prefix
+}
+
 // ConnectIPTCPForwarderOptions carries generic MASQUE server policy knobs reused by the
 // CONNECT-IP IPv4/TCP packet-plane forwarder (S2 path).
 type ConnectIPTCPForwarderOptions struct {
@@ -58,12 +65,12 @@ type ConnectIPTCPForwarderOptions struct {
 	Dialer              net.Dialer
 }
 
-// RunConnectIPTCPPacketPlaneForwarder terminates IPv4 TCP inside CONNECT-IP into host TCP
-// dials (S2). Non-IPv4-TCP packets are ignored (no router demux in this iteration).
+// RunConnectIPTCPPacketPlaneForwarder terminates IPv4 TCP and UDP inside CONNECT-IP into host
+// TCP/UDP dials (S2). Other protocols are ignored.
 //
 // It blocks until ctx is done, conn read fails, or an unrecoverable write error occurs, then
 // closes conn.
-func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Conn, o ConnectIPTCPForwarderOptions) error {
+func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn connectIPPacketPlaneConn, o ConnectIPTCPForwarderOptions) error {
 	if conn == nil {
 		return errors.New("masque: connect-ip forwarder: nil conn")
 	}
@@ -102,7 +109,14 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn *connectip.Co
 			log.Printf("masque connect_ip forwarder: read n=%d first_byte=0x%02x", n, buf[0])
 		}
 		pkt := buf[:n]
-		if pkt[0]>>4 != 4 || len(pkt) < header.IPv4MinimumSize || pkt[9] != uint8(header.TCPProtocolNumber) {
+		if pkt[0]>>4 != 4 || len(pkt) < header.IPv4MinimumSize {
+			continue
+		}
+		if pkt[9] == uint8(header.UDPProtocolNumber) {
+			f.handleUDPPacket(ctx, pkt, header.IPv4(pkt))
+			continue
+		}
+		if pkt[9] != uint8(header.TCPProtocolNumber) {
 			continue
 		}
 		iph := header.IPv4(pkt)
@@ -173,13 +187,16 @@ type tcp4Tuple struct {
 }
 
 type connectIPTCPForwarder struct {
-	conn *connectip.Conn
+	conn connectIPPacketPlaneConn
 	o    ConnectIPTCPForwarderOptions
 	wMu  sync.Mutex
 
 	sMu    sync.Mutex
 	synMu  sync.Mutex
 	sessions map[tcp4Tuple]*tcpForwardSession
+
+	uMu          sync.Mutex
+	udpSessions  map[udp4Tuple]*udpForwardSession
 }
 
 func (f *connectIPTCPForwarder) shutdownSessions() {
@@ -191,6 +208,14 @@ func (f *connectIPTCPForwarder) shutdownSessions() {
 	}
 	f.sessions = nil
 	f.sMu.Unlock()
+	f.uMu.Lock()
+	for _, s := range f.udpSessions {
+		if s != nil && s.remote != nil {
+			_ = s.remote.Close()
+		}
+	}
+	f.udpSessions = nil
+	f.uMu.Unlock()
 }
 
 func (f *connectIPTCPForwarder) writeRaw(pkt []byte) error {

@@ -64,10 +64,12 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		tcpTracef("masque tcp connect_stream h2 host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
 
 		pr, pw := io.Pipe()
+		uploadBridge := newConnectStreamUploadBridge(pw)
 		streamCtx, stopReqCtxRelay := h2ConnectRequestContextFactory(ctx)
 		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, MasqueTCPConnectStreamRequestURL(tcpURL), &h2ExtendedConnectUploadBody{pipe: pr})
 		if reqErr != nil {
 			stopReqCtxRelay(false)
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			return nil, errors.Join(ErrTCPConnectStreamFailed, fmt.Errorf("masque h2: tcp connect-stream build request: %w", reqErr))
@@ -83,6 +85,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
@@ -102,6 +105,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -115,6 +119,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
+			_ = uploadBridge.Close()
 			_ = pr.Close()
 			_ = pw.Close()
 			_ = resp.Body.Close()
@@ -126,14 +131,16 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		// Align streamConn semantics with the HTTP/2 CONNECT request context: the handshake may use a
 		// short-lived dial ctx while Request.Context is WithoutCancel — using the dial ctx here would
 		// mis-attribute transport errors via context.Cause after the handshake when the dial op ended.
-		return &streamConn{
+		sc := &streamConn{
 			reader:       newH2ConnectStreamResponseBody(resp.Body),
-			writer:       newH3MasqueBufferedPipeWriter(pw),
+			writer:       newH3MasqueBufferedPipeWriter(uploadBridge),
 			h2UploadPipe: pr,
 			ctx:          streamCtx,
 			local:        &net.TCPAddr{},
 			remote:       remoteAddr,
-		}, nil
+		}
+		sc.beginConnectStreamDownloadDrain()
+		return sc, nil
 	}
 	if lastRoundTripErr != nil {
 		return nil, errors.Join(ErrTCPConnectStreamFailed, lastRoundTripErr)
@@ -222,6 +229,19 @@ func (w *h2ConnectStreamResponseBody) responseBodyReader() io.Reader {
 		w.br = bufio.NewReaderSize(w.r, h2ConnectStreamResponseBodyBufSize)
 	}
 	return w.br
+}
+
+func (w *h2ConnectStreamResponseBody) connectStreamReadBuffered() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.br != nil && w.br.Buffered() > 0
+}
+
+func (w *h2ConnectStreamResponseBody) ConnectStreamReadBuffered() bool {
+	return w.connectStreamReadBuffered()
 }
 
 func (w *h2ConnectStreamResponseBody) Close() error {
