@@ -236,12 +236,6 @@ func (s *frameSorter) HasMoreData() bool {
 	return len(s.queue) > 0
 }
 
-// HasReadyFrame is true when the next in-order byte at readPos is already queued.
-func (s *frameSorter) HasReadyFrame() bool {
-	_, ok := s.queue[s.readPos]
-	return ok
-}
-
 var errTooLittleData = errors.New("too little data")
 
 // Peek copies len(p) consecutive bytes starting at offset into p, without removing them.

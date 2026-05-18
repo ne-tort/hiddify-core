@@ -35,8 +35,8 @@ const DefaultMaxReceiveStreamFlowControlWindow = 6 * (1 << 20) // 6 MB
 // DefaultMaxReceiveConnectionFlowControlWindow is the default connection-level flow control window for receiving data
 const DefaultMaxReceiveConnectionFlowControlWindow = 15 * (1 << 20) // 15 MB
 
-// WindowUpdateThreshold is the fraction of the receive window that has to be consumed before an higher offset is advertised to the peer.
-// Updates are keyed off max(bytesRead, highestReceived) so credit extends when data is received on the wire, not only after app drain.
+// WindowUpdateThreshold is the fraction of the receive window that has to be consumed before an higher offset is advertised to the client.
+// MASQUE CONNECT-stream bench: at 0.15 and ~512 KiB default stream windows, updates land ~77 KiB apart (~15 Mbit/s at 35–40 ms RTT).
 const WindowUpdateThreshold = 0.05
 
 // DefaultMaxIncomingStreams is the maximum number of streams that a peer may open

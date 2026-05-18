@@ -154,7 +154,7 @@ func NewGVisorStackWithOptions(ep stack.LinkEndpoint, opts stack.NICOptions, all
 			ipv6.NewProtocol,
 		},
 		TransportProtocols: []stack.TransportProtocolFactory{
-			tcp.NewProtocolCUBIC,
+			tcp.NewProtocol,
 			udp.NewProtocol,
 			icmp.NewProtocol4,
 			icmp.NewProtocol6,

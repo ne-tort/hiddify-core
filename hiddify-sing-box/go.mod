@@ -278,8 +278,6 @@ replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401
 
 replace github.com/sagernet/sing-tun => ./replace/sing-tun
 
-replace github.com/sagernet/gvisor => ./replace/gvisor
-
 replace github.com/quic-go/masque-go => ./third_party/masque-go
 
 replace github.com/quic-go/connect-ip-go => ./third_party/connect-ip-go

@@ -18,8 +18,6 @@ type flowController interface {
 type StreamFlowController interface {
 	flowController
 	AddBytesRead(protocol.ByteCount) (hasStreamWindowUpdate, hasConnWindowUpdate bool)
-	ShouldQueueMaxStreamData() bool
-	ShouldQueueConnectionMaxData() bool
 	// UpdateHighestReceived is called when a new highest offset is received
 	// final has to be to true if this is the final offset of the stream,
 	// as contained in a STREAM frame with FIN bit, and the RESET_STREAM frame
@@ -34,17 +32,15 @@ type StreamFlowController interface {
 type ConnectionFlowController interface {
 	flowController
 	AddBytesRead(protocol.ByteCount) (hasWindowUpdate bool)
-	ShouldQueueMaxData() bool
 	Reset() error
 	IsNewlyBlocked() (bool, protocol.ByteCount)
 }
 
 type connectionFlowControllerI interface {
 	ConnectionFlowController
-	// The following two methods are not supposed to be called from outside this package, but are needed internally
+	// The following two methods are not supposed to be called from outside this packet, but are needed internally
 	// for sending
 	EnsureMinimumWindowSize(protocol.ByteCount, monotime.Time)
 	// for receiving
 	IncrementHighestReceived(protocol.ByteCount, monotime.Time) error
-	ShouldQueueMaxData() bool
 }

@@ -26,11 +26,6 @@ import (
 // ReadFrom upload; upload pipe flush policy (h3MasqueBufferedPipeWriter) handles duplex ACKs.
 const bodyCopyBufferSize = 8 * 1024 * 1024
 
-// bodyCopyBufferConnectSize: CONNECT-stream upload chunk size for sendRequestBody (duplex with
-// response download on the same QUIC stream). Smaller than bulk bodyCopyBufferSize so upload ACKs
-// interleave with inbound response DATA; h3MasqueBufferedPipeWriter flushes during download.
-const bodyCopyBufferConnectSize = 8 * 1024
-
 type requestWriter struct {
 	mutex     sync.Mutex
 	encoder   *qpack.Encoder

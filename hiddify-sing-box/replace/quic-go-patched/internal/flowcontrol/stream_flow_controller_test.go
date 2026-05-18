@@ -125,9 +125,7 @@ func TestStreamAbandoning(t *testing.T) {
 
 	require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
 	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	// Stream FIN stops stream-level MAX_STREAM_DATA; connection MAX_DATA may still advance
-	// when data is received on the wire before the app drains (MASQUE receive-side credit).
-	_ = connFC.GetWindowUpdate(monotime.Now())
+	require.Zero(t, connFC.GetWindowUpdate(monotime.Now()))
 
 	// Abandon the stream.
 	// This marks all bytes as having been consumed.
@@ -195,17 +193,21 @@ func TestStreamWindowUpdate(t *testing.T) {
 		utils.DefaultLogger,
 	)
 	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	hasStreamWindowUpdate, _ := fc.AddBytesRead(4)
+	hasStreamWindowUpdate, _ := fc.AddBytesRead(24)
 	require.False(t, hasStreamWindowUpdate)
 	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	// WindowUpdateThreshold 0.05: update once ~5% of the stream window is consumed.
+	// the window is updated when it's 25% filled
 	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
 	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(105), fc.GetWindowUpdate(monotime.Now()))
+	require.Equal(t, protocol.ByteCount(125), fc.GetWindowUpdate(monotime.Now()))
 
-	hasStreamWindowUpdate, _ = fc.AddBytesRead(5)
+	hasStreamWindowUpdate, _ = fc.AddBytesRead(24)
+	require.False(t, hasStreamWindowUpdate)
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
+	// the window is updated when it's 25% filled
+	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
 	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(110), fc.GetWindowUpdate(monotime.Now()))
+	require.Equal(t, protocol.ByteCount(150), fc.GetWindowUpdate(monotime.Now()))
 
 	// Receive the final offset.
 	// We don't need to send any more flow control updates.
@@ -232,7 +234,7 @@ func TestStreamConnectionWindowUpdate(t *testing.T) {
 		utils.DefaultLogger,
 	)
 
-	hasStreamWindowUpdate, hasConnWindowUpdate := fc.AddBytesRead(5)
+	hasStreamWindowUpdate, hasConnWindowUpdate := fc.AddBytesRead(50)
 	require.False(t, hasStreamWindowUpdate)
 	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
 	require.True(t, hasConnWindowUpdate)

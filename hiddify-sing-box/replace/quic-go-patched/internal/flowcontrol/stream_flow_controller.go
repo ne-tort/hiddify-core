@@ -135,36 +135,6 @@ func (c *streamFlowController) shouldQueueWindowUpdate() bool {
 	return !c.receivedFinalOffset && c.hasWindowUpdate()
 }
 
-// shouldQueueWindowUpdateOnReceive is like shouldQueueWindowUpdate but keyed off bytes
-// already received on the wire (highestReceived). Needed when the app drain lags behind QUIC
-// delivery (MASQUE CONNECT-stream download ~64–77 KiB/RTT at ~15 Mbit/s).
-func (c *streamFlowController) shouldQueueWindowUpdateOnReceive() bool {
-	if c.receivedFinalOffset {
-		return false
-	}
-	// Extend credit as soon as the network delivered bytes the app has not drained yet.
-	// Threshold-only updates still left MASQUE CONNECT-stream download at ~64 KiB/RTT (~15 Mbit/s)
-	// when the 4 MiB feeder ring was not full but QUIC stream frames ran ahead of body.Read.
-	if c.highestReceived > c.bytesRead {
-		return true
-	}
-	bytesRemaining := c.receiveWindow - c.highestReceived
-	return bytesRemaining <= protocol.ByteCount(float64(c.receiveWindowSize)*(1-protocol.WindowUpdateThreshold))
-}
-
-// ShouldQueueMaxStreamData reports whether MAX_STREAM_DATA should be sent soon.
-// Caller must not hold c.mutex.
-func (c *streamFlowController) ShouldQueueMaxStreamData() bool {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	return c.shouldQueueWindowUpdateOnReceive()
-}
-
-// ShouldQueueConnectionMaxData reports whether MAX_DATA should be sent for the connection.
-func (c *streamFlowController) ShouldQueueConnectionMaxData() bool {
-	return c.connection.ShouldQueueMaxData()
-}
-
 func (c *streamFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteCount {
 	// If we already received the final offset for this stream, the peer won't need any additional flow control credit.
 	if c.receivedFinalOffset {
@@ -174,14 +144,8 @@ func (c *streamFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteC
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if !c.shouldQueueWindowUpdate() && !c.shouldQueueWindowUpdateOnReceive() {
-		return 0
-	}
-
 	oldWindowSize := c.receiveWindowSize
-	c.maybeAdjustWindowSize(now)
-	c.receiveWindow = c.bytesRead + c.receiveWindowSize
-	offset := c.receiveWindow
+	offset := c.getWindowUpdate(now)
 	if c.receiveWindowSize > oldWindowSize { // auto-tuning enlarged the window size
 		c.logger.Debugf("Increasing receive flow control window for stream %d to %d", c.streamID, c.receiveWindowSize)
 		c.connection.EnsureMinimumWindowSize(protocol.ByteCount(float64(c.receiveWindowSize)*protocol.ConnectionFlowControlMultiplier), now)

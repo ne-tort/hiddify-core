@@ -13,22 +13,16 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/adapters/gonet"
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
-	gtcp "github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
+	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/sagernet/gvisor/pkg/waiter"
 	"github.com/sagernet/sing/common"
 )
 
-// tunGvisorTCPBulkBuf raises per-connection gVisor TCP send/receive buffers on TUN relay legs.
-// Default stack defaults (~1 MiB) plus InitialCwnd=10 left bench tcp_down ~64 KiB/RTT when the
-// inner socket is *gonet.TCPConn (TuneConnectStreamTCPRelay only applies to *net.TCPConn).
-const tunGvisorTCPBulkBuf = 16 << 20
-
 type gLazyConn struct {
 	tcpConn         *gonet.TCPConn
-	endpoint        tcpip.Endpoint
 	parentCtx       context.Context
 	stack           *stack.Stack
-	request         *gtcp.ForwarderRequest
+	request         *tcp.ForwarderRequest
 	localAddr       net.Addr
 	remoteAddr      net.Addr
 	handshakeAccess sync.Mutex
@@ -69,18 +63,10 @@ func (c *gLazyConn) HandshakeContext(ctx context.Context) error {
 		return gErr
 	}
 	c.request.Complete(false)
-	opts := endpoint.SocketOptions()
-	opts.SetKeepAlive(true)
-	opts.SetDelayOption(false) // TCP_NODELAY (inverted): bulk TUN↔iperf relay
-	opts.SetSendBufferSize(tunGvisorTCPBulkBuf, true)
-	opts.SetReceiveBufferSize(tunGvisorTCPBulkBuf, true)
-	cc := tcpip.CongestionControlOption("cubic")
-	_ = endpoint.SetSockOpt(&cc)
+	endpoint.SocketOptions().SetKeepAlive(true)
 	endpoint.SetSockOpt(common.Ptr(tcpip.KeepaliveIdleOption(15 * time.Second)))
 	endpoint.SetSockOpt(common.Ptr(tcpip.KeepaliveIntervalOption(15 * time.Second)))
-	tuneGvisorEndpointBulkRelay(endpoint)
 	tcpConn := gonet.NewTCPConn(&wq, endpoint)
-	c.endpoint = endpoint
 	c.tcpConn = tcpConn
 	return nil
 }
@@ -220,15 +206,4 @@ func (c *gLazyConn) WriterReplaceable() bool {
 
 func (c *gLazyConn) Upstream() any {
 	return c.tcpConn
-}
-
-// TuneMasqueBulkRelay re-applies gVisor bulk relay cwnd on the TUN leg (route/conn may call
-// this after handshake when masque CONNECT-stream download starts).
-func (c *gLazyConn) TuneMasqueBulkRelay() {
-	if err := c.HandshakeContext(context.Background()); err != nil {
-		return
-	}
-	if c.endpoint != nil {
-		tuneGvisorEndpointBulkRelay(c.endpoint)
-	}
 }
