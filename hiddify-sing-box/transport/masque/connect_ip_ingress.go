@@ -310,6 +310,7 @@ func (s *coreSession) flushPreTCPNetstackIngress(ns *connectIPTCPNetstack) {
 		ns.injectInboundClone(p)
 	}
 	s.preTCPIngressBuf = s.preTCPIngressBuf[:0]
+	ns.scheduleOutboundDrain()
 }
 
 func (s *coreSession) clearPreTCPNetstackIngress() {

@@ -347,8 +347,9 @@ type connectIPTCPNetstack struct {
 	session      IPPacketSession
 	gStack       *stack.Stack
 	endpoint     *channel.Endpoint
-	notifyHandle *channel.NotificationHandle
-	reconcileMu  sync.Mutex
+	notifyHandle      *channel.NotificationHandle
+	outboundDrainMu   sync.Mutex
+	reconcileMu       sync.Mutex
 	installedV4  netip.Addr
 	installedV6  netip.Addr
 	closeOnce    sync.Once
@@ -359,6 +360,7 @@ type connectIPTCPNetstack struct {
 
 	outboundOnce sync.Once
 	outboundCh   chan []byte
+	outboundPoke chan struct{}
 	outboundWG   sync.WaitGroup
 }
 
@@ -689,9 +691,84 @@ func (s *connectIPTCPNetstack) deliverConnectIPOutboundPacket(payload []byte) er
 func (s *connectIPTCPNetstack) ensureOutboundWriter() {
 	s.outboundOnce.Do(func() {
 		s.outboundCh = make(chan []byte, connectIPNetstackOutboundQueueDepth)
-		s.outboundWG.Add(1)
+		s.outboundPoke = make(chan struct{}, 1)
+		s.outboundWG.Add(2)
 		go s.runOutboundWriter()
+		go s.runOutboundPokeDrain()
 	})
+}
+
+func (s *connectIPTCPNetstack) scheduleOutboundDrain() {
+	if s == nil || s.closed.Load() {
+		return
+	}
+	s.ensureOutboundWriter()
+	select {
+	case s.outboundPoke <- struct{}{}:
+	default:
+	}
+}
+
+func (s *connectIPTCPNetstack) runOutboundPokeDrain() {
+	defer s.outboundWG.Done()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-s.outboundPoke:
+			s.tryDrainLinkEndpointOutbound()
+		}
+	}
+}
+
+func (s *connectIPTCPNetstack) tryDrainLinkEndpointOutbound() {
+	if !s.outboundDrainMu.TryLock() {
+		return
+	}
+	defer s.outboundDrainMu.Unlock()
+	s.drainLinkEndpointOutboundLocked()
+}
+
+func (s *connectIPTCPNetstack) drainLinkEndpointOutbound() {
+	if !s.outboundDrainMu.TryLock() {
+		s.scheduleOutboundDrain()
+		return
+	}
+	defer s.outboundDrainMu.Unlock()
+	s.drainLinkEndpointOutboundLocked()
+}
+
+func (s *connectIPTCPNetstack) drainLinkEndpointOutboundLocked() {
+	s.ensureOutboundWriter()
+	obs := connectIPObsEventsEnabled()
+	for {
+		packet := s.endpoint.Read()
+		if packet == nil {
+			return
+		}
+		view := packet.ToView()
+		outbound := view.AsSlice()
+		if len(outbound) == 0 {
+			packet.DecRef()
+			continue
+		}
+		if obs {
+			connectIPCounters.netstackWriteDequeuedTotal.Add(1)
+		}
+		payload := connectIPNetstackBorrowOutboundBuf(len(outbound))
+		copy(payload, outbound)
+		packet.DecRef()
+		if s.closed.Load() {
+			connectIPNetstackReturnOutboundBuf(payload)
+			return
+		}
+		select {
+		case <-s.done:
+			connectIPNetstackReturnOutboundBuf(payload)
+			return
+		case s.outboundCh <- payload:
+		}
+	}
 }
 
 func (s *connectIPTCPNetstack) runOutboundWriter() {
@@ -742,36 +819,7 @@ func (s *connectIPTCPNetstack) drainOutboundQueueOnClose() {
 }
 
 func (s *connectIPTCPNetstack) WriteNotify() {
-	s.ensureOutboundWriter()
-	obs := connectIPObsEventsEnabled()
-	for {
-		packet := s.endpoint.Read()
-		if packet == nil {
-			return
-		}
-		view := packet.ToView()
-		outbound := view.AsSlice()
-		if len(outbound) == 0 {
-			packet.DecRef()
-			continue
-		}
-		if obs {
-			connectIPCounters.netstackWriteDequeuedTotal.Add(1)
-		}
-		payload := connectIPNetstackBorrowOutboundBuf(len(outbound))
-		copy(payload, outbound)
-		packet.DecRef()
-		if s.closed.Load() {
-			connectIPNetstackReturnOutboundBuf(payload)
-			return
-		}
-		select {
-		case <-s.done:
-			connectIPNetstackReturnOutboundBuf(payload)
-			return
-		case s.outboundCh <- payload:
-		}
-	}
+	s.tryDrainLinkEndpointOutbound()
 }
 
 func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, error) {

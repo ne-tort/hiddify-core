@@ -36,7 +36,14 @@ func (c *connectStreamTunnelConn) Write(p []byte) (int, error) {
 	return n, joinConnectStreamTunnelWriteErr(err)
 }
 
-func (c *connectStreamTunnelConn) Close() error                       { return c.inner.Close() }
+func (c *connectStreamTunnelConn) Close() error { return c.inner.Close() }
+
+func (c *connectStreamTunnelConn) CloseWrite() error {
+	if cw, ok := c.inner.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
 func (c *connectStreamTunnelConn) LocalAddr() net.Addr                { return c.inner.LocalAddr() }
 func (c *connectStreamTunnelConn) RemoteAddr() net.Addr               { return c.inner.RemoteAddr() }
 func (c *connectStreamTunnelConn) SetDeadline(t time.Time) error      { return c.inner.SetDeadline(t) }

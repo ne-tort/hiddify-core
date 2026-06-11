@@ -261,6 +261,16 @@ func relayTunnelCopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	return io.CopyBuffer(dst, src, *bp)
 }
 
+// relayTunnelUnblockPeerRead nudges a blocked download relay when the upload half finished
+// with EOF and the onward TCP peer is idle (upload-only workloads, discard iperf targets).
+func relayTunnelUnblockPeerRead(conn net.Conn) {
+	if d, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = d.SetReadDeadline(time.Now())
+		return
+	}
+	_ = conn.Close()
+}
+
 func relayTunnelSelect(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, uploadErrCh, downloadErrCh <-chan error) error {
 	select {
 	case <-ctx.Done():
@@ -273,6 +283,7 @@ func relayTunnelSelect(ctx context.Context, targetConn net.Conn, reqBody io.Read
 			_ = targetConn.Close()
 			return uploadErr
 		}
+		relayTunnelUnblockPeerRead(targetConn)
 		select {
 		case downloadErr := <-downloadErrCh:
 			return relayTunnelJoinErrors(uploadErr, downloadErr)

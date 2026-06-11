@@ -103,6 +103,21 @@ func (s *coreSession) connectIPTCPIngressFastPath(pkt []byte) bool {
 	return s.ingressTCPNetstack.Load() != nil || s.connectIPTCPInstallInflight.Load() > 0
 }
 
+func connectIPIPv4TCPHasPayload(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != uint8(header.TCPProtocolNumber) {
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl+header.TCPMinimumSize > len(pkt) {
+		return false
+	}
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+		return false
+	}
+	return len(pkt) > ihl+doff
+}
+
 // connectIPIPv4TCPIngressWakeCandidate is true for inbound TCP ACK-only (upload ACK-clock from server)
 // and for segments carrying payload (download DATA → client must emit ACKs on QUIC egress).
 func connectIPIPv4TCPIngressWakeCandidate(pkt []byte) bool {
@@ -144,10 +159,18 @@ func (s *coreSession) flushConnectIPIngressAckWake() {
 // deliverConnectIPTCPIngress injects one proxied TCP datagram into the CONNECT-IP netstack and
 // schedules QUIC send for upload ACK-clock / download DATA delivery.
 func (s *coreSession) deliverConnectIPTCPIngress(pkt []byte) bool {
-	if ns := s.ingressTCPNetstack.Load(); ns != nil {
+	deliver := func(ns *connectIPTCPNetstack) {
 		ns.injectInboundClone(pkt)
+		// Async drain after download DATA inject: gVisor queues egress TCP ACKs; a single
+		// WriteNotify edge may not drain the link endpoint before the next ingress segment.
+		if connectIPIPv4TCPHasPayload(pkt) {
+			ns.scheduleOutboundDrain()
+		}
 		s.noteConnectIPIngressAckForWake(pkt)
 		s.flushConnectIPIngressAckWake()
+	}
+	if ns := s.ingressTCPNetstack.Load(); ns != nil {
+		deliver(ns)
 		return true
 	}
 	if s.connectIPTCPInstallInflight.Load() > 0 {
@@ -155,9 +178,7 @@ func (s *coreSession) deliverConnectIPTCPIngress(pkt []byte) bool {
 		return true
 	}
 	if ns := s.tcpNetstackForIngressInject(); ns != nil {
-		ns.injectInboundClone(pkt)
-		s.noteConnectIPIngressAckForWake(pkt)
-		s.flushConnectIPIngressAckWake()
+		deliver(ns)
 		return true
 	}
 	return false

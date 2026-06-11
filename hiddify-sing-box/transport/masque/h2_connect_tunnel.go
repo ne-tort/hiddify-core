@@ -82,11 +82,20 @@ func (c *h2ThinTunnelConn) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (c *h2ThinTunnelConn) Close() error {
+	// EOF the CONNECT request body before tearing down the response stream so the server
+	// relay can finish upload and half-close the target TCP while download drains.
+	if c.upload != nil {
+		_ = c.upload.Close()
+	}
 	if c.reader != nil {
 		_ = c.reader.Close()
 	}
+	return nil
+}
+
+func (c *h2ThinTunnelConn) CloseWrite() error {
 	if c.upload != nil {
-		_ = c.upload.Close()
+		return c.upload.Close()
 	}
 	return nil
 }
