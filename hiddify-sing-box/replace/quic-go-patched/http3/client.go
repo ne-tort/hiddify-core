@@ -427,7 +427,8 @@ func (c *ClientConn) doRequest(req *http.Request, str *RequestStream) (*http.Res
 		sendingReqFailed = true
 	}
 	if !sendingReqFailed {
-		if req.Body == nil {
+		connectNoUploadBody := req.Method == http.MethodConnect && (req.Body == nil || req.Body == http.NoBody)
+		if connectNoUploadBody || req.Body == nil {
 			traceWroteRequest(trace, nil)
 			// RFC 9114 CONNECT: keep the bidi stream open for tunneled TCP (upload on same stream).
 			if req.Method != http.MethodConnect {

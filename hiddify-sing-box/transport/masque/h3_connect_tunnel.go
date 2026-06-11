@@ -38,7 +38,7 @@ func h3ConnectTunnelFromResponse(ctx context.Context, resp *http.Response, uploa
 	return &connectStreamTunnelConn{inner: conn}, nil
 }
 
-// h3ConnectRequest builds an RFC 9114 CONNECT request (NoBody = tunneled stream upload by default).
+// h3ConnectRequest builds an RFC 9114 CONNECT request (nil Body = tunneled upload on the bidi stream).
 func h3ConnectRequest(ctx context.Context, url string, serverHost string, options ClientOptions, usePipe bool) (*http.Request, *io.PipeReader, io.WriteCloser, error) {
 	if usePipe {
 		pr, pw := io.Pipe()
@@ -56,7 +56,9 @@ func h3ConnectRequest(ctx context.Context, url string, serverHost string, option
 		setMasqueAuthorizationHeader(req.Header, options)
 		return req, pr, pw, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, url, http.NoBody)
+	// nil Body, not http.NoBody: quic-go doRequest treats NoBody as a real body, reads EOF,
+	// and closes the CONNECT stream send half before tunneled TCP upload (write on closed stream).
+	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, url, nil)
 	if err != nil {
 		return nil, nil, nil, err
 	}
