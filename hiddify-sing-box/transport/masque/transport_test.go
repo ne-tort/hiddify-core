@@ -1,4 +1,4 @@
-package masque
+﻿package masque
 
 import (
 	"bytes"
@@ -329,7 +329,7 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(dialHosts) != 6 {
-		t.Fatalf("expected 3 http3 round-trip attempts per hop × 2 hops = 6, got %d (%v)", len(dialHosts), dialHosts)
+		t.Fatalf("expected 3 http3 round-trip attempts per hop Г— 2 hops = 6, got %d (%v)", len(dialHosts), dialHosts)
 	}
 	for i := 0; i < 3; i++ {
 		if dialHosts[i] != "hop1.example:443" {
@@ -1296,286 +1296,6 @@ func TestMasqueTCPConnectStreamAndServerQUICReceiveWindowFloors(t *testing.T) {
 	}
 }
 
-func TestStreamConnSetWriteDeadlineAlwaysStored(t *testing.T) {
-	c := &streamConn{
-		reader: io.NopCloser(&fakeDeadlineReader{}),
-		writer: &fakeWriter{},
-	}
-	if err := c.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatalf("SetWriteDeadline: %v", err)
-	}
-}
-
-func TestStreamConnWriteH3PipeUploadRespectsWriteDeadline(t *testing.T) {
-	pr, pw := io.Pipe()
-	t.Cleanup(func() {
-		_ = pr.Close()
-		_ = pw.Close()
-	})
-	duplex := newConnectStreamDuplexGate()
-	bw := newH3MasqueBufferedPipeWriter(pw, duplex)
-	c := &streamConn{
-		duplex: duplex,
-		reader: io.NopCloser(strings.NewReader("")),
-		writer: bw,
-		ctx:    context.Background(),
-		local:  &net.TCPAddr{},
-		remote: &net.TCPAddr{},
-	}
-	if err := c.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	// No reader on pr: flushes from bufio block on the pipe; deadline must unblock Write.
-	data := make([]byte, masqueConnectStreamReadCoalesceTarget+64*1024)
-	errCh := make(chan error, 1)
-	go func() {
-		_, err := c.Write(data)
-		errCh <- err
-	}()
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected deadline-related error")
-		}
-		if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("want ErrTCPConnectStreamFailed+DeadlineExceeded, got %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Write did not respect write deadline")
-	}
-}
-
-func TestStreamConnReadKeepsEOFWhenDialCtxCanceled(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	c := &streamConn{
-		reader: io.NopCloser(strings.NewReader("")),
-		writer: &fakeWriter{},
-		ctx:    dialCtx,
-	}
-	var buf [4]byte
-	n, err := c.Read(buf[:])
-	if n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF, got n=%d err=%v", n, err)
-	}
-}
-
-type streamConnFixedErrWriter struct{ err error }
-
-func (w streamConnFixedErrWriter) Write(p []byte) (int, error) {
-	if w.err != nil {
-		return 0, w.err
-	}
-	return len(p), nil
-}
-func (streamConnFixedErrWriter) Close() error { return nil }
-
-func TestStreamConnWriteKeepsEOFWhenDialCtxCanceled(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	c := &streamConn{
-		reader: io.NopCloser(strings.NewReader("")),
-		writer: streamConnFixedErrWriter{err: io.EOF},
-		ctx:    dialCtx,
-	}
-	n, err := c.Write([]byte("ping"))
-	if n != 0 || !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF, got n=%d err=%v", n, err)
-	}
-}
-
-func TestStreamConnWriteKeepsErrClosedPipeWhenDialCtxCanceledH2UploadPipe(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	pr, _ := io.Pipe()
-	c := &streamConn{
-		reader:       io.NopCloser(strings.NewReader("")),
-		writer:       streamConnFixedErrWriter{err: io.ErrClosedPipe},
-		h2UploadPipe: pr,
-		ctx:          dialCtx,
-	}
-	n, err := c.Write([]byte("ping"))
-	if n != 0 || !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("expected io.ErrClosedPipe, got n=%d err=%v", n, err)
-	}
-	_ = pr.Close()
-}
-
-func TestStreamConnReadKeepsErrClosedPipeWhenDialCtxCanceledH2UploadPipe(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	pr, _ := io.Pipe()
-	c := &streamConn{
-		reader:       streamConnFixedErrReader{err: io.ErrClosedPipe},
-		writer:       &fakeWriter{},
-		h2UploadPipe: pr,
-		ctx:          dialCtx,
-	}
-	var buf [4]byte
-	n, err := c.Read(buf[:])
-	if n != 0 || !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("expected io.ErrClosedPipe, got n=%d err=%v", n, err)
-	}
-	_ = pr.Close()
-}
-
-func TestStreamConnReadWriteMapsOsDeadlineExceededToDialClass(t *testing.T) {
-	c := &streamConn{
-		reader: io.NopCloser(streamConnFixedErrReader{err: os.ErrDeadlineExceeded}),
-		writer: streamConnFixedErrWriter{err: os.ErrDeadlineExceeded},
-		ctx:    context.Background(),
-	}
-	var buf [4]byte
-	_, err := c.Read(buf[:])
-	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("read: want ErrTCPConnectStreamFailed+DeadlineExceeded, got %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassDial {
-		t.Fatalf("read classify: want %s got %s", ErrorClassDial, got)
-	}
-
-	_, err = c.Write([]byte{1})
-	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("write: want ErrTCPConnectStreamFailed+DeadlineExceeded, got %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassDial {
-		t.Fatalf("write classify: want %s got %s", ErrorClassDial, got)
-	}
-}
-
-func TestStreamConnWriteBlamesDialCtxWhenCanceledOnPeerError(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	want := errors.New("peer reset")
-	c := &streamConn{
-		reader: io.NopCloser(strings.NewReader("")),
-		writer: streamConnFixedErrWriter{err: want},
-		ctx:    dialCtx,
-	}
-	_, err := c.Write([]byte("ping"))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected join with dial cancel, got err=%v", err)
-	}
-}
-
-func TestStreamConnWritePassesPeerErrorThroughWhenCtxDetachedFromDialCancel(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	want := errors.New("peer reset")
-	c := &streamConn{
-		reader: io.NopCloser(strings.NewReader("")),
-		writer: streamConnFixedErrWriter{err: want},
-		ctx:    context.WithoutCancel(dialCtx),
-	}
-	_, err := c.Write([]byte("ping"))
-	if errors.Is(err, ErrTCPConnectStreamFailed) || errors.Is(err, context.Canceled) {
-		t.Fatalf("expected no dial-error join when ctx detached, got err=%v", err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "masque h3 dataplane connect-stream write") || !errors.Is(err, want) {
-		t.Fatalf("expected H3 dataplane wrapper with unwrap to peer cause, got err=%v", err)
-	}
-}
-
-type streamConnFixedErrReader struct{ err error }
-
-func (r streamConnFixedErrReader) Read(p []byte) (int, error) { return 0, r.err }
-func (r streamConnFixedErrReader) Close() error               { return nil }
-
-func TestStreamConnReadBlamesDialCtxWhenCanceledOnPeerError(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	want := errors.New("peer reset")
-	c := &streamConn{
-		reader: streamConnFixedErrReader{err: want},
-		writer: &fakeWriter{},
-		ctx:    dialCtx,
-	}
-	var buf [4]byte
-	_, err := c.Read(buf[:])
-	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected join with dial cancel, got err=%v", err)
-	}
-}
-
-func TestStreamConnReadPassesPeerErrorThroughWhenCtxDetachedFromDialCancel(t *testing.T) {
-	dialCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	want := errors.New("peer reset")
-	c := &streamConn{
-		reader: streamConnFixedErrReader{err: want},
-		writer: &fakeWriter{},
-		ctx:    context.WithoutCancel(dialCtx),
-	}
-	var buf [4]byte
-	_, err := c.Read(buf[:])
-	if errors.Is(err, ErrTCPConnectStreamFailed) || errors.Is(err, context.Canceled) {
-		t.Fatalf("expected no dial-error join when ctx detached, got err=%v", err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "masque h3 dataplane connect-stream read") || !errors.Is(err, want) {
-		t.Fatalf("expected H3 dataplane wrapper with unwrap to peer cause, got err=%v", err)
-	}
-}
-
-func TestStreamConnH3DataplaneWrapsReadWriteErrors(t *testing.T) {
-	rootHTTP2 := errors.New(`stream read: QUIC layer reported handshake timeout (nested)`)
-	rootBrokenPipe := errors.New("write tcp: broken pipe")
-
-	rConn := &streamConn{
-		reader: io.NopCloser(streamConnFixedErrReader{err: rootHTTP2}),
-		writer: &fakeWriter{},
-		ctx:    context.Background(),
-	}
-	var buf [4]byte
-	if _, err := rConn.Read(buf[:]); err == nil || !strings.Contains(err.Error(), "masque h3 dataplane connect-stream read") || !errors.Is(err, rootHTTP2) {
-		t.Fatalf("expected H3 dataplane-wrapped read with unwrap chain; got %v", err)
-	}
-
-	wConn := &streamConn{
-		reader: io.NopCloser(streamConnFixedErrReader{errors.New("unused")}),
-		writer: errorPipeWriter{err: rootBrokenPipe},
-		ctx:    context.Background(),
-	}
-	if _, err := wConn.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "masque h3 dataplane connect-stream write") || !errors.Is(err, rootBrokenPipe) {
-		t.Fatalf("expected H3 dataplane-wrapped write with unwrap chain; got %v", err)
-	}
-}
-
-func TestStreamConnH2DataplaneWrapsReadWriteErrors(t *testing.T) {
-	prR, pwR := io.Pipe()
-	defer func() { _ = prR.Close(); _ = pwR.Close() }()
-	rootHTTP2 := errors.New(`http2: Stream closed by RST_STREAM`)
-	rootBrokenPipe := errors.New("write tcp: broken pipe")
-
-	rConn := &streamConn{
-		reader:       io.NopCloser(streamConnFixedErrReader{err: rootHTTP2}),
-		writer:       pwR,
-		h2UploadPipe: prR,
-		ctx:          context.Background(),
-	}
-	var buf [4]byte
-	if _, err := rConn.Read(buf[:]); err == nil || !strings.Contains(err.Error(), "masque h2 dataplane connect-stream read") || !errors.Is(err, rootHTTP2) {
-		t.Fatalf("expected dataplane-wrapped read with unwrap chain; got %v", err)
-	}
-
-	prW, pwW := io.Pipe()
-	defer func() { _ = prW.Close(); _ = pwW.Close() }()
-	wConn := &streamConn{
-		reader:       io.NopCloser(streamConnFixedErrReader{errors.New("unused")}),
-		writer:       errorPipeWriter{err: rootBrokenPipe},
-		h2UploadPipe: prW,
-		ctx:          context.Background(),
-	}
-	if _, err := wConn.Write([]byte("x")); err == nil || !strings.Contains(err.Error(), "masque h2 dataplane connect-stream write") || !errors.Is(err, rootBrokenPipe) {
-		t.Fatalf("expected dataplane-wrapped write with unwrap chain; got %v", err)
-	}
-}
-
-type errorPipeWriter struct{ err error }
-
-func (errorPipeWriter) Close() error { return nil }
-func (w errorPipeWriter) Write(_ []byte) (int, error) {
-	return 0, w.err
-}
 
 func TestWaitContextBackoffCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2226,7 +1946,7 @@ func TestOpenIPSessionHTTPFallbackRunsAfterIPH3ReconnectDialSwitchableFailure(t 
 	if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected http_layer fallback after iph3 reconnect switchable failure, overlay=%q", session.currentUDPHTTPLayer())
 	}
-	// 2× H3 (nonswitchable + after ipHTTP churn), 1× H3→H2 fallback dial, 1× H2 transport churn redial.
+	// 2Г— H3 (nonswitchable + after ipHTTP churn), 1Г— H3в†’H2 fallback dial, 1Г— H2 transport churn redial.
 	if call.Load() != 4 {
 		t.Fatalf("expected four connect_ip stub invocations, got %d", call.Load())
 	}
@@ -3247,29 +2967,6 @@ func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 	}
 }
 
-func TestStreamConnHalfCloseIsolation(t *testing.T) {
-	reader := &trackedReadCloser{}
-	writer := &trackedWriteCloser{}
-	conn := &streamConn{
-		reader: reader,
-		writer: writer,
-	}
-	if err := conn.CloseRead(); err != nil {
-		t.Fatalf("close read failed: %v", err)
-	}
-	if reader.closed != 1 {
-		t.Fatalf("expected reader to be closed once, got: %d", reader.closed)
-	}
-	if writer.closed != 0 {
-		t.Fatalf("writer should remain open after CloseRead, got closes: %d", writer.closed)
-	}
-	if err := conn.CloseWrite(); err != nil {
-		t.Fatalf("close write failed: %v", err)
-	}
-	if writer.closed != 1 {
-		t.Fatalf("expected writer to be closed once, got: %d", writer.closed)
-	}
-}
 
 func TestBuildTemplatesRejectsInvalidTCPTemplateURL(t *testing.T) {
 	_, _, _, err := buildTemplates(ClientOptions{

@@ -16,18 +16,24 @@ type connectStreamTunnelConn struct {
 
 func (c *connectStreamTunnelConn) Read(p []byte) (int, error) {
 	n, err := c.inner.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return n, errors.Join(ErrTCPConnectStreamFailed, err)
+	if err == nil || errors.Is(err, io.EOF) {
+		return n, err
 	}
-	return n, err
+	if errors.Is(err, io.ErrClosedPipe) {
+		return n, err
+	}
+	return n, joinConnectStreamTunnelReadErr(err)
 }
 
 func (c *connectStreamTunnelConn) Write(p []byte) (int, error) {
 	n, err := c.inner.Write(p)
-	if err != nil {
-		return n, errors.Join(ErrTCPConnectStreamFailed, err)
+	if err == nil || errors.Is(err, io.EOF) {
+		return n, err
 	}
-	return n, err
+	if errors.Is(err, io.ErrClosedPipe) {
+		return n, err
+	}
+	return n, joinConnectStreamTunnelWriteErr(err)
 }
 
 func (c *connectStreamTunnelConn) Close() error                       { return c.inner.Close() }
@@ -40,23 +46,31 @@ func (c *connectStreamTunnelConn) SetWriteDeadline(t time.Time) error { return c
 func (c *connectStreamTunnelConn) ReadFrom(r io.Reader) (int64, error) {
 	if rf, ok := c.inner.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(r)
-		if err != nil {
-			return n, errors.Join(ErrTCPConnectStreamFailed, err)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return n, joinConnectStreamTunnelWriteErr(err)
 		}
-		return n, nil
+		return n, err
 	}
-	return io.Copy(c, r)
+	n, err := io.Copy(c, r)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, joinConnectStreamTunnelWriteErr(err)
+	}
+	return n, err
 }
 
 func (c *connectStreamTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	if wt, ok := c.inner.(io.WriterTo); ok {
 		n, err := wt.WriteTo(w)
-		if err != nil {
-			return n, errors.Join(ErrTCPConnectStreamFailed, err)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return n, joinConnectStreamTunnelReadErr(err)
 		}
-		return n, nil
+		return n, err
 	}
-	return io.Copy(w, c.inner)
+	n, err := io.Copy(w, c.inner)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, joinConnectStreamTunnelReadErr(err)
+	}
+	return n, err
 }
 
 // RouteConnectionCopyWriterTo opts into route io.WriterTo bulk download when the inner conn supports it.

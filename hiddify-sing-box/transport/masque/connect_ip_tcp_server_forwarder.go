@@ -26,7 +26,7 @@ const connectIPTCPForwarderICMPRelayMax = 8
 
 // connectIPTCPForwarderRemoteReadBuf is the bulk read from the onward TCP dial (iperf, etc.).
 // Segmentation to client MSS still happens per IPv4/TCP packet on the CONNECT-IP plane.
-// 8 MiB matches masqueConnectStreamReadCoalesceTarget / server relayCopyBuffered.
+// 8 MiB read buffer for server relay bulk copy.
 const connectIPTCPForwarderRemoteReadBuf = 8 << 20
 
 // connectIPTCPForwarderRemoteWriteBuf coalesces proxied client segments before onward TCP writes.

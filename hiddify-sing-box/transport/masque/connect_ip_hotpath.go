@@ -15,6 +15,61 @@ func connectIPObsEventsEnabled() bool {
 	return strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_OBS")) == "1"
 }
 
+func trackConnectIPPacketRx(n int) {
+	if n <= 0 || !connectIPObsEventsEnabled() {
+		return
+	}
+	rxSeq := connectIPCounters.packetRxTotal.Add(1)
+	connectIPCounters.bytesRxTotal.Add(uint64(n))
+	if connectIPCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
+		emitConnectIPObservabilityEvent("first_packet_rx")
+	}
+	maybeEmitConnectIPActiveSnapshot(rxSeq)
+}
+
+func trackConnectIPPacketTx(ipLen int) {
+	if ipLen <= 0 || !connectIPObsEventsEnabled() {
+		return
+	}
+	txSeq := connectIPCounters.packetTxTotal.Add(1)
+	connectIPCounters.bytesTxTotal.Add(uint64(ipLen))
+	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
+		emitConnectIPObservabilityEvent("first_packet_tx")
+	}
+	maybeEmitConnectIPActiveSnapshot(txSeq)
+}
+
+func trackConnectIPReadExit(err error) {
+	if err == nil || !connectIPObsEventsEnabled() {
+		return
+	}
+	connectIPCounters.packetReadExitTotal.Add(1)
+	incConnectIPReadDropReason(classifyConnectIPErrorReason(err))
+	emitConnectIPObservabilityEvent("packet_read_exit")
+}
+
+func trackConnectIPWriteFail(err error, ceiling bool) {
+	if err == nil || !connectIPObsEventsEnabled() {
+		return
+	}
+	connectIPCounters.packetWriteFailTotal.Add(1)
+	if ceiling {
+		incConnectIPWriteFailReason("ceiling_reject")
+		emitConnectIPObservabilityEvent("packet_write_fail_ceiling")
+		return
+	}
+	incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
+	emitConnectIPObservabilityEvent("packet_write_fail")
+}
+
+func trackConnectIPPTBRx() {
+	if !connectIPObsEventsEnabled() {
+		return
+	}
+	connectIPCounters.ptbRxTotal.Add(1)
+	maybeEmitConnectIPPTBObs("packet_ptb_rx")
+}
+
 // connectIPUDPIngressSubCount tracks UDP bridge subscribers without locking the ingress loop.
 func (s *coreSession) connectIPUDPIngressSubsEmpty() bool {
 	return s.connectIPUDPIngressSubCount.Load() == 0

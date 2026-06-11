@@ -544,16 +544,23 @@ func (s *connectIPTCPNetstack) injectInboundClone(data []byte) {
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: buffer.MakeWithData(bytes.Clone(data)),
 	})
+	obs := connectIPObsEventsEnabled()
 	switch data[0] >> 4 {
 	case 4:
-		connectIPCounters.netstackReadInjectTotal.Add(1)
+		if obs {
+			connectIPCounters.netstackReadInjectTotal.Add(1)
+		}
 		s.endpoint.InjectInbound(ipv4.ProtocolNumber, packet)
 	case 6:
-		connectIPCounters.netstackReadInjectTotal.Add(1)
+		if obs {
+			connectIPCounters.netstackReadInjectTotal.Add(1)
+		}
 		s.endpoint.InjectInbound(ipv6.ProtocolNumber, packet)
 	default:
-		connectIPCounters.netstackReadDropInvalidTotal.Add(1)
-		incConnectIPReadDropReason("invalid_ip_version")
+		if obs {
+			connectIPCounters.netstackReadDropInvalidTotal.Add(1)
+			incConnectIPReadDropReason("invalid_ip_version")
+		}
 		packet.DecRef()
 	}
 }
@@ -650,37 +657,6 @@ func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.Networ
 	}, ipv6.ProtocolNumber
 }
 
-// Future work (egress reliability):
-// - B3: if HoL appears on H2 capsule path (single writeMu + writeToStream), consider a small buffered
-//   writes channel or splitting control vs bulk after slow-iteration metrics implicate that path.
-
-func connectIPSlowNetstackWriteNotifyThreshold() time.Duration {
-	v := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_SLOW_WRITE_NOTIFY_MS"))
-	if v == "" {
-		return 0
-	}
-	ms, err := strconv.Atoi(v)
-	if err != nil || ms <= 0 {
-		return 0
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
-func maybeSampleSlowNetstackWriteNotifyIteration(start time.Time, threshold time.Duration) {
-	if threshold <= 0 {
-		return
-	}
-	elapsed := time.Since(start)
-	if elapsed < threshold {
-		return
-	}
-	connectIPCounters.netstackWriteNotifySlowIterationTotal.Add(1)
-	n := connectIPCounters.netstackWriteNotifySlowIterationTotal.Load()
-	if n == 1 || n%256 == 0 {
-		log.Printf("masque connect-ip: slow WriteNotify iteration dur=%v (threshold=%v)", elapsed, threshold)
-	}
-}
-
 // deliverConnectIPOutboundPacket retries transient CONNECT-IP WritePacket failures on the same
 // frame until success or a non-retryable error. Callers must pass an owned buffer (gVisor view
 // slices are invalid after packet.DecRef).
@@ -767,9 +743,8 @@ func (s *connectIPTCPNetstack) drainOutboundQueueOnClose() {
 
 func (s *connectIPTCPNetstack) WriteNotify() {
 	s.ensureOutboundWriter()
-	slowThresh := connectIPSlowNetstackWriteNotifyThreshold()
+	obs := connectIPObsEventsEnabled()
 	for {
-		iterStart := time.Now()
 		packet := s.endpoint.Read()
 		if packet == nil {
 			return
@@ -778,10 +753,11 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 		outbound := view.AsSlice()
 		if len(outbound) == 0 {
 			packet.DecRef()
-			maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 			continue
 		}
-		connectIPCounters.netstackWriteDequeuedTotal.Add(1)
+		if obs {
+			connectIPCounters.netstackWriteDequeuedTotal.Add(1)
+		}
 		payload := connectIPNetstackBorrowOutboundBuf(len(outbound))
 		copy(payload, outbound)
 		packet.DecRef()
@@ -795,18 +771,22 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 			return
 		case s.outboundCh <- payload:
 		}
-		maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 	}
 }
 
 func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, error) {
 	const maxAttempts = 3
 	var lastErr error
+	obs := connectIPObsEventsEnabled()
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		connectIPCounters.netstackWriteAttemptTotal.Add(1)
+		if obs {
+			connectIPCounters.netstackWriteAttemptTotal.Add(1)
+		}
 		icmp, err := s.session.WritePacket(outbound)
 		if err == nil {
-			connectIPCounters.netstackWriteSuccessTotal.Add(1)
+			if obs {
+				connectIPCounters.netstackWriteSuccessTotal.Add(1)
+			}
 			return icmp, nil
 		}
 		lastErr = err
