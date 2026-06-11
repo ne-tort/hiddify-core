@@ -69,6 +69,7 @@ func (r *body) Read(b []byte) (int, error) {
 	if err := r.checkContentLengthViolation(); err != nil {
 		return n, err
 	}
+	masqueWakeSendAfterReceiveRead(r.str, n)
 	return n, maybeReplaceError(err)
 }
 
@@ -116,6 +117,7 @@ func newResponseBody(str *Stream, contentLength int64, done chan<- struct{}) *hi
 
 func (r *hijackableBody) Read(b []byte) (int, error) {
 	n, err := r.body.Read(b)
+	masqueWakeSendAfterReceiveRead(r.body.str, n)
 	if err != nil {
 		r.requestDone()
 	}
@@ -136,9 +138,27 @@ func (r *hijackableBody) requestDone() {
 	}
 }
 
+// HTTPStream exposes the underlying HTTP/3 stream (Invisv / MASQUE CONNECT-by-authority hijack).
+func (r *hijackableBody) HTTPStream() *Stream {
+	return r.body.str
+}
+
+// ReleaseHTTPStream marks the HTTP/3 request complete without cancelling the tunneled stream.
+// Call after hijacking HTTPStream() on CONNECT responses (otherwise the client conn stalls).
+func (r *hijackableBody) ReleaseHTTPStream() {
+	r.requestDone()
+}
+
 func (r *hijackableBody) Close() error {
 	r.requestDone()
 	// If the EOF was read, CancelRead() is a no-op.
 	r.body.str.CancelRead(quic.StreamErrorCode(ErrCodeRequestCanceled))
 	return nil
+}
+
+var _ HTTPStreamer = (*hijackableBody)(nil)
+
+// ResponseStreamReleaser is implemented by CONNECT response bodies after hijack.
+type ResponseStreamReleaser interface {
+	ReleaseHTTPStream()
 }

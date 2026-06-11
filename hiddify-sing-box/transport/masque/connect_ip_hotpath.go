@@ -1,0 +1,135 @@
+package masque
+
+import (
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	"github.com/sagernet/sing-box/option"
+)
+
+// CONNECT-IP observability logs full JSON snapshots (CONNECT_IP_OBS) and is off on the packet
+// plane by default — enable with MASQUE_CONNECT_IP_OBS=1 for VPS/debug interop.
+func connectIPObsEventsEnabled() bool {
+	return strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_OBS")) == "1"
+}
+
+// connectIPUDPIngressSubCount tracks UDP bridge subscribers without locking the ingress loop.
+func (s *coreSession) connectIPUDPIngressSubsEmpty() bool {
+	return s.connectIPUDPIngressSubCount.Load() == 0
+}
+
+func connectIPIPv4TCPAckOnly(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != uint8(header.TCPProtocolNumber) {
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl+header.TCPMinimumSize > len(pkt) {
+		return false
+	}
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+		return false
+	}
+	if len(pkt) > ihl+doff {
+		return false
+	}
+	return pkt[ihl+13]&0x10 != 0
+}
+
+func (s *coreSession) connectIPTCPIngressFastPath(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != uint8(header.TCPProtocolNumber) {
+		return false
+	}
+	if !s.connectIPUDPIngressSubsEmpty() {
+		return false
+	}
+	return s.ingressTCPNetstack.Load() != nil || s.connectIPTCPInstallInflight.Load() > 0
+}
+
+// connectIPIPv4TCPIngressWakeCandidate is true for inbound TCP ACK-only (upload ACK-clock from server)
+// and for segments carrying payload (download DATA → client must emit ACKs on QUIC egress).
+func connectIPIPv4TCPIngressWakeCandidate(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != uint8(header.TCPProtocolNumber) {
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl+header.TCPMinimumSize > len(pkt) {
+		return false
+	}
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+		return false
+	}
+	if len(pkt) > ihl+doff {
+		return true
+	}
+	return pkt[ihl+13]&0x10 != 0
+}
+
+func (s *coreSession) noteConnectIPIngressAckForWake(pkt []byte) {
+	if connectIPIPv4TCPIngressWakeCandidate(pkt) {
+		s.connectIPIngressAckWake.Store(true)
+	}
+}
+
+func (s *coreSession) flushConnectIPIngressAckWake() {
+	if !s.connectIPIngressAckWake.CompareAndSwap(true, false) {
+		return
+	}
+	if s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2 {
+		return
+	}
+	if h3 := s.ipHTTPConn; h3 != nil {
+		h3.MasqueWakeSend()
+	}
+}
+
+// deliverConnectIPTCPIngress injects one proxied TCP datagram into the CONNECT-IP netstack and
+// schedules QUIC send for upload ACK-clock / download DATA delivery.
+func (s *coreSession) deliverConnectIPTCPIngress(pkt []byte) bool {
+	if ns := s.ingressTCPNetstack.Load(); ns != nil {
+		ns.injectInboundClone(pkt)
+		s.noteConnectIPIngressAckForWake(pkt)
+		s.flushConnectIPIngressAckWake()
+		return true
+	}
+	if s.connectIPTCPInstallInflight.Load() > 0 {
+		s.enqueuePreTCPNetstackIngress(pkt)
+		return true
+	}
+	if ns := s.tcpNetstackForIngressInject(); ns != nil {
+		ns.injectInboundClone(pkt)
+		s.noteConnectIPIngressAckForWake(pkt)
+		s.flushConnectIPIngressAckWake()
+		return true
+	}
+	return false
+}
+
+var connectIPForwarderPktPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1600)
+		return &b
+	},
+}
+
+func connectIPForwarderBorrow(n int) []byte {
+	bp := connectIPForwarderPktPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) < n {
+		*bp = b[:0]
+		connectIPForwarderPktPool.Put(bp)
+		return make([]byte, n)
+	}
+	return b[:n]
+}
+
+func connectIPForwarderReturn(b []byte) {
+	if cap(b) < 64 || cap(b) > 8<<10 {
+		return
+	}
+	b = b[:0]
+	connectIPForwarderPktPool.Put(&b)
+}

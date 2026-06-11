@@ -215,9 +215,11 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 		}
 	}
 
-	// min_ack_delay must be less or equal to max_ack_delay
+	// min_ack_delay must be less or equal to max_ack_delay (RFC 9000). Some servers (e.g. h2o MASQUE)
+	// advertise an inconsistent pair; clamp instead of failing the handshake (sing-box connect_authority).
 	if p.MinAckDelay != nil && *p.MinAckDelay > p.MaxAckDelay {
-		return fmt.Errorf("min_ack_delay (%s) is greater than max_ack_delay (%s)", *p.MinAckDelay, p.MaxAckDelay)
+		clamped := p.MaxAckDelay
+		p.MinAckDelay = &clamped
 	}
 	if !fromSessionTicket {
 		if sentBy == protocol.PerspectiveServer && !readOriginalDestinationConnectionID {

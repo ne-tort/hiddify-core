@@ -27,7 +27,7 @@ func inboundALPNAsSlice(t *testing.T, in *option.InboundTLSOptions) []string {
 }
 
 func TestPrepareMasqueServerInboundTLS_nilRejected(t *testing.T) {
-	_, err := prepareMasqueServerInboundTLS(nil, option.MasqueHTTPLayerH3)
+	_, err := prepareMasqueServerInboundTLS(nil, option.MasqueHTTPLayerH3, false)
 	if err == nil {
 		t.Fatal("expected error for nil tls")
 	}
@@ -40,7 +40,7 @@ func TestPrepareMasqueServerInboundTLS_defaultALPNForH3AndAuto(t *testing.T) {
 	}
 	for _, hint := range []string{"", option.MasqueHTTPLayerH3, option.MasqueHTTPLayerAuto} {
 		t.Run("hint_"+hint, func(t *testing.T) {
-			out, err := prepareMasqueServerInboundTLS(base, hint)
+			out, err := prepareMasqueServerInboundTLS(base, hint, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func TestPrepareMasqueServerInboundTLS_h2DefaultALPN(t *testing.T) {
 		CertificatePath: "/tmp/cert.pem",
 		KeyPath:         "/tmp/key.pem",
 	}
-	out, err := prepareMasqueServerInboundTLS(base, option.MasqueHTTPLayerH2)
+	out, err := prepareMasqueServerInboundTLS(base, option.MasqueHTTPLayerH2, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +72,29 @@ func TestPrepareMasqueServerInboundTLS_h2DefaultALPN(t *testing.T) {
 	}
 }
 
+func TestPrepareMasqueServerInboundTLS_quicOnlyH3ALPN(t *testing.T) {
+	base := &option.InboundTLSOptions{
+		CertificatePath: "/tmp/cert.pem",
+		KeyPath:         "/tmp/key.pem",
+	}
+	out, err := prepareMasqueServerInboundTLS(base, option.MasqueHTTPLayerH2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := inboundALPNAsSlice(t, out)
+	want := []string{"h3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("quicOnly alpn %#v want %#v", got, want)
+	}
+}
+
 func TestPrepareMasqueServerInboundTLS_explicitALPNPreserved(t *testing.T) {
 	base := &option.InboundTLSOptions{
 		CertificatePath: "/tmp/cert.pem",
 		KeyPath:         "/tmp/key.pem",
 	}
 	base.ALPN = []string{"h3", "custom"}
-	out, err := prepareMasqueServerInboundTLS(base, option.MasqueHTTPLayerH2)
+	out, err := prepareMasqueServerInboundTLS(base, option.MasqueHTTPLayerH2, false)
 	if err != nil {
 		t.Fatal(err)
 	}

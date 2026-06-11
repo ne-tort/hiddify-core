@@ -94,6 +94,10 @@ func coalesceConnectStreamReadFeeder(r io.Reader, p []byte) (int, error) {
 }
 
 func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
+	return coalesceConnectStreamReadWithPerCallCap(r, p, masqueConnectStreamReadCoalescePerCall)
+}
+
+func coalesceConnectStreamReadWithPerCallCap(r io.Reader, p []byte, perCallCap int) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -123,6 +127,9 @@ func coalesceConnectStreamRead(r io.Reader, p []byte) (int, error) {
 		return total, nil
 	}
 	goal := len(p)
+	if perCallCap > 0 && goal > perCallCap {
+		goal = perCallCap
+	}
 	if goal > masqueConnectStreamReadCoalescePerCall {
 		goal = masqueConnectStreamReadCoalescePerCall
 	}

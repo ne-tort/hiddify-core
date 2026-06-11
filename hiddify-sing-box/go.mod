@@ -12,6 +12,7 @@ require (
 	github.com/coder/websocket v1.8.14
 	github.com/cretz/bine v0.2.0
 	github.com/database64128/tfo-go/v2 v2.3.1
+	github.com/dunglas/httpsfv v1.0.2
 	github.com/enfein/mieru/v3 v3.30.0
 	github.com/go-chi/chi/v5 v5.2.3
 	github.com/go-chi/render v1.0.3
@@ -42,7 +43,7 @@ require (
 	github.com/sagernet/gomobile v0.1.11
 	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.2
-	github.com/sagernet/sing v0.8.0-beta.11
+	github.com/sagernet/sing v0.8.3-0.20260315153529-ed51f65fbfde
 	github.com/sagernet/sing-mux v0.3.4
 	github.com/sagernet/sing-quic v0.6.0-beta.11
 	github.com/sagernet/sing-shadowsocks v0.2.8
@@ -123,7 +124,6 @@ require (
 	github.com/dgrijalva/jwt-go/v4 v4.0.0-preview1 // indirect
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dgryski/go-metro v0.0.0-20250106013310-edb8663e5e33 // indirect
-	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.0.2 // indirect
 	github.com/flynn/noise v1.1.0 // indirect

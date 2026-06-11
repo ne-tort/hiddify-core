@@ -29,9 +29,16 @@ const (
 )
 
 const (
-	MasqueTCPTransportAuto          = "auto"
-	MasqueTCPTransportConnectIP     = "connect_ip"
-	MasqueTCPTransportConnectStream = "connect_stream"
+	MasqueTCPTransportAuto             = "auto"
+	MasqueTCPTransportConnectIP        = "connect_ip"
+	MasqueTCPTransportConnectStream    = "connect_stream"
+	MasqueTCPTransportConnectAuthority = "connect_authority"
+)
+
+// Masque server TCP relay mode (mode=server only).
+const (
+	MasqueTCPRelayTemplate  = "template"
+	MasqueTCPRelayAuthority = "authority"
 )
 
 const (
@@ -107,6 +114,11 @@ type MasqueEndpointOptions struct {
 	ConnectIPScopeIPProto uint8  `json:"connect_ip_scope_ipproto,omitempty"`
 	// TemplateTCP is a URI template for CONNECT-stream TCP; same path-only rule. Empty defaults to /masque/tcp/{target_host}/{target_port}.
 	TemplateTCP string `json:"template_tcp,omitempty"`
+	// TemplateConnect is client-only: RFC 9114 CONNECT by authority (https://{target_host}:{target_port}/).
+	// Empty uses that default. Must not be set with tcp_transport connect_stream or template_tcp.
+	TemplateConnect string `json:"template_connect,omitempty"`
+	// TCPRelay is server-only: template (default) uses template_tcp paths; authority accepts CONNECT https://dest/.
+	TCPRelay string `json:"tcp_relay,omitempty"`
 	// TCPIPv6PathBracket, when true, puts RFC 5952 bracketed IPv6 in the CONNECT-stream path segment
 	// (`/tcp/[2001:db8::1]/443`). Some reverse proxies return HTTP 400 for unbracketed literals because
 	// colons are ambiguous with pseudo-path syntax; others reject brackets — default false keeps the
@@ -116,8 +128,9 @@ type MasqueEndpointOptions struct {
 	FallbackPolicy        string `json:"fallback_policy,omitempty"`
 	TCPMode               string `json:"tcp_mode,omitempty"`
 	// TCPTransport selects how outbound TCP is carried:
-	//   connect_stream — HTTP/3 CONNECT-stream to template_tcp / default /masque/tcp/…;
-	//   connect_ip     — IPv4 TCP via gVisor tcpip stack over CONNECT-IP (requires transport_mode connect_ip).
+	//   connect_stream     — HTTP/3 CONNECT-stream to template_tcp / default /masque/tcp/…;
+	//   connect_authority  — CONNECT https://{target_host}:{target_port}/ (thin stream, template_connect optional);
+	//   connect_ip         — IPv4 TCP via gVisor tcpip stack over CONNECT-IP (requires transport_mode connect_ip).
 	TCPTransport string `json:"tcp_transport,omitempty"`
 	// InboundTLS is sing-box inbound TLS (same schema as other inbounds). Required for mode=server when terminating TLS.
 	InboundTLS *InboundTLSOptions `json:"tls,omitempty"`

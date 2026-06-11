@@ -13,7 +13,7 @@ import (
 
 func TestH3MasqueBufferedPipeWriterFlushesMediumChunks(t *testing.T) {
 	pr, pw := io.Pipe()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	bw := newH3MasqueBufferedPipeWriter(pw, nil)
 	readCh := make(chan []int, 1)
 	go func() {
 		buf := make([]byte, 32*1024)
@@ -49,7 +49,9 @@ func TestH3MasqueBufferedPipeWriterFlushesMediumChunks(t *testing.T) {
 
 func TestH3MasqueBufferedPipeWriterFlushesDuplexSizedChunks(t *testing.T) {
 	pr, pw := io.Pipe()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	duplex := &connectStreamDuplexGate{enabled: true, uploadChunk: 4096}
+	duplex.active.Store(1)
+	bw := newH3MasqueBufferedPipeWriter(pw, duplex)
 	readCh := make(chan []int, 1)
 	go func() {
 		buf := make([]byte, 32*1024)
@@ -87,7 +89,7 @@ func TestH3MasqueBufferedPipeWriterFlushesDuplexSizedChunks(t *testing.T) {
 
 func TestH3MasqueBufferedPipeWriterFlushesAtFlushBulk(t *testing.T) {
 	pr, pw := io.Pipe()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	bw := newH3MasqueBufferedPipeWriter(pw, nil)
 	readCh := make(chan int, 1)
 	go func() {
 		buf := make([]byte, 128*1024)
@@ -129,7 +131,7 @@ func TestH3MasqueBufferedPipeWriterReadFromDeliversPayload(t *testing.T) {
 		}
 		readCh <- total
 	}()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	bw := newH3MasqueBufferedPipeWriter(pw, nil)
 	const payload = 48 * 1024
 	src := bytes.NewReader(bytes.Repeat([]byte("x"), payload))
 	if _, err := bw.ReadFrom(src); err != nil {
@@ -149,7 +151,7 @@ func TestH3MasqueBufferedPipeWriterFlushesTinyControl(t *testing.T) {
 		n, _ := pr.Read(buf)
 		readCh <- buf[:n]
 	}()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	bw := newH3MasqueBufferedPipeWriter(pw, nil)
 	tiny := []byte{1, 2, 3}
 	if _, err := bw.Write(tiny); err != nil {
 		t.Fatal(err)
@@ -174,7 +176,7 @@ func TestH3MasqueBufferedPipeWriterFlushesMSSSizedRelayChunk(t *testing.T) {
 		}
 		readDone <- n
 	}()
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	bw := newH3MasqueBufferedPipeWriter(pw, nil)
 	payload := bytes.Repeat([]byte{'x'}, 1460)
 	if _, err := bw.Write(payload); err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+
 )
 
 // CONNECT-IP demultiplexes all inbound proxied IPv4/v6 payloads through a single ReadPacket loop.
@@ -54,6 +55,7 @@ func (s *coreSession) registerUDPIngressSubscriber() *udpIngressSubscriber {
 	}
 	s.connectIPIngressSubsMu.Lock()
 	s.udpIngressSubscribers = append(s.udpIngressSubscribers, sub)
+	s.connectIPUDPIngressSubCount.Add(1)
 	s.connectIPIngressSubsMu.Unlock()
 	s.maybeStartConnectIPIngress()
 	return sub
@@ -107,9 +109,13 @@ func (s *coreSession) unregisterUDPIngressSubscriber(sub *udpIngressSubscriber) 
 		return
 	}
 	s.connectIPIngressSubsMu.Lock()
+	before := len(s.udpIngressSubscribers)
 	s.udpIngressSubscribers = slices.DeleteFunc(s.udpIngressSubscribers, func(other *udpIngressSubscriber) bool {
 		return other == sub
 	})
+	if len(s.udpIngressSubscribers) < before {
+		s.connectIPUDPIngressSubCount.Add(-1)
+	}
 	for {
 		select {
 		case <-sub.ch:
@@ -239,6 +245,11 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 			log.Printf("masque connect_ip ingress: rx n=%d ver=%d proto=%d ns=%v inflight=%d",
 				n, pkt[0]>>4, pkt[9], s.ingressTCPNetstack.Load() != nil, s.connectIPTCPInstallInflight.Load())
 		}
+		if s.connectIPTCPIngressFastPath(pkt) {
+			if s.deliverConnectIPTCPIngress(pkt) {
+				continue
+			}
+		}
 		// Server CONNECT-IP UDP relay returns ICMP port-unreachable as a full IPv4 packet (not
 		// CONNECT-UDP write feedback). Deliver to UDP bridge subscribers so ReadFrom surfaces
 		// ErrUDPPortUnreachable (bench udp_deliv / dig).
@@ -255,16 +266,7 @@ func (s *coreSession) connectIPIngressLoop(ctx context.Context) {
 				continue
 			}
 		}
-		if ns := s.ingressTCPNetstack.Load(); ns != nil {
-			ns.injectInboundClone(pkt)
-			continue
-		}
-		if s.connectIPTCPInstallInflight.Load() > 0 {
-			s.enqueuePreTCPNetstackIngress(pkt)
-			continue
-		}
-		if ns := s.tcpNetstackForIngressInject(); ns != nil {
-			ns.injectInboundClone(pkt)
+		if s.deliverConnectIPTCPIngress(pkt) {
 			continue
 		}
 		incConnectIPEngineDropReason("ingress_drop_no_consumer")

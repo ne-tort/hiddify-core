@@ -448,6 +448,7 @@ func (e *WarpEndpoint) startRuntime() {
 			ConnectIPScopeTarget:        e.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       e.options.ConnectIPScopeIPProto,
 			TemplateTCP:                 e.options.TemplateTCP,
+			TemplateConnect:             e.options.TemplateConnect,
 			FallbackPolicy:              normalizeFallbackPolicy(e.options.FallbackPolicy),
 			TCPMode:                     normalizeTCPMode(e.options.TCPMode),
 			TCPTransport:                normalizeTCPTransport(e.options.TCPTransport),

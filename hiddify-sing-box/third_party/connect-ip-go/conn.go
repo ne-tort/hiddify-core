@@ -1325,31 +1325,21 @@ func (c *Conn) emitPolicyDropICMP(original []byte, reason string) {
 // WritePacket writes an IP packet to the stream.
 // If sending the packet fails, it might return an ICMP packet.
 // It is the caller's responsibility to send the ICMP packet to the sender.
-func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
-	if len(b) == 0 {
-		return nil, fmt.Errorf("connect-ip: empty packet")
-	}
-	// If the connection is already closed, prefer returning the stable closed
-	// error instead of surfacing packet composition/policy failures.
-	if c.closeChan != nil {
-		select {
-		case <-c.closeChan:
-			return nil, c.errAfterClose()
-		default:
-		}
-	}
-	buf := datagramPool.Get().(*[]byte)
-	defer datagramPool.Put(buf)
-	if err := c.composeDatagram(buf, b); err != nil {
-		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
-		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
-		err = wrapConnectIPStreamDataplaneErr(c, err)
-		return nil, err
-	}
-	if err := c.str.SendDatagram(*buf); err != nil {
+// DatagramContextPrefixLen is the RFC9297 context ID prefix length on CONNECT-IP datagrams (default context 0).
+func DatagramContextPrefixLen() int {
+	return len(contextIDZero)
+}
+
+// DatagramContextIDPrefix returns the default (zero) datagram context ID bytes. Do not mutate the returned slice.
+func DatagramContextIDPrefix() []byte {
+	return contextIDZero
+}
+
+func (c *Conn) writePacketAfterCompose(datagram []byte, icmpSource []byte) (icmp []byte, err error) {
+	if err := c.str.SendDatagram(datagram); err != nil {
 		var errDTL *quic.DatagramTooLargeError
 		if errors.As(err, &errDTL) {
-			icmpPacket, icmpErr := composeICMPTooLargePacket(b, ptbMTUFromDatagramTooLarge(errDTL))
+			icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ptbMTUFromDatagramTooLarge(errDTL))
 			if icmpErr != nil {
 				log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
 				return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
@@ -1373,6 +1363,64 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 	return nil, nil
 }
 
+func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
+	if len(b) == 0 {
+		return nil, fmt.Errorf("connect-ip: empty packet")
+	}
+	if c.closeChan != nil {
+		select {
+		case <-c.closeChan:
+			return nil, c.errAfterClose()
+		default:
+		}
+	}
+	buf := datagramPool.Get().(*[]byte)
+	defer datagramPool.Put(buf)
+	if err := c.composeDatagram(buf, b); err != nil {
+		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
+		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
+		err = wrapConnectIPStreamDataplaneErr(c, err)
+		return nil, err
+	}
+	return c.writePacketAfterCompose(*buf, b)
+}
+
+// WritePacketPrefixed sends a datagram from a caller buffer laid out as [context ID][IP packet].
+// The IP region is copied into the internal datagram pool before TTL/Hop Limit decrement so retries
+// and caller buffer reuse cannot apply RFC9484 decrement more than once.
+func (c *Conn) WritePacketPrefixed(b []byte) (icmp []byte, err error) {
+	prefixLen := len(contextIDZero)
+	if len(b) <= prefixLen {
+		return nil, fmt.Errorf("connect-ip: prefixed datagram too short")
+	}
+	if c.closeChan != nil {
+		select {
+		case <-c.closeChan:
+			return nil, c.errAfterClose()
+		default:
+		}
+	}
+	packet := b[prefixLen:]
+	buf := datagramPool.Get().(*[]byte)
+	defer datagramPool.Put(buf)
+	need := prefixLen + len(packet)
+	if cap(*buf) < need {
+		*buf = make([]byte, need)
+	} else {
+		*buf = (*buf)[:need]
+	}
+	copy((*buf)[:prefixLen], contextIDZero)
+	copy((*buf)[prefixLen:], packet)
+	prepared := (*buf)[prefixLen:]
+	if err := c.prepareOutgoingProxiedPacket(prepared, c.routeView.Load()); err != nil {
+		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing prefixed packet (%d bytes): %v", len(packet), err)
+		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
+		err = wrapConnectIPStreamDataplaneErr(c, err)
+		return nil, err
+	}
+	return c.writePacketAfterCompose(*buf, prepared)
+}
+
 func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {
 	return c.composeDatagramWithView(dst, src, c.routeView.Load())
 }
@@ -1389,7 +1437,13 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 	}
 	copy(*dst, contextIDZero)
 	copy((*dst)[contextIDLen:], src)
-	packet := (*dst)[contextIDLen:]
+	return c.prepareOutgoingProxiedPacket((*dst)[contextIDLen:], view)
+}
+
+func (c *Conn) prepareOutgoingProxiedPacket(packet []byte, view *connRouteView) error {
+	if len(packet) == 0 {
+		return errors.New("connect-ip: empty packet")
+	}
 	switch v := ipVersion(packet); v {
 	default:
 		return fmt.Errorf("connect-ip: unknown IP versions: %d", v)
@@ -1402,7 +1456,6 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 			return fmt.Errorf("connect-ip: datagram TTL too small: %d", ttl)
 		}
 		packet[8]-- // decrement TTL
-		// recalculate the checksum
 		binary.BigEndian.PutUint16(packet[10:12], calculateIPv4Checksum(([ipv4.HeaderLen]byte)(packet[:ipv4.HeaderLen])))
 	case 6:
 		if len(packet) < ipv6.HeaderLen {
@@ -1418,11 +1471,6 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 		return nil
 	}
 
-	// Outgoing policy checks frequently depend only on addresses and may not
-	// require parsing IPv6 upper-layer protocol from an extension chain.
-	// Avoid failing packet composition when extension-chain parsing errors
-	// happen in cases like HopLimit/TTL checks (RFC9484/IPv6 packets can be
-	// header-only with Next Header pointing at an extension type).
 	pktVersion := ipVersion(packet)
 	switch pktVersion {
 	case 4:
@@ -1446,9 +1494,6 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 		pktSrc := netip.AddrFrom16([16]byte(packet[8:24]))
 		pktDst := netip.AddrFrom16([16]byte(packet[24:40]))
 
-		// Decide whether upper-layer protocol parsing is required.
-		// If source is already allowed by assignedAddresses or the local route
-		// entry matches with wildcard IPProtocol=0, we can safely skip protocol parsing.
 		assignedV6 := view.assignedV6
 		localRoutesV6 := view.localRoutesV6
 		needProto := false

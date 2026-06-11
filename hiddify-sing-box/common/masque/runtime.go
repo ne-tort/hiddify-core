@@ -72,6 +72,7 @@ type RuntimeOptions struct {
 	ConnectIPScopeTarget        string
 	ConnectIPScopeIPProto       uint8
 	TemplateTCP                 string
+	TemplateConnect             string
 	FallbackPolicy              string
 	TCPMode                     string
 	TCPTransport                string
@@ -180,6 +181,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			ConnectIPScopeTarget:        r.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       r.options.ConnectIPScopeIPProto,
 			TemplateTCP:                 r.options.TemplateTCP,
+			TemplateConnect:             r.options.TemplateConnect,
 			FallbackPolicy:              r.options.FallbackPolicy,
 			TCPMode:                     r.options.TCPMode,
 			TCPTransport:                r.options.TCPTransport,

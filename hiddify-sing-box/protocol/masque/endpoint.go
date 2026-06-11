@@ -65,6 +65,8 @@ func normalizeTCPTransport(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case option.MasqueTCPTransportConnectStream:
 		return option.MasqueTCPTransportConnectStream
+	case option.MasqueTCPTransportConnectAuthority:
+		return option.MasqueTCPTransportConnectAuthority
 	case option.MasqueTCPTransportConnectIP:
 		return option.MasqueTCPTransportConnectIP
 	case option.MasqueTCPTransportAuto:
@@ -73,6 +75,21 @@ func normalizeTCPTransport(mode string) string {
 		t := strings.TrimSpace(mode)
 		if t == "" {
 			return ""
+		}
+		return strings.ToLower(t)
+	}
+}
+
+func normalizeTCPRelay(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", option.MasqueTCPRelayTemplate:
+		return option.MasqueTCPRelayTemplate
+	case option.MasqueTCPRelayAuthority:
+		return option.MasqueTCPRelayAuthority
+	default:
+		t := strings.TrimSpace(mode)
+		if t == "" {
+			return option.MasqueTCPRelayTemplate
 		}
 		return strings.ToLower(t)
 	}
@@ -202,10 +219,24 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	}
 	switch tcpTransport {
 	case option.MasqueTCPTransportConnectStream:
-		// CONNECT-stream over outer HTTP/3 or HTTP/2 (effective http_layer).
+		if strings.TrimSpace(o.TemplateConnect) != "" {
+			return E.New("masque: template_connect is only for tcp_transport connect_authority")
+		}
+	case option.MasqueTCPTransportConnectAuthority:
+		if strings.TrimSpace(o.TemplateTCP) != "" {
+			return E.New("masque: template_tcp is incompatible with tcp_transport connect_authority")
+		}
+		if tip := strings.TrimSpace(o.TemplateConnect); tip != "" {
+			if strings.Contains(tip, "{target_host}") && !strings.Contains(tip, "{target_port}") {
+				return E.New("masque: template_connect with {target_host} must include {target_port}")
+			}
+		}
 	case option.MasqueTCPTransportConnectIP:
 		if tm != option.MasqueTransportModeConnectIP {
 			return E.New("masque: tcp_transport connect_ip requires transport_mode connect_ip (userspace TCP over CONNECT-IP tunnel)")
+		}
+		if strings.TrimSpace(o.TemplateConnect) != "" {
+			return E.New("masque: template_connect is only for tcp_transport connect_authority")
 		}
 	default:
 		return E.New("masque: invalid tcp_transport: ", tcpTransport)
@@ -296,6 +327,9 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 			return E.New("masque: template_tcp must include {target_host} and {target_port}")
 		}
 	}
+	if tcpTransport == option.MasqueTCPTransportConnectStream && strings.TrimSpace(o.TemplateConnect) != "" {
+		return E.New("masque: template_connect is only for tcp_transport connect_authority")
+	}
 
 	switch tm {
 	case option.MasqueTransportModeAuto, option.MasqueTransportModeConnectUDP, option.MasqueTransportModeConnectIP:
@@ -350,6 +384,16 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if strings.TrimSpace(o.TCPTransport) != "" {
 		return E.New("masque server: tcp_transport is client-only")
 	}
+	if strings.TrimSpace(o.TemplateConnect) != "" && normalizeTCPRelay(o.TCPRelay) != option.MasqueTCPRelayAuthority {
+		return E.New("masque server: template_connect requires tcp_relay authority")
+	}
+	tcpRelay := normalizeTCPRelay(o.TCPRelay)
+	if strings.TrimSpace(o.TCPRelay) != "" && tcpRelay != option.MasqueTCPRelayTemplate && tcpRelay != option.MasqueTCPRelayAuthority {
+		return E.New("masque server: invalid tcp_relay")
+	}
+	if tcpRelay == option.MasqueTCPRelayAuthority && strings.TrimSpace(o.TemplateTCP) != "" {
+		return E.New("masque server: template_tcp is incompatible with tcp_relay authority")
+	}
 	if o.ConnectIPScopeTarget != "" || o.ConnectIPScopeIPProto != 0 {
 		return E.New("masque server: connect_ip_scope_* is client-only")
 	}
@@ -367,7 +411,7 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 		(!strings.Contains(udpExp, "{target_host}") || !strings.Contains(udpExp, "{target_port}")) {
 		return E.New("masque server: template_udp must include {target_host} and {target_port}")
 	}
-	if strings.TrimSpace(o.TemplateTCP) != "" &&
+	if tcpRelay == option.MasqueTCPRelayTemplate && strings.TrimSpace(o.TemplateTCP) != "" &&
 		(!strings.Contains(tcpExp, "{target_host}") || !strings.Contains(tcpExp, "{target_port}")) {
 		return E.New("masque server: template_tcp must include {target_host} and {target_port}")
 	}
@@ -379,7 +423,9 @@ func validateMasqueServerMuxPaths(o option.MasqueEndpointOptions) error {
 	paths := []string{
 		pathFromTemplate(udpRaw),
 		pathFromTemplate(ipRaw),
-		pathFromTemplate(tcpRaw),
+	}
+	if normalizeTCPRelay(o.TCPRelay) != option.MasqueTCPRelayAuthority {
+		paths = append(paths, pathFromTemplate(tcpRaw))
 	}
 	seen := make(map[string]struct{}, len(paths))
 	for _, p := range paths {

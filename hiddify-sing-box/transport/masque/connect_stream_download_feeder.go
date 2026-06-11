@@ -7,16 +7,12 @@ import (
 	"sync"
 )
 
-// connectStreamDownloadFeederRingCap is the backlog between the QUIC response body and
-// streamConn.WriteTo. Sized for several coalesce rounds so the feeder keeps draining while
-// TUN/TCP blocks, without per-chunk heap allocations.
-const connectStreamDownloadFeederRingCap = 4 << 20
-
 // connectStreamDownloadFeeder drains the HTTP/2/3 CONNECT-stream response body on a background
 // goroutine into a fixed ring buffer so QUIC can keep delivering DATA while the TUN relay blocks
 // on Write (unbuffered io.Pipe download pumps deadlocked here; bench tcp_down ~64 KiB/RTT).
 type connectStreamDownloadFeeder struct {
 	startOnce sync.Once
+	gate      *connectStreamDuplexGate
 	ring      []byte
 	r, w      int
 	used      int
@@ -28,13 +24,18 @@ type connectStreamDownloadFeeder struct {
 	closed  bool
 }
 
-func (f *connectStreamDownloadFeeder) start(ctx context.Context, body io.Reader) {
+func (f *connectStreamDownloadFeeder) start(ctx context.Context, body io.Reader, gate *connectStreamDuplexGate) {
 	if body == nil {
 		f.setErr(io.EOF)
 		return
 	}
 	f.startOnce.Do(func() {
-		f.ring = make([]byte, connectStreamDownloadFeederRingCap)
+		f.gate = gate
+		ringCap := connectStreamDownloadFeederRingCapLegacy
+		if gate != nil {
+			ringCap = gate.RingCap()
+		}
+		f.ring = make([]byte, ringCap)
 		f.data = sync.NewCond(&f.mu)
 		go func() {
 			bp := masqueStreamDownloadWriteToBufPool.Get().(*[]byte)
@@ -59,9 +60,30 @@ func (f *connectStreamDownloadFeeder) start(ctx context.Context, body io.Reader)
 				// Background drain: keep blocking on the response body until the ring is full.
 				// Stopping after !ConnectStreamReadBuffered capped bench tcp_down at ~64 KiB/RTT.
 				for f.ringSpace() > 0 {
-					n, err := coalesceConnectStreamReadFeeder(body, scratch)
+					chunk := scratch
+					if space := f.ringSpace(); space > 0 && space < len(chunk) {
+						chunk = chunk[:space]
+					}
+					if f.gate != nil && f.gate.Active() {
+						want := f.gate.ResponseReadChunk(len(chunk))
+						if want <= 0 {
+							// Bootstrap: keep pulling small slices while the ring is not full so
+							// WriteTo can deliver to the TCP stack and the upload goroutine can
+							// RecordUpload before we hard-block on wire credit.
+							if f.used < f.gate.windowBytes {
+								want = min(len(chunk), f.gate.UploadChunk())
+							} else {
+								f.gate.WaitResponseSlot(1)
+								continue
+							}
+						} else {
+							f.gate.WaitResponseSlot(want)
+						}
+						chunk = chunk[:want]
+					}
+					n, err := coalesceConnectStreamReadFeeder(body, chunk)
 					if n > 0 {
-						if !f.writeRing(scratch[:n]) {
+						if !f.writeRing(chunk[:n]) {
 							return
 						}
 					}
@@ -119,6 +141,9 @@ func (f *connectStreamDownloadFeeder) writeRing(p []byte) bool {
 		f.w = (f.w + n) % len(f.ring)
 		f.used += n
 		f.mu.Unlock()
+		if f.gate != nil && f.gate.Active() {
+			f.gate.CommitResponse(n)
+		}
 		f.data.Broadcast()
 		p = p[n:]
 	}

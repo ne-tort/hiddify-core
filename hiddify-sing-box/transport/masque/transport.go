@@ -32,6 +32,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/connectauthority"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -55,21 +56,20 @@ const masqueH3ConnectStreamFlushSmall = 512
 // masqueH3ConnectStreamFlushBulk — push upload to the pipe / quic-go sendRequestBody (9bf058bc: 64 KiB).
 const masqueH3ConnectStreamFlushBulk = 64 * 1024
 
-// masqueH3ConnectStreamFlushDuplexMax — during iperf -R, flush ≤4 KiB upload chunks promptly (ACK path).
-const masqueH3ConnectStreamFlushDuplexMax = 4096
-
 // h3MasqueBufferedPipeWriter wraps the upload-side *io.PipeWriter (same stack as H2 CONNECT-stream).
 // The bare pipe does not implement SetWriteDeadline; streamConn stores write deadlines in
 // h2PipeWriteDL and tears down the pipe on expiry (parity across http_layer h2/h3).
 type h3MasqueBufferedPipeWriter struct {
-	bw    *bufio.Writer
-	inner io.WriteCloser
+	bw     *bufio.Writer
+	inner  io.WriteCloser
+	duplex *connectStreamDuplexGate
 }
 
-func newH3MasqueBufferedPipeWriter(inner io.WriteCloser) *h3MasqueBufferedPipeWriter {
+func newH3MasqueBufferedPipeWriter(inner io.WriteCloser, duplex *connectStreamDuplexGate) *h3MasqueBufferedPipeWriter {
 	return &h3MasqueBufferedPipeWriter{
-		bw:    bufio.NewWriterSize(inner, masqueH3ConnectStreamBufSize),
-		inner: inner,
+		bw:     bufio.NewWriterSize(inner, masqueH3ConnectStreamBufSize),
+		inner:  inner,
+		duplex: duplex,
 	}
 }
 
@@ -122,7 +122,11 @@ func (w *h3MasqueBufferedPipeWriter) shouldFlushAfterWrite(chunkLen int) bool {
 	if buffered >= masqueH3ConnectStreamBufSize || buffered >= masqueH3ConnectStreamFlushBulk {
 		return true
 	}
-	if chunkLen <= masqueH3ConnectStreamFlushDuplexMax && buffered < masqueH3ConnectStreamFlushBulk {
+	duplexFlush := defaultConnectStreamDuplexUploadChunk
+	if w.duplex != nil {
+		duplexFlush = w.duplex.DuplexFlushThreshold()
+	}
+	if chunkLen <= duplexFlush && buffered < masqueH3ConnectStreamFlushBulk {
 		return true
 	}
 	return chunkLen <= masqueH3ConnectStreamFlushSmall && buffered <= 2*masqueH3ConnectStreamFlushSmall
@@ -135,8 +139,12 @@ func (w *h3MasqueBufferedPipeWriter) Write(p []byte) (int, error) {
 	}
 	flush := w.shouldFlushAfterWrite(len(p))
 	if flush {
+		toRelease := w.bw.Buffered()
 		if flushErr := w.bw.Flush(); flushErr != nil {
 			return n, flushErr
+		}
+		if w.duplex != nil && w.duplex.Active() && toRelease > 0 {
+			w.duplex.RecordUpload(toRelease)
 		}
 	}
 	return n, nil
@@ -168,7 +176,11 @@ func (w *h3MasqueBufferedPipeWriter) ReadFrom(r io.Reader) (int64, error) {
 		}
 		if er != nil {
 			if errors.Is(er, io.EOF) {
+				toRelease := w.bw.Buffered()
 				_ = w.bw.Flush()
+				if w.duplex != nil && w.duplex.Active() && toRelease > 0 {
+					w.duplex.RecordUpload(toRelease)
+				}
 				return written, nil
 			}
 			return written, er
@@ -198,13 +210,9 @@ var masqueStreamDownloadWriteToBufPool = sync.Pool{
 	},
 }
 
-// masqueStreamDownloadWriteToTunLen caps each streamConn.WriteTo → TUN write so gVisor/kernel TCP
-// can ACK in smaller steps and clock duplex upload (request body) on the CONNECT stream.
-const masqueStreamDownloadWriteToTunLen = 512 * 1024
-
 var masqueStreamDownloadWriteToTunPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, masqueStreamDownloadWriteToTunLen)
+		b := make([]byte, connectStreamDownloadSinkMaxBulk)
 		return &b
 	},
 }
@@ -514,6 +522,12 @@ func tcpStreamHTTP3LegacyDatagramsEnv() bool {
 	}
 }
 
+// MasqueTCPConnectStreamQUICConfig exposes bulk TCP CONNECT-stream QUIC tuning for isolated
+// clients (masque-thin-client, connectauthority) without importing unexported helpers.
+func MasqueTCPConnectStreamQUICConfig(opts ClientOptions) *quic.Config {
+	return masqueTCPConnectStreamQUICConfig(opts)
+}
+
 // MasqueHTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
 // Large RX windows match the client; InitialPacketSize matches self-hosted CONNECT-stream/UDP
 // (defaultUDPInitialPacketSize) so the edge does not spend the bulk phase on 1280 B packets.
@@ -664,6 +678,7 @@ type ClientOptions struct {
 	ConnectIPScopeTarget  string
 	ConnectIPScopeIPProto uint8
 	TemplateTCP           string
+	TemplateConnect       string
 	FallbackPolicy        string
 	TCPMode               string
 	TCPTransport          string
@@ -845,7 +860,7 @@ func (f DirectClientFactory) NewSession(ctx context.Context, options ClientOptio
 	return &directSession{
 		dialer:       net.Dialer{},
 		tcpTransport: tcpTransport,
-		capabilities: CapabilitySet{ConnectUDP: true, ConnectIP: false, ConnectTCP: tcpTransport == option.MasqueTCPTransportConnectStream},
+		capabilities: CapabilitySet{ConnectUDP: true, ConnectIP: false, ConnectTCP: tcpTransport == option.MasqueTCPTransportConnectStream || tcpTransport == option.MasqueTCPTransportConnectAuthority},
 	}, nil
 }
 
@@ -921,6 +936,7 @@ func (f CoreClientFactory) NewSession(ctx context.Context, options ClientOptions
 	tcpTransport := normalizeTCPTransport(options.TCPTransport)
 	tm := strings.ToLower(strings.TrimSpace(options.TransportMode))
 	tcpCapable := tcpTransport == option.MasqueTCPTransportConnectStream ||
+		tcpTransport == option.MasqueTCPTransportConnectAuthority ||
 		(tcpTransport == option.MasqueTCPTransportConnectIP && tm == option.MasqueTransportModeConnectIP)
 	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
 	if effectiveCeiling <= 0 {
@@ -1007,6 +1023,8 @@ type coreSession struct {
 	ipHTTPConn                     *http3.ClientConn
 	ipHTTP                         *http3.Transport
 	tcpHTTP                        *http3.Transport
+	authorityClient                *connectauthority.Client
+	authorityClientMu              sync.Mutex
 	templateUDP                    *uritemplate.Template
 	templateIP                     *uritemplate.Template
 	templateTCP                    *uritemplate.Template
@@ -1022,9 +1040,11 @@ type coreSession struct {
 	tcpNetstack                    TCPNetstack
 
 	// Single-consumer CONNECT-IP ingress (see connect_ip_ingress.go).
-	connectIPIngressSubsMu  sync.Mutex
-	udpIngressSubscribers   []*udpIngressSubscriber
-	connectIPIngressLoopMu  sync.Mutex
+	connectIPIngressSubsMu       sync.Mutex
+	udpIngressSubscribers        []*udpIngressSubscriber
+	connectIPUDPIngressSubCount  atomic.Int32
+	connectIPIngressAckWake      atomic.Bool
+	connectIPIngressLoopMu       sync.Mutex
 	connectIPIngressRunning atomic.Bool
 	connectIPIngressCancel  context.CancelFunc
 	connectIPIngressWG      sync.WaitGroup
@@ -1130,6 +1150,15 @@ func (s *coreSession) DialContext(ctx context.Context, network string, destinati
 	default:
 	}
 	switch normalizeTCPTransport(s.options.TCPTransport) {
+	case option.MasqueTCPTransportConnectAuthority:
+		conn, err := s.dialTCPConnectAuthority(ctx, destination)
+		if err == nil {
+			recordTCPDialSuccess()
+			return conn, nil
+		}
+		recordTCPDialFailure()
+		recordTCPDialErrorClass(err)
+		return nil, err
 	case option.MasqueTCPTransportConnectStream:
 		conn, err := s.dialTCPStream(ctx, destination)
 		if err == nil {
@@ -1484,6 +1513,7 @@ func (s *coreSession) tryHTTPFallbackSwitchLockedAssumeMu(err error) bool {
 		s.tcpHTTP.Close()
 		s.tcpHTTP = nil
 	}
+	_ = s.closeConnectAuthorityClient()
 	if s.udpClient != nil {
 		_ = s.udpClient.Close()
 		s.udpClient = nil
@@ -2781,7 +2811,13 @@ func (s *coreSession) newConnectIPPacketSession(conn *connectip.Conn, overlayH2 
 		profileLocalIPv4:  strings.TrimSpace(s.options.ProfileLocalIPv4),
 		profileLocalIPv6:  strings.TrimSpace(s.options.ProfileLocalIPv6),
 		overlayH2:         overlayH2,
+		wakeAfterDatagramTx: s.scheduleConnectIPDatagramSendWake,
 	}
+}
+
+func (s *coreSession) scheduleConnectIPDatagramSendWake() {
+	s.connectIPIngressAckWake.Store(true)
+	s.flushConnectIPIngressAckWake()
 }
 
 func (s *coreSession) Capabilities() CapabilitySet {
@@ -2808,9 +2844,9 @@ func (s *coreSession) Close() error {
 		errs        []error
 		tcpNetstack TCPNetstack
 		ipConn      *connectip.Conn
-		ipHTTP      *http3.Transport
-		tcpHTTP     *http3.Transport
-		udpClient   *qmasque.Client
+		ipHTTP    *http3.Transport
+		tcpHTTP   *http3.Transport
+		udpClient *qmasque.Client
 	)
 	s.mu.Lock()
 	tcpNetstack = s.tcpNetstack
@@ -2864,6 +2900,7 @@ func (s *coreSession) Close() error {
 	if tcpHTTP != nil && tcpHTTP != ipHTTP {
 		errs = append(errs, tcpHTTP.Close())
 	}
+	_ = s.closeConnectAuthorityClient()
 	emitConnectIPObservabilityEvent("session_close_end")
 	return errors.Join(errs...)
 }
@@ -3257,6 +3294,8 @@ func normalizeTCPTransport(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case option.MasqueTCPTransportConnectStream:
 		return option.MasqueTCPTransportConnectStream
+	case option.MasqueTCPTransportConnectAuthority:
+		return option.MasqueTCPTransportConnectAuthority
 	case option.MasqueTCPTransportConnectIP:
 		return option.MasqueTCPTransportConnectIP
 	default:
@@ -3674,27 +3713,26 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		// CONNECT stream to Request.Context; sing-box often passes a dial ctx that ends right after
 		// setup — without detaching, reads hit H3_REQUEST_CANCELLED (local) when the dial ctx cancels.
 		streamCtx, stopReqCtxRelay := connectip.NewH2ExtendedConnectRequestContext(ctx)
-		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, MasqueTCPConnectStreamRequestURL(tcpURL), nil)
+		usePipe := masqueConnectUsePipeUpload()
+		req, pr, pw, reqErr := h3ConnectRequest(streamCtx, MasqueTCPConnectStreamRequestURL(tcpURL), serverHost, options, usePipe)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
 			return nil, errors.Join(ErrTCPConnectStreamFailed, E.Cause(reqErr, "build TCP MASQUE request"))
 		}
-		req.Host = serverHost
-		req.Proto = "HTTP/3"
-		req.ProtoMajor = 3
-		req.ProtoMinor = 0
-		req.Header = make(http.Header)
-		setMasqueAuthorizationHeader(req.Header, options)
-		pr, pw := io.Pipe()
-		req.Body = pr
-		req.ContentLength = -1
+		if pr != nil {
+			req.Body = pr
+		}
 		roundTripper := s.getTCPRoundTripper(tcpHTTP)
 		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
-			_ = pr.Close()
-			_ = pw.Close()
+			if pr != nil {
+				_ = pr.Close()
+			}
+			if pw != nil {
+				_ = pw.Close()
+			}
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
 				tcpTracef("masque tcp connect_stream cancelled host=%s port=%d attempt=%d error_class=%s err=%v", targetHost, targetPort, attempt+1, ClassifyError(ErrTCPConnectStreamFailed), roundTripErr)
 				return nil, errors.Join(ErrTCPConnectStreamFailed, roundTripErr)
@@ -3715,8 +3753,12 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
-			_ = pr.Close()
-			_ = pw.Close()
+			if pr != nil {
+				_ = pr.Close()
+			}
+			if pw != nil {
+				_ = pw.Close()
+			}
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				tcpTracef("masque tcp connect_stream denied host=%s port=%d status=%d error_class=%s", targetHost, targetPort, resp.StatusCode, ClassifyError(ErrAuthFailed))
@@ -3727,22 +3769,26 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
-			_ = pr.Close()
-			_ = pw.Close()
+			if pr != nil {
+				_ = pr.Close()
+			}
+			if pw != nil {
+				_ = pw.Close()
+			}
 			_ = resp.Body.Close()
 			return nil, errors.Join(ErrTCPConnectStreamFailed, ctxErr)
 		}
-		tcpTracef("masque tcp connect_stream success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
+		tcpTracef("masque tcp connect_stream success host=%s port=%d status=%d pipe_upload=%t", targetHost, targetPort, resp.StatusCode, usePipe)
 		stopReqCtxRelay(true)
-		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
-		sc := &streamConn{
-			reader: newH3MasqueResponseReadCloser(resp.Body),
-			writer: newH3MasqueBufferedPipeWriter(pw),
-			ctx:    streamCtx,
-			local:  &net.TCPAddr{},
-			remote: remoteAddr,
+		conn, err := h3ConnectTunnelFromResponse(streamCtx, resp, pw, targetHost, targetPort)
+		if err != nil {
+			if pw != nil {
+				_ = pw.Close()
+			}
+			_ = resp.Body.Close()
+			return nil, err
 		}
-		return sc, nil
+		return conn, nil
 	}
 	if lastRoundTripErr != nil {
 		return nil, errors.Join(ErrTCPConnectStreamFailed, lastRoundTripErr)
@@ -3918,19 +3964,14 @@ func applyQUICExperimentalOptions(base *quic.Config, opts QUICExperimentalOption
 	return config
 }
 
-// masqueConnectStreamUploadDuringDownloadReadLen matches server relayUploadCopy (4 KiB):
-// while WriteTo is draining download, an 8 MiB ReadFrom on the TUN leg blocks the upload goroutine
-// and starves duplex CONNECT-stream request-body progress (bench tcp_down ~64 KiB/RTT).
-const masqueConnectStreamUploadDuringDownloadReadLen = 4 << 10
-
 type streamConn struct {
 	mu             sync.Mutex
 	readBufMu      sync.Mutex // CONNECT-stream download: coalesce + sing bufio.ReadBuffer staging (must not interleave with Read/WriteTo).
 	readStaging    []byte
 	readStagingOff int
+	duplex         *connectStreamDuplexGate
 	downloadFeed   *connectStreamDownloadFeeder
 	downloadFeedOnce sync.Once
-	relayDownloadBusy atomic.Int32 // >0 while WriteTo is relaying response → TUN (iperf -R download)
 	h2PipeWriteMu  sync.Mutex // CONNECT-stream pipe upload (H2 Extended CONNECT + H3 request body): serializes Writes (parity h2ConnectUDPPacketConn.writeMu)
 	reader         io.ReadCloser
 	writer         io.WriteCloser
@@ -4024,7 +4065,7 @@ func (c *streamConn) downloadFeedReader() io.Reader {
 	}
 	c.downloadFeedOnce.Do(func() {
 		c.downloadFeed = &connectStreamDownloadFeeder{}
-		c.downloadFeed.start(c.ctx, c.connectStreamBodyReader())
+		c.downloadFeed.start(c.ctx, c.connectStreamBodyReader(), c.duplex)
 	})
 	return c.downloadFeed
 }
@@ -4060,7 +4101,11 @@ func (c *streamConn) readCoalescedInto(dst []byte) (int, error) {
 	if feed == nil {
 		return total, io.EOF
 	}
-	nn, err := coalesceConnectStreamRead(feed, dst[total:])
+	perCall := masqueConnectStreamReadCoalescePerCall
+	if c.duplex != nil {
+		perCall = c.duplex.CoalescePerCallCap()
+	}
+	nn, err := coalesceConnectStreamReadWithPerCallCap(feed, dst[total:], perCall)
 	total += nn
 	return total, err
 }
@@ -4100,8 +4145,12 @@ func (c *streamConn) readForWriteTo(dst []byte) (int, error) {
 			}
 		}
 	}
+	perCall := masqueConnectStreamReadCoalescePerCall
+	if c.duplex != nil {
+		perCall = c.duplex.CoalescePerCallCap()
+	}
 	for total < len(dst) && connectStreamReaderHasBuffered(feed) {
-		nn, err := coalesceConnectStreamRead(feed, dst[total:])
+		nn, err := coalesceConnectStreamReadWithPerCallCap(feed, dst[total:], perCall)
 		total += nn
 		if err != nil {
 			if total > 0 && errors.Is(err, io.EOF) {
@@ -4193,8 +4242,10 @@ func (c *streamConn) WriteTo(w io.Writer) (int64, error) {
 	if w == nil {
 		return 0, errors.New("masque connect-stream WriteTo: nil writer")
 	}
-	c.relayDownloadBusy.Add(1)
-	defer c.relayDownloadBusy.Add(-1)
+	if c.duplex != nil {
+		c.duplex.EnterDuplex()
+		defer c.duplex.LeaveDuplex()
+	}
 	var written int64
 	c.readBufMu.Lock()
 	if c.readStagingOff < len(c.readStaging) {
@@ -4210,7 +4261,11 @@ func (c *streamConn) WriteTo(w io.Writer) (int64, error) {
 	c.readBufMu.Unlock()
 	bp := masqueStreamDownloadWriteToTunPool.Get().(*[]byte)
 	defer masqueStreamDownloadWriteToTunPool.Put(bp)
-	buf := *bp
+	chunkMax := connectStreamDownloadSinkMaxBulk
+	if c.duplex != nil {
+		chunkMax = c.duplex.MaxDownloadChunk()
+	}
+	buf := (*bp)[:chunkMax]
 	for {
 		n, err := c.readForWriteTo(buf)
 		if n > 0 {
@@ -4257,6 +4312,10 @@ func (c *streamConn) Write(p []byte) (int, error) {
 // connection is the upload destination — bulk data flows through bufio.Writer.ReadFrom instead
 // of many small Write calls (major win for MASQUE CONNECT-stream upload / iperf).
 func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
+	if c.duplex != nil {
+		c.duplex.EnterDuplex()
+		defer c.duplex.LeaveDuplex()
+	}
 	if c.h2PipeWriteDL.writeTimeoutExceeded() {
 		return 0, errors.Join(ErrTCPConnectStreamFailed, context.DeadlineExceeded)
 	}
@@ -4266,7 +4325,9 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	}
 	// Bulk upload: delegate to h3MasqueBufferedPipeWriter.ReadFrom (flush-aware bufio) instead of
 	// writeConnectStreamPipeUploadLocked + 8 MiB staging (and avoid the upload-bridge copy/wait).
-	if wNanos == 0 && c.relayDownloadBusy.Load() == 0 {
+	// Bulk delegate only when duplex is off; during iperf -R the upload leg must flush 4 KiB
+	// chunks so connectStreamDuplexGate can RecordUpload and unblock response intake.
+	if wNanos == 0 && (c.duplex == nil || !c.duplex.Enabled()) {
 		if rf, ok := c.writer.(io.ReaderFrom); ok {
 			c.h2PipeWriteMu.Lock()
 			n, err := rf.ReadFrom(r)
@@ -4280,8 +4341,8 @@ func (c *streamConn) ReadFrom(r io.Reader) (int64, error) {
 	bp := masqueStreamUploadReadFromBufPool.Get().(*[]byte)
 	defer masqueStreamUploadReadFromBufPool.Put(bp)
 	buf := *bp
-	if c.relayDownloadBusy.Load() > 0 {
-		buf = buf[:masqueConnectStreamUploadDuringDownloadReadLen]
+	if c.duplex != nil {
+		buf = buf[:c.duplex.MaxUploadChunk(len(buf))]
 	}
 	var written int64
 	for {
@@ -4343,7 +4404,13 @@ func (c *streamConn) writeConnectStreamPipeUploadLocked(p []byte) (int, error) {
 		defer wcancel()
 		n, err = c.awaitConnectStreamPipeWriterBlockedWriteInterruptible(wctx, p)
 	}
-	return c.connectStreamFinishWriteError(n, err)
+	n, err = c.connectStreamFinishWriteError(n, err)
+	if err == nil && c.duplex != nil && c.duplex.Active() && n > 0 {
+		if _, ok := c.writer.(*h3MasqueBufferedPipeWriter); !ok {
+			c.duplex.RecordUpload(n)
+		}
+	}
+	return n, err
 }
 
 func (c *streamConn) connectStreamFinishReadFromWriteError(err error) error {
@@ -4463,6 +4530,8 @@ type connectIPPacketSession struct {
 	profileLocalIPv6  string
 	// overlayH2 is true when CONNECT-IP uses HTTP/2 DATAGRAM capsules (no QUIC unreliable datagrams).
 	overlayH2 bool
+	// wakeAfterDatagramTx schedules QUIC send after egress DATAGRAM (gVisor ACKs on download).
+	wakeAfterDatagramTx func()
 }
 
 func (s *connectIPPacketSession) ReadPacket(buffer []byte) (int, error) {
@@ -4511,14 +4580,41 @@ func (s *connectIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 		return nil, errors.Join(ErrTransportInit, errors.New("connect-ip packet exceeds configured datagram ceiling"))
 	}
 	icmp, err := s.conn.WritePacket(buffer)
+	return s.accountConnectIPPacketWrite(len(buffer), icmp, err)
+}
+
+// writePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
+func (s *connectIPPacketSession) writePacketPrefixed(buffer []byte) ([]byte, error) {
+	prefixLen := connectip.DatagramContextPrefixLen()
+	if prefixLen <= 0 || len(buffer) <= prefixLen {
+		return nil, errors.Join(ErrTransportInit, errors.New("connect-ip prefixed datagram too short"))
+	}
+	ipLen := len(buffer) - prefixLen
+	if s.datagramCeiling > 0 && ipLen > s.datagramCeiling {
+		connectIPCounters.packetWriteFailTotal.Add(1)
+		incConnectIPWriteFailReason("ceiling_reject")
+		emitConnectIPObservabilityEvent("packet_write_fail_ceiling")
+		return nil, errors.Join(ErrTransportInit, errors.New("connect-ip packet exceeds configured datagram ceiling"))
+	}
+	if s.conn == nil {
+		return nil, errors.Join(ErrTransportInit, errors.New("connect-ip conn is nil"))
+	}
+	icmp, err := s.conn.WritePacketPrefixed(buffer)
+	return s.accountConnectIPPacketWrite(ipLen, icmp, err)
+}
+
+func (s *connectIPPacketSession) accountConnectIPPacketWrite(ipLen int, icmp []byte, err error) ([]byte, error) {
 	if err != nil {
 		connectIPCounters.packetWriteFailTotal.Add(1)
 		incConnectIPWriteFailReason(classifyConnectIPErrorReason(err))
 		emitConnectIPObservabilityEvent("packet_write_fail")
 		return icmp, err
 	}
+	if ipLen <= 0 {
+		return icmp, err
+	}
 	txSeq := connectIPCounters.packetTxTotal.Add(1)
-	connectIPCounters.bytesTxTotal.Add(uint64(len(buffer)))
+	connectIPCounters.bytesTxTotal.Add(uint64(ipLen))
 	if connectIPCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
 		emitConnectIPObservabilityEvent("first_packet_tx")
 	}
@@ -4526,6 +4622,9 @@ func (s *connectIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 	if len(icmp) > 0 {
 		connectIPCounters.ptbRxTotal.Add(1)
 		maybeEmitConnectIPPTBObs("packet_ptb_rx")
+	}
+	if s.wakeAfterDatagramTx != nil {
+		s.wakeAfterDatagramTx()
 	}
 	return icmp, err
 }
@@ -4543,7 +4642,9 @@ func incConnectIPSessionReset(reason string) {
 	connectIPCounters.mu.Lock()
 	connectIPCounters.sessionResetByReason[reason]++
 	connectIPCounters.mu.Unlock()
-	emitConnectIPObservabilityEvent("session_reset_" + reason)
+	if connectIPObsEventsEnabled() {
+		emitConnectIPObservabilityEvent("session_reset_" + reason)
+	}
 }
 
 func classifyConnectIPErrorReason(err error) string {
@@ -4632,6 +4733,9 @@ func setConnectIPSessionID() {
 }
 
 func maybeEmitConnectIPPTBObs(reason string) {
+	if !connectIPObsEventsEnabled() {
+		return
+	}
 	now := time.Now().UnixMilli()
 	last := connectIPCounters.lastPTBObsEmitUnixMilli.Load()
 	if last != 0 && now-last < 1000 {
@@ -4649,6 +4753,9 @@ func maybeEmitConnectIPPTBObs(reason string) {
 const connectIPActiveObsSampleMask = uint64(127)
 
 func maybeEmitConnectIPActiveSnapshot(planeTick uint64) {
+	if !connectIPObsEventsEnabled() {
+		return
+	}
 	last := connectIPCounters.lastActiveEmitUnixMilli.Load()
 	if last != 0 {
 		if (planeTick & connectIPActiveObsSampleMask) != 0 {
@@ -4827,6 +4934,9 @@ func ConnectIPObservabilitySnapshot() map[string]any {
 }
 
 func emitConnectIPObservabilityEvent(reason string) {
+	if !connectIPObsEventsEnabled() {
+		return
+	}
 	snapshot := ConnectIPObservabilitySnapshot()
 	snapshot["connect_ip_emit_seq"] = connectIPCounters.emitSeq.Add(1)
 	snapshot["event_reason"] = reason

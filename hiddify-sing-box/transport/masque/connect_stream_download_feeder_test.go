@@ -14,7 +14,7 @@ func TestConnectStreamDownloadFeederDrainsAheadOfConsumer(t *testing.T) {
 	payload := bytes.Repeat([]byte{'x'}, chunk*chunks)
 	inner := &chunkedReadCloser{chunk: chunk, chunks: chunks, left: len(payload)}
 	f := &connectStreamDownloadFeeder{}
-	f.start(context.Background(), inner)
+	f.start(context.Background(), inner, nil)
 	out := make([]byte, 0, len(payload))
 	buf := make([]byte, 32*1024)
 	for {

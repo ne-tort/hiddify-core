@@ -1312,8 +1312,10 @@ func TestStreamConnWriteH3PipeUploadRespectsWriteDeadline(t *testing.T) {
 		_ = pr.Close()
 		_ = pw.Close()
 	})
-	bw := newH3MasqueBufferedPipeWriter(pw)
+	duplex := newConnectStreamDuplexGate()
+	bw := newH3MasqueBufferedPipeWriter(pw, duplex)
 	c := &streamConn{
+		duplex: duplex,
 		reader: io.NopCloser(strings.NewReader("")),
 		writer: bw,
 		ctx:    context.Background(),
@@ -3792,6 +3794,7 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 }
 
 func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	session := &coreSession{
 		options: ClientOptions{
 			Server:      "masque.local",
@@ -3831,6 +3834,7 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 }
 
 func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	relayCtx, relayCancel := context.WithCancel(context.Background())
 	session := &coreSession{
 		options: ClientOptions{
@@ -3868,6 +3872,7 @@ func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 }
 
 func TestDialTCPStreamInProcessHTTP3ProxySuccess(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen tcp target: %v", err)

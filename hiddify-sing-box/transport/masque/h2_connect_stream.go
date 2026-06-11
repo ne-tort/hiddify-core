@@ -122,19 +122,7 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 		}
 		stopReqCtxRelay(true)
 		tcpTracef("masque tcp connect_stream h2 success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
-		remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(destination.Port))))
-		// Align streamConn semantics with the HTTP/2 CONNECT request context: the handshake may use a
-		// short-lived dial ctx while Request.Context is WithoutCancel — using the dial ctx here would
-		// mis-attribute transport errors via context.Cause after the handshake when the dial op ended.
-		sc := &streamConn{
-			reader:       newH2ConnectStreamResponseBody(resp.Body),
-			writer:       newH3MasqueBufferedPipeWriter(pw),
-			h2UploadPipe: pr,
-			ctx:          streamCtx,
-			local:        &net.TCPAddr{},
-			remote:       remoteAddr,
-		}
-		return sc, nil
+		return h2ConnectTunnelFromResponse(streamCtx, resp, pw, targetHost, uint16(targetPort))
 	}
 	if lastRoundTripErr != nil {
 		return nil, errors.Join(ErrTCPConnectStreamFailed, lastRoundTripErr)
@@ -142,9 +130,8 @@ func (s *coreSession) dialTCPStreamH2(ctx context.Context, tcpURL *url.URL, opti
 	return nil, ErrTCPConnectStreamFailed
 }
 
-// h2ConnectStreamResponseBodyBufSize: align with streamConn coalesce target so bufio does not
-// cap bulk Read into the 8 MiB WriteTo scratch (64 KiB bufio capped bench download ~15 Mbit/s).
-const h2ConnectStreamResponseBodyBufSize = masqueConnectStreamReadCoalesceTarget
+// h2ConnectStreamResponseBodyBufSize matches thin relay copy (h2o proxy.tunnel parity).
+const h2ConnectStreamResponseBodyBufSize = RelayTunnelBufLen
 
 // h2ConnectStreamResponseBody wraps the HTTP/2 CONNECT response body (typically
 // golang.org/x/net/http2.transportResponseBody), which does not implement SetReadDeadline.

@@ -4,58 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
-	"strconv"
 	"sync"
-	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 )
 
-// streamDatagramQueueDropTotal counts DATAGRAM frames dropped because the per-stream
-// backlog reached streamDatagramQueueLen (enqueueDatagram silent drop).
-var streamDatagramQueueDropTotal atomic.Uint64
-
-// StreamDatagramQueueDropTotal returns enqueueDatagram drops due to a full per-stream queue (process-wide).
-func StreamDatagramQueueDropTotal() uint64 {
-	return streamDatagramQueueDropTotal.Load()
-}
-
-// streamDatagramRecvClosedDropTotal counts DATAGRAM frames dropped because ReceiveDatagram
-// side already failed/closed (enqueueDatagram silent drop).
-var streamDatagramRecvClosedDropTotal atomic.Uint64
-
-// StreamDatagramRecvClosedDropTotal returns enqueueDatagram drops after recv-side close (process-wide).
-func StreamDatagramRecvClosedDropTotal() uint64 {
-	return streamDatagramRecvClosedDropTotal.Load()
-}
-
-// Default per-stream backlog: raised from 4096→8192→16384 as CONNECT-IP degrade_matrix triage
-// showed sink-side datagram gaps at high shaped rates (~130–140 Mbit) without QUIC rcv-queue or
-// packer oversize signals — transient HTTP/3 per-stream enqueue outpacing application drain.
-const defaultStreamDatagramQueueLen = 16384
-
-// Per-stream HTTP/3 DATAGRAM backlog before ReceiveDatagram drains (silent drop when full).
-// CONNECT-IP / MASQUE bulk can exceed transient drain headroom when queue is too small.
-// Keep it configurable for constrained hosts while defaulting to a safer high-rate headroom.
-var streamDatagramQueueLen = loadStreamDatagramQueueLen()
-
-func loadStreamDatagramQueueLen() int {
-	raw := os.Getenv("HIDDIFY_HTTP3_STREAM_DATAGRAM_QUEUE_LEN")
-	if raw == "" {
-		return defaultStreamDatagramQueueLen
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return defaultStreamDatagramQueueLen
-	}
-	if v < 128 {
-		return 128
-	}
-	if v > 65536 {
-		return 65536
-	}
-	return v
-}
+const streamDatagramQueueLen = 32
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -69,17 +23,11 @@ type stateTrackingStream struct {
 
 	sendDatagram func([]byte) error
 	hasData      chan struct{}
-	// Fixed-capacity ring for inbound HTTP DATAGRAM frames (capacity = streamDatagramQueueLen).
-	dgSlots [][]byte
-	dgHead  int
-	dgCount int
+	queue        [][]byte // TODO: use a ring buffer
 
 	mx      sync.Mutex
 	sendErr error
 	recvErr error
-	// recvClosed mirrors recvErr != nil for enqueueDatagram: cheap load before the ring mutex
-	// so closed streams stop taking the lock on every stray post-close DATAGRAM.
-	recvClosed atomic.Bool
 
 	clearer streamClearer
 }
@@ -91,16 +39,11 @@ type streamClearer interface {
 }
 
 func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
-	capacity := streamDatagramQueueLen
-	if capacity < 1 {
-		capacity = 128
-	}
 	t := &stateTrackingStream{
 		Stream:       s,
 		clearer:      clearer,
 		sendDatagram: sendDatagram,
 		hasData:      make(chan struct{}, 1),
-		dgSlots:      make([][]byte, capacity),
 	}
 
 	context.AfterFunc(s.Context(), func() {
@@ -135,7 +78,6 @@ func (s *stateTrackingStream) closeReceive(e error) {
 			s.clearer.clearStream(s.StreamID())
 		}
 		s.recvErr = e
-		s.recvClosed.Store(true)
 		s.signalHasDatagram()
 	}
 }
@@ -165,6 +107,9 @@ func (s *stateTrackingStream) CancelRead(e quic.StreamErrorCode) {
 
 func (s *stateTrackingStream) Read(b []byte) (int, error) {
 	n, err := s.Stream.Read(b)
+	if n > 0 {
+		quic.MasqueWakeStreamSend(s.Stream)
+	}
 	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
 		s.closeReceive(err)
 	}
@@ -190,55 +135,25 @@ func (s *stateTrackingStream) signalHasDatagram() {
 }
 
 func (s *stateTrackingStream) enqueueDatagram(data []byte) {
-	if s.recvClosed.Load() {
-		streamDatagramRecvClosedDropTotal.Add(1)
-		return
-	}
-	s.mx.Lock()
-	if s.recvErr != nil {
-		s.mx.Unlock()
-		streamDatagramRecvClosedDropTotal.Add(1)
-		return
-	}
-	if s.dgCount >= streamDatagramQueueLen {
-		s.mx.Unlock()
-		streamDatagramQueueDropTotal.Add(1)
-		return
-	}
-	idx := (s.dgHead + s.dgCount) % len(s.dgSlots)
-	s.dgSlots[idx] = data
-	s.dgCount++
-	s.mx.Unlock()
-	// Wake waiters without holding the ring mutex; connect-ip/MASQUE ingress is single-writer
-	// per stream but receive path contends on dequeue.
-	s.signalHasDatagram()
-}
-
-// TryReceiveDatagram returns immediately with the next queued HTTP DATAGRAM when one is pending.
-// Mirrors quic.Conn.TryReceiveDatagram: if no datagram is ready, reports (!ok).
-func (s *stateTrackingStream) TryReceiveDatagram() ([]byte, bool) {
 	s.mx.Lock()
 	defer s.mx.Unlock()
-	if s.dgCount > 0 {
-		idx := s.dgHead
-		data := s.dgSlots[idx]
-		s.dgSlots[idx] = nil
-		s.dgHead = (s.dgHead + 1) % len(s.dgSlots)
-		s.dgCount--
-		return data, true
+
+	if s.recvErr != nil {
+		return
 	}
-	return nil, false
+	if len(s.queue) >= streamDatagramQueueLen {
+		return
+	}
+	s.queue = append(s.queue, data)
+	s.signalHasDatagram()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
 	s.mx.Lock()
-	if s.dgCount > 0 {
-		idx := s.dgHead
-		data := s.dgSlots[idx]
-		s.dgSlots[idx] = nil
-		s.dgHead = (s.dgHead + 1) % len(s.dgSlots)
-		s.dgCount--
+	if len(s.queue) > 0 {
+		data := s.queue[0]
+		s.queue = s.queue[1:]
 		s.mx.Unlock()
 		return data, nil
 	}

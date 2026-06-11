@@ -241,6 +241,8 @@ type ServerEndpoint struct {
 	dialer         net.Dialer
 	// singServerTLS holds sing-box inbound TLS lifecycle (ACME, cert reload); closed with the endpoint.
 	singServerTLS btls.ServerConfig
+	// authorityThin is set for minimal+std TLS path (masque-thin-server parity listen/Serve).
+	authorityThin *TM.AuthorityHTTPServer
 }
 
 type startErrorState struct {
@@ -274,60 +276,295 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	// Do not reset closing in Close()'s defer — Serve may still be unwinding after Close returns.
 	e.closing.Store(false)
 	ctx := context.Background()
-	inTLS, err := prepareMasqueServerInboundTLS(e.options.InboundTLS, normalizeHTTPLayer(e.options.HTTPLayer))
-	if err != nil {
-		return err
-	}
-	srvCfg, err := btls.NewServerWithOptions(btls.ServerOptions{Context: ctx, Logger: e.logger, Options: *inTLS})
-	if err != nil {
-		return E.Cause(err, "masque server tls")
-	}
-	if srvCfg == nil {
-		return E.New("masque server: tls config is nil")
-	}
-	if err := srvCfg.Start(); err != nil {
-		return E.Cause(err, "masque server tls start")
-	}
-	e.singServerTLS = srvCfg
-	baseTLS, err := srvCfg.STDConfig()
-	if err != nil {
-		_ = srvCfg.Close()
-		e.singServerTLS = nil
-		return E.Cause(err, "masque server tls std config")
-	}
-	if baseTLS == nil {
-		_ = srvCfg.Close()
-		e.singServerTLS = nil
-		return E.New("masque server: tls std config is nil")
-	}
+	tcpRelay := normalizeTCPRelay(e.options.TCPRelay)
+	authorityH3Only := tcpRelay == option.MasqueTCPRelayAuthority
+	authorityMinimal := authorityH3Only && masqueAuthorityServerMinimal(e.options)
+	useStdTLS := authorityMinimal && masqueAuthorityUseStdTLS()
 	compiled, compileErr := compileMasqueServerAuth(e.options)
 	if compileErr != nil {
-		_ = srvCfg.Close()
-		e.singServerTLS = nil
 		return compileErr
 	}
 	e.compiledAuth = compiled
 
+	var (
+		http3TLS      *tls.Config
+		collateralTLS *tls.Config
+	)
+	if useStdTLS {
+		stdTLS, tlsErr := loadMasqueAuthorityStdTLS(e.options.InboundTLS)
+		if tlsErr != nil {
+			return tlsErr
+		}
+		http3TLS = http3.ConfigureTLSConfig(stdTLS)
+		if e.logger != nil {
+			e.logger.Info("masque authority server: std tls (thin parity), minimal=", authorityMinimal)
+		}
+	} else {
+		inTLS, err := prepareMasqueServerInboundTLS(e.options.InboundTLS, normalizeHTTPLayer(e.options.HTTPLayer), authorityH3Only)
+		if err != nil {
+			return err
+		}
+		srvCfg, err := btls.NewServerWithOptions(btls.ServerOptions{Context: ctx, Logger: e.logger, Options: *inTLS})
+		if err != nil {
+			return E.Cause(err, "masque server tls")
+		}
+		if srvCfg == nil {
+			return E.New("masque server: tls config is nil")
+		}
+		if err := srvCfg.Start(); err != nil {
+			return E.Cause(err, "masque server tls start")
+		}
+		e.singServerTLS = srvCfg
+		baseTLS, err := srvCfg.STDConfig()
+		if err != nil {
+			_ = srvCfg.Close()
+			e.singServerTLS = nil
+			return E.Cause(err, "masque server tls std config")
+		}
+		if baseTLS == nil {
+			_ = srvCfg.Close()
+			e.singServerTLS = nil
+			return E.New("masque server: tls std config is nil")
+		}
+		collateralTLS = baseTLS
+		http3TLS = http3.ConfigureTLSConfig(baseTLS)
+	}
+
+	var httpHandler http.Handler
+	if authorityMinimal {
+		httpHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if os.Getenv("MASQUE_TRACE_TCP") == "1" {
+				fmt.Fprintf(os.Stderr, "masque authority minimal http method=%s url=%s host=%s\n",
+					r.Method, r.URL.String(), r.Host)
+			}
+			if r.Method == http.MethodConnect {
+				e.handleTCPConnectAuthority(w, r)
+				return
+			}
+			http.NotFound(w, r)
+		})
+	} else {
+		var buildErr error
+		httpHandler, buildErr = e.buildMasqueServerMuxHandler(tcpRelay)
+		if buildErr != nil {
+			return buildErr
+		}
+	}
+
+	listenHost := strings.TrimSpace(e.options.Listen)
+	if listenHost == "" {
+		listenHost = "0.0.0.0"
+	}
+	addr := net.JoinHostPort(listenHost, strconv.Itoa(int(e.options.ListenPort)))
+	if authorityMinimal && useStdTLS {
+		if err := e.startAuthorityThinHTTPServer(httpHandler, addr, http3TLS); err != nil {
+			return err
+		}
+		e.startErr.Store(startErrorState{})
+		e.ready.Store(true)
+		return nil
+	}
+	enableH3Datagrams := !authorityH3Only
+	quicCfg := TM.MasqueHTTPServerQUICConfig()
+	if authorityH3Only {
+		quicCfg = TM.MasqueAuthorityHTTPServerQUICConfig()
+	}
+	h3Srv := &http3.Server{
+		Handler:         httpHandler,
+		TLSConfig:       http3TLS,
+		EnableDatagrams: enableH3Datagrams,
+		QUICConfig:      quicCfg,
+	}
+	if !authorityMinimal {
+		h3Srv.Addr = addr
+	}
+	e.server = h3Srv
+	const masqueDynPortBindAttempts = 512
+	ephemeralPorts := int(e.options.ListenPort) == 0
+	maxAttempts := 1
+	if ephemeralPorts {
+		maxAttempts = masqueDynPortBindAttempts
+	}
+	var packetConn net.PacketConn
+	var tcpRaw net.Listener
+	var lastTCPListenErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		pc, udpErr := net.ListenPacket("udp", addr)
+		if udpErr != nil {
+			return E.Cause(udpErr, "listen udp for masque server")
+		}
+		if !authorityMinimal {
+			if err := TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen"); err != nil {
+				_ = pc.Close()
+				return E.Cause(err, "validate quic transport packetconn")
+			}
+		}
+		if authorityH3Only {
+			packetConn = pc
+			break
+		}
+		us := pc.LocalAddr()
+		uaddr, uok := us.(*net.UDPAddr)
+		if !uok || uaddr == nil {
+			_ = pc.Close()
+			e.server = nil
+			return E.New("masque server: UDP listener has unexpected address type ", us)
+		}
+		tcpBind := net.JoinHostPort(listenHost, strconv.Itoa(uaddr.Port))
+		tr, tcpErr := net.Listen("tcp", tcpBind)
+		if tcpErr == nil {
+			packetConn = pc
+			tcpRaw = tr
+			break
+		}
+		_ = pc.Close()
+		lastTCPListenErr = tcpErr
+		if ephemeralPorts && masqueTCPBindFailureRetryable(tcpErr) {
+			continue
+		}
+		e.server = nil
+		return E.Cause(tcpErr, "listen tcp for masque server (http2 extended connect)")
+	}
+	if packetConn == nil {
+		e.server = nil
+		err := lastTCPListenErr
+		if err == nil {
+			err = errors.New("masque server: UDP listen failed")
+		}
+		return E.Cause(err, "listen udp for masque server")
+	}
+	if !authorityH3Only && tcpRaw == nil {
+		e.server = nil
+		err := lastTCPListenErr
+		if err == nil {
+			err = errors.New("masque server: UDP/TCP dual listen exhausted retries")
+		}
+		return E.Cause(err, "listen tcp for masque server (http2 extended connect)")
+	}
+	e.packetConn = packetConn
+
+	if !authorityH3Only {
+		if collateralTLS == nil {
+			return E.New("masque server: missing TLS config for HTTP/2 collateral listener")
+		}
+		tcpTLS := collateralTLS.Clone()
+		tcpTLS.NextProtos = []string{"h2", "http/1.1"}
+		tcpLn := tls.NewListener(tcpRaw, tcpTLS)
+		e.tcpTLSListener = tcpLn
+		http2Srv := &http.Server{
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 30 * time.Second,
+			ReadTimeout:       0,
+			WriteTimeout:      0,
+		}
+		if err := http2.ConfigureServer(http2Srv, TM.MasqueBulkHTTP2ServerConfig()); err != nil {
+			return E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
+		}
+		e.http2Server = http2Srv
+		go func() {
+			err := http2Srv.Serve(tcpLn)
+			if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
+				e.startErr.Store(startErrorState{err: err})
+				if e.logger != nil {
+					e.logger.Error("masque HTTP/2 server stopped: ", err)
+				}
+			}
+			e.ready.Store(false)
+		}()
+	}
+
+	server := e.server
+	go func() {
+		err := server.Serve(packetConn)
+		if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
+			e.startErr.Store(startErrorState{err: err})
+			if e.logger != nil {
+				e.logger.Error("masque server stopped: ", err)
+			}
+		}
+		e.ready.Store(false)
+	}()
+	e.startErr.Store(startErrorState{})
+	e.ready.Store(true)
+	return nil
+}
+
+func masqueAuthorityServerMinimal(o option.MasqueEndpointOptions) bool {
+	if TM.AuthorityServerMinimal() {
+		return true
+	}
+	return strings.TrimSpace(o.TemplateUDP) == "" && strings.TrimSpace(o.TemplateIP) == ""
+}
+
+func (e *ServerEndpoint) startAuthorityThinHTTPServer(handler http.Handler, listenAddr string, tlsCfg *tls.Config) error {
+	as, err := TM.StartAuthorityHTTPServer(TM.AuthorityListenOptions{
+		ListenAddr:      listenAddr,
+		TLSConfig:       tlsCfg,
+		Handler:         handler,
+		EnableDatagrams: false,
+		QUICConfig:      TM.MasqueAuthorityHTTPServerQUICConfig(),
+	})
+	if err != nil {
+		return E.Cause(err, "masque authority thin http3 listen")
+	}
+	e.authorityThin = as
+	e.server = as.Server
+	e.packetConn = as.PacketConn
+	go func() {
+		serveErr := as.Serve()
+		if serveErr != nil && !(e.closing.Load() && isExpectedServerShutdownError(serveErr)) {
+			e.startErr.Store(startErrorState{err: serveErr})
+			if e.logger != nil {
+				e.logger.Error("masque authority thin server stopped: ", serveErr)
+			}
+		}
+		e.ready.Store(false)
+	}()
+	return nil
+}
+
+func (e *ServerEndpoint) buildMasqueServerMuxHandler(tcpRelay string) (http.Handler, error) {
 	udpTemplateRaw, ipTemplateRaw, tcpTemplateRaw := resolveMasqueServerTemplateURLs(e.options)
 	udpTemplate, err := uritemplate.New(udpTemplateRaw)
 	if err != nil {
-		return E.Cause(err, "invalid server UDP template")
+		return nil, E.Cause(err, "invalid server UDP template")
 	}
 	ipTemplate, err := uritemplate.New(ipTemplateRaw)
 	if err != nil {
-		return E.Cause(err, "invalid server IP template")
+		return nil, E.Cause(err, "invalid server IP template")
 	}
-	tcpTemplate, err := uritemplate.New(tcpTemplateRaw)
-	if err != nil {
-		return E.Cause(err, "invalid server TCP template")
+	var tcpTemplate *uritemplate.Template
+	var tcpPath string
+	if tcpRelay == option.MasqueTCPRelayTemplate {
+		var err error
+		tcpTemplate, err = uritemplate.New(tcpTemplateRaw)
+		if err != nil {
+			return nil, E.Cause(err, "invalid server TCP template")
+		}
+		tcpPath = sanitizeTemplatePathForHTTPMux(pathFromTemplate(tcpTemplateRaw))
 	}
 	udpPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(udpTemplateRaw))
 	ipPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(ipTemplateRaw))
-	tcpPath := sanitizeTemplatePathForHTTPMux(pathFromTemplate(tcpTemplateRaw))
+	mux := http.NewServeMux()
+	if TM.ServerThin() {
+		if tcpRelay != option.MasqueTCPRelayTemplate || tcpTemplate == nil {
+			return nil, E.New("masque server: MASQUE_SERVER_CONNECT_STREAM_ONLY requires tcp_relay template")
+		}
+		mux.HandleFunc(udpPath, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		mux.HandleFunc(ipPath, func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
+		})
+		tcpRelaxedAuthority := masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldTCP)
+		mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
+			e.handleTCPConnectRequest(w, r, tcpTemplate, tcpRelaxedAuthority)
+		})
+		return mux, nil
+	}
 	udpProxy := &qmasque.Proxy{}
 	e.udpProxy = udpProxy
 	ipProxy := &connectip.Proxy{}
-	mux := http.NewServeMux()
 	mux.HandleFunc(udpPath, func(w http.ResponseWriter, r *http.Request) {
 		if !e.authorizeRequest(r) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -403,115 +640,28 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 		// Keep all traffic on RoutePacketConnectionEx path and avoid TCP-special bridge.
 		routeMasqueConnectIPBlocked(e.router, r.Context(), packetConn, metadata, e.logger, e.options, e.dialer)
 	})
-	tcpRelaxedAuthority := masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldTCP)
-	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
-		e.handleTCPConnectRequest(w, r, tcpTemplate, tcpRelaxedAuthority)
-	})
-	listenHost := strings.TrimSpace(e.options.Listen)
-	if listenHost == "" {
-		listenHost = "0.0.0.0"
+	if tcpRelay != option.MasqueTCPRelayAuthority {
+		tcpRelaxedAuthority := masqueServerShouldRelaxTemplateAuthority(e.options, masqueTemplateFieldTCP)
+		mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
+			e.handleTCPConnectRequest(w, r, tcpTemplate, tcpRelaxedAuthority)
+		})
 	}
-	addr := net.JoinHostPort(listenHost, strconv.Itoa(int(e.options.ListenPort)))
-	e.server = &http3.Server{
-		Addr:            addr,
-		Handler:         mux,
-		TLSConfig:       http3.ConfigureTLSConfig(baseTLS),
-		EnableDatagrams: true,
-		QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
-	}
-	// Align UDP/QUIC listener port with collateral TCP+H2 TLS must succeed for both transports.
-	// Windows (and similar) may reserve wide excluded ephemeral ranges where UDP bind succeeds but
-	// sibling TCP bind on the same port returns WSAEACCESS / "access permissions"; retries must be
-	// generous enough that listen_port:0 converges outside those ranges without user tuning.
-	const masqueDynPortBindAttempts = 512
-	ephemeralPorts := int(e.options.ListenPort) == 0
-	maxAttempts := 1
-	if ephemeralPorts {
-		maxAttempts = masqueDynPortBindAttempts
-	}
-	var packetConn net.PacketConn
-	var tcpRaw net.Listener
-	var lastTCPListenErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		pc, udpErr := net.ListenPacket("udp", addr)
-		if udpErr != nil {
-			return E.Cause(udpErr, "listen udp for masque server")
-		}
-		if err := TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen"); err != nil {
-			_ = pc.Close()
-			return E.Cause(err, "validate quic transport packetconn")
-		}
-		us := pc.LocalAddr()
-		uaddr, uok := us.(*net.UDPAddr)
-		if !uok || uaddr == nil {
-			_ = pc.Close()
-			e.server = nil
-			return E.New("masque server: UDP listener has unexpected address type ", us)
-		}
-		tcpBind := net.JoinHostPort(listenHost, strconv.Itoa(uaddr.Port))
-		tr, tcpErr := net.Listen("tcp", tcpBind)
-		if tcpErr == nil {
-			packetConn = pc
-			tcpRaw = tr
-			break
-		}
-		_ = pc.Close()
-		lastTCPListenErr = tcpErr
-		if ephemeralPorts && masqueTCPBindFailureRetryable(tcpErr) {
-			continue
-		}
-		e.server = nil
-		return E.Cause(tcpErr, "listen tcp for masque server (http2 extended connect)")
-	}
-	if packetConn == nil || tcpRaw == nil {
-		e.server = nil
-		err := lastTCPListenErr
-		if err == nil {
-			err = errors.New("masque server: UDP/TCP dual listen exhausted retries")
-		}
-		return E.Cause(err, "listen tcp for masque server (http2 extended connect)")
-	}
-	e.packetConn = packetConn
-
-	tcpTLS := baseTLS.Clone()
-	tcpTLS.NextProtos = []string{"h2", "http/1.1"}
-	tcpLn := tls.NewListener(tcpRaw, tcpTLS)
-	e.tcpTLSListener = tcpLn
-	http2Srv := &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       0,
-		WriteTimeout:      0,
-	}
-	if err := http2.ConfigureServer(http2Srv, TM.MasqueBulkHTTP2ServerConfig()); err != nil {
-		return E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
-	}
-	e.http2Server = http2Srv
-	go func() {
-		err := http2Srv.Serve(tcpLn)
-		if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
-			e.startErr.Store(startErrorState{err: err})
-			if e.logger != nil {
-				e.logger.Error("masque HTTP/2 server stopped: ", err)
+	var httpHandler http.Handler = mux
+	if tcpRelay == option.MasqueTCPRelayAuthority {
+		// CONNECT by authority may use :path / or *; do not rely on ServeMux "/" alone.
+		httpHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if os.Getenv("MASQUE_TRACE_TCP") == "1" {
+				fmt.Fprintf(os.Stderr, "masque authority http method=%s url=%s host=%s\n",
+					r.Method, r.URL.String(), r.Host)
 			}
-		}
-		e.ready.Store(false)
-	}()
-
-	server := e.server
-	go func() {
-		err := server.Serve(packetConn)
-		if err != nil && !(e.closing.Load() && isExpectedServerShutdownError(err)) {
-			e.startErr.Store(startErrorState{err: err})
-			if e.logger != nil {
-				e.logger.Error("masque server stopped: ", err)
+			if r.Method == http.MethodConnect {
+				e.handleTCPConnectAuthority(w, r)
+				return
 			}
-		}
-		e.ready.Store(false)
-	}()
-	e.startErr.Store(startErrorState{})
-	e.ready.Store(true)
-	return nil
+			mux.ServeHTTP(w, r)
+		})
+	}
+	return httpHandler, nil
 }
 
 func routePacketConnectionExBypassTunnelWrapper(router adapter.Router, ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc, routeLog log.ContextLogger) {
@@ -618,6 +768,13 @@ func (e *ServerEndpoint) IsReady() bool {
 func (e *ServerEndpoint) Close() error {
 	e.closing.Store(true)
 	e.ready.Store(false)
+	if e.authorityThin != nil {
+		err := e.authorityThin.Close()
+		e.authorityThin = nil
+		e.server = nil
+		e.packetConn = nil
+		return err
+	}
 	if e.udpProxy != nil {
 		e.udpProxy.Close()
 		e.udpProxy = nil
@@ -908,7 +1065,7 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 		flusher.Flush()
 	}
 	debugf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort)
-	relayErr := relayTCPBidirectional(r.Context(), targetConn, r.Body, w)
+	relayErr := relayTCPForward(r.Context(), targetConn, r.Body, w)
 	if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
 		debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr)
 		return

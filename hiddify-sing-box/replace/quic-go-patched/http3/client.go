@@ -381,9 +381,20 @@ func (r *cancelingReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (c *ClientConn) sendRequestBody(str *RequestStream, body io.ReadCloser, contentLength int64) error {
+// connectRequestBodyCopySize is the io.CopyBuffer chunk for tunneled CONNECT upload on a bidi stream.
+// Small chunks interleave with response DATA (TCP ACK clock on iperf -R); 64 KiB batches capped ~64 KiB/RTT.
+const connectRequestBodyCopySize = 4 * 1024
+
+func sendRequestBodyCopySize(method string) int {
+	if method == http.MethodConnect {
+		return connectRequestBodyCopySize
+	}
+	return bodyCopyBufferSize
+}
+
+func (c *ClientConn) sendRequestBody(str *RequestStream, req *http.Request, body io.ReadCloser, contentLength int64) error {
 	defer body.Close()
-	buf := make([]byte, bodyCopyBufferSize)
+	buf := make([]byte, sendRequestBodyCopySize(req.Method))
 	sr := &cancelingReader{str: str, r: body}
 	if contentLength == -1 {
 		_, err := io.CopyBuffer(str, sr, buf)
@@ -418,7 +429,10 @@ func (c *ClientConn) doRequest(req *http.Request, str *RequestStream) (*http.Res
 	if !sendingReqFailed {
 		if req.Body == nil {
 			traceWroteRequest(trace, nil)
-			str.Close()
+			// RFC 9114 CONNECT: keep the bidi stream open for tunneled TCP (upload on same stream).
+			if req.Method != http.MethodConnect {
+				str.Close()
+			}
 		} else {
 			// send the request body asynchronously
 			go func() {
@@ -429,7 +443,7 @@ func (c *ClientConn) doRequest(req *http.Request, str *RequestStream) (*http.Res
 				if req.ContentLength > 0 {
 					contentLength = req.ContentLength
 				}
-				err := c.sendRequestBody(str, req.Body, contentLength)
+				err := c.sendRequestBody(str, req, req.Body, contentLength)
 				traceWroteRequest(trace, err)
 				if err != nil {
 					if c.logger != nil {
@@ -481,6 +495,14 @@ func (c *ClientConn) doRequest(req *http.Request, str *RequestStream) (*http.Res
 	res.TLS = &connState
 	res.Request = req
 	return res, nil
+}
+
+// MasqueWakeSend schedules QUIC send after CONNECT-IP ingress (TCP ACK datagrams).
+func (c *ClientConn) MasqueWakeSend() {
+	if c == nil || c.conn == nil {
+		return
+	}
+	quic.MasqueWakeConnSend(c.conn)
 }
 
 // RawClientConn is a low-level HTTP/3 client connection.

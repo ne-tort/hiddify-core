@@ -29,6 +29,10 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+// connectIPNetstackOutboundQueueDepth pipelines gVisor egress frames while WritePacket is
+// blocked on RTT / QUIC datagram scheduling (upload goodput on connect-ip TUN).
+const connectIPNetstackOutboundQueueDepth = 2048
+
 // connectIPLinkOutboundQueueSlots is the gVisor channel.Endpoint outbound queue depth
 // (see tcpip/link/channel). Writes are non-blocking: when the queue is full the stack
 // returns tcpip.ErrNoBufferSpace and drops the packet. TCP-over-connect-ip egress can
@@ -38,11 +42,12 @@ const connectIPLinkOutboundQueueSlots = 65536
 // connectIPTCPNetstackNIC is the sole gVisor NIC for CONNECT-IP TCP (parity with sing-tun DefaultNIC).
 const connectIPTCPNetstackNIC tcpip.NICID = 1
 
-// connectIPNetstackOutboundBufPool recycles copies of gVisor packet views passed to WritePacket.
-// connect-ip-go copies the payload; we must not retain the view slice after DecRef.
+// connectIPNetstackOutboundBufPool recycles egress copies passed to WritePacket.
+// connect-ip-go copies again in composeDatagram; DecRef gVisor packet before enqueue
+// so WriteNotify does not block the link endpoint with held packet buffers.
 var connectIPNetstackOutboundBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, 0, 2048)
+		b := make([]byte, 0, 1600)
 		return &b
 	},
 }
@@ -351,6 +356,10 @@ type connectIPTCPNetstack struct {
 	closed       atomic.Bool
 	terminalErr  atomic.Value
 	done         chan struct{}
+
+	outboundOnce sync.Once
+	outboundCh   chan []byte
+	outboundWG   sync.WaitGroup
 }
 
 func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts connectIPTCPNetstackOptions) (*connectIPTCPNetstack, error) {
@@ -375,7 +384,7 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 		},
 		// ICMPv4/v6: CONNECT-IP PMTU injects ICMP PTB into the stack; parity with replace/sing-tun/stack_gvisor.
 		TransportProtocols: []stack.TransportProtocolFactory{
-			tcp.NewProtocol,
+			tcp.NewProtocolCUBIC,
 			udp.NewProtocol,
 			icmp.NewProtocol4,
 			icmp.NewProtocol6,
@@ -412,6 +421,10 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &modRxOpt); err != nil {
 		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
 	}
+	ccOpt := tcpip.CongestionControlOption("cubic")
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &ccOpt); err != nil {
+		return nil, errors.Join(ErrTCPStackInit, gonet.TranslateNetstackError(err))
+	}
 	if runtime.GOOS == "windows" {
 		tcpRecoveryOpt := tcpip.TCPRecovery(0)
 		if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRecoveryOpt); err != nil {
@@ -420,7 +433,7 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 	}
 	tcpRXBufOpt := tcpip.TCPReceiveBufferSizeRangeOption{
 		Min:     tcp.MinBufferSize,
-		Default: tcp.DefaultSendBufferSize,
+		Default: tcp.DefaultReceiveBufferSize,
 		Max:     8 << 20,
 	}
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRXBufOpt); err != nil {
@@ -428,7 +441,7 @@ func newConnectIPTCPNetstack(_ context.Context, session IPPacketSession, opts co
 	}
 	tcpTXBufOpt := tcpip.TCPSendBufferSizeRangeOption{
 		Min:     tcp.MinBufferSize,
-		Default: tcp.DefaultReceiveBufferSize,
+		Default: tcp.DefaultSendBufferSize,
 		Max:     6 << 20,
 	}
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpTXBufOpt); err != nil {
@@ -697,7 +710,63 @@ func (s *connectIPTCPNetstack) deliverConnectIPOutboundPacket(payload []byte) er
 	return err
 }
 
+func (s *connectIPTCPNetstack) ensureOutboundWriter() {
+	s.outboundOnce.Do(func() {
+		s.outboundCh = make(chan []byte, connectIPNetstackOutboundQueueDepth)
+		s.outboundWG.Add(1)
+		go s.runOutboundWriter()
+	})
+}
+
+func (s *connectIPTCPNetstack) runOutboundWriter() {
+	defer s.outboundWG.Done()
+	for {
+		select {
+		case <-s.done:
+			s.drainOutboundQueueOnClose()
+			return
+		case payload := <-s.outboundCh:
+			if len(payload) == 0 {
+				continue
+			}
+			if s.closed.Load() {
+				connectIPNetstackReturnOutboundBuf(payload)
+				continue
+			}
+			if err := s.deliverConnectIPOutboundPacket(payload); err != nil {
+				if s.closed.Load() || errors.Is(err, net.ErrClosed) {
+					connectIPNetstackReturnOutboundBuf(payload)
+					return
+				}
+				if isRetryablePacketWriteError(err) {
+					incConnectIPWriteFailReason("retryable")
+					connectIPNetstackReturnOutboundBuf(payload)
+					continue
+				}
+				incConnectIPWriteFailReason("fatal")
+				incConnectIPSessionReset("write_fail_fatal")
+				s.failWithError(errors.Join(ErrTransportInit, err))
+				connectIPNetstackReturnOutboundBuf(payload)
+				return
+			}
+			connectIPNetstackReturnOutboundBuf(payload)
+		}
+	}
+}
+
+func (s *connectIPTCPNetstack) drainOutboundQueueOnClose() {
+	for {
+		select {
+		case payload := <-s.outboundCh:
+			connectIPNetstackReturnOutboundBuf(payload)
+		default:
+			return
+		}
+	}
+}
+
 func (s *connectIPTCPNetstack) WriteNotify() {
+	s.ensureOutboundWriter()
 	slowThresh := connectIPSlowNetstackWriteNotifyThreshold()
 	for {
 		iterStart := time.Now()
@@ -716,26 +785,21 @@ func (s *connectIPTCPNetstack) WriteNotify() {
 		payload := connectIPNetstackBorrowOutboundBuf(len(outbound))
 		copy(payload, outbound)
 		packet.DecRef()
-		if err := s.deliverConnectIPOutboundPacket(payload); err != nil {
-			if isRetryablePacketWriteError(err) {
-				incConnectIPWriteFailReason("retryable")
-			} else {
-				incConnectIPWriteFailReason("fatal")
-				incConnectIPSessionReset("write_fail_fatal")
-			}
-			s.failWithError(errors.Join(ErrTransportInit, err))
+		if s.closed.Load() {
 			connectIPNetstackReturnOutboundBuf(payload)
 			return
 		}
-		connectIPNetstackReturnOutboundBuf(payload)
+		select {
+		case <-s.done:
+			connectIPNetstackReturnOutboundBuf(payload)
+			return
+		case s.outboundCh <- payload:
+		}
 		maybeSampleSlowNetstackWriteNotifyIteration(iterStart, slowThresh)
 	}
 }
 
 func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, error) {
-	// connect-ip-go.Conn.WritePacket copies proxied IPv4/v6 payload into its own pooled
-	// compose buffer before decrementing TTL/Hop Limit (composeDatagram). The caller-owned
-	// slice is never mutated — no per-packet Clone was required beyond what WritePacket already does.
 	const maxAttempts = 3
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -750,7 +814,11 @@ func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, er
 			return nil, err
 		}
 		if attempt+1 < maxAttempts {
-			time.Sleep(time.Duration(1<<attempt) * time.Millisecond)
+			if attempt == 0 {
+				runtime.Gosched()
+			} else {
+				time.Sleep(time.Millisecond)
+			}
 		}
 	}
 	return nil, lastErr
@@ -806,11 +874,14 @@ func (s *connectIPTCPNetstack) Close() error {
 		s.closed.Store(true)
 		incConnectIPSessionReset("lifecycle_close")
 		close(s.done)
+		// Detach WriteNotify before waiting on the outbound writer.
 		s.endpoint.RemoveNotify(s.notifyHandle)
+		// Close the packet session first so a blocked WritePacket in the writer can unwind.
+		closeErr = s.session.Close()
+		s.outboundWG.Wait()
 		s.endpoint.Close()
 		s.gStack.RemoveNIC(connectIPTCPNetstackNIC)
 		s.gStack.Close()
-		closeErr = s.session.Close()
 	})
 	return closeErr
 }

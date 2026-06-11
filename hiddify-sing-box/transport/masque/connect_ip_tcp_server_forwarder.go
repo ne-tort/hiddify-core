@@ -32,6 +32,14 @@ const connectIPTCPForwarderRemoteReadBuf = 8 << 20
 // connectIPTCPForwarderRemoteWriteBuf coalesces proxied client segments before onward TCP writes.
 const connectIPTCPForwarderRemoteWriteBuf = 2 << 20
 
+// connectIPTCPForwarderRemoteFlushBatch batches onward-TCP flushes during bulk upload while
+// sendAckOnly still returns per-segment ACKs to the client gVisor stack.
+const connectIPTCPForwarderRemoteFlushBatch = 64 * 1024
+
+// connectIPTCPForwarderWriteQueueDepth pipelines server→client CONNECT-IP segments (ACKs and
+// download relay) so handleSegment is not blocked on synchronous WritePacket.
+const connectIPTCPForwarderWriteQueueDepth = 512
+
 // connectIPTCPForwarderKernelBuf matches protocol/masque masqueRelayTCPKernelBuf for relay dials.
 const connectIPTCPForwarderKernelBuf = 16 << 20
 
@@ -78,14 +86,19 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn connectIPPack
 		log.Printf("masque connect_ip forwarder: started")
 	}
 	f := &connectIPTCPForwarder{
-		conn: conn,
-		o:    o,
+		conn:    conn,
+		o:       o,
+		writeCh: make(chan []byte, connectIPTCPForwarderWriteQueueDepth),
 	}
 	if f.o.Dialer.Timeout == 0 && f.o.Dialer.Deadline.IsZero() {
 		f.o.Dialer.Timeout = 8 * time.Second
 	}
+	writeDone := make(chan struct{})
+	go f.runWriteLoop(ctx, writeDone)
 	defer func() {
 		f.shutdownSessions()
+		close(f.writeCh)
+		<-writeDone
 		_ = conn.Close()
 	}()
 	buf := make([]byte, 65536)
@@ -172,8 +185,8 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn connectIPPack
 		s := f.getSession(flow)
 		if s == nil {
 			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-				log.Printf("masque connect_ip forwarder: no session flags=0x%02x %s:%d -> %s:%d",
-					flags, flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
+				log.Printf("masque connect_ip forwarder: no session flags=0x%x %s:%d -> %s:%d",
+					uint8(flags), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
 			}
 			continue
 		}
@@ -190,6 +203,9 @@ type connectIPTCPForwarder struct {
 	conn connectIPPacketPlaneConn
 	o    ConnectIPTCPForwarderOptions
 	wMu  sync.Mutex
+	writeCh chan []byte
+	peerPrefixes atomic.Value // []netip.Prefix
+	ackTSTick    atomic.Uint32
 
 	sMu    sync.Mutex
 	synMu  sync.Mutex
@@ -197,6 +213,48 @@ type connectIPTCPForwarder struct {
 
 	uMu          sync.Mutex
 	udpSessions  map[udp4Tuple]*udpForwardSession
+}
+
+func (f *connectIPTCPForwarder) runWriteLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case pkt, ok := <-f.writeCh:
+			if !ok {
+				return
+			}
+			f.wMu.Lock()
+			err := f.writeRawLocked(pkt)
+			f.wMu.Unlock()
+			connectIPForwarderReturn(pkt)
+			if err != nil && strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: write loop err=%v", err)
+			}
+		}
+	}
+}
+
+func (f *connectIPTCPForwarder) enqueueWrite(pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	if f.writeCh == nil {
+		f.wMu.Lock()
+		err := f.writeRawLocked(pkt)
+		f.wMu.Unlock()
+		connectIPForwarderReturn(pkt)
+		return err
+	}
+	select {
+	case f.writeCh <- pkt:
+		return nil
+	default:
+		// Backpressure: block rather than drop TCP ACK / data segments.
+		f.writeCh <- pkt
+		return nil
+	}
 }
 
 func (f *connectIPTCPForwarder) shutdownSessions() {
@@ -219,13 +277,20 @@ func (f *connectIPTCPForwarder) shutdownSessions() {
 }
 
 func (f *connectIPTCPForwarder) writeRaw(pkt []byte) error {
-	f.wMu.Lock()
-	defer f.wMu.Unlock()
-	return f.writeRawLocked(pkt)
+	return f.enqueueWrite(pkt)
+}
+
+func (f *connectIPTCPForwarder) peerPrefixesCached() []netip.Prefix {
+	if v := f.peerPrefixes.Load(); v != nil {
+		return v.([]netip.Prefix)
+	}
+	p := f.conn.CurrentPeerPrefixes()
+	f.peerPrefixes.Store(p)
+	return p
 }
 
 func (f *connectIPTCPForwarder) writeRawLocked(pkt []byte) error {
-	p := RewriteConnectIPOutgoingPeerDst(pkt, f.conn.CurrentPeerPrefixes())
+	p := RewriteConnectIPOutgoingPeerDst(pkt, f.peerPrefixesCached())
 	for i := 0; i < connectIPTCPForwarderICMPRelayMax; i++ {
 		icmp, err := f.conn.WritePacket(p)
 		if err != nil {
@@ -532,14 +597,13 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 			go s.close()
 			return
 		}
-		if s.outbound.Buffered() >= connectIPTCPForwarderRemoteWriteBuf/2 {
-			if err := s.outbound.Flush(); err != nil {
-				go s.close()
-				return
-			}
-		}
 		s.rcvNxt += uint32(len(payload))
 		_ = s.sendAckOnly()
+		// Prompt ACK above; batch onward-TCP flush so iperf/hello still works (immediate below).
+		if err := s.maybeFlushRemote(len(payload) <= 512); err != nil {
+			go s.close()
+			return
+		}
 	}
 
 	if flags&header.TCPFlagFin != 0 {
@@ -570,7 +634,17 @@ func (s *tcpForwardSession) sendAckOnly() error {
 		nil,
 		opts,
 	)
-	return s.f.writeRaw(pkt)
+	return s.f.enqueueWrite(pkt)
+}
+
+func (s *tcpForwardSession) maybeFlushRemote(immediate bool) error {
+	if s.outbound == nil {
+		return nil
+	}
+	if immediate || s.outbound.Buffered() >= connectIPTCPForwarderRemoteFlushBatch {
+		return s.outbound.Flush()
+	}
+	return nil
 }
 
 func (s *tcpForwardSession) buildTimestampOption() []byte {
@@ -582,7 +656,7 @@ func (s *tcpForwardSession) buildTimestampOption() []byte {
 	b[1] = header.TCPOptionNOP
 	b[2] = header.TCPOptionTS
 	b[3] = header.TCPOptionTSLength
-	ts := uint32(time.Now().UnixNano())
+	ts := s.f.ackTSTick.Add(1)
 	binary.BigEndian.PutUint32(b[4:], ts)
 	binary.BigEndian.PutUint32(b[8:], s.tsRecent)
 	return b[:]
@@ -634,7 +708,7 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 				opts,
 			)
 			s.mu.Unlock()
-			if err := s.f.writeRaw(pkt); err != nil {
+			if err := s.f.enqueueWrite(pkt); err != nil {
 				return
 			}
 			off += chunk
@@ -724,7 +798,7 @@ func buildIPv4TCPPacket(
 		tcpHdrLen = header.TCPMinimumSize + len(tcpOpts)
 	}
 	totalLen := header.IPv4MinimumSize + tcpHdrLen + len(payload)
-	pkt := make([]byte, totalLen)
+	pkt := connectIPForwarderBorrow(totalLen)
 	iph := header.IPv4(pkt[:header.IPv4MinimumSize])
 	iph.Encode(&header.IPv4Fields{
 		TOS:            0,

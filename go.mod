@@ -9,7 +9,7 @@ require (
 	github.com/kardianos/service v1.2.2
 	github.com/miekg/dns v1.1.72
 	github.com/sagernet/gomobile v0.1.11
-	github.com/sagernet/sing v0.8.0-beta.11
+	github.com/sagernet/sing v0.8.3-0.20260315153529-ed51f65fbfde
 	github.com/sagernet/sing-dns v0.3.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.40.0
