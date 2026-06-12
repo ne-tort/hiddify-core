@@ -1,0 +1,124 @@
+package session
+
+import (
+	"strings"
+	"sync/atomic"
+
+	qmasque "github.com/quic-go/masque-go"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/httpx"
+	"github.com/yosida95/uritemplate/v3"
+)
+
+// CurrentUDPHTTPLayer returns the effective CONNECT-UDP/control overlay ("h2" or "h3").
+func CurrentUDPHTTPLayer(s *CoreSession) string {
+	v, _ := s.UDPHTTPLayer.Load().(string)
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case option.MasqueHTTPLayerH2:
+		return option.MasqueHTTPLayerH2
+	default:
+		return option.MasqueHTTPLayerH3
+	}
+}
+
+// HTTPLayerCacheDialIdentityForSession returns the live MASQUE TLS edge identity for TTL cache keys.
+func HTTPLayerCacheDialIdentityForSession(s *CoreSession) HTTPLayerCacheDialIdentity {
+	var hopTag string
+	if len(s.HopOrder) > 0 && s.HopIndex >= 0 && s.HopIndex < len(s.HopOrder) {
+		hopTag = strings.TrimSpace(s.HopOrder[s.HopIndex].Tag)
+	}
+	return HTTPLayerCacheDialIdentity{
+		HopTag: hopTag,
+		Server: strings.TrimSpace(s.Options.Server),
+		Port:   s.Options.ServerPort,
+	}
+}
+
+// MaybeRecordHTTPLayerCacheSuccess forwards a working h2/h3 choice to protocol/masque.RecordMasqueHTTPLayerSuccess.
+// EffectiveMasqueClientHTTPLayer only consults the chain entry hop (empty Via), not inner hops after advanceHop.
+func MaybeRecordHTTPLayerCacheSuccess(s *CoreSession, layer string) {
+	if s.Options.HTTPLayerSuccess == nil {
+		return
+	}
+	if len(s.HopOrder) > 0 && s.HopIndex > 0 {
+		return
+	}
+	s.Options.HTTPLayerSuccess(layer, HTTPLayerCacheDialIdentityForSession(s))
+}
+
+// TryHTTPFallbackSwitch attempts H3↔H2 overlay pivot after a switchable handshake failure.
+func TryHTTPFallbackSwitch(s *CoreSession, host OverlaySwitchHost, err error) bool {
+	s.Mu.Lock()
+	ok := TryHTTPFallbackSwitchLockedAssumeMu(s, host, err)
+	s.Mu.Unlock()
+	return ok
+}
+
+// TryHTTPFallbackSwitchLockedAssumeMu pivots overlay when http_layer_fallback is enabled. Caller holds s.Mu.
+func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host OverlaySwitchHost, err error) bool {
+	if !s.HTTPLayerFallback || err == nil || !httpx.IsLayerSwitchableFailure(err) {
+		return false
+	}
+	if !s.HTTPFallbackConsumed.CompareAndSwap(false, true) {
+		return false
+	}
+	cur := CurrentUDPHTTPLayer(s)
+	var next string
+	switch cur {
+	case option.MasqueHTTPLayerH3:
+		next = option.MasqueHTTPLayerH2
+	case option.MasqueHTTPLayerH2:
+		next = option.MasqueHTTPLayerH3
+	default:
+		s.HTTPFallbackConsumed.Store(false)
+		return false
+	}
+	host.OverlaySwitchLog(strings.TrimSpace(s.Options.Tag), cur, next)
+	host.CancelConnectIPIngress()
+	CloseConnectIPDataplaneLockedAssumeMu(s, host)
+	host.TeardownOverlayHTTPLockedAssumeMu()
+	_ = host.CloseConnectAuthorityClient()
+	host.CloseUDPClientLockedAssumeMu()
+	host.CloseAllH2ClientTransports()
+	s.UDPHTTPLayer.Store(next)
+	return true
+}
+
+// ResetHTTPFallbackBudgetAfterSuccess clears the one-shot http_layer_fallback latch after a successful overlay handshake.
+func ResetHTTPFallbackBudgetAfterSuccess(s *CoreSession) {
+	s.HTTPFallbackConsumed.Store(false)
+}
+
+// ClearHTTPFallbackConsumedAfterGivingUp resets the latch when returning an error so the next dial gets a fresh pivot budget.
+func ClearHTTPFallbackConsumedAfterGivingUp(s *CoreSession) {
+	s.HTTPFallbackConsumed.Store(false)
+}
+
+// WireMasqueUDPClientForOverlayLocked rebuilds QUIC CONNECT-UDP client or clears it when overlay is H2.
+// Caller must hold s.Mu (udpHTTPLayer was updated by TryHTTPFallbackSwitch).
+func WireMasqueUDPClientForOverlayLocked(s *CoreSession, newUDPClient func() *qmasque.Client) (*qmasque.Client, *uritemplate.Template) {
+	if CurrentUDPHTTPLayer(s) != option.MasqueHTTPLayerH2 {
+		if s.UDPClient == nil && newUDPClient != nil {
+			s.UDPClient = newUDPClient()
+		}
+	} else if s.UDPClient != nil {
+		_ = s.UDPClient.Close()
+		s.UDPClient = nil
+	}
+	return s.UDPClient, s.TemplateUDP
+}
+
+// OverlayDatagramsEnabled reports whether CONNECT-IP should advertise QUIC datagrams for the current overlay.
+func OverlayDatagramsEnabled(s *CoreSession) bool {
+	return CurrentUDPHTTPLayer(s) != option.MasqueHTTPLayerH2
+}
+
+// StoreUDPHTTPLayer sets the overlay layer (tests).
+func StoreUDPHTTPLayer(s *CoreSession, layer string) {
+	s.UDPHTTPLayer.Store(layer)
+}
+
+// HTTPFallbackConsumedLatch exposes the fallback latch for tests.
+func HTTPFallbackConsumedLatch(s *CoreSession) *atomic.Bool {
+	return &s.HTTPFallbackConsumed
+}

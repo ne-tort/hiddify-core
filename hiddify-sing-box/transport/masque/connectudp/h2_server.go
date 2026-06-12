@@ -1,0 +1,216 @@
+package connectudp
+
+import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"syscall"
+
+	"github.com/quic-go/quic-go/quicvarint"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
+)
+
+const (
+	// H2ServerUDPReadBuf is the server relay UDP recv buffer: must hold a full kernel
+	// datagram; net.UDPConn.Read truncates without error when the buffer is smaller than the packet.
+	H2ServerUDPReadBuf = 65535
+	// H2ResponseBodyBufSize coalesces HTTP/2 CONNECT-UDP response-body reads for RFC 9297
+	// capsule parsing (parity ServeH2 br and masque-go prefetch).
+	H2ResponseBodyBufSize = 64 * 1024
+)
+
+func isH2ServeTransientReadErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.EWOULDBLOCK) ||
+		errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.EINTR) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
+
+func isH2ServeTransientWriteErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.EWOULDBLOCK) ||
+		errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.EINTR) ||
+		errors.Is(err, syscall.ECONNRESET)
+}
+
+func isH2ServeICMPUnreachableRead(n int, err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
+}
+
+func isH2ServeTerminalConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "use of closed network connection") ||
+		strings.Contains(s, "pipe is being closed")
+}
+
+// H2ResponseWriter serializes downlink capsule writes + flush (connect-ip-go h2ServerCapsuleStream parity).
+type H2ResponseWriter struct {
+	http.ResponseWriter
+	mu sync.Mutex
+}
+
+// WriteUDPPayloadAsCapsules frames udpPayload as RFC 9297 DATAGRAM capsules on the HTTP/2 response body.
+func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := h2c.WriteUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload); err != nil {
+		return err
+	}
+	h2c.FlushResponse(w.ResponseWriter)
+	return nil
+}
+
+// ServeH2 relays UDP payloads over an established HTTP/2 CONNECT-UDP stream using
+// RFC 9297 DATAGRAM capsules (same wire format as dialUDPOverHTTP2 on the client).
+// The caller must set response headers and WriteHeader(http.StatusOK) before calling this.
+func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
+	if w == nil || r == nil || conn == nil {
+		return errors.New("masque h2: connect-udp relay: nil argument")
+	}
+	downlinkW := &H2ResponseWriter{ResponseWriter: w}
+	var wg sync.WaitGroup
+	var closeUDP sync.Once
+	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
+	var shutdownBody sync.Once
+	shutdownRelay := func() {
+		shutdownBody.Do(func() {
+			if r.Body != nil {
+				_ = r.Body.Close()
+			}
+		})
+	}
+
+	var upErr, downErr error
+	downlinkReady := make(chan struct{})
+	var downlinkReadyOnce sync.Once
+	signalDownlinkReady := func() {
+		downlinkReadyOnce.Do(func() { close(downlinkReady) })
+	}
+	signalDownlinkReady()
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer shutdownRelay()
+		defer closeUDPConn()
+		br := bufio.NewReaderSize(r.Body, H2ResponseBodyBufSize)
+		for {
+			ct, cr, err := h2c.ParseCapsule(quicvarint.NewReader(br))
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return
+				}
+				upErr = fmt.Errorf("masque h2 dataplane connect-udp server capsule: %w", err)
+				return
+			}
+			if ct != h2c.CapsuleTypeDatagram {
+				if _, err := io.Copy(io.Discard, cr); err != nil {
+					upErr = fmt.Errorf("masque h2 dataplane connect-udp server non-datagram capsule drain: %w", err)
+					return
+				}
+				continue
+			}
+			payload, err := io.ReadAll(cr)
+			if err != nil {
+				upErr = fmt.Errorf("masque h2 dataplane connect-udp server capsule body: %w", err)
+				return
+			}
+			udpPayload, ok, perr := ParseHTTPDatagramUDP(payload)
+			if perr != nil || !ok {
+				continue
+			}
+			if len(udpPayload) == 0 {
+				signalDownlinkReady()
+				continue
+			}
+			if _, err := conn.Write(udpPayload); err != nil {
+				if errors.Is(err, syscall.ECONNREFUSED) ||
+					errors.Is(err, syscall.EHOSTUNREACH) ||
+					errors.Is(err, syscall.ENETUNREACH) {
+					if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
+						downErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after write: %w", werr)
+						return
+					}
+					continue
+				}
+				if isH2ServeTransientWriteErr(err) {
+					continue
+				}
+				upErr = fmt.Errorf("masque h2 dataplane connect-udp server udp write: %w", err)
+				return
+			}
+			signalDownlinkReady()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		defer shutdownRelay()
+		defer closeUDPConn()
+		select {
+		case <-downlinkReady:
+		case <-r.Context().Done():
+			return
+		}
+		buf := make([]byte, H2ServerUDPReadBuf)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				if isH2ServeICMPUnreachableRead(n, err) {
+					if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
+						downErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram: %w", werr)
+						return
+					}
+					continue
+				}
+				if isH2ServeTransientReadErr(err) {
+					continue
+				}
+				if isH2ServeTerminalConnErr(err) {
+					return
+				}
+				downErr = fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
+				return
+			}
+			if err := downlinkW.WriteUDPPayloadAsCapsules(buf[:n]); err != nil {
+				downErr = fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	joined := errors.Join(upErr, downErr)
+	_ = http.NewResponseController(w).Flush()
+	return joined
+}

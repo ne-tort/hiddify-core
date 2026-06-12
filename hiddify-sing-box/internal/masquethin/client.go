@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sagernet/sing-box/transport/masque/connectauthority"
+	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // ClientConfig configures the thin CONNECT-by-authority client.
@@ -26,12 +26,12 @@ type ClientConfig struct {
 type Client struct {
 	cfg ClientConfig
 	mu  sync.Mutex
-	h3  *connectauthority.Client
+	h3  *h3t.AuthorityClient
 }
 
 // NewClient builds a thin MASQUE CONNECT authority client.
 func NewClient(cfg ClientConfig) (*Client, error) {
-	cl, err := connectauthority.NewClient(cfg.connectAuthorityConfig())
+	cl, err := h3t.NewAuthorityClient(cfg.authorityClientConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c ClientConfig) connectAuthorityConfig() connectauthority.ClientConfig {
+func (c ClientConfig) authorityClientConfig() h3t.AuthorityClientConfig {
 	if c.UsePipeUpload {
 		_ = os.Setenv("MASQUE_CONNECT_AUTHORITY_PIPE_UPLOAD", "1")
 	} else {
@@ -71,7 +71,7 @@ func (c ClientConfig) connectAuthorityConfig() connectauthority.ClientConfig {
 	if tlsCfg.ServerName == "" {
 		tlsCfg.ServerName = strings.TrimSpace(c.Server)
 	}
-	return connectauthority.ClientConfig{
+	return h3t.AuthorityClientConfig{
 		Server:          strings.TrimSpace(c.Server),
 		ServerPort:      port,
 		TemplateConnect: "",
@@ -84,7 +84,7 @@ func (c ClientConfig) connectAuthorityConfig() connectauthority.ClientConfig {
 // DialTCP opens a MASQUE CONNECT authority stream to targetHost:targetPort via the proxy.
 func (c *Client) DialTCP(ctx context.Context, targetHost string, targetPort uint16) (net.Conn, error) {
 	if c == nil || c.h3 == nil {
-		return nil, connectauthority.ErrConnectAuthorityFailed
+		return nil, h3t.ErrConnectAuthorityFailed
 	}
 	return c.h3.DialTCP(ctx, targetHost, targetPort)
 }

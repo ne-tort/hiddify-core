@@ -3,13 +3,11 @@ package masque
 import (
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
 	"net/url"
 	"strings"
 	"testing"
 
-	M "github.com/sagernet/sing/common/metadata"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -52,24 +50,6 @@ func TestMasqueTCPPathIPv6ReservedExpansionNoPercentColon(t *testing.T) {
 	wantSub := "/s/tcp/2001:67c:4e8:f002::a/443"
 	if !strings.Contains(expanded, wantSub) {
 		t.Fatalf("expanded URL %q missing expected segment %q", expanded, wantSub)
-	}
-}
-
-func TestResolveDestinationHostIPv6JoinHostPort(t *testing.T) {
-	t.Parallel()
-	addr := netip.MustParseAddr("2001:b28:f23d:f001::a")
-	sa := M.Socksaddr{Addr: addr, Port: 443}
-	h, err := resolveDestinationHost(sa)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.ContainsAny(h, "[]") {
-		t.Fatalf("host must be unbracketed for MASQUE path and net.JoinHostPort: %q", h)
-	}
-	dial := net.JoinHostPort(h, "443")
-	want := "[2001:b28:f23d:f001::a]:443"
-	if dial != want {
-		t.Fatalf("JoinHostPort got %q want %q", dial, want)
 	}
 }
 
@@ -157,13 +137,13 @@ func TestMasqueTCPBracketRetryEligible(t *testing.T) {
 func TestIsMasqueTCPConnectStreamHTTP400(t *testing.T) {
 	t.Parallel()
 	err := fmt.Errorf("%w: status=400 url=x", ErrTCPConnectStreamFailed)
-	if !isMasqueTCPConnectStreamHTTP400(err) {
+	if !strm.IsConnectStreamHTTP400(err) {
 		t.Fatal("expected 400")
 	}
-	if isMasqueTCPConnectStreamHTTP400(fmt.Errorf("%w: status=403 url=x", ErrTCPConnectStreamFailed)) {
+	if strm.IsConnectStreamHTTP400(fmt.Errorf("%w: status=403 url=x", ErrTCPConnectStreamFailed)) {
 		t.Fatal("403 not 400")
 	}
-	if isMasqueTCPConnectStreamHTTP400(errors.New("status=400")) {
+	if strm.IsConnectStreamHTTP400(errors.New("status=400")) {
 		t.Fatal("missing ErrTCPConnectStreamFailed")
 	}
 }

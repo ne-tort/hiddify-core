@@ -56,6 +56,21 @@ func stripIPv6BracketsForParse(s string) string {
 	return s
 }
 
+func masqueListenBindsUnspecified(listen string) bool {
+	h := strings.TrimSpace(listen)
+	if h == "" {
+		return true
+	}
+	hostForParse := stripIPv6BracketsForParse(h)
+	if i := strings.IndexByte(hostForParse, '%'); i >= 0 {
+		hostForParse = hostForParse[:i]
+	}
+	if ip := net.ParseIP(hostForParse); ip != nil {
+		return ip.IsUnspecified()
+	}
+	return false
+}
+
 // resolveMasqueServerTemplateURLs returns full https URI templates for the MASQUE server.
 // Empty template_* fields get default /masque/… paths; path-only values (leading /) get https://authority prefixed.
 func resolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, tcp string) {

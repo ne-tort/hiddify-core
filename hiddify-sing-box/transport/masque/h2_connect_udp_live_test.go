@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/stretchr/testify/require"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -47,8 +48,8 @@ func TestLiveH2ConnectUDPPortUnreachable(t *testing.T) {
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:              host,
 			ServerPort:          uint16(port),
 			ServerToken:         token,
@@ -56,12 +57,12 @@ func TestLiveH2ConnectUDPPortUnreachable(t *testing.T) {
 			ClientBasicPassword: pass,
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true, ServerName: host},
 		},
-	}
+		})
 	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

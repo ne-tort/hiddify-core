@@ -7,9 +7,12 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -108,8 +111,19 @@ type connectIPUploadHarness struct {
 	remoteLn   net.Listener
 }
 
-func startConnectIPUploadHarness(t *testing.T, link packetLink) *connectIPUploadHarness {
+// connectIPUploadHarnessOpts configures the harness remote TCP target (forwarder onward dial).
+type connectIPUploadHarnessOpts struct {
+	remoteEcho     bool
+	onRemoteAccept func()
+	WriteQueueMetrics *fwd.WriteQueueMetrics
+}
+
+func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
 	t.Helper()
+	var o connectIPUploadHarnessOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	clientSess, serverSess := link.endpoints()
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 
@@ -132,9 +146,16 @@ func startConnectIPUploadHarness(t *testing.T, link packetLink) *connectIPUpload
 			if err != nil {
 				return
 			}
+			if o.onRemoteAccept != nil {
+				o.onRemoteAccept()
+			}
 			go func(c net.Conn) {
 				defer c.Close()
-				_, _ = io.Copy(io.Discard, c)
+				if o.remoteEcho {
+					_, _ = io.Copy(c, c)
+				} else {
+					_, _ = io.Copy(io.Discard, c)
+				}
 			}(c)
 		}
 	}()
@@ -146,9 +167,11 @@ func startConnectIPUploadHarness(t *testing.T, link packetLink) *connectIPUpload
 	fwdCtx, fwdCancel := context.WithCancel(context.Background())
 	fwdDone := make(chan error, 1)
 	go func() {
-		fwdDone <- RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, ConnectIPTCPForwarderOptions{
-			AllowPrivateTargets: true,
-		})
+		fwdOpts := ConnectIPTCPForwarderOptions{AllowPrivateTargets: true}
+		if o.WriteQueueMetrics != nil {
+			fwdOpts.WriteQueueMetrics = o.WriteQueueMetrics
+		}
+		fwdDone <- RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, fwdOpts)
 	}()
 
 	waitIngress := runIngressRelay(clientSess, clientNS)
@@ -288,6 +311,11 @@ func TestMasqueConnectIPLocalizeBottleneck(t *testing.T) {
 func startConnectIPDownloadHarness(t *testing.T, link packetLink) *connectIPUploadHarness {
 	t.Helper()
 	clientSess, serverSess := link.endpoints()
+	return startConnectIPLocalizePipeHarness(t, clientSess, serverSess)
+}
+
+func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPacketSession) *connectIPUploadHarness {
+	t.Helper()
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
 		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
@@ -347,6 +375,109 @@ func TestMasqueConnectIPLocalizeDownload(t *testing.T) {
 	t.Logf("connect-ip download L1: %.1f Mbit/s (%d bytes)", mbps, n)
 	if mbps < connectIPLocalizeFastMbps {
 		t.Fatalf("download L1 slow: %.1f Mbit/s (want >= %.0f)", mbps, connectIPLocalizeFastMbps)
+	}
+}
+
+// benignOnceWriteSession injects one remote QUIC NO_ERROR (0x100) on the next WritePacket
+// after ArmTeardown0x100 — models H3 half-close during CONNECT-IP egress drain.
+type benignOnceWriteSession struct {
+	inner IPPacketSession
+	armed atomic.Bool
+	fired atomic.Bool
+}
+
+func (s *benignOnceWriteSession) ArmTeardown0x100() {
+	s.armed.Store(true)
+}
+
+func (s *benignOnceWriteSession) ReadPacket(buffer []byte) (int, error) {
+	return s.inner.ReadPacket(buffer)
+}
+
+func (s *benignOnceWriteSession) WritePacket(buffer []byte) ([]byte, error) {
+	if s.armed.Load() && !s.fired.Load() {
+		s.fired.Store(true)
+		return nil, &quic.ApplicationError{ErrorCode: 0x100, Remote: true}
+	}
+	return s.inner.WritePacket(buffer)
+}
+
+func (s *benignOnceWriteSession) Close() error {
+	return s.inner.Close()
+}
+
+// waitConnectIPRecycleReady blocks until upload teardown injects benign 0x100 and egress drains.
+func waitConnectIPRecycleReady(t *testing.T, h *connectIPUploadHarness, fired *atomic.Bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		h.clientNS.ScheduleOutboundDrain()
+		if fired != nil && fired.Load() && h.clientNS.OutboundQueueDepth() == 0 {
+			if err := h.clientNS.TerminalError(); err != nil {
+				t.Fatalf("unexpected terminal netstack error before recycle dial: %v", err)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if fired != nil && !fired.Load() {
+		t.Fatal("expected one benign 0x100 during upload teardown drain")
+	}
+	if depth := h.clientNS.OutboundQueueDepth(); depth != 0 {
+		t.Fatalf("outbound queue not drained after recycle (depth=%d)", depth)
+	}
+	if err := h.clientNS.TerminalError(); err != nil {
+		t.Fatalf("unexpected terminal netstack error before recycle dial: %v", err)
+	}
+}
+
+func flushConnectIPEgressAfterClose(h *connectIPUploadHarness) {
+	if h == nil || h.clientNS == nil {
+		return
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.clientNS.ScheduleOutboundDrain()
+		if h.clientNS.OutboundQueueDepth() == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestMasqueConnectIPLocalizeRecycle verifies bulk upload teardown (incl. benign 0x100)
+// does not poison the packet plane before a fresh download flow.
+func TestMasqueConnectIPLocalizeRecycle(t *testing.T) {
+	const uploadDur = 300 * time.Millisecond
+	const downloadDur = 400 * time.Millisecond
+
+	rawClient, serverSess := instantPacketLink{}.endpoints()
+	clientSess := &benignOnceWriteSession{inner: rawClient}
+	h := startConnectIPLocalizePipeHarness(t, clientSess, serverSess)
+	defer h.close()
+
+	upConn := h.dialRemote(t)
+	upBytes, upMbps, err := measureTCPUploadMbps(upConn, uploadDur)
+	if err != nil {
+		t.Fatalf("upload bench: %v", err)
+	}
+	clientSess.ArmTeardown0x100()
+	if err := upConn.Close(); err != nil {
+		t.Fatalf("close upload conn: %v", err)
+	}
+	flushConnectIPEgressAfterClose(h)
+	waitConnectIPRecycleReady(t, h, &clientSess.fired)
+
+	downConn := h.dialRemote(t)
+	defer downConn.Close()
+	downBytes, downMbps, err := measureTCPDownloadMbps(downConn, downloadDur)
+	if err != nil {
+		t.Fatalf("download bench after recycle: %v", err)
+	}
+	t.Logf("connect-ip recycle upload: %.1f Mbit/s (%d bytes)", upMbps, upBytes)
+	t.Logf("connect-ip recycle download: %.1f Mbit/s (%d bytes)", downMbps, downBytes)
+	if downMbps < connectIPLocalizeFastMbps {
+		t.Fatalf("download after upload recycle slow: %.1f Mbit/s (want >= %.0f)", downMbps, connectIPLocalizeFastMbps)
 	}
 }
 

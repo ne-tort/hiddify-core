@@ -6,6 +6,7 @@ import (
 
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/masque/server"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
 )
@@ -421,11 +422,11 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 func validateMasqueServerMuxPaths(o option.MasqueEndpointOptions) error {
 	udpRaw, ipRaw, tcpRaw := resolveMasqueServerTemplateURLs(o)
 	paths := []string{
-		pathFromTemplate(udpRaw),
-		pathFromTemplate(ipRaw),
+		server.PathFromTemplate(udpRaw),
+		server.PathFromTemplate(ipRaw),
 	}
 	if normalizeTCPRelay(o.TCPRelay) != option.MasqueTCPRelayAuthority {
-		paths = append(paths, pathFromTemplate(tcpRaw))
+		paths = append(paths, server.PathFromTemplate(tcpRaw))
 	}
 	seen := make(map[string]struct{}, len(paths))
 	for _, p := range paths {

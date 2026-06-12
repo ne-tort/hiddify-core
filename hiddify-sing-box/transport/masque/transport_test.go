@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +23,9 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	"github.com/sagernet/sing-box/transport/masque/session"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
@@ -45,6 +45,68 @@ func (n *nopTCPNetstack) DialContext(ctx context.Context, destination M.Socksadd
 func (n *nopTCPNetstack) Close() error {
 	n.closeCalled.Store(true)
 	return nil
+}
+
+type connectIPTeardownOrderNetstack struct {
+	ipConnStillSet func() bool
+}
+
+func (n *connectIPTeardownOrderNetstack) DialContext(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	return nil, errors.New("nop")
+}
+
+func (n *connectIPTeardownOrderNetstack) Close() error {
+	if n.ipConnStillSet != nil && n.ipConnStillSet() {
+		return errors.New("tcp netstack closed before shared connect-ip conn")
+	}
+	return nil
+}
+
+func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
+	s := newTestCoreSession(session.CoreSession{
+		HTTPLayerFallback: true,
+		IPConn:            &connectip.Conn{},
+	})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
+	orderNS := &connectIPTeardownOrderNetstack{
+		ipConnStillSet: func() bool { return s.IPConn != nil },
+	}
+	s.TCPNetstack = orderNS
+
+	s.Mu.Lock()
+	switched := s.tryHTTPFallbackSwitchLockedAssumeMu(errors.New("Extended CONNECT refused"))
+	s.Mu.Unlock()
+	if !switched {
+		t.Fatal("expected http layer fallback switch")
+	}
+	if s.IPConn != nil {
+		t.Fatal("expected ipConn cleared after fallback teardown")
+	}
+	if s.TCPNetstack != nil {
+		t.Fatal("expected tcpNetstack cleared after fallback teardown")
+	}
+	if layer, _ := s.UDPHTTPLayer.Load().(string); layer != option.MasqueHTTPLayerH2 {
+		t.Fatalf("expected overlay pivot to h2, got %q", layer)
+	}
+}
+
+func TestReleaseOpenedConnectIPSessionTeardownOrder(t *testing.T) {
+	s := newTestCoreSession(session.CoreSession{
+		IPConn: &connectip.Conn{},
+	})
+	orderNS := &connectIPTeardownOrderNetstack{
+		ipConnStillSet: func() bool { return s.IPConn != nil },
+	}
+	s.TCPNetstack = orderNS
+
+	s.releaseOpenedConnectIPSessionIfAbandoned()
+
+	if s.IPConn != nil {
+		t.Fatal("expected ipConn cleared after abandon teardown")
+	}
+	if s.TCPNetstack != nil {
+		t.Fatal("expected tcpNetstack cleared after abandon teardown")
+	}
 }
 
 func (e timeoutNetError) Error() string   { return e.msg }
@@ -128,56 +190,6 @@ func TestMasqueDialTargetPreservesHostname(t *testing.T) {
 	}
 }
 
-func TestMasqueUDPExpandedURLAuthority(t *testing.T) {
-	raw := "https://proxy.example:8443/masque/udp/{target_host}/{target_port}"
-	tpl, err := uritemplate.New(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := masqueUDPExpandedURLAuthority(tpl, "1.2.3.4:5353"); got != "proxy.example:8443" {
-		t.Fatalf("authority: got %q", got)
-	}
-	if masqueUDPExpandedURLAuthority(nil, "1.2.3.4:53") != "" {
-		t.Fatal("nil template expected empty authority")
-	}
-	if masqueUDPExpandedURLAuthority(tpl, "nohostport") != "" {
-		t.Fatal("bad target expected empty authority")
-	}
-}
-
-func TestMasqueUDPConnectObservabilityFields(t *testing.T) {
-	t.Parallel()
-	raw := "https://proxy.example:8443/masque/udp/{target_host}/{target_port}"
-	tpl, err := uritemplate.New(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := ClientOptions{Server: "edge.example", ServerPort: 443}
-	lt, dial := masqueUDPConnectObservabilityFields(opts, tpl, "1.2.3.4:5353")
-	if lt != "proxy.example:8443" {
-		t.Fatalf("target: got %q", lt)
-	}
-	if want := masqueDialTarget(masqueQuicDialCandidateHost(opts), 443); dial != want {
-		t.Fatalf("dial: got %q want %q", dial, want)
-	}
-	optsZero := ClientOptions{Server: "srv.example", ServerPort: 0}
-	if _, d0 := masqueUDPConnectObservabilityFields(optsZero, tpl, "8.8.8.8:53"); d0 != masqueDialTarget(masqueQuicDialCandidateHost(optsZero), 443) {
-		t.Fatalf("implicit 443 dial mismatch")
-	}
-}
-
-func TestMasqueConnectIPOverlayDialAddr(t *testing.T) {
-	t.Parallel()
-	opts := ClientOptions{Server: "ip.example", ServerPort: 444}
-	if got := masqueConnectIPOverlayDialAddr(opts); got != masqueDialTarget(masqueQuicDialCandidateHost(opts), 444) {
-		t.Fatalf("got %q", got)
-	}
-	optsZero := ClientOptions{Server: "z.example", ServerPort: 0}
-	if got := masqueConnectIPOverlayDialAddr(optsZero); got != masqueDialTarget(masqueQuicDialCandidateHost(optsZero), 443) {
-		t.Fatalf("implicit port: got %q", got)
-	}
-}
-
 func TestTcpMasqueConnectStreamChosenLogFields(t *testing.T) {
 	t.Parallel()
 	u, err := url.Parse("https://proxy.example/tcp/{target_host}/{target_port}")
@@ -224,32 +236,6 @@ func TestResolveTLSServerNameTrimmed(t *testing.T) {
 	}
 }
 
-func TestWarpMasqueConnectStreamBearerToken(t *testing.T) {
-	if got := warpMasqueConnectStreamBearerToken(ClientOptions{ServerToken: "  s  "}); got != "s" {
-		t.Fatalf("server token trim: got %q", got)
-	}
-	if got := warpMasqueConnectStreamBearerToken(ClientOptions{WarpMasqueDeviceBearerToken: " d "}); got != "d" {
-		t.Fatalf("device bearer fallback: got %q", got)
-	}
-	if got := warpMasqueConnectStreamBearerToken(ClientOptions{ServerToken: "a", WarpMasqueDeviceBearerToken: "b"}); got != "a" {
-		t.Fatalf("prefer server_token: got %q", got)
-	}
-	warpCert := tls.Certificate{Certificate: [][]byte{[]byte{0x30, 0x03, 0x01, 0x02, 0x03}}}
-	if got := warpMasqueConnectStreamBearerToken(ClientOptions{
-		WarpMasqueClientCert:        warpCert,
-		WarpMasqueDeviceBearerToken: "device-token",
-	}); got != "" {
-		t.Fatalf("WARP mTLS must omit device bearer on connect-stream; got %q", got)
-	}
-	if got := warpMasqueConnectStreamBearerToken(ClientOptions{
-		WarpMasqueClientCert:        warpCert,
-		ServerToken:                 "srv",
-		WarpMasqueDeviceBearerToken: "device",
-	}); got != "srv" {
-		t.Fatalf("server_token must win with WARP cert; got %q", got)
-	}
-}
-
 func TestResolveEntryHopNoEntryRejected(t *testing.T) {
 	_, _, err := resolveEntryHop([]HopOptions{
 		{Tag: "a", Via: "b", Server: "a.example", Port: 443},
@@ -262,23 +248,23 @@ func TestResolveEntryHopNoEntryRejected(t *testing.T) {
 
 func TestCoreSessionGetTCPRoundTripperUnderSessionMutex(t *testing.T) {
 	t.Parallel()
-	// CONNECT-IP (openIPSessionLocked) and ListenPacket/connect_ip dial while holding s.mu.
-	// getTCPRoundTripper must not acquire s.mu or the session deadlocks before the network round-trip.
-	naked := &coreSession{}
-	naked.mu.Lock()
+	// CONNECT-IP (openIPSessionLocked) and ListenPacket/connect_ip dial while holding s.Mu.
+	// getTCPRoundTripper must not acquire s.Mu or the session deadlocks before the network round-trip.
+	naked := newTestCoreSession(session.CoreSession{})
+	naked.Mu.Lock()
 	rt := naked.getTCPRoundTripper(http.DefaultTransport)
-	naked.mu.Unlock()
+	naked.Mu.Unlock()
 	if rt != http.DefaultTransport {
 		t.Fatalf("expected DefaultTransport without override, got %T", rt)
 	}
-	injected := &coreSession{
-		tcpRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	injected := newTestCoreSession(session.CoreSession{
+			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("stub")
 		}),
-	}
-	injected.mu.Lock()
+		})
+	injected.Mu.Lock()
 	rt = injected.getTCPRoundTripper(http.DefaultTransport)
-	injected.mu.Unlock()
+	injected.Mu.Unlock()
 	if rt == http.DefaultTransport {
 		t.Fatal("expected injected RoundTripper when tcpRoundTripper is set")
 	}
@@ -287,29 +273,29 @@ func TestCoreSessionGetTCPRoundTripperUnderSessionMutex(t *testing.T) {
 func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 	var mu sync.Mutex
 	var dialHosts []string
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
 			TCPTransport:             "connect_stream",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "hop1", Server: "hop1.example", Port: 443},
 			{Tag: "hop2", Via: "hop1", Server: "hop2.example", Port: 8443},
 		},
-		hopIndex:          0,
-		capabilities:      CapabilitySet{ConnectTCP: true},
-		httpLayerFallback: false,
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			HopIndex: 0,
+			Caps: CapabilitySet{ConnectTCP: true},
+			HTTPLayerFallback: false,
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			mu.Lock()
 			dialHosts = append(dialHosts, req.Host)
 			mu.Unlock()
 			// Must be retryable for dialTCPStreamHTTP3 inner loop (same as UDP hop logic after datagram failures).
 			return nil, timeoutNetError{msg: "timeout while connecting"}
 		}),
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	_, _, tcp, err := buildTemplates(ClientOptions{
 		Server:     "hop1.example",
 		ServerPort: 443,
@@ -321,7 +307,7 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTemplates: %v", err)
 	}
-	session.templateTCP = tcp
+	session.TemplateTCP = tcp
 	_, err = session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
 		t.Fatal("expected error after exhausting hop chain")
@@ -341,28 +327,28 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 			t.Fatalf("hop2 round-trip %d: expected host hop2.example:8443, got %q", i, dialHosts[i])
 		}
 	}
-	if session.options.Server != "hop2.example" || session.options.ServerPort != 8443 {
-		t.Fatalf("expected session settled on last hop server, got %s:%d", session.options.Server, session.options.ServerPort)
+	if session.Options.Server != "hop2.example" || session.Options.ServerPort != 8443 {
+		t.Fatalf("expected session settled on last hop server, got %s:%d", session.Options.Server, session.Options.ServerPort)
 	}
 }
 
 func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
 			TCPTransport:             "connect_stream",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "hop1", Server: "hop1.example", Port: 443},
 			{Tag: "hop2", Via: "hop1", Server: "hop2.example", Port: 8443},
 		},
-		hopIndex:          0,
-		capabilities:      CapabilitySet{ConnectTCP: true},
-		httpLayerFallback: true,
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+			HopIndex: 0,
+			Caps: CapabilitySet{ConnectTCP: true},
+			HTTPLayerFallback: true,
+		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	_, _, tcp, err := buildTemplates(ClientOptions{
 		Server:     "hop1.example",
 		ServerPort: 443,
@@ -374,7 +360,7 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTemplates: %v", err)
 	}
-	session.templateTCP = tcp
+	session.TemplateTCP = tcp
 	_, err = session.dialTCPStream(context.Background(), M.Socksaddr{})
 	if err == nil {
 		t.Fatal("expected error for invalid destination")
@@ -382,26 +368,26 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 	if !errors.Is(err, ErrCapability) {
 		t.Fatalf("expected ErrCapability, got %v", err)
 	}
-	if session.hopIndex != 0 {
-		t.Fatalf("expected hop chain untouched (invalid destination), hopIndex=%d", session.hopIndex)
+	if session.HopIndex != 0 {
+		t.Fatalf("expected hop chain untouched (invalid destination), hopIndex=%d", session.HopIndex)
 	}
-	if session.options.Server != "hop1.example" || session.options.ServerPort != 443 {
-		t.Fatalf("expected entry hop unchanged, got %s:%d", session.options.Server, session.options.ServerPort)
+	if session.Options.Server != "hop1.example" || session.Options.ServerPort != 443 {
+		t.Fatalf("expected entry hop unchanged, got %s:%d", session.Options.Server, session.Options.ServerPort)
 	}
 }
 
 func TestCoreSessionAdvanceHop(t *testing.T) {
-	session := &coreSession{
-		hopOrder: []HopOptions{
+	session := newTestCoreSession(session.CoreSession{
+			HopOrder: []HopOptions{
 			{Tag: "h1", Server: "h1.example", Port: 443},
 			{Tag: "h2", Via: "h1", Server: "h2.example", Port: 8443},
 		},
-	}
+		})
 	if !session.advanceHop() {
 		t.Fatal("expected first advanceHop to succeed")
 	}
-	if session.hopIndex != 1 {
-		t.Fatalf("unexpected hop index: %d", session.hopIndex)
+	if session.HopIndex != 1 {
+		t.Fatalf("unexpected hop index: %d", session.HopIndex)
 	}
 	if session.advanceHop() {
 		t.Fatal("expected second advanceHop to fail at chain end")
@@ -410,25 +396,25 @@ func TestCoreSessionAdvanceHop(t *testing.T) {
 
 func TestResetHopTemplatesClearsTCPNetstack(t *testing.T) {
 	ns := &nopTCPNetstack{}
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
 				{Tag: "entry", Server: "entry.example", Port: 443},
 				{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "entry", Server: "entry.example", Port: 443},
 			{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 		},
-		hopIndex:    1,
-		tcpNetstack: ns,
-	}
+			HopIndex: 1,
+			TCPNetstack: ns,
+		})
 	if err := session.resetHopTemplates(); err != nil {
 		t.Fatalf("resetHopTemplates failed: %v", err)
 	}
-	if session.tcpNetstack != nil {
+	if session.TCPNetstack != nil {
 		t.Fatal("expected tcpNetstack cleared on hop reset")
 	}
 	if !ns.closeCalled.Load() {
@@ -437,78 +423,78 @@ func TestResetHopTemplatesClearsTCPNetstack(t *testing.T) {
 }
 
 func TestResetHopTemplatesClearsTCPHTTPTransport(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
 				{Tag: "entry", Server: "entry.example", Port: 443},
 				{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "entry", Server: "entry.example", Port: 443},
 			{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 		},
-		hopIndex: 1,
-		tcpHTTP:  &http3.Transport{},
-	}
+			HopIndex: 1,
+			TCPHTTP: &http3.Transport{},
+		})
 
 	if err := session.resetHopTemplates(); err != nil {
 		t.Fatalf("resetHopTemplates failed: %v", err)
 	}
-	if session.tcpHTTP != nil {
+	if session.TCPHTTP != nil {
 		t.Fatal("expected tcpHTTP transport cache to be cleared on hop reset")
 	}
 }
 
 func TestResetHopTemplatesClearsSharedIPH3Refs(t *testing.T) {
 	shared := &http3.Transport{}
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
 				{Tag: "entry", Server: "entry.example", Port: 443},
 				{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "entry", Server: "entry.example", Port: 443},
 			{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 		},
-		hopIndex: 1,
-		tcpHTTP:  shared,
-		ipHTTP:   shared,
-	}
+			HopIndex: 1,
+			TCPHTTP: shared,
+			IPHTTP: shared,
+		})
 	if err := session.resetHopTemplates(); err != nil {
 		t.Fatalf("resetHopTemplates failed: %v", err)
 	}
-	if session.ipHTTP != nil || session.tcpHTTP != nil || session.ipHTTPConn != nil {
-		t.Fatalf("expected shared ip/tcp http3.Transport cleared on hop reset, ipHTTP=%v tcpHTTP=%v ipHTTPConn=%v", session.ipHTTP, session.tcpHTTP, session.ipHTTPConn)
+	if session.IPHTTP != nil || session.TCPHTTP != nil || session.IPHTTPConn != nil {
+		t.Fatalf("expected shared ip/tcp http3.Transport cleared on hop reset, ipHTTP=%v tcpHTTP=%v ipHTTPConn=%v", session.IPHTTP, session.TCPHTTP, session.IPHTTPConn)
 	}
 }
 
 func TestResetTCPHTTPTransportClearsSharedIPH3Refs(t *testing.T) {
 	shared := &http3.Transport{}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:     "example.com",
 			ServerPort: 443,
 		},
-		tcpHTTP: shared,
-		ipHTTP:  shared,
-	}
+			TCPHTTP: shared,
+			IPHTTP: shared,
+		})
 	s.resetTCPHTTPTransport()
-	if s.tcpHTTP == nil || s.tcpHTTP == shared {
+	if s.TCPHTTP == nil || s.TCPHTTP == shared {
 		t.Fatal("expected fresh tcpHTTP after reset")
 	}
-	if s.ipHTTP != nil || s.ipHTTPConn != nil {
+	if s.IPHTTP != nil || s.IPHTTPConn != nil {
 		t.Fatal("expected shared CONNECT-IP http3.Transport pointer cleared alongside tcpHTTP rebuild")
 	}
 }
 
 func TestResetHopTemplatesClearsDialPeerOnInnerHop(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:     "entry.example",
 			DialPeer:   "203.0.113.77",
 			ServerPort: 443,
@@ -517,26 +503,26 @@ func TestResetHopTemplatesClearsDialPeerOnInnerHop(t *testing.T) {
 				{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "entry", Server: "entry.example", Port: 443},
 			{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 		},
-		hopIndex: 1,
-	}
+			HopIndex: 1,
+		})
 	if err := session.resetHopTemplates(); err != nil {
 		t.Fatalf("resetHopTemplates failed: %v", err)
 	}
-	if session.options.Server != "next.example" || session.options.ServerPort != 8443 {
-		t.Fatalf("unexpected hop templates server: got %s:%d", session.options.Server, session.options.ServerPort)
+	if session.Options.Server != "next.example" || session.Options.ServerPort != 8443 {
+		t.Fatalf("unexpected hop templates server: got %s:%d", session.Options.Server, session.Options.ServerPort)
 	}
-	if strings.TrimSpace(session.options.DialPeer) != "" {
-		t.Fatalf("expected DialPeer cleared past entry hop, got %q", session.options.DialPeer)
+	if strings.TrimSpace(session.Options.DialPeer) != "" {
+		t.Fatalf("expected DialPeer cleared past entry hop, got %q", session.Options.DialPeer)
 	}
 }
 
 func TestResetHopTemplatesPreservesHTTPOverlay(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:                   "entry.example",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			Hops: []HopOptions{
@@ -544,14 +530,14 @@ func TestResetHopTemplatesPreservesHTTPOverlay(t *testing.T) {
 				{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "entry", Server: "entry.example", Port: 443},
 			{Tag: "next", Via: "entry", Server: "next.example", Port: 8443},
 		},
-		hopIndex: 1,
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
-	session.httpFallbackConsumed.Store(true)
+			HopIndex: 1,
+		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	session.HTTPFallbackConsumed.Store(true)
 
 	if err := session.resetHopTemplates(); err != nil {
 		t.Fatalf("resetHopTemplates failed: %v", err)
@@ -559,15 +545,15 @@ func TestResetHopTemplatesPreservesHTTPOverlay(t *testing.T) {
 	if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected udp overlay h2 preserved across hop reset, got %q", session.currentUDPHTTPLayer())
 	}
-	if session.httpFallbackConsumed.Load() {
+	if session.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed reset to false for the new hop")
 	}
 }
 
 func TestMaybeRecordHTTPLayerCacheSuccessSkipsInnerHop(t *testing.T) {
 	var calls atomic.Int32
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:                   "hop2.example",
 			ServerPort:               8443,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerAuto,
@@ -575,17 +561,17 @@ func TestMaybeRecordHTTPLayerCacheSuccessSkipsInnerHop(t *testing.T) {
 				calls.Add(1)
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "hop1", Server: "hop1.example", Port: 443},
 			{Tag: "hop2", Via: "hop1", Server: "hop2.example", Port: 8443},
 		},
-		hopIndex: 1,
-	}
+			HopIndex: 1,
+		})
 	s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH2)
 	if calls.Load() != 0 {
 		t.Fatalf("expected no cache record on inner hop, got %d calls", calls.Load())
 	}
-	s.hopIndex = 0
+	s.HopIndex = 0
 	s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH3)
 	if calls.Load() != 1 {
 		t.Fatalf("expected one cache record on entry hop, got %d", calls.Load())
@@ -595,8 +581,9 @@ func TestMaybeRecordHTTPLayerCacheSuccessSkipsInnerHop(t *testing.T) {
 func TestDialConnectIPAttemptHookRecordsHTTPLayerCacheSuccess(t *testing.T) {
 	okConn := &connectip.Conn{}
 	var gotLayer atomic.Value
-	s := &coreSession{
-		options: ClientOptions{
+	s := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: "connect_ip",
 			Server:        "example.com",
 			ServerPort:    443,
@@ -604,12 +591,14 @@ func TestDialConnectIPAttemptHookRecordsHTTPLayerCacheSuccess(t *testing.T) {
 				gotLayer.Store(layer)
 			},
 		},
-		dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			return okConn, nil
-		},
-	}
-	s.hopOrder = nil
-	s.hopIndex = 0
+		}}
+		return cs
+	}()
+	s.HopOrder = nil
+	s.HopIndex = 0
 
 	if _, err := s.dialConnectIPAttempt(context.Background(), false); err != nil {
 		t.Fatalf("dialConnectIPAttempt h3 hook: %v", err)
@@ -672,28 +661,6 @@ func TestBuildTemplatesWarpMasqueUsqueConnectIPURL(t *testing.T) {
 	}
 	if got := ip.Raw(); got != "https://cloudflareaccess.com" {
 		t.Fatalf("CONNECT-IP template must match usque internal.ConnectURI, got %q", got)
-	}
-}
-
-func TestApplyWarpMasqueHTTP3TransportFieldsCfConnectIPEnablesLegacy276(t *testing.T) {
-	tr := &http3.Transport{}
-	applyWarpMasqueHTTP3TransportFields(tr, ClientOptions{
-		WarpMasqueLegacyH3Extras: false,
-		WarpConnectIPProtocol:    "cf-connect-ip",
-	})
-	if tr.AdditionalSettings == nil || tr.AdditionalSettings[cloudflareLegacyH3DatagramSettingID] != 1 {
-		t.Fatalf("expected legacy H3 datagram setting for cf-connect-ip, got %#v", tr.AdditionalSettings)
-	}
-	if !tr.DisableCompression {
-		t.Fatal("expected DisableCompression for WARP H3 extras path")
-	}
-}
-
-func TestApplyWarpMasqueHTTP3TransportFieldsNoopWithoutExtrasOrCf(t *testing.T) {
-	tr := &http3.Transport{}
-	applyWarpMasqueHTTP3TransportFields(tr, ClientOptions{})
-	if len(tr.AdditionalSettings) > 0 {
-		t.Fatalf("unexpected AdditionalSettings: %#v", tr.AdditionalSettings)
 	}
 }
 
@@ -794,61 +761,6 @@ func TestTransportMalformedScopedFlowBoundaryParity(t *testing.T) {
 	if resultClass != ErrorClassCapability {
 		t.Fatalf("expected wrapped malformed scope classification capability, got: %s (err=%v)", resultClass, err)
 	}
-	writeMalformedScopedTransportArtifactIfRequested(t, actualClass, resultClass)
-}
-
-func TestBuildScopedErrorArtifactNormalizesErrorSource(t *testing.T) {
-	tests := []struct {
-		name   string
-		source string
-		want   string
-	}{
-		{
-			name:   "runtime",
-			source: ErrorSourceRuntime,
-			want:   ErrorSourceRuntime,
-		},
-		{
-			name:   "compose_up",
-			source: ErrorSourceComposeUp,
-			want:   ErrorSourceComposeUp,
-		},
-		{
-			name:   "empty_fallback_runtime",
-			source: "",
-			want:   ErrorSourceRuntime,
-		},
-		{
-			name:   "unknown_fallback_runtime",
-			source: "docker_boot",
-			want:   ErrorSourceRuntime,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			artifact := BuildScopedErrorArtifact(ErrorClassCapability, ErrorClassCapability, tc.source)
-			if artifact.ErrorSource != tc.want {
-				t.Fatalf("unexpected artifact source: got=%s want=%s", artifact.ErrorSource, tc.want)
-			}
-		})
-	}
-}
-
-func writeMalformedScopedTransportArtifactIfRequested(t *testing.T, actualClass, resultClass ErrorClass) {
-	t.Helper()
-
-	artifactPath := os.Getenv("MASQUE_MALFORMED_SCOPED_TRANSPORT_ARTIFACT_PATH")
-	if artifactPath == "" {
-		return
-	}
-	artifact := BuildScopedErrorArtifact(actualClass, resultClass, "runtime")
-	raw, err := json.MarshalIndent(artifact, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal malformed-scoped transport artifact: %v", err)
-	}
-	if err := os.WriteFile(artifactPath, raw, 0o644); err != nil {
-		t.Fatalf("write malformed-scoped transport artifact: %v", err)
-	}
 }
 
 func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
@@ -890,54 +802,6 @@ func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	}
 }
 
-func TestCoreSessionCapabilitiesDatagramsTracksHTTPLayerOverlay(t *testing.T) {
-	cs := &coreSession{
-		options: ClientOptions{
-			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
-			Server:                   "example.com",
-			ServerPort:               443,
-		},
-		capabilities: CapabilitySet{
-			ExtendedConnect: true,
-			Datagrams:       false,
-			CapsuleProtocol: true,
-			ConnectUDP:      true,
-			ConnectIP:       true,
-		},
-	}
-	cs.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
-	if cs.Capabilities().Datagrams {
-		t.Fatal("expected Datagrams=false on h2 overlay")
-	}
-	cs.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
-	if !cs.Capabilities().Datagrams {
-		t.Fatal("expected Datagrams=true on h3 overlay after rotation from h2-effective ctor")
-	}
-
-	csH3 := &coreSession{
-		options: ClientOptions{
-			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
-			Server:                   "example.com",
-			ServerPort:               443,
-		},
-		capabilities: CapabilitySet{
-			ExtendedConnect: true,
-			Datagrams:       true,
-			CapsuleProtocol: true,
-			ConnectUDP:      true,
-			ConnectIP:       true,
-		},
-	}
-	csH3.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
-	if !csH3.Capabilities().Datagrams {
-		t.Fatal("expected Datagrams=true on h3 overlay with h3-effective ctor")
-	}
-	csH3.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
-	if csH3.Capabilities().Datagrams {
-		t.Fatal("expected Datagrams=false on h2 overlay with h3-effective ctor")
-	}
-}
-
 func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	streamSession, err := (DirectClientFactory{}).NewSession(context.TODO(), ClientOptions{
 		TCPTransport: "connect_stream",
@@ -971,11 +835,11 @@ func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 }
 
 func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TCPTransport: "connect_stream",
 		},
-	}
+		})
 	_, err := session.DialContext(context.Background(), "udp", M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
 		t.Fatal("expected non-tcp network to fail fast in core session")
@@ -991,117 +855,12 @@ func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
 	}
 }
 
-func TestDirectSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
-	session := &directSession{}
-	_, err := session.DialContext(context.Background(), "udp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected non-tcp network to fail fast in direct session")
-	}
-	if !errors.Is(err, ErrUnsupportedNetwork) {
-		t.Fatalf("expected ErrUnsupportedNetwork for non-tcp direct boundary reject, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "unsupported network in masque session") {
-		t.Fatalf("unexpected non-tcp boundary error: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
-		t.Fatalf("expected capability class for non-tcp direct boundary reject, got: %s", got)
-	}
-}
-
-func TestDirectSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing.T) {
-	session := &directSession{tcpTransport: "auto"}
-	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected direct session tcp_transport=auto to fail with deterministic path-not-implemented error")
-	}
-	if !errors.Is(err, ErrTCPPathNotImplemented) {
-		t.Fatalf("expected ErrTCPPathNotImplemented, got: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
-		t.Fatalf("expected capability class for direct auto transport path reject, got: %s", got)
-	}
-}
-
-func TestDirectSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
-	session := &directSession{tcpTransport: "connect_ip"}
-	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected direct session tcp_transport=connect_ip to fail as TUN-only TCP path")
-	}
-	if !errors.Is(err, ErrTCPOverConnectIP) {
-		t.Fatalf("expected ErrTCPOverConnectIP, got: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
-		t.Fatalf("expected capability class for direct connect_ip tcp reject, got: %s", got)
-	}
-}
-
-func TestDirectSessionListenPacketReturnsCanceledBeforeBind(t *testing.T) {
-	session := &directSession{
-		capabilities: CapabilitySet{ConnectUDP: true},
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := session.ListenPacket(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 53))
-	if err == nil {
-		t.Fatal("expected canceled context to skip ListenPacket bind")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Cause to surface cancel, got: %v", err)
-	}
-}
-
-func TestDirectSessionDialContextReturnsCanceledBeforeHostResolve(t *testing.T) {
-	session := &directSession{tcpTransport: option.MasqueTCPTransportConnectStream}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := session.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected canceled context before direct tcp dial work")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Cause to surface cancel, got: %v", err)
-	}
-}
-
-func TestDirectSessionOpenIPSessionReturnsCanceledBeforeCapabilityBoundary(t *testing.T) {
-	session := &directSession{}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := session.OpenIPSession(ctx)
-	if err == nil {
-		t.Fatal("expected canceled context before direct CONNECT-IP capability checks")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Cause to surface cancel, got: %v", err)
-	}
-}
-
-func TestDirectSessionOpenIPSessionReturnsCapabilityBoundary(t *testing.T) {
-	session := &directSession{
-		capabilities: CapabilitySet{ConnectIP: true},
-	}
-	_, err := session.OpenIPSession(context.Background())
-	if err == nil {
-		t.Fatal("expected direct session CONNECT-IP open to fail fast")
-	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability for direct backend CONNECT-IP boundary, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "CONNECT-IP is not available in direct backend") {
-		t.Fatalf("unexpected direct backend CONNECT-IP boundary error: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
-		t.Fatalf("expected capability class for direct backend CONNECT-IP boundary reject, got: %s", got)
-	}
-}
-
 func TestCoreSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TCPTransport: "auto",
 		},
-	}
+		})
 	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
 		t.Fatal("expected tcp_transport=auto to fail with deterministic path-not-implemented error")
@@ -1115,11 +874,11 @@ func TestCoreSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing
 }
 
 func TestCoreSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TCPTransport: "connect_ip",
 		},
-	}
+		})
 	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
 		t.Fatal("expected tcp_transport=connect_ip to fail as TUN-only TCP path")
@@ -1132,8 +891,8 @@ func TestCoreSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
 	}
 }
 
-func TestResolveDestinationHostRejectsInvalidDestination(t *testing.T) {
-	_, err := resolveDestinationHost(M.Socksaddr{})
+func TestStreamResolveDestinationHostRejectsInvalidDestination(t *testing.T) {
+	_, err := strm.ResolveDestinationHost(M.Socksaddr{})
 	if err == nil {
 		t.Fatal("expected invalid destination to be rejected")
 	}
@@ -1145,34 +904,65 @@ func TestResolveDestinationHostRejectsInvalidDestination(t *testing.T) {
 	}
 }
 
-func TestResolveDestinationHostTrimsPaddedFqdnFromParseSocksaddr(t *testing.T) {
+func TestStreamResolveDestinationHostTrimsPaddedFqdn(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("  example.com\t", 443)
-	host, err := resolveDestinationHost(dest)
+	host, err := strm.ResolveDestinationHost(dest)
 	if err != nil {
-		t.Fatalf("resolveDestinationHost: %v", err)
+		t.Fatalf("ResolveDestinationHost: %v", err)
 	}
 	if host != "example.com" {
 		t.Fatalf("expected trimmed fqdn example.com, got %q", host)
 	}
 }
 
-func TestResolveDestinationHostPaddedFqdnDoesNotOverrideIP(t *testing.T) {
+func TestStreamResolveDestinationHostPaddedFqdnDoesNotOverrideIP(t *testing.T) {
 	dest := M.Socksaddr{
 		Addr: netip.MustParseAddr("198.51.100.1"),
 		Port: 443,
 		Fqdn: "  example.com ",
 	}
-	host, err := resolveDestinationHost(dest)
+	host, err := strm.ResolveDestinationHost(dest)
 	if err != nil {
-		t.Fatalf("resolveDestinationHost: %v", err)
+		t.Fatalf("ResolveDestinationHost: %v", err)
 	}
 	if host != "198.51.100.1" {
 		t.Fatalf("expected IP when both addr and padded fqdn present, got %q", host)
 	}
 }
 
+func TestStreamIsRetryableTCPStreamError(t *testing.T) {
+	if !strm.IsRetryableTCPStreamError(&quic.IdleTimeoutError{}) {
+		t.Fatal("expected timeout/no recent network activity to be retryable")
+	}
+	if !strm.IsRetryableTCPStreamError(&quic.ApplicationError{ErrorCode: 0x100, Remote: true}) {
+		t.Fatal("expected application errors to be retryable")
+	}
+	if strm.IsRetryableTCPStreamError(net.ErrClosed) {
+		t.Fatal("expected closed network connection to be non-retryable for tcp stream path")
+	}
+	if !strm.IsRetryableTCPStreamError(&net.OpError{Op: "read", Err: syscall.ECONNRESET}) {
+		t.Fatal("expected TCP ECONNRESET to be retryable for H2 CONNECT-stream")
+	}
+	if !strm.IsRetryableTCPStreamError(http2.ConnectionError(http2.ErrCodeProtocol)) {
+		t.Fatal("expected http2 connection error to be retryable")
+	}
+}
+
+func TestStreamTCPConnectStreamErrMayBenefitFromNextHop(t *testing.T) {
+	if strm.TCPConnectStreamErrMayBenefitFromNextHop(nil) {
+		t.Fatal("nil error must not benefit from next hop")
+	}
+	capErr := errors.Join(ErrCapability, errors.New("invalid destination"))
+	if strm.TCPConnectStreamErrMayBenefitFromNextHop(capErr) {
+		t.Fatal("capability errors must not consume hops")
+	}
+	if !strm.TCPConnectStreamErrMayBenefitFromNextHop(errors.New("connection reset")) {
+		t.Fatal("transient overlay errors may benefit from next hop")
+	}
+}
+
 func TestCoreSessionDialDirectTCPRejectsInvalidDestination(t *testing.T) {
-	session := &coreSession{}
+	session := newTestCoreSession(session.CoreSession{})
 	_, err := session.dialDirectTCP(context.Background(), "tcp", M.Socksaddr{})
 	if err == nil {
 		t.Fatal("expected direct tcp dial to reject invalid destination")
@@ -1185,170 +975,12 @@ func TestCoreSessionDialDirectTCPRejectsInvalidDestination(t *testing.T) {
 	}
 }
 
-func TestDirectSessionDialContextRejectsInvalidDestination(t *testing.T) {
-	session := &directSession{tcpTransport: "connect_stream"}
-	_, err := session.DialContext(context.Background(), "tcp", M.Socksaddr{})
-	if err == nil {
-		t.Fatal("expected direct session dial to reject invalid destination")
-	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability for direct session invalid destination, got: %v", err)
-	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
-		t.Fatalf("expected capability class for direct session invalid destination, got: %s", got)
-	}
-}
-
-func TestClassifyError(t *testing.T) {
-	if ClassifyError(errors.Join(ErrTCPDial, errors.New("dial failed"))) != ErrorClassDial {
-		t.Fatal("expected tcp dial error class")
-	}
-	if ClassifyError(ErrPolicyFallbackDenied) != ErrorClassPolicy {
-		t.Fatal("expected policy error class")
-	}
-	if ClassifyError(ErrAuthFailed) != ErrorClassAuth {
-		t.Fatal("expected auth error class")
-	}
-	if ClassifyError(net.ErrClosed) != ErrorClassLifecycle {
-		t.Fatal("expected lifecycle error class for net.ErrClosed")
-	}
-	if ClassifyError(&connectip.CloseError{Remote: true}) != ErrorClassLifecycle {
-		t.Fatal("expected lifecycle error class for remote CloseError")
-	}
-	if ClassifyError(ErrUnsupportedNetwork) != ErrorClassCapability {
-		t.Fatal("expected capability error class for unsupported network sentinel")
-	}
-}
-
-func TestApplyQUICExperimentalOptions(t *testing.T) {
-	cfg := applyQUICExperimentalOptions(nil, QUICExperimentalOptions{
-		Enabled:                    true,
-		KeepAlivePeriod:            5 * time.Second,
-		MaxIdleTimeout:             10 * time.Second,
-		InitialStreamReceiveWindow: 1234,
-		MaxIncomingStreams:         8,
-	})
-	if cfg.KeepAlivePeriod != 5*time.Second {
-		t.Fatal("expected keepalive period to be applied")
-	}
-	if cfg.MaxIdleTimeout != 10*time.Second {
-		t.Fatal("expected max idle timeout to be applied")
-	}
-	if cfg.InitialStreamReceiveWindow != 1234 {
-		t.Fatal("expected stream window to be applied")
-	}
-	if cfg.MaxIncomingStreams != 8 {
-		t.Fatal("expected max incoming streams to be applied")
-	}
-}
-
-func TestNewUDPClientSetsInitialPacketSizeBaseline(t *testing.T) {
-	session := &coreSession{
-		options: ClientOptions{},
-	}
-	client := session.newUDPClient()
-	if client == nil || client.QUICConfig == nil {
-		t.Fatal("expected udp client quic config")
-	}
-	if client.QUICConfig.InitialPacketSize == 0 {
-		t.Fatal("expected non-zero udp initial packet size baseline")
-	}
-}
-
-func TestMasqueTCPConnectStreamAndServerQUICReceiveWindowFloors(t *testing.T) {
-	cli := masqueTCPConnectStreamQUICConfig(ClientOptions{})
-	if cli.InitialPacketSize != defaultUDPInitialPacketSize {
-		t.Fatalf("connect-stream client InitialPacketSize: got %d want %d", cli.InitialPacketSize, defaultUDPInitialPacketSize)
-	}
-	if cli.InitialStreamReceiveWindow < 128<<20 {
-		t.Fatalf("connect-stream client InitialStreamReceiveWindow: got %d want >= %d", cli.InitialStreamReceiveWindow, 128<<20)
-	}
-	if cli.MaxStreamReceiveWindow < 128<<20 {
-		t.Fatalf("connect-stream client MaxStreamReceiveWindow: got %d want >= %d", cli.MaxStreamReceiveWindow, 128<<20)
-	}
-	if cli.InitialConnectionReceiveWindow < 192<<20 {
-		t.Fatalf("connect-stream client InitialConnectionReceiveWindow: got %d want >= %d", cli.InitialConnectionReceiveWindow, 192<<20)
-	}
-	if cli.MaxConnectionReceiveWindow < 192<<20 {
-		t.Fatalf("connect-stream client MaxConnectionReceiveWindow: got %d want >= %d", cli.MaxConnectionReceiveWindow, 192<<20)
-	}
-	cliWarp := masqueTCPConnectStreamQUICConfig(ClientOptions{
-		WarpMasqueClientCert: tls.Certificate{Certificate: [][]byte{[]byte("stub")}},
-	})
-	if cliWarp.InitialPacketSize != 0 {
-		t.Fatalf("warp connect-stream InitialPacketSize: got %d want 0 (unset for Cloudflare path)", cliWarp.InitialPacketSize)
-	}
-	srv := MasqueHTTPServerQUICConfig()
-	if srv.InitialPacketSize != defaultUDPInitialPacketSize {
-		t.Fatalf("server InitialPacketSize: got %d want %d", srv.InitialPacketSize, defaultUDPInitialPacketSize)
-	}
-	if srv.InitialStreamReceiveWindow < 128<<20 {
-		t.Fatalf("server InitialStreamReceiveWindow: got %d want >= %d", srv.InitialStreamReceiveWindow, 128<<20)
-	}
-	if srv.MaxStreamReceiveWindow < 128<<20 {
-		t.Fatalf("server MaxStreamReceiveWindow: got %d want >= %d", srv.MaxStreamReceiveWindow, 128<<20)
-	}
-	if srv.InitialConnectionReceiveWindow < 192<<20 {
-		t.Fatalf("server InitialConnectionReceiveWindow: got %d want >= %d", srv.InitialConnectionReceiveWindow, 192<<20)
-	}
-	if srv.MaxConnectionReceiveWindow < 192<<20 {
-		t.Fatalf("server MaxConnectionReceiveWindow: got %d want >= %d", srv.MaxConnectionReceiveWindow, 192<<20)
-	}
-}
-
-
-func TestWaitContextBackoffCancelled(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := waitContextBackoff(ctx, 2*time.Second); err == nil {
-		t.Fatal("expected backoff to abort on cancelled context")
-	}
-}
-
-func TestIsRetryableConnectIPError(t *testing.T) {
-	if !isRetryableConnectIPError(&quic.IdleTimeoutError{}) {
-		t.Fatal("expected timeout/no recent network activity to be retryable")
-	}
-	if !isRetryableConnectIPError(net.ErrClosed) {
-		t.Fatal("expected closed network connection to be retryable")
-	}
-	if isRetryableConnectIPError(errors.New("authorization failed")) {
-		t.Fatal("expected auth failures to be non-retryable")
-	}
-}
-
-func TestIsRetryableTCPStreamError(t *testing.T) {
-	if !isRetryableTCPStreamError(&quic.IdleTimeoutError{}) {
-		t.Fatal("expected timeout/no recent network activity to be retryable")
-	}
-	if !isRetryableTCPStreamError(&quic.ApplicationError{ErrorCode: 0x100, Remote: true}) {
-		t.Fatal("expected application errors to be retryable")
-	}
-	if isRetryableTCPStreamError(net.ErrClosed) {
-		t.Fatal("expected closed network connection to be non-retryable for tcp stream path")
-	}
-	if !isRetryableTCPStreamError(&net.OpError{Op: "read", Err: syscall.ECONNRESET}) {
-		t.Fatal("expected TCP ECONNRESET to be retryable for H2 CONNECT-stream")
-	}
-	if !isRetryableTCPStreamError(http2.ConnectionError(http2.ErrCodeProtocol)) {
-		t.Fatal("expected http2 connection error to be retryable")
-	}
-}
-
-func TestConnectIPPacketSessionDatagramCeiling(t *testing.T) {
-	session := &connectIPPacketSession{datagramCeiling: 1280}
-	_, err := session.WritePacket(make([]byte, 1400))
-	if err == nil {
-		t.Fatal("expected datagram ceiling error")
-	}
-}
-
 func TestConnectIPPacketSessionCloseKeepsSharedConnOwnedByCoreSession(t *testing.T) {
 	sharedConn := &connectip.Conn{}
-	session := &coreSession{
-		capabilities: CapabilitySet{ConnectIP: true},
-		ipConn:       sharedConn,
-	}
+	session := newTestCoreSession(session.CoreSession{
+			Caps: CapabilitySet{ConnectIP: true},
+			IPConn: sharedConn,
+		})
 	wrapped, err := session.OpenIPSession(context.Background())
 	if err != nil {
 		t.Fatalf("open reused connect-ip session: %v", err)
@@ -1356,66 +988,38 @@ func TestConnectIPPacketSessionCloseKeepsSharedConnOwnedByCoreSession(t *testing
 	if err := wrapped.Close(); err != nil {
 		t.Fatalf("close wrapped connect-ip session: %v", err)
 	}
-	if session.ipConn != sharedConn {
+	if session.IPConn != sharedConn {
 		t.Fatal("expected wrapped close to keep coreSession shared connect-ip conn alive")
 	}
 	reused, err := session.OpenIPSession(context.Background())
 	if err != nil {
 		t.Fatalf("reopen reused connect-ip session: %v", err)
 	}
-	reusedWrapper, ok := reused.(*connectIPPacketSession)
+	reusedWrapper, ok := reused.(*mcip.ClientPacketSession)
 	if !ok {
 		t.Fatalf("unexpected ip session wrapper type: %T", reused)
 	}
-	if reusedWrapper.conn != sharedConn {
+	if reusedWrapper.Conn() != sharedConn {
 		t.Fatal("expected reopen path to reuse the same shared connect-ip conn")
 	}
 }
 
 func TestCoreSessionCloseClearsConnectIPHTTPStateAndIsIdempotent(t *testing.T) {
-	session := &coreSession{
-		ipHTTP:     &http3.Transport{},
-		ipHTTPConn: &http3.ClientConn{},
-	}
+	session := newTestCoreSession(session.CoreSession{
+			IPHTTP: &http3.Transport{},
+			IPHTTPConn: &http3.ClientConn{},
+		})
 	if err := session.Close(); err != nil {
 		t.Fatalf("first close returned error: %v", err)
 	}
-	if session.ipHTTP != nil {
+	if session.IPHTTP != nil {
 		t.Fatal("expected close to clear cached connect-ip http3 transport")
 	}
-	if session.ipHTTPConn != nil {
+	if session.IPHTTPConn != nil {
 		t.Fatal("expected close to clear cached connect-ip http3 client conn")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatalf("second close should stay idempotent, got error: %v", err)
-	}
-}
-
-func TestConnectIPDatagramCeilingMaxEnvContract(t *testing.T) {
-	testCases := []struct {
-		name      string
-		envValue  string
-		unsetEnv  bool
-		expectMax int
-	}{
-		{name: "unset uses default", unsetEnv: true, expectMax: defaultConnectIPDatagramCeilingMax},
-		{name: "valid override in range", envValue: "2048", expectMax: 2048},
-		{name: "invalid text falls back", envValue: "not-a-number", expectMax: defaultConnectIPDatagramCeilingMax},
-		{name: "below lower bound falls back", envValue: "1279", expectMax: defaultConnectIPDatagramCeilingMax},
-		{name: "above upper bound falls back", envValue: "65536", expectMax: defaultConnectIPDatagramCeilingMax},
-		{name: "trimmed valid override", envValue: " 4096 ", expectMax: 4096},
-	}
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.unsetEnv {
-				_ = os.Unsetenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX")
-			} else {
-				t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", tc.envValue)
-			}
-			if got := connectIPDatagramCeilingMax(); got != tc.expectMax {
-				t.Fatalf("unexpected ceiling max: got=%d want=%d", got, tc.expectMax)
-			}
-		})
 	}
 }
 
@@ -1426,12 +1030,12 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 		requested       uint32
 		expectedCeiling int
 	}{
-		{name: "zero requested uses default ceiling max", envCeilingMax: "4096", requested: 0, expectedCeiling: defaultConnectIPDatagramCeilingMax},
+		{name: "zero requested uses default ceiling max", envCeilingMax: "4096", requested: 0, expectedCeiling: mcip.DefaultDatagramCeilingMax},
 		{name: "zero requested clamps to env max below default", envCeilingMax: "1400", requested: 0, expectedCeiling: 1400},
 		{name: "below lower bound clamps to 1280", envCeilingMax: "4096", requested: 1200, expectedCeiling: 1280},
 		{name: "within bounds preserved", envCeilingMax: "4096", requested: 1400, expectedCeiling: 1400},
 		{name: "above env max clamps down", envCeilingMax: "4096", requested: 5000, expectedCeiling: 4096},
-		{name: "default max clamps to 1500", envCeilingMax: "not-a-number", requested: 2000, expectedCeiling: defaultConnectIPDatagramCeilingMax},
+		{name: "default max clamps to 1500", envCeilingMax: "not-a-number", requested: 2000, expectedCeiling: mcip.DefaultDatagramCeilingMax},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1448,8 +1052,8 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 			if !ok {
 				t.Fatalf("unexpected session type: %T", session)
 			}
-			if core.connectIPDatagramCeiling != tc.expectedCeiling {
-				t.Fatalf("unexpected connect ip datagram ceiling: got=%d want=%d", core.connectIPDatagramCeiling, tc.expectedCeiling)
+			if core.ConnectIPDatagramCeiling != tc.expectedCeiling {
+				t.Fatalf("unexpected connect ip datagram ceiling: got=%d want=%d", core.ConnectIPDatagramCeiling, tc.expectedCeiling)
 			}
 		})
 	}
@@ -1459,233 +1063,19 @@ func TestBuildAndParseIPv4UDPPacket(t *testing.T) {
 	src := netip.MustParseAddr("198.18.0.2")
 	dst := netip.MustParseAddr("10.200.0.2")
 	payload := []byte("hello-masque")
-	packet, err := buildIPv4UDPPacket(src, 53000, dst, 5601, payload)
+	packet, err := mcip.BuildIPv4UDPPacket(src, 53000, dst, 5601, payload)
 	if err != nil {
 		t.Fatalf("build packet: %v", err)
 	}
-	gotPayload, gotSrc, gotSrcPort, err := parseIPv4UDPPacket(packet)
+	gotPayload, gotSrc, gotSrcPort, err := mcip.ParseIPv4UDPPacket(packet)
 	if err != nil {
 		t.Fatalf("parse packet: %v", err)
 	}
-	if gotSrc != src {
-		t.Fatalf("unexpected src: %s", gotSrc)
-	}
-	if gotSrcPort != 53000 {
-		t.Fatalf("unexpected src port: %d", gotSrcPort)
-	}
-	if !bytes.Equal(gotPayload, payload) {
-		t.Fatalf("unexpected payload: %q", gotPayload)
+	if gotSrc != src || gotSrcPort != 53000 || !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("unexpected roundtrip: src=%s port=%d payload=%q", gotSrc, gotSrcPort, gotPayload)
 	}
 }
 
-func TestBuildIPv4UDPPacketInplaceReusesBuffer(t *testing.T) {
-	src := netip.MustParseAddr("198.18.0.2")
-	dst := netip.MustParseAddr("10.200.0.2")
-	initial := make([]byte, 0, 2048)
-	packetA, err := buildIPv4UDPPacketInplace(initial, src, 53000, dst, 5601, []byte("a"))
-	if err != nil {
-		t.Fatalf("first packet build: %v", err)
-	}
-	packetB, err := buildIPv4UDPPacketInplace(packetA[:0], src, 53000, dst, 5601, []byte("bbbb"))
-	if err != nil {
-		t.Fatalf("second packet build: %v", err)
-	}
-	if len(packetB) != 32 {
-		t.Fatalf("unexpected packet size: got=%d want=32", len(packetB))
-	}
-	if &packetA[:1][0] != &packetB[:1][0] {
-		t.Fatal("expected in-place builder to reuse caller-provided capacity")
-	}
-}
-
-func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
-	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	n, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
-	if err != nil {
-		t.Fatalf("write to: %v", err)
-	}
-	if n != 3 {
-		t.Fatalf("unexpected write n: %d", n)
-	}
-	if len(rec.lastWrite) == 0 {
-		t.Fatal("expected packet write")
-	}
-	dst := net.IP(rec.lastWrite[16:20]).String()
-	if dst != "10.200.0.2" {
-		t.Fatalf("unexpected destination ip: %s", dst)
-	}
-	dstPort := binary.BigEndian.Uint16(rec.lastWrite[22:24])
-	if dstPort != 5601 {
-		t.Fatalf("unexpected destination port: %d", dstPort)
-	}
-}
-
-func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
-	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	_, err := conn.WriteTo([]byte("abc"), &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 5601})
-	if err == nil {
-		t.Fatal("expected IPv6 destination rejection for temporary IPv4-only UDP bridge contract")
-	}
-}
-
-func TestConnectIPUDPPacketConnWriteToSplitsLargePayload(t *testing.T) {
-	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	payload := bytes.Repeat([]byte{0xab}, 2500)
-	n, err := conn.WriteTo(payload, &net.UDPAddr{IP: net.ParseIP("10.200.0.2"), Port: 5601})
-	if err != nil {
-		t.Fatalf("write to: %v", err)
-	}
-	if n != len(payload) {
-		t.Fatalf("unexpected write n: got=%d want=%d", n, len(payload))
-	}
-	if len(rec.writes) != 3 {
-		t.Fatalf("unexpected write count: got=%d want=3", len(rec.writes))
-	}
-	for _, packet := range rec.writes {
-		dst := net.IP(packet[16:20]).String()
-		if dst != "10.200.0.2" {
-			t.Fatalf("unexpected destination ip: %s", dst)
-		}
-		dstPort := binary.BigEndian.Uint16(packet[22:24])
-		if dstPort != 5601 {
-			t.Fatalf("unexpected destination port: %d", dstPort)
-		}
-	}
-}
-
-func TestConnectIPUDPPacketConnReadFrom(t *testing.T) {
-	packet, err := buildIPv4UDPPacket(
-		netip.MustParseAddr("10.200.0.2"),
-		5601,
-		netip.MustParseAddr("198.18.0.2"),
-		53000,
-		[]byte("pong"),
-	)
-	if err != nil {
-		t.Fatalf("build packet: %v", err)
-	}
-	rec := &recordingIPPacketSession{readPacket: packet}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	buf := make([]byte, 16)
-	n, addr, err := conn.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("read from: %v", err)
-	}
-	if n != 4 || string(buf[:n]) != "pong" {
-		t.Fatalf("unexpected payload: %q", buf[:n])
-	}
-	udpAddr, ok := addr.(*net.UDPAddr)
-	if !ok {
-		t.Fatalf("unexpected addr type: %T", addr)
-	}
-	if udpAddr.Port != 5601 || udpAddr.IP.String() != "10.200.0.2" {
-		t.Fatalf("unexpected source addr: %v", udpAddr)
-	}
-}
-
-func TestConnectIPUDPPacketConnWriteToEmptySendsOnePacket(t *testing.T) {
-	rec := &recordingIPPacketSession{}
-	conn := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	pc := conn.(*connectIPUDPPacketConn)
-	dst := &net.UDPAddr{IP: net.ParseIP("10.200.0.2").To4(), Port: 5601}
-	n, err := pc.WriteTo(nil, dst)
-	if err != nil {
-		t.Fatalf("WriteTo: %v", err)
-	}
-	if n != 0 {
-		t.Fatalf("expected n=0, got %d", n)
-	}
-	if len(rec.writes) != 1 {
-		t.Fatalf("expected 1 WritePacket for zero-length UDP, got %d", len(rec.writes))
-	}
-	pkt := rec.lastWrite
-	if len(pkt) != 28 {
-		t.Fatalf("expected 28-byte IPv4+UDP (empty payload), got len=%d", len(pkt))
-	}
-	udpLen := int(binary.BigEndian.Uint16(pkt[24:26]))
-	if udpLen != 8 {
-		t.Fatalf("expected UDP length 8 (header only), got %d", udpLen)
-	}
-}
-
-func TestConnectIPUDPPacketConnReadFromIngressDirectBuffer(t *testing.T) {
-	packet, err := buildIPv4UDPPacket(
-		netip.MustParseAddr("10.200.0.2"),
-		5601,
-		netip.MustParseAddr("198.18.0.2"),
-		53000,
-		[]byte("pong"),
-	)
-	if err != nil {
-		t.Fatalf("build packet: %v", err)
-	}
-	sub := &udpIngressSubscriber{ch: make(chan []byte, 1)}
-	sub.ch <- packet
-	pc := &connectIPUDPPacketConn{
-		ingressSub:      sub,
-		localV4:         netip.MustParseAddr("198.18.0.2"),
-		pmtuState:       newConnectIPPMTUState(1172, 512, 1172),
-		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
-	}
-	buf := bytes.Repeat([]byte{0xdd}, connectIPUDPDirectReadMin)
-	n, addr, err := pc.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("read from: %v", err)
-	}
-	if n != 4 || string(buf[:n]) != "pong" {
-		t.Fatalf("unexpected payload after ingress copy: %q", buf[:n])
-	}
-	if buf[n] != 0xdd {
-		t.Fatalf("expected trailing buffer prefix to stay untouched")
-	}
-	udpAddr, ok := addr.(*net.UDPAddr)
-	if !ok {
-		t.Fatalf("unexpected addr type: %T", addr)
-	}
-	if udpAddr.Port != 5601 || udpAddr.IP.String() != "10.200.0.2" {
-		t.Fatalf("unexpected source addr: %v", udpAddr)
-	}
-}
-
-func TestConnectIPUDPPacketConnReadFromDirectBufferNoStaging(t *testing.T) {
-	packet, err := buildIPv4UDPPacket(
-		netip.MustParseAddr("10.200.0.2"),
-		5601,
-		netip.MustParseAddr("198.18.0.2"),
-		53000,
-		[]byte("pong"),
-	)
-	if err != nil {
-		t.Fatalf("build packet: %v", err)
-	}
-	rec := &recordingIPPacketSession{readPacket: packet}
-	pc := newConnectIPUDPPacketConn(context.Background(), rec, nil)
-	c := pc.(*connectIPUDPPacketConn)
-	if c.readBuffer != nil {
-		t.Fatal("expected lazy read buffer to be unset before first small-buffer read is skipped")
-	}
-	buf := make([]byte, connectIPUDPDirectReadMin)
-	n, addr, err := c.ReadFrom(buf)
-	if err != nil {
-		t.Fatalf("read from: %v", err)
-	}
-	if n != 4 || string(buf[:n]) != "pong" {
-		t.Fatalf("unexpected payload after in-place shift: %q", buf[:n])
-	}
-	if c.readBuffer != nil {
-		t.Fatal("large-buffer ReadFrom must not allocate conn.readBuffer")
-	}
-	udpAddr, ok := addr.(*net.UDPAddr)
-	if !ok {
-		t.Fatalf("unexpected addr type: %T", addr)
-	}
-	if udpAddr.Port != 5601 || udpAddr.IP.String() != "10.200.0.2" {
-		t.Fatalf("unexpected source addr: %v", udpAddr)
-	}
-}
 
 func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 	templateUDP, err := uritemplate.New("https://example.com/masque/udp/{target_host}/{target_port}")
@@ -1698,8 +1088,9 @@ func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 	}
 	defer pc.Close()
 
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -1707,22 +1098,24 @@ func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 				return nil, nil
 			},
 		},
-		templateUDP:       templateUDP,
-		capabilities:      CapabilitySet{ConnectUDP: true},
-		httpLayerFallback: true,
-		udpClient:         &qmasque.Client{},
-		udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true},
+			HTTPLayerFallback: true,
+			UDPClient: &qmasque.Client{},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
 			return pc, nil
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
-	session.httpFallbackConsumed.Store(true)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
+	session.HTTPFallbackConsumed.Store(true)
 
-	_, dialErr := session.dialUDPAddr(context.Background(), session.udpClient, templateUDP, "127.0.0.1:5353")
+	_, dialErr := session.dialUDPAddr(context.Background(), session.UDPClient, templateUDP, "127.0.0.1:5353")
 	if dialErr != nil {
 		t.Fatalf("dialUDPAddr: %v", dialErr)
 	}
-	if session.httpFallbackConsumed.Load() {
+	if session.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected http_fallback budget cleared after a successful CONNECT-UDP handshake on this hop")
 	}
 }
@@ -1733,19 +1126,21 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 		t.Fatalf("build udp template: %v", err)
 	}
 	var call atomic.Uint32
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				return nil, errors.New("tcp dial stub")
 			},
 		},
-		templateUDP:       templateUDP,
-		capabilities:      CapabilitySet{ConnectUDP: true, ConnectIP: false},
-		httpLayerFallback: true,
-		udpClient:         &qmasque.Client{},
-		udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true, ConnectIP: false},
+			HTTPLayerFallback: true,
+			UDPClient: &qmasque.Client{},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
 			n := call.Add(1)
 			switch n {
 			case 1:
@@ -1756,16 +1151,17 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 			default:
 				return nil, errors.New("unexpected extra udp dial")
 			}
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
 	_, listenErr := session.ListenPacket(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 5353))
 	if listenErr == nil {
 		t.Fatal("expected error when hop chain is exhausted and h2 dial fails")
 	}
-	if len(session.hopOrder) != 0 {
-		t.Fatalf("test expects no masque hop chain, got %+v index=%d", session.hopOrder, session.hopIndex)
+	if len(session.HopOrder) != 0 {
+		t.Fatalf("test expects no masque hop chain, got %+v index=%d", session.HopOrder, session.HopIndex)
 	}
 	if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected http_layer fallback after reconnect dial switchable failure, overlay=%q", session.currentUDPHTTPLayer())
@@ -1773,7 +1169,7 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 	if call.Load() != 2 {
 		t.Fatalf("expected exactly two udpDial invocations on h3 before overlay switch, got %d", call.Load())
 	}
-	if session.httpFallbackConsumed.Load() {
+	if session.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared after exhausted ListenPacket so retries can pivot again")
 	}
 }
@@ -1785,20 +1181,22 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 	}
 	okPC := &tierBPacketConnStub{}
 	var call atomic.Uint32
-	var session *coreSession
-	session = &coreSession{
-		options: ClientOptions{
-			TransportMode:            "connect_udp",
-			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
-			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				return nil, errors.New("tcp dial stub")
+	var testSess *coreSession
+	testSess = func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
+				TransportMode:            "connect_udp",
+				MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
+				TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					return nil, errors.New("tcp dial stub")
+				},
 			},
-		},
-		templateUDP:       templateUDP,
-		capabilities:      CapabilitySet{ConnectUDP: true, ConnectIP: false},
-		httpLayerFallback: false,
-		h2UDPConnectHook: func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
-			if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
+			TemplateUDP:       templateUDP,
+			Caps:              CapabilitySet{ConnectUDP: true, ConnectIP: false},
+			HTTPLayerFallback: false,
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, h2UDPConnectHook: func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
+			if testSess.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
 				t.Fatal("expected CONNECT-UDP dial on h2 overlay only")
 			}
 			n := call.Add(1)
@@ -1810,11 +1208,12 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 			default:
 				return nil, errors.New("unexpected extra h2 CONNECT-UDP dial")
 			}
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+		}}
+		return cs
+	}()
+	testSess.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
-	pc, listenErr := session.ListenPacket(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 5353))
+	pc, listenErr := testSess.ListenPacket(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 5353))
 	if listenErr != nil {
 		t.Fatalf("ListenPacket: %v", listenErr)
 	}
@@ -1829,8 +1228,8 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 
 func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t *testing.T) {
 	var h3RoundTrips atomic.Uint32
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
 			TemplateTCP:              "https://example.com/masque/tcp/{target_host}/{target_port}",
@@ -1840,10 +1239,10 @@ func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t
 				return nil, errors.New("tcp dial stub")
 			},
 		},
-		capabilities:      CapabilitySet{ConnectTCP: true},
-		httpLayerFallback: true,
-	}
-	session.tcpRoundTripper = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			Caps: CapabilitySet{ConnectTCP: true},
+			HTTPLayerFallback: true,
+		})
+	session.TCPRoundTripper = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if session.currentUDPHTTPLayer() == option.MasqueHTTPLayerH3 {
 			n := h3RoundTrips.Add(1)
 			switch n {
@@ -1857,14 +1256,14 @@ func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t
 		}
 		return nil, errors.New("h2_connect_stream_round_trip_stub")
 	})
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
 	_, dialErr := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if dialErr == nil {
 		t.Fatal("expected error once h2 path hits tcp dial stub")
 	}
-	if len(session.hopOrder) != 0 {
-		t.Fatalf("test expects no masque hop chain, got %+v", session.hopOrder)
+	if len(session.HopOrder) != 0 {
+		t.Fatalf("test expects no masque hop chain, got %+v", session.HopOrder)
 	}
 	if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected http_layer fallback after transport churn exposes switchable failure, overlay=%q", session.currentUDPHTTPLayer())
@@ -1872,7 +1271,7 @@ func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t
 	if got := h3RoundTrips.Load(); got != 2 {
 		t.Fatalf("expected exactly two CONNECT-stream RoundTrips on overlay h3 before switch, got %d", got)
 	}
-	if session.httpFallbackConsumed.Load() {
+	if session.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared after exhausted dialTCPStream so retries can pivot again")
 	}
 }
@@ -1882,28 +1281,31 @@ func TestOpenIPSessionFailureClearsHTTPFallbackLatchForNextAttempt(t *testing.T)
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
-		templateIP:        templateIP,
-		capabilities:      CapabilitySet{ConnectIP: true},
-		httpLayerFallback: true,
-		dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
+			TemplateIP: templateIP,
+			Caps: CapabilitySet{ConnectIP: true},
+			HTTPLayerFallback: true,
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			if !useHTTP2 {
 				return nil, errors.New("Extended CONNECT not supported")
 			}
 			return nil, errors.New("stub h2 connect-ip non-switchable failure")
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
 	_, openErr := session.OpenIPSession(context.Background())
 	if openErr == nil {
 		t.Fatal("expected error from stubbed connect-ip dials")
 	}
-	if session.httpFallbackConsumed.Load() {
+	if session.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared after a wholly failed open so the next try can pivot again")
 	}
 }
@@ -1914,15 +1316,17 @@ func TestOpenIPSessionHTTPFallbackRunsAfterIPH3ReconnectDialSwitchableFailure(t 
 		t.Fatalf("build ip template: %v", err)
 	}
 	var call atomic.Uint32
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
-		templateIP:        templateIP,
-		capabilities:      CapabilitySet{ConnectIP: true},
-		httpLayerFallback: true,
-		dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
+			TemplateIP: templateIP,
+			Caps: CapabilitySet{ConnectIP: true},
+			HTTPLayerFallback: true,
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			n := call.Add(1)
 			if useHTTP2 {
 				return nil, errors.New("stub h2 connect-ip after overlay switch")
@@ -1935,9 +1339,10 @@ func TestOpenIPSessionHTTPFallbackRunsAfterIPH3ReconnectDialSwitchableFailure(t 
 			default:
 				return nil, errors.New("unexpected extra connect_ip dial on h3")
 			}
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
 	_, openErr := session.OpenIPSession(context.Background())
 	if openErr == nil {
@@ -1959,18 +1364,20 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 	}
 	okConn := &connectip.Conn{}
 	var call atomic.Uint32
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				return nil, errors.New("tcp dial stub")
 			},
 		},
-		templateIP:        templateIP,
-		capabilities:      CapabilitySet{ConnectIP: true},
-		httpLayerFallback: false,
-		dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
+			TemplateIP: templateIP,
+			Caps: CapabilitySet{ConnectIP: true},
+			HTTPLayerFallback: false,
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			if !useHTTP2 {
 				t.Fatal("expected CONNECT-IP dial on h2 overlay only")
 			}
@@ -1983,9 +1390,10 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 			default:
 				return nil, errors.New("unexpected extra connect_ip dial on h2")
 			}
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	sess, openErr := session.OpenIPSession(context.Background())
 	if openErr != nil {
@@ -1994,8 +1402,8 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 	if call.Load() != 2 {
 		t.Fatalf("expected h2 churn then success (2 connect-ip attempts), got %d", call.Load())
 	}
-	ps, ok := sess.(*connectIPPacketSession)
-	if !ok || ps.conn != okConn {
+	ps, ok := sess.(*mcip.ClientPacketSession)
+	if !ok || ps.Conn() != okConn {
 		t.Fatalf("unexpected session wrapper: %T / conn=%v", sess, ps)
 	}
 }
@@ -2005,15 +1413,15 @@ func TestDialConnectIPHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:    "t",
 			Server: "127.0.0.1",
 			// Intentionally no TCPDial: a canceled dial must not surface as missing dialer before ctx cause.
 			ServerPort: 443,
 		},
-		templateIP: templateIP,
-	}
+			TemplateIP: templateIP,
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialConnectIPHTTP2(ctx)
@@ -2026,8 +1434,8 @@ func TestDialConnectIPHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 }
 
 func TestDialConnectIPHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
@@ -2035,8 +1443,8 @@ func TestDialConnectIPHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
 				return nil, errors.New("unreachable tcp dial")
 			},
 		},
-		templateIP: nil,
-	}
+			TemplateIP: nil,
+		})
 	_, dialErr := s.dialConnectIPHTTP2(context.Background())
 	if dialErr == nil {
 		t.Fatal("expected error")
@@ -2054,14 +1462,14 @@ func TestDialUDPOverHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 			// No TCPDial: canceled ctx must yield Cause before tcp dialer error.
 		},
-	}
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialUDPOverHTTP2(ctx, templateUDP, "8.8.8.8:53")
@@ -2074,13 +1482,13 @@ func TestDialUDPOverHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 }
 
 func TestDialUDPOverHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-	}
+		})
 	_, dialErr := s.dialUDPOverHTTP2(context.Background(), nil, "8.8.8.8:53")
 	if dialErr == nil {
 		t.Fatal("expected error")
@@ -2094,14 +1502,14 @@ func TestDialUDPOverHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
 }
 
 func TestDialUDPAddrH3ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	cli := &qmasque.Client{}
 	_, dialErr := s.dialUDPAddr(context.Background(), cli, nil, "8.8.8.8:53")
 	if dialErr == nil {
@@ -2116,8 +1524,8 @@ func TestDialUDPAddrH3ReturnsErrWhenTemplateNil(t *testing.T) {
 }
 
 func TestDialUDPAddrH2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
@@ -2125,8 +1533,8 @@ func TestDialUDPAddrH2ReturnsErrWhenTemplateNil(t *testing.T) {
 				return nil, errors.New("unreachable tcp dial")
 			},
 		},
-	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+		})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 	s.h2UDPConnectHook = func(context.Context, *uritemplate.Template, string) (net.PacketConn, error) {
 		t.Fatal("dialUDPOverHTTP2 hook must not run when UDP template is nil")
 		return nil, nil
@@ -2153,7 +1561,9 @@ func TestDialTCPStreamH2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialTCPStreamH2(ctx, u, opts, "example.com", M.Socksaddr{})
@@ -2179,7 +1589,9 @@ func TestDialTCPStreamH2JoinsErrWhenH2TransportUnconfigured(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	_, dialErr := s.dialTCPStreamH2(context.Background(), u, opts, "example.com", M.Socksaddr{Port: 443})
 	if dialErr == nil {
 		t.Fatal("expected error")
@@ -2205,10 +1617,12 @@ func TestDialTCPStreamH2ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 			return nil, errors.New("unexpected tcp dial")
 		},
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	var attempts atomic.Uint32
 	ctx, cancel := context.WithCancel(context.Background())
-	s.tcpRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	s.TCPRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		attempts.Add(1)
 		cancel()
 		return &http.Response{
@@ -2245,7 +1659,9 @@ func TestDialTCPStreamH2StopsFailedRequestRelayBeforeRetry(t *testing.T) {
 			return nil, errors.New("unexpected tcp dial")
 		},
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	var attempts atomic.Uint32
 	var activeRelays atomic.Int32
 	prevFactory := h2ConnectRequestContextFactory
@@ -2265,7 +1681,7 @@ func TestDialTCPStreamH2StopsFailedRequestRelayBeforeRetry(t *testing.T) {
 			t.Fatalf("request relay leaks after dial return: %d", n)
 		}
 	})
-	s.tcpRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	s.TCPRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		if attempts.Add(1) == 1 {
 			return nil, errors.New("broken pipe")
 		}
@@ -2287,14 +1703,14 @@ func TestDialUDPAddrH3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialUDPAddr(ctx, nil, templateUDP, "8.8.8.8:53")
@@ -2313,8 +1729,8 @@ func TestDialUDPAddrH2ReturnsCanceledBeforeDialUDPOverHTTP2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
@@ -2322,12 +1738,12 @@ func TestDialUDPAddrH2ReturnsCanceledBeforeDialUDPOverHTTP2(t *testing.T) {
 				return nil, errors.New("unreachable tcp dial")
 			},
 		},
-	}
+		})
 	s.h2UDPConnectHook = func(context.Context, *uritemplate.Template, string) (net.PacketConn, error) {
 		t.Fatal("dialUDPOverHTTP2 path should not run when ctx already canceled")
 		return nil, nil
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialUDPAddr(ctx, nil, templateUDP, "8.8.8.8:53")
@@ -2340,14 +1756,14 @@ func TestDialUDPAddrH2ReturnsCanceledBeforeDialUDPOverHTTP2(t *testing.T) {
 }
 
 func TestDialConnectIPAttemptH3ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-		templateIP: nil,
-	}
+			TemplateIP: nil,
+		})
 	_, dialErr := s.dialConnectIPAttempt(context.Background(), false)
 	if dialErr == nil {
 		t.Fatal("expected error")
@@ -2365,14 +1781,14 @@ func TestDialConnectIPAttemptH3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-		templateIP: templateIP,
-	}
+			TemplateIP: templateIP,
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialConnectIPAttempt(ctx, false)
@@ -2390,8 +1806,8 @@ func TestDialConnectIPAttemptH2ReturnsCanceledBeforeLayerWorkClearsFallbackLatch
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
@@ -2400,9 +1816,9 @@ func TestDialConnectIPAttemptH2ReturnsCanceledBeforeLayerWorkClearsFallbackLatch
 				return nil, nil
 			},
 		},
-		templateIP: templateIP,
-	}
-	s.httpFallbackConsumed.Store(true)
+			TemplateIP: templateIP,
+		})
+	s.HTTPFallbackConsumed.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialConnectIPAttempt(ctx, true)
@@ -2412,21 +1828,21 @@ func TestDialConnectIPAttemptH2ReturnsCanceledBeforeLayerWorkClearsFallbackLatch
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if s.httpFallbackConsumed.Load() {
+	if s.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared on early cancel before H2 CONNECT-IP (parity with H3)")
 	}
 }
 
 // Parity with openIPSessionLocked: cached HTTP/3 client conn must not short-circuit a canceled ctx.
 func TestOpenHTTP3ClientConnReturnsCanceledBeforeReuse(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
 		},
-		ipHTTPConn: new(http3.ClientConn),
-	}
+			IPHTTPConn: new(http3.ClientConn),
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	conn, openErr := s.openHTTP3ClientConn(ctx)
@@ -2443,8 +1859,8 @@ func TestOpenHTTP3ClientConnReturnsCanceledBeforeReuse(t *testing.T) {
 
 // Parity with openHTTP3ClientConn: cached HTTP/2 overlay transport must not short-circuit a canceled ctx.
 func TestEnsureH2UDPTransportReturnsCanceledBeforeReuse(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
 			ServerPort: 443,
@@ -2452,8 +1868,8 @@ func TestEnsureH2UDPTransportReturnsCanceledBeforeReuse(t *testing.T) {
 				return nil, errors.New("unreachable")
 			},
 		},
-		h2UdpTransport: &http2.Transport{},
-	}
+			H2UDPTransport: &http2.Transport{},
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	tr, err := s.ensureH2UDPTransport(ctx)
@@ -2470,16 +1886,16 @@ func TestEnsureH2UDPTransportReturnsCanceledBeforeReuse(t *testing.T) {
 
 // Parity with dial paths: a canceled ctx must not hit the reuse shortcut (success with existing ipConn).
 func TestOpenIPSessionLockedReturnsCanceledBeforeReuse(t *testing.T) {
-	s := &coreSession{
-		options:      ClientOptions{Tag: "t"},
-		capabilities: CapabilitySet{ConnectIP: true},
-		ipConn:       &connectip.Conn{},
-	}
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{Tag: "t"},
+			Caps: CapabilitySet{ConnectIP: true},
+			IPConn: &connectip.Conn{},
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s.mu.Lock()
+	s.Mu.Lock()
 	_, openErr := s.openIPSessionLocked(ctx)
-	s.mu.Unlock()
+	s.Mu.Unlock()
 	if openErr == nil {
 		t.Fatal("expected error")
 	}
@@ -2494,8 +1910,8 @@ func TestOpenIPSessionLockedCanceledDialDoesNotAdvanceHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "hop1.example",
 			ServerPort: 443,
@@ -2504,14 +1920,14 @@ func TestOpenIPSessionLockedCanceledDialDoesNotAdvanceHop(t *testing.T) {
 				{Tag: "h2", Via: "h1", Server: "hop2.example", Port: 8443},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "h1", Server: "hop1.example", Port: 443},
 			{Tag: "h2", Via: "h1", Server: "hop2.example", Port: 8443},
 		},
-		hopIndex:     0,
-		capabilities: CapabilitySet{ConnectIP: true},
-		templateIP:   templateIP,
-	}
+			HopIndex: 0,
+			Caps: CapabilitySet{ConnectIP: true},
+			TemplateIP: templateIP,
+		})
 	// Block until ctx is canceled, then return cancellation (simulates long CONNECT-IP / QUIC handshake).
 	// dialConnectIPOnCurrentHopLocked may call the hook multiple times on one hop; only the first entry signals the test goroutine.
 	entered := make(chan struct{})
@@ -2526,20 +1942,20 @@ func TestOpenIPSessionLockedCanceledDialDoesNotAdvanceHop(t *testing.T) {
 		<-entered
 		cancel()
 	}()
-	s.mu.Lock()
+	s.Mu.Lock()
 	_, openErr := s.openIPSessionLocked(ctx)
-	s.mu.Unlock()
+	s.Mu.Unlock()
 	if openErr == nil {
 		t.Fatal("expected error")
 	}
 	if !errors.Is(openErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", openErr)
 	}
-	if s.hopIndex != 0 {
-		t.Fatalf("expected hopIndex to stay 0 on cancel, got %d", s.hopIndex)
+	if s.HopIndex != 0 {
+		t.Fatalf("expected hopIndex to stay 0 on cancel, got %d", s.HopIndex)
 	}
-	if s.options.Server != "hop1.example" || s.options.ServerPort != 443 {
-		t.Fatalf("expected session to remain on first hop, got %s:%d", s.options.Server, s.options.ServerPort)
+	if s.Options.Server != "hop1.example" || s.Options.ServerPort != 443 {
+		t.Fatalf("expected session to remain on first hop, got %s:%d", s.Options.Server, s.Options.ServerPort)
 	}
 }
 
@@ -2550,8 +1966,8 @@ func TestOpenIPSessionLockedCanceledDialInnerLoopDoesNotAdvanceHopAgain(t *testi
 	if err != nil {
 		t.Fatalf("template: %v", err)
 	}
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "hop1.example",
 			ServerPort: 443,
@@ -2561,20 +1977,20 @@ func TestOpenIPSessionLockedCanceledDialInnerLoopDoesNotAdvanceHopAgain(t *testi
 				{Tag: "h3", Via: "h2", Server: "hop3.example", Port: 8444},
 			},
 		},
-		hopOrder: []HopOptions{
+			HopOrder: []HopOptions{
 			{Tag: "h1", Server: "hop1.example", Port: 443},
 			{Tag: "h2", Via: "h1", Server: "hop2.example", Port: 8443},
 			{Tag: "h3", Via: "h2", Server: "hop3.example", Port: 8444},
 		},
-		hopIndex:     0,
-		capabilities: CapabilitySet{ConnectIP: true},
-		templateIP:   templateIP,
-	}
+			HopIndex: 0,
+			Caps: CapabilitySet{ConnectIP: true},
+			TemplateIP: templateIP,
+		})
 	secondDialEntered := make(chan struct{})
 	var enteredOnce sync.Once
 	ctx, cancel := context.WithCancel(context.Background())
 	s.dialConnectIPAttemptHook = func(dialCtx context.Context, _ bool) (*connectip.Conn, error) {
-		if s.hopIndex == 0 {
+		if s.HopIndex == 0 {
 			return nil, errors.New("overlay handshake failed")
 		}
 		enteredOnce.Do(func() { close(secondDialEntered) })
@@ -2585,20 +2001,20 @@ func TestOpenIPSessionLockedCanceledDialInnerLoopDoesNotAdvanceHopAgain(t *testi
 		<-secondDialEntered
 		cancel()
 	}()
-	s.mu.Lock()
+	s.Mu.Lock()
 	_, openErr := s.openIPSessionLocked(ctx)
-	s.mu.Unlock()
+	s.Mu.Unlock()
 	if openErr == nil {
 		t.Fatal("expected error")
 	}
 	if !errors.Is(openErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled in error chain, got %v", openErr)
 	}
-	if s.hopIndex != 1 {
-		t.Fatalf("expected exactly one hop advance before cancel, hopIndex=%d", s.hopIndex)
+	if s.HopIndex != 1 {
+		t.Fatalf("expected exactly one hop advance before cancel, hopIndex=%d", s.HopIndex)
 	}
-	if s.options.Server != "hop2.example" || s.options.ServerPort != 8443 {
-		t.Fatalf("expected logical hop h2 after single advance, got %s:%d", s.options.Server, s.options.ServerPort)
+	if s.Options.Server != "hop2.example" || s.Options.ServerPort != 8443 {
+		t.Fatalf("expected logical hop h2 after single advance, got %s:%d", s.Options.Server, s.Options.ServerPort)
 	}
 }
 
@@ -2612,7 +2028,9 @@ func TestDialTCPStreamHTTP3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, dialErr := s.dialTCPStreamHTTP3(ctx, u, opts, "example.com", 80, nil)
@@ -2638,10 +2056,12 @@ func TestDialTCPStreamHTTP3ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := &coreSession{options: opts}
+	s := newTestCoreSession(session.CoreSession{
+			Options: opts,
+		})
 	var attempts atomic.Uint32
 	ctx, cancel := context.WithCancel(context.Background())
-	s.tcpRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	s.TCPRoundTripper = roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		attempts.Add(1)
 		cancel()
 		return &http.Response{
@@ -2677,17 +2097,20 @@ func TestListenPacketConnectIPSkipsDestinationResolution(t *testing.T) {
 		t.Fatalf("build ip template: %v", err)
 	}
 	okConn := &connectip.Conn{}
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: "connect_ip",
 		},
-		templateIP:   templateIP,
-		capabilities: CapabilitySet{ConnectIP: true},
-		dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
+			TemplateIP: templateIP,
+			Caps: CapabilitySet{ConnectIP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			return okConn, nil
-		},
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		}}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
 	pc, listenErr := session.ListenPacket(context.Background(), dest)
 	if listenErr != nil {
@@ -2706,58 +2129,62 @@ func TestListenPacketConnectIPCanceledBeforeNewConnectIPUDPPacketConn(t *testing
 	}
 	okConn := &connectip.Conn{}
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: "connect_ip",
 		},
-		templateIP:   templateIP,
-		capabilities: CapabilitySet{ConnectIP: true},
-		dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
+			TemplateIP: templateIP,
+			Caps: CapabilitySet{ConnectIP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
 			return okConn, nil
-		},
-		listenPacketPostOpenIPSessionUnlockHook: func() { cancel() },
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		}, 	listenPacketPostOpenIPSessionUnlockHook: func() { cancel() }}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	// Exercise full abandon teardown: overlay transports must not outlive the closed connect-ip.Conn.
-	session.ipHTTP = &http3.Transport{}
-	session.h2UdpMu.Lock()
-	session.h2UdpTransport = &http2.Transport{}
-	session.h2UdpMu.Unlock()
+	session.IPHTTP = &http3.Transport{}
+	session.H2UDPMu.Lock()
+	session.H2UDPTransport = &http2.Transport{}
+	session.H2UDPMu.Unlock()
 
 	_, listenErr := session.ListenPacket(ctx, M.Socksaddr{})
 	if listenErr == nil || !errors.Is(listenErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", listenErr)
 	}
-	if session.ipConn != nil {
+	if session.IPConn != nil {
 		t.Fatal("expected released ipConn after cancel before PacketConn wrap")
 	}
-	if session.ipHTTP != nil || session.ipHTTPConn != nil {
+	if session.IPHTTP != nil || session.IPHTTPConn != nil {
 		t.Fatal("expected resetIPH3 after abandon before PacketConn wrap")
 	}
-	session.h2UdpMu.Lock()
-	h2Left := session.h2UdpTransport
-	session.h2UdpMu.Unlock()
+	session.H2UDPMu.Lock()
+	h2Left := session.H2UDPTransport
+	session.H2UDPMu.Unlock()
 	if h2Left != nil {
 		t.Fatal("expected H2 overlay pool cleared after abandon before PacketConn wrap")
 	}
 }
 
 func TestReleaseOpenedConnectIPSessionIfAbandonedClearsHTTPLayers(t *testing.T) {
-	s := &coreSession{options: ClientOptions{}}
-	s.ipConn = &connectip.Conn{}
-	s.ipHTTP = &http3.Transport{}
-	s.h2UdpMu.Lock()
-	s.h2UdpTransport = &http2.Transport{}
-	s.h2UdpMu.Unlock()
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{},
+		})
+	s.IPConn = &connectip.Conn{}
+	s.IPHTTP = &http3.Transport{}
+	s.H2UDPMu.Lock()
+	s.H2UDPTransport = &http2.Transport{}
+	s.H2UDPMu.Unlock()
 
 	s.releaseOpenedConnectIPSessionIfAbandoned()
 
-	if s.ipConn != nil || s.ipHTTP != nil || s.ipHTTPConn != nil {
-		t.Fatalf("expected CONNECT-IP plane and HTTP/3 refs cleared, ipConn=%v ipHTTP=%v", s.ipConn, s.ipHTTP)
+	if s.IPConn != nil || s.IPHTTP != nil || s.IPHTTPConn != nil {
+		t.Fatalf("expected CONNECT-IP plane and HTTP/3 refs cleared, ipConn=%v ipHTTP=%v", s.IPConn, s.IPHTTP)
 	}
-	s.h2UdpMu.Lock()
-	h2Left := s.h2UdpTransport
-	s.h2UdpMu.Unlock()
+	s.H2UDPMu.Lock()
+	h2Left := s.H2UDPTransport
+	s.H2UDPMu.Unlock()
 	if h2Left != nil {
 		t.Fatal("expected h2UdpTransport cleared")
 	}
@@ -2766,14 +2193,17 @@ func TestReleaseOpenedConnectIPSessionIfAbandonedClearsHTTPLayers(t *testing.T) 
 func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 	var hookCalls atomic.Uint32
 	okConn := &connectip.Conn{}
-	session := &coreSession{
-		options:      ClientOptions{TransportMode: "connect_ip"},
-		capabilities: CapabilitySet{ConnectIP: true},
-		dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{TransportMode: "connect_ip"},
+			Caps: CapabilitySet{ConnectIP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
 			hookCalls.Add(1)
 			return okConn, nil
-		},
-	}
+		}}
+		return cs
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, listenErr := session.ListenPacket(ctx, M.Socksaddr{})
@@ -2788,14 +2218,17 @@ func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 func TestOpenIPSessionCanceledBeforeLockSkipsConnectIPDial(t *testing.T) {
 	var hookCalls atomic.Uint32
 	okConn := &connectip.Conn{}
-	session := &coreSession{
-		options:      ClientOptions{TransportMode: "connect_ip"},
-		capabilities: CapabilitySet{ConnectIP: true},
-		dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{TransportMode: "connect_ip"},
+			Caps: CapabilitySet{ConnectIP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
 			hookCalls.Add(1)
 			return okConn, nil
-		},
-	}
+		}}
+		return cs
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, openErr := session.OpenIPSession(ctx)
@@ -2813,18 +2246,21 @@ func TestListenPacketCanceledSkipsUDPDialHook(t *testing.T) {
 		t.Fatalf("build udp template: %v", err)
 	}
 	var dials atomic.Uint32
-	s := &coreSession{
-		options: ClientOptions{
+	s := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
-		udpClient:    &qmasque.Client{},
-		templateUDP:  templateUDP,
-		capabilities: CapabilitySet{ConnectUDP: true},
-		udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
+			UDPClient: &qmasque.Client{},
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
 			dials.Add(1)
 			return nil, errors.New("unexpected dial")
-		},
-	}
+		}}
+		return cs
+	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, listenErr := s.ListenPacket(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 53))
@@ -2843,19 +2279,21 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 	}
 	var dials atomic.Uint32
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &coreSession{
-		options: ClientOptions{
+	s := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
-		udpClient:    &qmasque.Client{},
-		templateUDP:  templateUDP,
-		capabilities: CapabilitySet{ConnectUDP: true},
-		udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
+			UDPClient: &qmasque.Client{},
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
 			dials.Add(1)
 			return nil, errors.New("unexpected dial")
-		},
-		listenPacketPreResolveDestinationHook: func() { cancel() },
-	}
+		}, 	listenPacketPreResolveDestinationHook: func() { cancel() }}
+		return cs
+	}()
 	_, listenErr := s.ListenPacket(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 53))
 	if listenErr == nil || !errors.Is(listenErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", listenErr)
@@ -2866,41 +2304,41 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 }
 
 func TestDialContextCanceledBeforeTCPBranches(t *testing.T) {
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
-	}
-	s.httpFallbackConsumed.Store(true)
+		})
+	s.HTTPFallbackConsumed.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := s.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if s.httpFallbackConsumed.Load() {
+	if s.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared on early cancel before dialTCPStream (parity with ListenPacket/OpenIPSession)")
 	}
 }
 
 func TestDialConnectIPTCPCanceledClearsHTTPFallbackLatch(t *testing.T) {
-	s := &coreSession{
-		capabilities: CapabilitySet{ConnectIP: true},
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Caps: CapabilitySet{ConnectIP: true},
+			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectIP,
 			TCPTransport:  option.MasqueTCPTransportConnectIP,
 			Server:        "127.0.0.1",
 			ServerPort:    443,
 		},
-	}
-	s.httpFallbackConsumed.Store(true)
+		})
+	s.HTTPFallbackConsumed.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := s.dialConnectIPTCP(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 443))
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if s.httpFallbackConsumed.Load() {
+	if s.HTTPFallbackConsumed.Load() {
 		t.Fatal("expected httpFallbackConsumed cleared on early cancel in dialConnectIPTCP (parity with DialContext/ListenPacket)")
 	}
 }
@@ -2914,21 +2352,24 @@ func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 	releaseDial := make(chan struct{})
 	listenDone := make(chan error, 1)
 	var startOnce atomic.Bool
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: "connect_udp",
 		},
-		udpClient:    &qmasque.Client{},
-		templateUDP:  templateUDP,
-		capabilities: CapabilitySet{ConnectUDP: true, ConnectIP: false},
-		udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
+			UDPClient: &qmasque.Client{},
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true, ConnectIP: false},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
 			if startOnce.CompareAndSwap(false, true) {
 				close(dialStarted)
 			}
 			<-releaseDial
 			return nil, errors.New("stub dial failure")
-		},
-	}
+		}}
+		return cs
+	}()
 
 	go func() {
 		_, listenErr := session.ListenPacket(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 5353))
@@ -2996,8 +2437,8 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 	}()
 	addr := ln.Addr().(*net.TCPAddr)
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", uint16(addr.Port))
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
@@ -3005,11 +2446,11 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
-		capabilities: CapabilitySet{ConnectTCP: true},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			Caps: CapabilitySet{ConnectTCP: true},
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return nil, errors.New("stub masque connect_stream unavailable")
 		}),
-	}
+		})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.DialContext(ctx, "tcp", dest)
@@ -3026,8 +2467,8 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 
 func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
@@ -3035,14 +2476,14 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
-		capabilities: CapabilitySet{ConnectTCP: true},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			Caps: CapabilitySet{ConnectTCP: true},
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusForbidden,
 				Body:       io.NopCloser(bytes.NewReader(nil)),
 			}, nil
 		}),
-	}
+		})
 	_, err := session.DialContext(context.Background(), "tcp", dest)
 	if !errors.Is(err, ErrAuthFailed) {
 		t.Fatalf("expected ErrAuthFailed without direct fallback, got: %v", err)
@@ -3051,8 +2492,8 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 
 func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
@@ -3060,11 +2501,11 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 			TCPMode:        option.MasqueTCPModeStrictMasque,
 			FallbackPolicy: option.MasqueFallbackPolicyStrict,
 		},
-		capabilities: CapabilitySet{ConnectTCP: true},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			Caps: CapabilitySet{ConnectTCP: true},
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return nil, errors.New("stub masque connect_stream unavailable")
 		}),
-	}
+		})
 	_, err := session.DialContext(context.Background(), "tcp", dest)
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3074,13 +2515,13 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
 	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			session := &coreSession{
-				options: ClientOptions{
+			session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
 					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 				},
-				tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					if req.Method != http.MethodConnect {
 						t.Fatalf("unexpected method: %s", req.Method)
 					}
@@ -3089,7 +2530,7 @@ func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
 						Body:       io.NopCloser(bytes.NewReader(nil)),
 					}, nil
 				}),
-			}
+		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 			if !errors.Is(err, ErrAuthFailed) {
 				t.Fatalf("expected ErrAuthFailed for status=%d, got: %v", statusCode, err)
@@ -3108,19 +2549,19 @@ func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
 		http.StatusServiceUnavailable,
 	} {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			session := &coreSession{
-				options: ClientOptions{
+			session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
 					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 				},
-				tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: statusCode,
 						Body:       io.NopCloser(bytes.NewReader(nil)),
 					}, nil
 				}),
-			}
+		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 			if !errors.Is(err, ErrTCPConnectStreamFailed) {
 				t.Fatalf("expected ErrTCPConnectStreamFailed for non-auth non-2xx status=%d, got: %v", statusCode, err)
@@ -3142,17 +2583,17 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 	for name, retryErr := range retryableErrors {
 		t.Run(name, func(t *testing.T) {
 			attempts := 0
-			session := &coreSession{
-				options: ClientOptions{
+			session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
 					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 				},
-				tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					attempts++
 					return nil, retryErr
 				}),
-			}
+		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 			if !errors.Is(err, ErrTCPConnectStreamFailed) {
 				t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3170,17 +2611,17 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 	retryErr := timeoutNetError{msg: "timeout while connecting"}
 	attempts := 0
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, retryErr
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3199,17 +2640,17 @@ func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 func TestDialTCPStreamNonRetryableRoundTripErrorDoesNotRetryAndKeepsDialClass(t *testing.T) {
 	attempts := 0
 	nonRetryableErr := errors.New("tls: bad certificate")
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, nonRetryableErr
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3234,20 +2675,20 @@ func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *tes
 		time.Sleep(5 * time.Millisecond)
 		cancel()
 	}()
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			if attempts == 1 {
 				firstAttempt <- struct{}{}
 			}
 			return nil, timeoutNetError{msg: "timeout while connecting"}
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3266,18 +2707,21 @@ func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *tes
 func TestDialTCPStreamPreAdvanceHopJoinsCauseWhenCanceledAtChainEnd(t *testing.T) {
 	handshakeErr := errors.New("handshake before hop advance cancel")
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &coreSession{
-		options: ClientOptions{
+	session := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return nil, handshakeErr
 		}),
-		dialTCPStreamPreAdvanceHopHook: func() { cancel() },
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	dialTCPStreamPreAdvanceHopHook: func() { cancel() }}
+		return cs
+	}()
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.Canceled) || !errors.Is(err, handshakeErr) {
 		t.Fatalf("expected joined handshake+cancel, got: %v", err)
@@ -3291,18 +2735,20 @@ func TestListenPacketUDPChainEndJoinsCauseWhenCanceledAtHopExhaustion(t *testing
 		t.Fatalf("build udp template: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &coreSession{
-		options: ClientOptions{
+	s := func() *coreSession {
+		s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
-		udpClient:    &qmasque.Client{},
-		templateUDP:  templateUDP,
-		capabilities: CapabilitySet{ConnectUDP: true},
-		udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
+			UDPClient: &qmasque.Client{},
+			TemplateUDP: templateUDP,
+			Caps: CapabilitySet{ConnectUDP: true},
+		})
+		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
 			return nil, dialUDPfail
-		},
-		listenPacketPreChainEndReturnHook: func() { cancel() },
-	}
+		}, 	listenPacketPreChainEndReturnHook: func() { cancel() }}
+		return cs
+	}()
 	_, listenErr := s.ListenPacket(ctx, M.ParseSocksaddrHostPort("127.0.0.1", 53))
 	if listenErr == nil || !errors.Is(listenErr, context.Canceled) || !errors.Is(listenErr, dialUDPfail) {
 		t.Fatalf("expected joined dial error+cancel at chain end, got: %v", listenErr)
@@ -3314,19 +2760,19 @@ func TestDialTCPStreamOuterLoopJoinsContextCauseWhenCanceledDuringRoundTrip(t *t
 	entered := make(chan struct{})
 	resume := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			close(entered)
 			<-resume
 			return nil, handshakeErr
 		}),
-	}
-	session.udpHTTPLayer.Store(option.MasqueHTTPLayerH3)
+		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	go func() {
 		<-entered
 		cancel()
@@ -3348,17 +2794,17 @@ func TestDialTCPStreamContextCanceledBeforeFirstRoundTripStopsWithoutAttempt(t *
 	attempts := 0
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, timeoutNetError{msg: "timeout while connecting"}
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3378,17 +2824,17 @@ func TestDialTCPStreamContextDeadlineExceededBeforeFirstRoundTripStopsWithoutAtt
 	attempts := 0
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, timeoutNetError{msg: "timeout while connecting"}
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3408,17 +2854,17 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 	attempts := 0
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, timeoutNetError{msg: "timeout while connecting"}
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3436,17 +2882,17 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 
 func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *testing.T) {
 	attempts := 0
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, context.Canceled
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3464,17 +2910,17 @@ func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *test
 
 func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry(t *testing.T) {
 	attempts := 0
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
 			return nil, context.DeadlineExceeded
 		}),
-	}
+		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
 	if !errors.Is(err, ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
@@ -3492,13 +2938,13 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 
 func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			// dialTCPStream attaches Request.Context via connectip.NewH2ExtendedConnectRequestContext:
 			// it deliberately does not inherit dial deadline cancellation on the CONNECT stream body.
 			// Simulate relay-phase timeout with an independent timer on the response body.
@@ -3508,7 +2954,7 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 				Body:       &contextBoundReadCloser{ctx: relayCtx},
 			}, nil
 		}),
-	}
+		})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
@@ -3533,19 +2979,19 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	relayCtx, relayCancel := context.WithCancel(context.Background())
-	session := &coreSession{
-		options: ClientOptions{
+	session := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
 			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
 		},
-		tcpRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       &contextBoundReadCloser{ctx: relayCtx},
 			}, nil
 		}),
-	}
+		})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
@@ -3793,49 +3239,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableApplicationErrorKeepsBudgetAnd
 	}
 }
 
-func TestValidateQUICTransportPacketConnTierAUDPConnPasses(t *testing.T) {
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen packet: %v", err)
-	}
-	defer pc.Close()
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
-	if err := ValidateQUICTransportPacketConn(pc, "test_server"); err != nil {
-		t.Fatalf("expected TierA udp conn to pass strict policy, got: %v", err)
-	}
-}
-
-func TestValidateQUICTransportPacketConnTierBStrictRejects(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
-	pc := &tierBPacketConnStub{}
-	err := ValidateQUICTransportPacketConn(pc, "test_custom")
-	if err == nil {
-		t.Fatal("expected strict policy to reject TierB packet conn")
-	}
-	if !errors.Is(err, ErrQUICPacketConnContract) {
-		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
-	}
-}
-
-func TestCustomQUICDialStrictPolicyRejects(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
-	session := &coreSession{
-		options: ClientOptions{
-			QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-				t.Fatal("custom QUICDial must not run in strict mode")
-				return nil, nil
-			},
-		},
-	}
-	_, err := session.quicDialWithPolicy("client_connect_stream")(context.Background(), "127.0.0.1:443", &tls.Config{}, &quic.Config{})
-	if err == nil {
-		t.Fatal("expected strict policy reject error")
-	}
-	if !errors.Is(err, ErrQUICPacketConnContract) {
-		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
-	}
-}
-
 type tierBPacketConnStub struct{}
 
 func (s *tierBPacketConnStub) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -3931,91 +3334,6 @@ func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, target
 	return proxyPort
 }
 
-func TestSnapshotMetricsIncludesErrorClassCounters(t *testing.T) {
-	before := SnapshotMetrics()
-	recordTCPDialFailure()
-	recordTCPDialErrorClass(ErrTCPDial)
-	recordTCPDialErrorClass(ErrPolicyFallbackDenied)
-	recordTCPDialErrorClass(ErrTCPOverConnectIP)
-	recordTCPDialErrorClass(errors.New("unknown"))
-	after := SnapshotMetrics()
-
-	if after.TCPDialFailTotal < before.TCPDialFailTotal+1 {
-		t.Fatalf("expected dial fail counter increment, before=%d after=%d", before.TCPDialFailTotal, after.TCPDialFailTotal)
-	}
-	if after.TCPErrorClassDialTotal < before.TCPErrorClassDialTotal+1 {
-		t.Fatalf("expected dial class counter increment, before=%d after=%d", before.TCPErrorClassDialTotal, after.TCPErrorClassDialTotal)
-	}
-	if after.TCPErrorClassPolicyTotal < before.TCPErrorClassPolicyTotal+1 {
-		t.Fatalf("expected policy class counter increment, before=%d after=%d", before.TCPErrorClassPolicyTotal, after.TCPErrorClassPolicyTotal)
-	}
-	if after.TCPErrorClassCapTotal < before.TCPErrorClassCapTotal+1 {
-		t.Fatalf("expected capability class counter increment, before=%d after=%d", before.TCPErrorClassCapTotal, after.TCPErrorClassCapTotal)
-	}
-	if after.TCPErrorClassOtherTotal < before.TCPErrorClassOtherTotal+1 {
-		t.Fatalf("expected other class counter increment, before=%d after=%d", before.TCPErrorClassOtherTotal, after.TCPErrorClassOtherTotal)
-	}
-}
-
-func TestSnapshotMetricsTracksDialSuccessFallbackStackReady(t *testing.T) {
-	before := SnapshotMetrics()
-	recordTCPDialSuccess()
-	recordTCPDialSuccess()
-	recordTCPFallback()
-	recordConnectIPStackReady(true)
-	recordConnectIPStackReady(false)
-	after := SnapshotMetrics()
-	if after.TCPDialTotal < before.TCPDialTotal+2 {
-		t.Fatalf("tcp_dial_total: before=%d after=%d", before.TCPDialTotal, after.TCPDialTotal)
-	}
-	if after.TCPFallbackTotal < before.TCPFallbackTotal+1 {
-		t.Fatalf("tcp_fallback_total: before=%d after=%d", before.TCPFallbackTotal, after.TCPFallbackTotal)
-	}
-	if after.ConnectIPStackReady < before.ConnectIPStackReady+1 {
-		t.Fatalf("connect_ip_stack_ready_total: before=%d after=%d", before.ConnectIPStackReady, after.ConnectIPStackReady)
-	}
-	if after.ConnectIPStackNotReady < before.ConnectIPStackNotReady+1 {
-		t.Fatalf("connect_ip_stack_not_ready_total: before=%d after=%d", before.ConnectIPStackNotReady, after.ConnectIPStackNotReady)
-	}
-}
-
-func TestConnectIPObservabilitySnapshotPolicyReasonContract(t *testing.T) {
-	snapshot := ConnectIPObservabilitySnapshot()
-	reasonMapRaw, ok := snapshot["connect_ip_policy_drop_icmp_reason_total"]
-	if !ok {
-		t.Fatal("expected connect_ip_policy_drop_icmp_reason_total key in observability snapshot")
-	}
-	reasonMap, ok := reasonMapRaw.(map[string]uint64)
-	if !ok {
-		t.Fatalf("unexpected policy-drop reason map type: %T", reasonMapRaw)
-	}
-	for _, reason := range []string{"src_not_allowed", "dst_not_allowed", "proto_not_allowed"} {
-		_, exists := reasonMap[reason]
-		if !exists {
-			t.Fatalf("expected mandatory policy-drop reason key %q", reason)
-		}
-	}
-	if ClassifyError(ErrPolicyFallbackDenied) != ErrorClassPolicy {
-		t.Fatal("expected ErrPolicyFallbackDenied to stay classified as policy")
-	}
-}
-
-func TestConnectIPObservabilitySnapshotIncludesNetstackNotifyMetrics(t *testing.T) {
-	snapshot := ConnectIPObservabilitySnapshot()
-	for _, key := range []string{
-		"connect_ip_netstack_write_notify_retry_continue_drop_total",
-		"connect_ip_netstack_write_notify_slow_iteration_total",
-	} {
-		raw, ok := snapshot[key]
-		if !ok {
-			t.Fatalf("expected %q in ConnectIPObservabilitySnapshot", key)
-		}
-		if _, ok := raw.(uint64); !ok {
-			t.Fatalf("unexpected type for %s: %T", key, raw)
-		}
-	}
-}
-
 func TestConnectIPObservabilitySnapshotIncludesHTTP3StreamDatagramQueueDrops(t *testing.T) {
 	snapshot := ConnectIPObservabilitySnapshot()
 	raw, ok := snapshot["http3_stream_datagram_queue_drop_total"]
@@ -4066,31 +3384,8 @@ func (s *recordingIPPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 
 func (s *recordingIPPacketSession) Close() error { return nil }
 
-func TestParseICMPPortUnreachablePeerIPv4(t *testing.T) {
-	orig, err := buildIPv4UDPPacket(
-		netip.MustParseAddr("198.18.0.2"),
-		53000,
-		netip.MustParseAddr("10.200.0.2"),
-		5601,
-		[]byte("dns"),
-	)
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	icmpPkt := make([]byte, 20+8+len(orig))
-	icmpPkt[0] = 0x45
-	icmpPkt[9] = 1
-	icmpPkt[20] = 3
-	icmpPkt[21] = 3
-	copy(icmpPkt[28:], orig)
-	peer, port, ok := parseICMPPortUnreachablePeer(icmpPkt)
-	if !ok || peer != netip.MustParseAddr("10.200.0.2") || port != 5601 {
-		t.Fatalf("parse: peer=%v port=%d ok=%v", peer, port, ok)
-	}
-}
-
 func TestConnectIPUDPBridgeICMPPortUnreachableFromWrite(t *testing.T) {
-	orig, err := buildIPv4UDPPacket(
+	orig, err := mcip.BuildIPv4UDPPacket(
 		netip.MustParseAddr("198.18.0.2"),
 		53000,
 		netip.MustParseAddr("10.200.0.2"),
@@ -4113,36 +3408,8 @@ func TestConnectIPUDPBridgeICMPPortUnreachableFromWrite(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	_, _, err = conn.ReadFrom(make([]byte, 64))
-	if !errors.Is(err, ErrUDPPortUnreachable) {
-		t.Fatalf("read: %v want ErrUDPPortUnreachable", err)
-	}
-}
-
-func TestParseICMPPTBHopMTUIPv4(t *testing.T) {
-	pkt := make([]byte, 28)
-	pkt[0] = 0x45
-	pkt[9] = 1
-	icmpOff := 20
-	pkt[icmpOff] = 3
-	pkt[icmpOff+1] = 4
-	binary.BigEndian.PutUint16(pkt[icmpOff+6:icmpOff+8], 1200)
-	mtu, v6, ok := parseICMPPTBHopMTU(pkt)
-	if !ok || v6 || mtu != 1200 {
-		t.Fatalf("parse: mtu=%d v6=%v ok=%v", mtu, v6, ok)
-	}
-}
-
-func TestParseICMPPTBHopMTUIPv6(t *testing.T) {
-	pkt := make([]byte, 48)
-	pkt[0] = 0x60
-	pkt[6] = 58
-	icmpOff := 40
-	pkt[icmpOff] = 2
-	pkt[icmpOff+1] = 0
-	binary.BigEndian.PutUint32(pkt[icmpOff+4:icmpOff+8], 1400)
-	mtu, v6, ok := parseICMPPTBHopMTU(pkt)
-	if !ok || !v6 || mtu != 1400 {
-		t.Fatalf("parse: mtu=%d v6=%v ok=%v", mtu, v6, ok)
+	if !errors.Is(err, mcip.ErrICMPPortUnreachable) {
+		t.Fatalf("read: %v want ErrICMPPortUnreachable", err)
 	}
 }
 

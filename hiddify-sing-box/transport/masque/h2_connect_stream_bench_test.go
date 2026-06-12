@@ -14,6 +14,8 @@ import (
 
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/session"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"golang.org/x/net/http2"
 )
 
@@ -29,7 +31,7 @@ func startInProcessH2TCPConnectStreamProxy(t *testing.T) int {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if p := r.Header.Get(":protocol"); p != "" && p != h2ConnectStreamProto {
+		if p := r.Header.Get(":protocol"); p != "" && p != strm.H2ConnectStreamProto {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -101,24 +103,24 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 		t.Fatalf("parse url: %v", err)
 	}
 
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+			Options: ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
-	}
-	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		})
+	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	conn, err := s.dialTCPStreamH2(ctx, tcpURL, s.options, "127.0.0.1", M.ParseSocksaddrHostPort("127.0.0.1", uint16(targetPort)))
+	conn, err := s.dialTCPStreamH2(ctx, tcpURL, s.Options, "127.0.0.1", M.ParseSocksaddrHostPort("127.0.0.1", uint16(targetPort)))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

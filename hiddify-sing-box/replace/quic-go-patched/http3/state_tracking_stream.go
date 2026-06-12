@@ -107,7 +107,7 @@ func (s *stateTrackingStream) CancelRead(e quic.StreamErrorCode) {
 
 func (s *stateTrackingStream) Read(b []byte) (int, error) {
 	n, err := s.Stream.Read(b)
-	if n > 0 {
+	if n > 0 && masqueWakeSendOnReceiveRead() {
 		quic.MasqueWakeStreamSend(s.Stream)
 	}
 	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {

@@ -24,7 +24,14 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/sagernet/sing-box/option"
+	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/session"
 )
+
+func testH2UDPPacketConn(cfg cudp.H2PacketConnConfig) *h2ConnectUDPPacketConn {
+	return cudp.NewH2PacketConn(cfg)
+}
 
 // dialTimeoutNetErr is synthetic net-compatible timeout text matching common Windows dial failures
 // that omit legacy "i/o timeout" tokens.
@@ -57,48 +64,22 @@ func (c *chunkWriter) Write(p []byte) (int, error) {
 func TestWriteAllIOWriterCompletesPartialWrites(t *testing.T) {
 	w := &chunkWriter{max: 7}
 	payload := bytes.Repeat([]byte{'z'}, 100)
-	n, err := writeAllIOWriter(w, payload)
+	n, err := h2c.WriteAll(w, payload)
 	require.NoError(t, err)
 	require.Equal(t, len(payload), n)
 	require.Equal(t, payload, w.buf.Bytes())
 }
 
-// partialFailWriter returns a short write together with an error on the first call (allowed by io.Writer).
-// Callers like writeAllIOWriter must observe n>0 on that path; h2UDPUploadWriter must not collapse n to 0.
-type partialFailWriter struct {
-	calls int
-}
-
-func (w *partialFailWriter) Write(p []byte) (int, error) {
-	w.calls++
-	if w.calls == 1 {
-		if len(p) < 2 {
-			return len(p), errors.New("test short write")
-		}
-		return 2, errors.New("test short write")
-	}
-	return len(p), nil
-}
-
-func (*partialFailWriter) Close() error { return nil }
-
-func TestH2UDPUploadWriterPropagatesPartialWriteOnError(t *testing.T) {
-	uw := &h2UDPUploadWriter{c: &h2ConnectUDPPacketConn{reqBody: &partialFailWriter{}}}
-	n, err := uw.Write([]byte("hello"))
-	require.Error(t, err)
-	require.Equal(t, 2, n, "io.Writer must return bytes written before error (writeAllIOWriter / net/http rely on this)")
-}
-
 func TestEnsureH2UDPTransportSetsDisableCompression(t *testing.T) {
 	ctx := context.Background()
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+		Options: ClientOptions{
 			Server: "example.com",
 			TCPDial: func(context.Context, string, string) (net.Conn, error) {
 				return nil, errors.New("dial not used in this test")
 			},
 		},
-	}
+	})
 	tr, err := s.ensureH2UDPTransport(ctx)
 	require.NoError(t, err)
 	require.True(t, tr.DisableCompression, "H2 MASQUE dataplane must not negotiate gzip (breaks CONNECT stream framing)")
@@ -106,27 +87,6 @@ func TestEnsureH2UDPTransportSetsDisableCompression(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, tr, tr2)
 	require.True(t, tr2.DisableCompression)
-}
-
-func TestWarpMasqueH2AlternateDialHostSwapsSiblingIPv4(t *testing.T) {
-	require.Equal(t, "162.159.198.2", warpMasqueH2AlternateDialHost("162.159.198.1"))
-	require.Equal(t, "162.159.198.1", warpMasqueH2AlternateDialHost("162.159.198.2"))
-}
-
-func TestWarpMasqueH2AlternateDialHostRejectsNonSiblingIPv4(t *testing.T) {
-	require.Equal(t, "", warpMasqueH2AlternateDialHost("162.159.198.3"))
-	require.Equal(t, "", warpMasqueH2AlternateDialHost("engage.cloudflareclient.com"))
-	require.Equal(t, "", warpMasqueH2AlternateDialHost("2606:4700::1111"))
-}
-
-func TestH2DialHostCandidatesCfConnectIPForcesAlternateOnly(t *testing.T) {
-	got := h2DialHostCandidates("cf-connect-ip", "162.159.198.1", "162.159.198.2")
-	require.Equal(t, []string{"162.159.198.2"}, got)
-}
-
-func TestH2DialHostCandidatesNonCfKeepsPrimaryThenAlternate(t *testing.T) {
-	got := h2DialHostCandidates("connect-ip", "162.159.198.1", "162.159.198.2")
-	require.Equal(t, []string{"162.159.198.1", "162.159.198.2"}, got)
 }
 
 func TestParseMasqueHTTPDatagramUDPZeroContext(t *testing.T) {
@@ -139,7 +99,7 @@ func TestParseMasqueHTTPDatagramUDPZeroContext(t *testing.T) {
 func TestWriteMasqueCapsuleUDPFrame(t *testing.T) {
 	var buf bytes.Buffer
 	dgram := []byte{0, 'z'}
-	require.NoError(t, http3.WriteCapsule(&buf, capsuleTypeDatagram, dgram))
+	require.NoError(t, http3.WriteCapsule(&buf, http3.CapsuleType(h2c.CapsuleTypeDatagram), dgram))
 	require.Greater(t, buf.Len(), 3)
 }
 
@@ -147,12 +107,12 @@ func TestWriteMasqueCapsuleUDPFrame(t *testing.T) {
 // (http3.ParseCapsule + io.Copy(io.Discard, reader) admitted hostiles before this hard cap).
 func TestParseH2ConnectUDPCapsuleRejectsAstronomicDatagramDeclaredLength(t *testing.T) {
 	var hdr bytes.Buffer
-	hdr.Write(quicvarint.Append(nil, uint64(capsuleTypeDatagram)))
-	hdr.Write(quicvarint.Append(nil, uint64(h2ConnectUDPMaxCapsulePayload)+1_000_000))
+	hdr.Write(quicvarint.Append(nil, uint64(http3.CapsuleType(h2c.CapsuleTypeDatagram))))
+	hdr.Write(quicvarint.Append(nil, uint64(h2c.MaxCapsulePayload())+1_000_000))
 	vr := quicvarint.NewReader(bytes.NewReader(hdr.Bytes()))
-	_, _, err := parseH2ConnectUDPCapsule(vr)
+	_, _, err := h2c.ParseCapsule(vr)
 	require.Error(t, err)
-	require.ErrorIs(t, err, errMasqueH2ConnectUDPOversizedDeclared)
+	require.ErrorIs(t, err, h2c.ErrOversizedDeclared)
 	require.Contains(t, err.Error(), "DATAGRAM capsule payload exceeds")
 }
 
@@ -164,19 +124,19 @@ func TestParseH2ConnectUDPCapsuleRejectsAstronomicDatagramDeclaredLength(t *test
 func TestH2ConnectUDPPacketConnSkipsMalformedHTTPDatagramThenReadsValid(t *testing.T) {
 	var wire bytes.Buffer
 	// Truncated 2-byte context varint prefix (0x40 >> 6 == 1) — parse returns (_, false, io.EOF).
-	require.NoError(t, http3.WriteCapsule(&wire, capsuleTypeDatagram, []byte{0x40}))
-	require.NoError(t, http3.WriteCapsule(&wire, capsuleTypeDatagram, []byte{0, 'z'}))
+	require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(h2c.CapsuleTypeDatagram), []byte{0x40}))
+	require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(h2c.CapsuleTypeDatagram), []byte{0, 'z'}))
 
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "127.0.0.1:1"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "127.0.0.1:1"},
+	})
 	buf := make([]byte, 64)
 	n, _, err := c.ReadFrom(buf)
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 	require.Equal(t, byte('z'), buf[0])
-	require.False(t, c.closed.Load())
+	require.False(t, c.IsClosed())
 }
 
 // Regression: io.EOF must be detected with errors.Is so a wrapped clean shutdown does not look like
@@ -187,25 +147,25 @@ func (r h2UDPReadReturnErr) Read(p []byte) (int, error) { return 0, r.err }
 
 func TestH2ConnectUDPPacketConnReadFromCleanEOFWrapped(t *testing.T) {
 	wrapped := fmt.Errorf("upstream: %w", io.EOF)
-	c := &h2ConnectUDPPacketConn{
-		resp: &http.Response{Body: io.NopCloser(h2UDPReadReturnErr{err: wrapped})},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp: &http.Response{Body: io.NopCloser(h2UDPReadReturnErr{err: wrapped})},
+	})
 	_, _, err := c.ReadFrom(make([]byte, 8))
 	require.ErrorIs(t, err, io.EOF)
-	require.False(t, c.closed.Load())
+	require.False(t, c.IsClosed())
 }
 
 func TestH2ConnectUDPPacketConnSkipsLargeNonDatagramCapsule(t *testing.T) {
 	var wire bytes.Buffer
-	large := make([]byte, h2ConnectUDPMaxCapsulePayload+100)
+	large := make([]byte, h2c.MaxCapsulePayload()+100)
 	require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(1), large))
 	dgram := []byte{0, 'x'}
-	require.NoError(t, http3.WriteCapsule(&wire, capsuleTypeDatagram, dgram))
+	require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(h2c.CapsuleTypeDatagram), dgram))
 
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "127.0.0.1:1"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "127.0.0.1:1"},
+	})
 	buf := make([]byte, 64)
 	n, _, err := c.ReadFrom(buf)
 	require.NoError(t, err)
@@ -216,12 +176,12 @@ func TestH2ConnectUDPPacketConnSkipsLargeNonDatagramCapsule(t *testing.T) {
 // Regression: corrupt capsule framing after CONNECT-UDP closes the tunnel (stream stays misaligned).
 func TestH2ConnectUDPPacketConnClosesOnTruncatedCapsulePrefix(t *testing.T) {
 	var hdr bytes.Buffer
-	hdr.Write(quicvarint.Append(nil, uint64(capsuleTypeDatagram)))
+	hdr.Write(quicvarint.Append(nil, uint64(http3.CapsuleType(h2c.CapsuleTypeDatagram))))
 	// truncated length varint — ParseCapsule parity expects UnexpectedEOF, not silent EOF
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(hdr.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "127.0.0.1:1"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(hdr.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "127.0.0.1:1"},
+	})
 	buf := make([]byte, 64)
 	n, _, err := c.ReadFrom(buf)
 	if err == nil {
@@ -230,7 +190,7 @@ func TestH2ConnectUDPPacketConnClosesOnTruncatedCapsulePrefix(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("expected 0 bytes read, got %d", n)
 	}
-	if !c.closed.Load() {
+	if !c.IsClosed() {
 		t.Fatal("expected PacketConn closed after capsule parse failure")
 	}
 }
@@ -240,12 +200,12 @@ func TestH2ConnectUDPPacketConnClosesOnWriteBodyError(t *testing.T) {
 	pr, pw := io.Pipe()
 	_ = pr.CloseWithError(errors.New("test closed read side"))
 
-	c := &h2ConnectUDPPacketConn{reqBody: pw}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{ReqBody: pw})
 	n, err := c.WriteTo([]byte{42}, nil)
 	require.Error(t, err)
 	require.Equal(t, 0, n)
 	require.Contains(t, err.Error(), "write body")
-	require.True(t, c.closed.Load())
+	require.True(t, c.IsClosed())
 }
 
 type eofWriteCloser struct{}
@@ -256,13 +216,13 @@ func (eofWriteCloser) Close() error              { return nil }
 // Plain io.EOF on request-body write mirrors ReadFrom when the CONNECT response body ends: no Close(),
 // no dataplane wrapper (http_layer_fallback / classifiers stay off normal half-close semantics).
 func TestH2ConnectUDPPacketConnWriteToCleanEOFWithoutClose(t *testing.T) {
-	c := &h2ConnectUDPPacketConn{
-		reqBody: eofWriteCloser{},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		ReqBody: eofWriteCloser{},
+	})
 	n, err := c.WriteTo([]byte{1, 2, 3}, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.EOF)
-	require.False(t, c.closed.Load())
+	require.False(t, c.IsClosed())
 }
 
 type errClosedPipeWriteCloser struct{}
@@ -271,13 +231,13 @@ func (errClosedPipeWriteCloser) Write([]byte) (int, error) { return 0, io.ErrClo
 func (errClosedPipeWriteCloser) Close() error              { return nil }
 
 func TestH2ConnectUDPPacketConnWriteToCleanErrClosedPipeWithoutClose(t *testing.T) {
-	c := &h2ConnectUDPPacketConn{
-		reqBody: errClosedPipeWriteCloser{},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		ReqBody: errClosedPipeWriteCloser{},
+	})
 	n, err := c.WriteTo([]byte{1, 2, 3}, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
-	require.False(t, c.closed.Load())
+	require.False(t, c.IsClosed())
 }
 
 type udpCapsuleCaptureWriteCloser struct{ buf bytes.Buffer }
@@ -292,16 +252,16 @@ func (c *udpCapsuleCaptureWriteCloser) Close() error { return nil }
 // serialize a DATAGRAM capsule for zero-length UDP, not silently drop egress.
 func TestH2ConnectUDPPacketConnWriteToEmptyEmitCapsule(t *testing.T) {
 	cap := &udpCapsuleCaptureWriteCloser{}
-	c := &h2ConnectUDPPacketConn{reqBody: cap}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{ReqBody: cap})
 
 	n, err := c.WriteTo([]byte(nil), nil)
 	require.NoError(t, err)
 	require.Zero(t, n)
 	require.NotEmpty(t, cap.buf.Bytes())
 
-	ct, cr, err := parseH2ConnectUDPCapsule(quicvarint.NewReader(bytes.NewReader(cap.buf.Bytes())))
+	ct, cr, err := h2c.ParseCapsule(quicvarint.NewReader(bytes.NewReader(cap.buf.Bytes())))
 	require.NoError(t, err)
-	require.Equal(t, capsuleTypeDatagram, ct)
+	require.Equal(t, h2c.CapsuleTypeDatagram, ct)
 	raw, err := io.ReadAll(cr)
 	require.NoError(t, err)
 	payload, ok, perr := ParseMasqueHTTPDatagramUDP(raw)
@@ -311,12 +271,12 @@ func TestH2ConnectUDPPacketConnWriteToEmptyEmitCapsule(t *testing.T) {
 }
 
 // Regression: one WriteTo must not emit a single DATAGRAM capsule whose HTTP Datagram exceeds
-// h2ConnectUDPMaxCapsulePayload (server uplink rejects; parity with ServeH2ConnectUDP downlink splitter).
+// h2c.MaxCapsulePayload() (server uplink rejects; parity with ServeH2ConnectUDP downlink splitter).
 func TestH2ConnectUDPPacketConnWriteToSplitsLargePayloadIntoRFC9297Capsules(t *testing.T) {
-	total := h2ConnectUDPMaxUDPPayloadPerDatagramCapsule*2 + 50
+	total := h2c.MaxUDPPayloadPerDatagramCapsule()*2 + 50
 	payload := bytes.Repeat([]byte{'q'}, total)
 	capWC := &udpCapsuleCaptureWriteCloser{}
-	c := &h2ConnectUDPPacketConn{reqBody: capWC}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{ReqBody: capWC})
 
 	n, err := c.WriteTo(payload, nil)
 	require.NoError(t, err)
@@ -325,14 +285,14 @@ func TestH2ConnectUDPPacketConnWriteToSplitsLargePayloadIntoRFC9297Capsules(t *t
 	r := quicvarint.NewReader(bytes.NewReader(capWC.buf.Bytes()))
 	var reassembled []byte
 	for {
-		ct, cr, cerr := parseH2ConnectUDPCapsule(r)
+		ct, cr, cerr := h2c.ParseCapsule(r)
 		if cerr != nil {
 			if cerr == io.EOF {
 				break
 			}
 			require.NoError(t, cerr)
 		}
-		require.Equal(t, capsuleTypeDatagram, ct)
+		require.Equal(t, h2c.CapsuleTypeDatagram, ct)
 		raw, rerr := io.ReadAll(cr)
 		require.NoError(t, rerr)
 		pl, ok, perr := ParseMasqueHTTPDatagramUDP(raw)
@@ -345,19 +305,19 @@ func TestH2ConnectUDPPacketConnWriteToSplitsLargePayloadIntoRFC9297Capsules(t *t
 
 func TestH2ConnectUDPPacketConnRejectsOversizedNondatagramCapsule(t *testing.T) {
 	var wire bytes.Buffer
-	big := make([]byte, h2ConnectUDPNondatagramMaxCapsulePayload+1)
+	big := make([]byte, h2c.NondatagramMaxCapsulePayload+1)
 	require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(7), big))
 
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "127.0.0.1:1"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "127.0.0.1:1"},
+	})
 	buf := make([]byte, 64)
 	n, _, err := c.ReadFrom(buf)
 	require.Error(t, err)
 	require.Equal(t, 0, n)
 	require.Contains(t, err.Error(), "non-datagram capsule exceeds")
-	require.True(t, c.closed.Load())
+	require.True(t, c.IsClosed())
 }
 
 // net.PacketConn allows concurrent method calls; serialized ReadFrom avoids concurrent reads on the shared response body reader.
@@ -365,12 +325,12 @@ func TestH2ConnectUDPPacketConnConcurrentReadFromSerializesReads(t *testing.T) {
 	var wire bytes.Buffer
 	for _, b := range []byte{'a', 'b'} {
 		dgram := []byte{0, b}
-		require.NoError(t, http3.WriteCapsule(&wire, capsuleTypeDatagram, dgram))
+		require.NoError(t, http3.WriteCapsule(&wire, http3.CapsuleType(h2c.CapsuleTypeDatagram), dgram))
 	}
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "192.0.2.1:53"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wire.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "192.0.2.1:53"},
+	})
 	type readRes struct {
 		n   int
 		b   byte
@@ -438,7 +398,7 @@ func TestIsMasqueHTTPLayerSwitchableFailure(t *testing.T) {
 	if IsMasqueHTTPLayerSwitchableFailure(ErrConnectIPTemplateNotConfigured) {
 		t.Fatal("missing CONNECT-IP template sentinel must not flip HTTP layer")
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(fmt.Errorf("parse: %w", errMasqueH2ConnectUDPOversizedDeclared)) {
+	if IsMasqueHTTPLayerSwitchableFailure(fmt.Errorf("parse: %w", h2c.ErrOversizedDeclared)) {
 		t.Fatal("H2 CONNECT-UDP declared-length capsule rejection must not flip HTTP layer")
 	}
 	if IsMasqueHTTPLayerSwitchableFailure(fmt.Errorf("masque connect-ip h2: %w", ErrConnectIPTemplateNotConfigured)) {
@@ -548,13 +508,13 @@ func TestIsMasqueHTTPLayerSwitchableFailure(t *testing.T) {
 
 func TestH2ConnectUDPPacketConnReadFromEmptyDatagramICMPRefused(t *testing.T) {
 	var wb bytes.Buffer
-	if err := writeUDPH2ConnectDatagramCapsule(&wb, nil); err != nil {
+	if err := h2c.WriteDatagramCapsule(&wb, nil); err != nil {
 		t.Fatal(err)
 	}
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "192.0.2.3:5201"},
-	}
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "192.0.2.3:5201"},
+	})
 	n, _, err := c.ReadFrom(make([]byte, 64))
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, ErrUDPPortUnreachable)
@@ -563,18 +523,18 @@ func TestH2ConnectUDPPacketConnReadFromEmptyDatagramICMPRefused(t *testing.T) {
 func TestH2ConnectUDPPacketConnReadFromDropsShortNonICMPPayload(t *testing.T) {
 	var wb bytes.Buffer
 	// DATAGRAM capsule: context id 0 + 4-byte slop (< DNS header) then empty ICMP.
-	if err := writeUDPH2ConnectDatagramCapsule(&wb, []byte{0xde, 0xad, 0xbe, 0xef}); err != nil {
+	if err := h2c.WriteDatagramCapsule(&wb, []byte{0xde, 0xad, 0xbe, 0xef}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeUDPH2ConnectDatagramCapsule(&wb, nil); err != nil {
+	if err := h2c.WriteDatagramCapsule(&wb, nil); err != nil {
 		t.Fatal(err)
 	}
-	c := &h2ConnectUDPPacketConn{
-		resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
-		remoteAddr: masqueUDPAddr{s: "192.0.2.3:5201"},
-		downlinkCh: make(chan h2UDPDownlinkItem, 2),
-	}
-	go c.runH2ConnectUDPDownlinkPump()
+	c := testH2UDPPacketConn(cudp.H2PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(wb.Bytes()))},
+		RemoteAddr: masqueUDPAddr{S: "192.0.2.3:5201"},
+		AsyncDownlink: true,
+	})
+	go c.RunDownlinkPump()
 	n, _, err := c.ReadFrom(make([]byte, 64))
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, ErrUDPPortUnreachable)
@@ -596,18 +556,18 @@ func TestH2ConnectUDPReadBeforeWriteMatchesTUNOrder(t *testing.T) {
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+		Options: ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		},
-	}
-	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	})
+	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -659,18 +619,18 @@ func TestH2ConnectUDPPortUnreachableRoundTripInProcess(t *testing.T) {
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+		Options: ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		},
-	}
-	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	})
+	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -700,7 +660,7 @@ func startInProcessH2UDPConnectProxy(t *testing.T) int {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if strings.TrimSpace(r.Header.Get(":protocol")) != h2ConnectUDPProto {
+		if strings.TrimSpace(r.Header.Get(":protocol")) != cudp.H2ConnectProto {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -760,18 +720,18 @@ func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 
-	s := &coreSession{
-		options: ClientOptions{
+	s := newTestCoreSession(session.CoreSession{
+		Options: ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		},
-	}
-	s.options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+	})
+	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	s.udpHTTPLayer.Store(option.MasqueHTTPLayerH2)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()

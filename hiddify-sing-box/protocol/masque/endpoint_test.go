@@ -12,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/masque/server"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -700,31 +701,31 @@ func TestServerEndpointAuthorizeRequest(t *testing.T) {
 }
 
 func TestAllowTCPTargetBlocksPrivateByDefault(t *testing.T) {
-	if _, err := resolveTCPTargetForDial(context.Background(), "127.0.0.1", false); err == nil {
+	if _, err := server.ResolveTCPTargetForDial(context.Background(), "127.0.0.1", false); err == nil {
 		t.Fatal("expected localhost to be denied by default")
 	}
-	if _, err := resolveTCPTargetForDial(context.Background(), "192.168.1.10", false); err == nil {
+	if _, err := server.ResolveTCPTargetForDial(context.Background(), "192.168.1.10", false); err == nil {
 		t.Fatal("expected private address to be denied by default")
 	}
-	if resolved, err := resolveTCPTargetForDial(context.Background(), "1.1.1.1", false); err != nil || resolved == "" {
+	if resolved, err := server.ResolveTCPTargetForDial(context.Background(), "1.1.1.1", false); err != nil || resolved == "" {
 		t.Fatal("expected public address to be allowed")
 	}
-	if _, err := resolveTCPTargetForDial(context.Background(), "localhost", true); err != nil {
+	if _, err := server.ResolveTCPTargetForDial(context.Background(), "localhost", true); err != nil {
 		t.Fatal("expected allow_private_targets=true to allow local targets")
 	}
 }
 
 func TestAllowTCPPortPolicy(t *testing.T) {
-	if !allowTCPPort("443", nil, nil) {
+	if !server.AllowTCPPort("443", nil, nil) {
 		t.Fatal("expected 443 to be allowed without policies")
 	}
-	if allowTCPPort("25", nil, []uint16{25}) {
+	if server.AllowTCPPort("25", nil, []uint16{25}) {
 		t.Fatal("expected blocked port to be denied")
 	}
-	if allowTCPPort("80", []uint16{443}, nil) {
+	if server.AllowTCPPort("80", []uint16{443}, nil) {
 		t.Fatal("expected port outside allowlist to be denied")
 	}
-	if !allowTCPPort("443", []uint16{443, 8443}, []uint16{25}) {
+	if !server.AllowTCPPort("443", []uint16{443, 8443}, []uint16{25}) {
 		t.Fatal("expected allowlisted port to pass")
 	}
 }
@@ -735,7 +736,7 @@ func TestParseTCPTargetFromRequestRejectsMalformedTarget(t *testing.T) {
 		t.Fatalf("template init: %v", err)
 	}
 	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/masque/tcp//bad", nil)
-	if _, _, err := parseTCPTargetFromRequest(req, template, false); err == nil {
+	if _, _, err := server.ParseTCPTargetFromRequest(req, template, false, masqueRequestAuthorityMatchesTemplate); err == nil {
 		t.Fatal("expected malformed target to be rejected")
 	}
 }
@@ -751,7 +752,7 @@ func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *tes
 	}
 	req.Host = "example.com"
 	req.RequestURI = "masque/tcp/host.example/9443"
-	host, port, err := parseTCPTargetFromRequest(req, template, false)
+	host, port, err := server.ParseTCPTargetFromRequest(req, template, false, masqueRequestAuthorityMatchesTemplate)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -789,7 +790,7 @@ func TestParseTCPTargetFromRequestRelaxesAuthorityDefaultLoopbackTemplate(t *tes
 	}
 	req.Host = "203.0.113.1:8443"
 	req.RequestURI = "/masque/tcp/example.com/443"
-	host, port, err := parseTCPTargetFromRequest(req, template, true)
+	host, port, err := server.ParseTCPTargetFromRequest(req, template, true, masqueRequestAuthorityMatchesTemplate)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -800,14 +801,14 @@ func TestParseTCPTargetFromRequestRelaxesAuthorityDefaultLoopbackTemplate(t *tes
 	req2, _ := http.NewRequest(http.MethodConnect, "", nil)
 	req2.Host = "203.0.113.1:8443"
 	req2.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := parseTCPTargetFromRequest(req2, template, false); err == nil {
+	if _, _, err := server.ParseTCPTargetFromRequest(req2, template, false, masqueRequestAuthorityMatchesTemplate); err == nil {
 		t.Fatal("expected strict mode to reject authority mismatch")
 	}
 
 	req3, _ := http.NewRequest(http.MethodConnect, "", nil)
 	req3.Host = "203.0.113.1:9443"
 	req3.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := parseTCPTargetFromRequest(req3, template, true); err == nil {
+	if _, _, err := server.ParseTCPTargetFromRequest(req3, template, true, masqueRequestAuthorityMatchesTemplate); err == nil {
 		t.Fatal("expected port mismatch to reject even when relaxed")
 	}
 }
@@ -820,7 +821,7 @@ func TestParseTCPTargetFromRequestRelaxedRejectsNonLoopbackTemplateHost(t *testi
 	req, _ := http.NewRequest(http.MethodConnect, "", nil)
 	req.Host = "203.0.113.1:8443"
 	req.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := parseTCPTargetFromRequest(req, template, true); err == nil {
+	if _, _, err := server.ParseTCPTargetFromRequest(req, template, true, masqueRequestAuthorityMatchesTemplate); err == nil {
 		t.Fatal("expected failure when template host is not loopback")
 	}
 }
