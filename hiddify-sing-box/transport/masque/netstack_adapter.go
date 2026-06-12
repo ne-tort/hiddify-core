@@ -347,9 +347,9 @@ type connectIPTCPNetstack struct {
 	session      IPPacketSession
 	gStack       *stack.Stack
 	endpoint     *channel.Endpoint
-	notifyHandle      *channel.NotificationHandle
-	outboundDrainMu   sync.Mutex
-	reconcileMu       sync.Mutex
+	notifyHandle       *channel.NotificationHandle
+	outboundDraining   atomic.Bool
+	reconcileMu        sync.Mutex
 	installedV4  netip.Addr
 	installedV6  netip.Addr
 	closeOnce    sync.Once
@@ -706,6 +706,7 @@ func (s *connectIPTCPNetstack) scheduleOutboundDrain() {
 	select {
 	case s.outboundPoke <- struct{}{}:
 	default:
+		go s.runExclusiveOutboundDrain()
 	}
 }
 
@@ -716,25 +717,16 @@ func (s *connectIPTCPNetstack) runOutboundPokeDrain() {
 		case <-s.done:
 			return
 		case <-s.outboundPoke:
-			s.tryDrainLinkEndpointOutbound()
+			s.runExclusiveOutboundDrain()
 		}
 	}
 }
 
-func (s *connectIPTCPNetstack) tryDrainLinkEndpointOutbound() {
-	if !s.outboundDrainMu.TryLock() {
+func (s *connectIPTCPNetstack) runExclusiveOutboundDrain() {
+	if !s.outboundDraining.CompareAndSwap(false, true) {
 		return
 	}
-	defer s.outboundDrainMu.Unlock()
-	s.drainLinkEndpointOutboundLocked()
-}
-
-func (s *connectIPTCPNetstack) drainLinkEndpointOutbound() {
-	if !s.outboundDrainMu.TryLock() {
-		s.scheduleOutboundDrain()
-		return
-	}
-	defer s.outboundDrainMu.Unlock()
+	defer s.outboundDraining.Store(false)
 	s.drainLinkEndpointOutboundLocked()
 }
 
@@ -819,7 +811,9 @@ func (s *connectIPTCPNetstack) drainOutboundQueueOnClose() {
 }
 
 func (s *connectIPTCPNetstack) WriteNotify() {
-	s.tryDrainLinkEndpointOutbound()
+	// Full drain per gVisor notification (baseline 5130a991). Exclusive via atomic flag
+	// so ingress poke does not race endpoint.Read; no mutex across outboundCh send.
+	s.runExclusiveOutboundDrain()
 }
 
 func (s *connectIPTCPNetstack) writePacketWithRetry(outbound []byte) ([]byte, error) {

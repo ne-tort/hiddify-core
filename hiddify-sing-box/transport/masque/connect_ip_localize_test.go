@@ -29,6 +29,36 @@ type connectIPUploadBenchResult struct {
 
 func (r connectIPUploadBenchResult) ok() bool { return r.err == nil }
 
+func measureTCPDownloadMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+	deadline := time.Now().Add(duration)
+	buf := make([]byte, 256*1024)
+	var total int64
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := conn.Read(buf)
+		if n > 0 {
+			total += int64(n)
+		}
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() && total > 0 {
+				break
+			}
+			if err == io.EOF {
+				break
+			}
+			if total > 0 {
+				break
+			}
+			return 0, 0, err
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return total, float64(total*8) / secs / 1e6, nil
+}
+
 func measureTCPUploadMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
 	deadline := time.Now().Add(duration)
 	buf := make([]byte, 256*1024)
@@ -253,6 +283,71 @@ func TestMasqueConnectIPLocalizeBottleneck(t *testing.T) {
 
 	v := verdictConnectIPUpload(l0, l1, l3)
 	t.Logf("connect-ip localize verdict: %s", v)
+}
+
+func startConnectIPDownloadHarness(t *testing.T, link packetLink) *connectIPUploadHarness {
+	t.Helper()
+	clientSess, serverSess := link.endpoints()
+	peer := netip.MustParsePrefix("198.18.0.2/32")
+	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+		MTU:       1372,
+	})
+	if err != nil {
+		t.Fatalf("client netstack: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("remote listen: %v", err)
+	}
+	go func() {
+		buf := make([]byte, 256*1024)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				deadline := time.Now().Add(30 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, err := c.Write(buf); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	serverConn := &forwarderPipeConn{IPPacketSession: serverSess, peerPrefixes: []netip.Prefix{peer}}
+	fwdCtx, fwdCancel := context.WithCancel(context.Background())
+	fwdDone := make(chan error, 1)
+	go func() {
+		fwdDone <- RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, ConnectIPTCPForwarderOptions{
+			AllowPrivateTargets: true,
+		})
+	}()
+	return &connectIPUploadHarness{
+		clientSess: clientSess, serverConn: serverConn, clientNS: clientNS,
+		waitIngress: runIngressRelay(clientSess, clientNS),
+		fwdCancel: fwdCancel, fwdDone: fwdDone, remoteLn: ln,
+	}
+}
+
+func TestMasqueConnectIPLocalizeDownload(t *testing.T) {
+	const duration = 400 * time.Millisecond
+	h := startConnectIPDownloadHarness(t, instantPacketLink{})
+	defer h.close()
+	conn := h.dialRemote(t)
+	defer conn.Close()
+	n, mbps, err := measureTCPDownloadMbps(conn, duration)
+	if err != nil {
+		t.Fatalf("download bench: %v", err)
+	}
+	t.Logf("connect-ip download L1: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < connectIPLocalizeFastMbps {
+		t.Fatalf("download L1 slow: %.1f Mbit/s (want >= %.0f)", mbps, connectIPLocalizeFastMbps)
+	}
 }
 
 // --- packet link models ---

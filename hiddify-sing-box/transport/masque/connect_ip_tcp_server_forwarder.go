@@ -86,9 +86,10 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn connectIPPack
 		log.Printf("masque connect_ip forwarder: started")
 	}
 	f := &connectIPTCPForwarder{
-		conn:    conn,
-		o:       o,
-		writeCh: make(chan []byte, connectIPTCPForwarderWriteQueueDepth),
+		conn:         conn,
+		o:            o,
+		writeCh:      make(chan []byte, connectIPTCPForwarderWriteQueueDepth),
+		writeStopped: make(chan struct{}),
 	}
 	if f.o.Dialer.Timeout == 0 && f.o.Dialer.Deadline.IsZero() {
 		f.o.Dialer.Timeout = 8 * time.Second
@@ -96,6 +97,7 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn connectIPPack
 	writeDone := make(chan struct{})
 	go f.runWriteLoop(ctx, writeDone)
 	defer func() {
+		close(f.writeStopped)
 		f.shutdownSessions()
 		close(f.writeCh)
 		<-writeDone
@@ -203,7 +205,8 @@ type connectIPTCPForwarder struct {
 	conn connectIPPacketPlaneConn
 	o    ConnectIPTCPForwarderOptions
 	wMu  sync.Mutex
-	writeCh chan []byte
+	writeCh      chan []byte
+	writeStopped chan struct{}
 	peerPrefixes atomic.Value // []netip.Prefix
 	ackTSTick    atomic.Uint32
 
@@ -248,12 +251,19 @@ func (f *connectIPTCPForwarder) enqueueWrite(pkt []byte) error {
 		return err
 	}
 	select {
+	case <-f.writeStopped:
+		connectIPForwarderReturn(pkt)
+		return net.ErrClosed
 	case f.writeCh <- pkt:
 		return nil
 	default:
-		// Backpressure: block rather than drop TCP ACK / data segments.
-		f.writeCh <- pkt
-		return nil
+		select {
+		case <-f.writeStopped:
+			connectIPForwarderReturn(pkt)
+			return net.ErrClosed
+		case f.writeCh <- pkt:
+			return nil
+		}
 	}
 }
 
