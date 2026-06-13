@@ -493,7 +493,7 @@ func (s *ReceiveStream) masquePokeDownloadReceiveWindow() bool {
 	s.mutex.Unlock()
 	// Schedule MAX_STREAM_DATA immediately (parity Read path after AddBytesRead).
 	// Re-notify when already queued so a stalled framer re-prioritizes control frames
-	// between WriteTo chunk deliveries (K-REF-B ~15 Mbit/s without re-poke wake).
+	// between WriteTo chunk deliveries (download stall in windowed bidi without re-poke wake).
 	s.sender.onHasStreamControlFrame(streamID, s)
 	// Conn-level MAX_DATA renotify (parity Read queuedConnWindowUpdate → onHasConnectionData).
 	s.sender.onHasConnectionData()

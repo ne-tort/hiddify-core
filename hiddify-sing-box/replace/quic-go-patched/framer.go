@@ -234,7 +234,7 @@ func (f *framer) QueuedTooManyControlFrames() bool {
 // AddActiveStream registers a stream with pending send data. Returns true when a
 // download-boost stream was re-promoted/re-enqueued on duplicate onHasStreamData.
 // WakeActiveSendStreamsWithPendingData signals blocked Write() waiters after peer MAX_DATA
-// opens connection-level flow control (K-REF-B stall when conn FC is the bottleneck).
+// opens connection-level flow control (windowed bidi download stall when conn FC is the bottleneck).
 func (f *framer) WakeActiveSendStreamsWithPendingData() {
 	f.mutex.Lock()
 	streams := make([]*SendStream, 0, len(f.activeStreams))
@@ -265,7 +265,7 @@ func (f *framer) AddActiveStream(id protocol.StreamID, str streamFrameGetter) (r
 		return false
 	}
 	// Re-promote or re-enqueue download-active stream when new DATA arrives while
-	// already active (parity poke-renotify for MAX_STREAM_DATA; K-REF-B ~15 Mbit/s).
+	// already active (parity poke-renotify for MAX_STREAM_DATA; connect-stream-h3 KPI ~15 Mbit/s).
 	if !f.promoteActiveStreamLocked(id) {
 		f.streamQueue.PushFront(id)
 	}

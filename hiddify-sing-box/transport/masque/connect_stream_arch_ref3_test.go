@@ -30,7 +30,7 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 }
 
 // TestArchREF3ThinDialKPI (REF3-4): MASQUE_CONNECT_STREAM_THIN on L3 harness — instant >21,
-// windowed sb-peer stays in FC band (client thin path does not unlock K-REF-B alone).
+// windowed sb-peer stays in FC band (client thin path does not unlock connect-stream-h3 KPI alone).
 func TestArchREF3ThinDialKPI(t *testing.T) {
 	const duration = localizeBenchDuration
 	t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
@@ -58,7 +58,7 @@ func TestArchREF3ThinDialKPI(t *testing.T) {
 }
 
 // TestArchREF3ThinModeSBServerAB (REF3-3): A/B prod vs MASQUE_CONNECT_STREAM_THIN through sb server
-// relay (HandleTCPConnectRequest); windowed sb-peer ceiling unchanged — thin client does not unlock K-REF-B.
+// relay (HandleTCPConnectRequest); windowed sb-peer ceiling unchanged — thin client does not unlock connect-stream-h3 KPI.
 func TestArchREF3ThinModeSBServerAB(t *testing.T) {
 	const duration = localizeBenchDuration
 

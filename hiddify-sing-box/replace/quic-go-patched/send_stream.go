@@ -643,14 +643,14 @@ func (s *SendStream) closeForShutdown(err error) {
 
 // wakeBlockedWriter unblocks Write() and re-enqueues send work when peer flow control
 // opens (MAX_STREAM_DATA / MAX_DATA). Re-notifies the framer when data is buffered but
-// the stream was dropped from activeStreams while blocked on conn FC (K-REF-B stall).
+// the stream was dropped from activeStreams while blocked on conn FC (download stall in windowed bidi).
 func (s *SendStream) wakeBlockedWriter(sender streamSender) {
 	s.mutex.Lock()
 	pending := len(s.dataForWriting) > 0 || s.nextFrame != nil || len(s.retransmissionQueue) > 0
 	id := s.streamID
 	s.mutex.Unlock()
 	// Always poke writeChan: duplicate MAX_STREAM_DATA / MAX_DATA renotify must unblock
-	// Write() even when buffered-data check races with the writer goroutine (K-REF-B field).
+	// Write() even when buffered-data check races with the writer goroutine (windowed bidi download stall).
 	s.signalWrite()
 	if !pending {
 		return

@@ -16,7 +16,7 @@ var ArchREFSRCServerCallChain = []ArchREFSRCServerCallChainRow{
 	{
 		Layer: "L5 mux", Symbol: "server.BuildMuxHandler tcpPath",
 		Next: "server.HandleTCPConnectRequest", Parity: true,
-		Note: "template tcp_relay=template; authority uses HandleTCPConnectAuthority",
+		Note: "template tcp_relay=template; removed authority handler — prod connect_stream only",
 	},
 	{
 		Layer: "L5 handler", Symbol: "server.HandleTCPConnectRequest",
@@ -107,16 +107,16 @@ var ArchREFSRCServerThinAudit = []ArchREFSRCServerThinRow{
 		Parity: true, Note: "H3 datagrams on; H2 collateral; relay.TCPTunnel unchanged",
 	},
 	{
-		Flag: "MASQUE_SERVER_THIN / CONNECT_STREAM_ONLY", Relay: "template mux only → HandleTCPConnectRequest",
+		Flag: "MASQUE_SERVER_CONNECT_STREAM_ONLY", Relay: "template mux only → HandleTCPConnectRequest",
 		Parity: true, Note: "UDP/IP 404; same relay entry as full endpoint",
 	},
 	{
-		Flag: "MASQUE_SERVER_TEMPLATE_THIN_LISTEN / ServerThin", Relay: "LaunchAuthorityThinHTTPServer + template mux (no authority client)",
-		Parity: true, Note: "REF-SRC-THIN-4: thin QUIC listen inside s-ui without authority transport",
+		Flag: "removed: MASQUE_SERVER_TEMPLATE_THIN_LISTEN / ServerThin", Relay: "removed; prod MASQUE_SERVER_CONNECT_STREAM_ONLY",
+		Parity: true, Note: "removed; prod connect_stream — thin listen path deleted",
 	},
 	{
-		Flag: "authorityMinimal + std TLS", Relay: "LaunchAuthorityThinHTTPServer → authority handler",
-		Parity: true, Note: "MasqueAuthorityHTTPServerQUICConfig; masquethin/relay.go delegates to strm",
+		Flag: "removed: authorityMinimal + std TLS", Relay: "removed; prod connect_stream",
+		Parity: true, Note: "removed; LaunchAuthorityThinHTTPServer deleted — prod connect_stream only",
 	},
 }
 
@@ -133,5 +133,5 @@ var ArchREFSRCServerRelayKPIAudit = ArchREFSRCServerRelayKPI{
 	Leg:           "TestArchServerH2OParityRelayL3 / S16 windowed band",
 	ExpectMbps:    "instant >>21; windowed 4–28 (sb-peer FC model)",
 	PassCondition: "instant > connectStreamVPSKPITargetDownMbps; windowed band not KPI pass alone",
-	Verdict:       "h2o-parity relay OK; K-REF-B ceiling needs client S2C FC (REF2-2) not more server flush",
+	Verdict:       "h2o-parity relay OK; connect-stream download gate ceiling needs client S2C FC (REF2-2) not more server flush",
 }

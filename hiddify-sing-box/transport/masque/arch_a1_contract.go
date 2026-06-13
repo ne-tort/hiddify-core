@@ -117,9 +117,9 @@ var ArchP1SubVariants = []ArchP1SubVariant{
 		ProdDefault: false, EnvRollback: "MASQUE_CONNECT_STREAM_DUAL_CONNECT=1",
 	},
 	{
-		ID: ArchP1WrongPlaneH3, Summary: "H-AUTH-BIDI / authority h3 stream experiments",
-		Valid: false, KS1Signal: "reject — wrong app plane on same wire stream",
-		ProdDefault: false, EnvRollback: "MASQUE_CONNECT_AUTHORITY_BIDI_STREAM=1",
+		ID: ArchP1WrongPlaneH3, Summary: "removed: H-AUTH-BIDI / authority h3 stream experiments",
+		Valid: false, KS1Signal: "reject — wrong app plane on same wire stream; path removed",
+		ProdDefault: false, EnvRollback: "removed (was MASQUE_CONNECT_AUTHORITY_BIDI_STREAM=1)",
 	},
 }
 

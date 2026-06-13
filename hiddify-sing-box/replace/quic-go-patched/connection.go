@@ -3027,7 +3027,7 @@ func (c *Conn) onHasStreamControlFrame(id protocol.StreamID, str streamControlFr
 	if sendHandler, err := c.streamsMap.getSendStream(id); err == nil {
 		if st, ok := sendHandler.(*Stream); ok {
 			// First MAX_STREAM_DATA queue and renotify: nudge send when download-active
-			// (K-REF-B stall when receive Read queues FC but upload Write blocked).
+			// (windowed bidi download stall when receive Read queues FC but upload Write blocked).
 			masqueWakeOnControlFrameRenotify(st, c.framer.isBidiSendBoost(id))
 		}
 	}

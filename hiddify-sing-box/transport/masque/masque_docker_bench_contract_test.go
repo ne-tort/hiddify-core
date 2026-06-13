@@ -313,7 +313,7 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
 		"REF1_FIELD_KPI_REDEPLOY_RETRY",
 		"return_tcp_down=True",
 		"docker remote client",
-		"--field-vps",
+		"--field-refresh",
 		"_ref1_field_run_colocated_matrix",
 		"REF1_FIELD_RUN_COLOCATED",
 		"--snapshot-slug",
@@ -322,7 +322,7 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
 		"validate_local_ref1",
         "redeploy_sui_panel",
         "ref1_verify_remote_sui_masque",
-        "K-REF-B",
+        "connect-stream-h3",
 		`"h3,h3-h2o`,
 		"MASQUE_SERVER=127.0.0.1",
 		"_SSH_RETRY_ATTEMPTS",
@@ -404,7 +404,7 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
 	)
 }
 
-// TestMasqueSUIProdEnvContract locks s-ui container env for K-REF-B server :4438 prod tuning.
+// TestMasqueSUIProdEnvContract locks s-ui container env for connect-stream-h3 server :4438 prod tuning.
 func TestMasqueSUIProdEnvContract(t *testing.T) {
 	t.Parallel()
 	compose := readRepoSource(t, filepath.Join("vendor", "s-ui", "docker-compose.stand.yml"))
@@ -451,7 +451,7 @@ func TestMasqueSUIRedeployBinaryNativeTagsContract(t *testing.T) {
 	)
 }
 
-// TestMasqueDockerBenchConnectStreamH3KPIContract locks local docker K-REF-B gate for connect-stream-h3.
+// TestMasqueDockerBenchConnectStreamH3KPIContract locks local docker connect-stream-h3 gate (S113).
 func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 	t.Parallel()
 	runLocal := readDockerBenchSource(t, "run_local.py")
@@ -517,13 +517,13 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		"windowed_prod_hijack",
 		"endpointH3RelayResponse",
 		"endpointProdWindowedLink",
-		"K-REF-B s-ui path",
+		"connect-stream-h3 KPI",
 	)
 	requireSubstrings(t, history, "ref1-2 local docker",
 		"connect-stream-h3",
 		"**68.0**",
 		"KPI >21",
-		"K-REF-B",
+		"local analog",
 	)
 	requireSubstrings(t, matrixDoc, "connect-stream h3 kpi",
 		"connect-stream-h3",

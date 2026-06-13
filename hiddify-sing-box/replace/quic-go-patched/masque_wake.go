@@ -45,7 +45,7 @@ func MasquePokeDownloadReceiveWindow(s *Stream) bool {
 
 // masquePokeDownloadReceiveWindow queues MAX_STREAM_DATA before the first Read when download
 // becomes active (CONNECT-stream WriteTo / server hijack relay). Avoids one RTT stall while
-// the peer fills the initial 64 KiB transport window (K-REF-B ~15 Mbit/s without eager poke).
+// the peer fills the initial 64 KiB transport window (windowed bidi download stall without eager poke).
 func masquePokeDownloadReceiveWindow(s *Stream) bool {
 	if s == nil || s.receiveStr == nil || !masqueDownloadEagerWindow() {
 		return false

@@ -255,7 +255,7 @@ func TestMasqueConnectStreamParallelStreams(t *testing.T) {
 	}
 }
 
-// TestConnectStreamDockerH3KPIInProcGuard proxies docker connect-stream-h3 K-REF-B gate on prod
+// TestConnectStreamDockerH3KPIInProcGuard proxies docker connect-stream-h3 KPI on prod
 // windowed bidi link (tcp_down >= 21 in run_local.py @ netem 35 ms).
 func TestConnectStreamDockerH3KPIInProcGuard(t *testing.T) {
 	if !h3.DownloadEagerWindowEnabled() {
@@ -269,7 +269,7 @@ func TestConnectStreamDockerH3KPIInProcGuard(t *testing.T) {
 	}
 	t.Logf("connect-stream docker H3 KPI proxy: %.1f Mbit/s (%d B)", r.mbps, r.bytes)
 	if r.mbps <= connectStreamVPSKPITargetDownMbps {
-		t.Fatalf("download %.1f Mbit/s want > %.0f (docker connect-stream-h3 K-REF-B gate)",
+		t.Fatalf("download %.1f Mbit/s want > %.0f (connect-stream download gate)",
 			r.mbps, connectStreamVPSKPITargetDownMbps)
 	}
 }

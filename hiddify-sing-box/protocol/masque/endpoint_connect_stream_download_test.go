@@ -241,7 +241,7 @@ func TestEndpointConnectStreamDownloadWriteTo(t *testing.T) {
 			t.Fatalf("windowed prod bytes=%d want >= %d", n, endpointDownloadMinBytes)
 		}
 		if mbps <= kpiTargetMbps {
-			t.Fatalf("windowed prod client download: %.1f Mbit/s (want > %.0f K-REF-B s-ui path)", mbps, kpiTargetMbps)
+			t.Fatalf("windowed prod client download: %.1f Mbit/s (want > %.0f connect-stream-h3 KPI)", mbps, kpiTargetMbps)
 		}
 	})
 	t.Run("windowed_prod_hijack", func(t *testing.T) {
@@ -258,7 +258,7 @@ func TestEndpointConnectStreamDownloadWriteTo(t *testing.T) {
 			t.Fatalf("windowed prod hijack bytes=%d want >= %d", n, endpointDownloadMinBytes)
 		}
 		if mbps <= kpiTargetMbps {
-			t.Fatalf("windowed prod hijack download: %.1f Mbit/s (want > %.0f K-REF-B s-ui prod path)", mbps, kpiTargetMbps)
+			t.Fatalf("windowed prod hijack download: %.1f Mbit/s (want > %.0f connect-stream-h3 KPI)", mbps, kpiTargetMbps)
 		}
 	})
 }

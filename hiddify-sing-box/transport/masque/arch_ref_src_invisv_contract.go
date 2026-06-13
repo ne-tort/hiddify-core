@@ -16,7 +16,7 @@ var ArchREFSRCInvisvAudit = []ArchREFSRCInvisvRow{
 	{
 		ID: "REF-SRC-INVISV-1", Attr: "CreateTCPStream CONNECT",
 		Invisv: "http.NewRequest(CONNECT, https://host:port/, nil); httpClient.Do",
-		SB:     "template_tcp ExpandAuthorityConnectURL or connect_authority; h3/ConnectRequest usePipe=false default",
+		SB:     "removed connect_authority; prod template_tcp + connect_stream; h3/ConnectRequest usePipe=false default",
 		Parity: true, Anchor: "repos/invisv-masque/http3/client.go:394-434; h3/tunnel.go",
 	},
 	{

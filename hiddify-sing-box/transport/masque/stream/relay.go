@@ -261,7 +261,7 @@ func releaseConnectRelayRequestBody(reqBody io.ReadCloser) {
 	}
 }
 
-// h3StreamFromCONNECTRelay prefers responseWriter hijack (thin server order), then req.Body.
+// h3StreamFromCONNECTRelay prefers responseWriter hijack (H3 CONNECT order), then req.Body.
 func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.ResponseWriter) io.ReadWriteCloser {
 	if os.Getenv("MASQUE_RELAY_LOG_HIJACK") == "1" {
 		_, wHS := responseWriter.(http3.HTTPStreamer)

@@ -38,7 +38,7 @@ var ArchREFSRCUsqueAudit = []ArchREFSRCUsqueRow{
 		SB:    "Per-session CONNECT-stream relay; connectip session lifecycle in connectip/dial_*.go",
 		Portable: false,
 		Anchor: "experiments/router/stand/usque/upstream/api/tunnel.go:MaintainTunnel",
-		KPINote: "Tunnel maintain is client-edge WARP scope; not K-REF-B server relay fix",
+		KPINote: "Tunnel maintain is client-edge WARP scope; not connect-stream download gate server relay fix",
 	},
 	{
 		ID: "REF-SRC-USQUE-2-cfproto",
@@ -46,7 +46,7 @@ var ArchREFSRCUsqueAudit = []ArchREFSRCUsqueRow{
 		SB:    "WarpConnectIPProtocol=cf-connect-ip; CONNECT-stream to self-hosted s-ui uses template_tcp",
 		Portable: false,
 		Anchor: "endpoint_warp_masque.go; h3/quic_config.go:WarpCloudflareQUICBase",
-		KPINote: "WARP consumer forbids CONNECT-stream to edge (403); prod K-REF-B is s-ui template_tcp",
+		KPINote: "WARP consumer forbids CONNECT-stream to edge (403); connect-stream-h3 KPI is s-ui template_tcp",
 	},
 	{
 		ID: "REF-SRC-USQUE-3-buffer",
@@ -54,7 +54,7 @@ var ArchREFSRCUsqueAudit = []ArchREFSRCUsqueRow{
 		SB:    "connectip: netstack{Outbound,Inbound}BufPool (~1600 B); connect-stream: relayTunnelBufPool 64 KiB io.CopyBuffer",
 		Portable: true,
 		Anchor: "connectip/netstack.go; stream/relay.go:relayTunnelCopyBuffer",
-		KPINote: "Buffer pool pattern already adopted; no further port needed for K-REF-B",
+		KPINote: "Buffer pool pattern already adopted; no further port needed for connect-stream-h3 KPI",
 	},
 	{
 		ID: "REF-SRC-USQUE-3-relay",

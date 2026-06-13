@@ -210,8 +210,8 @@ type ArchRejectedPeerExperiment struct {
 
 // ArchRejectedPeerExperiments is the frozen A0-4a inventory (subset tied to CONNECT-stream).
 var ArchRejectedPeerExperiments = []ArchRejectedPeerExperiment{
-	{ID: "H-AUTH-BIDI", Peer: ArchPeerSUI, Summary: "MASQUE_CONNECT_AUTHORITY_BIDI_STREAM=1 NoBody + full http3.Stream write", Verdict: "reject", KPIMbps: 0},
-	{ID: "H-AUTH-H3-STREAM", Peer: ArchPeerSUI, Summary: "MASQUE_CONNECT_AUTHORITY_H3_STREAM=1 single http3.Stream authority", Verdict: "reject", KPIMbps: 0},
+	{ID: "H-AUTH-BIDI", Peer: ArchPeerSUI, Summary: "removed: MASQUE_CONNECT_AUTHORITY_BIDI_STREAM — prod connect_stream only", Verdict: "reject", KPIMbps: 0},
+	{ID: "H-AUTH-H3-STREAM", Peer: ArchPeerSUI, Summary: "removed: MASQUE_CONNECT_AUTHORITY_H3_STREAM — prod connect_stream only", Verdict: "reject", KPIMbps: 0},
 	{ID: "H-SRV-ACK16", Peer: ArchPeerSUI, Summary: "server relayUploadCopyACK 16 KiB + s-ui deploy", Verdict: "reject", KPIMbps: 14.9},
 	{ID: "H-SRV-RELAY", Peer: ArchPeerSUI, Summary: "server download 512 KiB + batched flush env", Verdict: "merged-no-kpi", KPIMbps: 14.7},
 	{ID: "H-THIN-SB-CLIENT", Peer: ArchPeerSUI, Summary: "thin server × sb client — sb client wrap not root cause", Verdict: "reject", KPIMbps: 554},

@@ -56,7 +56,7 @@ func MasqueSetBidiDownloadActive(s *Stream, active bool) {
 	if active {
 		poked := masquePokeDownloadReceiveWindow(s)
 		// Eager window: always schedule send after activation so queued MAX_STREAM_DATA
-		// (or upload interleave) is not delayed until the next Read (K-REF-B field stall).
+		// (or upload interleave) is not delayed until the next Read (windowed bidi download stall).
 		if masqueDownloadEagerWindow() || poked {
 			masqueScheduleDownloadActiveWake(s)
 		}

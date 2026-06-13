@@ -132,7 +132,7 @@ func (c *TunnelConn) maybeStartDownloadDrain() {
 
 // maybeStartDownloadDrainOnUpload starts background response discard only on upload-only
 // legs. Route SOCKS/TUN copy always pairs upload with concurrent download WriteTo; auto
-// drain there races and eats protocol bytes before WriteTo (docker iperf banner / K-REF-B).
+// drain there races and eats protocol bytes before WriteTo (docker iperf banner / connect-stream download gate).
 func (c *TunnelConn) maybeStartDownloadDrainOnUpload() {
 	if c == nil || c.routeBidiDuplex {
 		return

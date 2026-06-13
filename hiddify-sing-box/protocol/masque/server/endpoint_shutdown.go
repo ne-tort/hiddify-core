@@ -10,7 +10,7 @@ import (
 
 const defaultMasqueShutdownTimeout = 8 * time.Second
 
-// ShutdownMasqueEndpointConfig tears down listeners started by LaunchMasqueStack or authority thin path.
+// ShutdownMasqueEndpointConfig tears down listeners started by LaunchMasqueStack or connect-stream-only path.
 type ShutdownMasqueEndpointConfig struct {
 	Stack           *MasqueStack
 	UDPProxy        *qmasque.Proxy

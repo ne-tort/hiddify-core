@@ -59,7 +59,7 @@ type ArchEndpointRelayRow struct {
 	Note     string
 }
 
-// ArchEndpointRelayAudit is the frozen REF2-5 differential: template / authority / endpoint → relay.
+// ArchEndpointRelayAudit is the frozen REF2-5 differential: template / connect_stream / endpoint → relay.
 var ArchEndpointRelayAudit = []ArchEndpointRelayRow{
 	{
 		Path: "server/connect_stream.go (template)", RelayFn: "relay.TCPForward",
@@ -67,9 +67,9 @@ var ArchEndpointRelayAudit = []ArchEndpointRelayRow{
 		Note: "s-ui template tcp_relay=template; mux BuildMuxHandler tcpPath",
 	},
 	{
-		Path: "server/connect_authority_relay.go (authority)", RelayFn: "relay.TCPTunnel",
+		Path: "removed: connect_authority_relay.go", RelayFn: "relay.TCPTunnel",
 		Delegate: "strm.RelayTCPTunnel", Parity: true,
-		Note: "thin/Invisv CONNECT https://host:port/; tcp_relay=authority",
+		Note: "removed; prod connect_stream only — same RelayTCPTunnel entry",
 	},
 	{
 		Path: "protocol/masque/endpoint_server.go", RelayFn: "server.HandleTCPConnectRequest",

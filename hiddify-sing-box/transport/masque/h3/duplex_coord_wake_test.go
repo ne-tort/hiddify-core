@@ -46,7 +46,7 @@ func (s *testH3ConnectStream) Close() error                     { return nil }
 func (s *testH3ConnectStream) QUICStream() *quic.Stream       { return nil }
 
 // TestMasqueH3DownloadOnlyWriteToUsesFullBuffer (REF1-2): coord default-on must not
-// shrink download-only WriteTo to 16 KiB when no enqueueDuplexUpload pending (K-REF-B down leg).
+// shrink download-only WriteTo to 16 KiB when no enqueueDuplexUpload pending (download leg).
 func TestMasqueH3DownloadOnlyWriteToUsesFullBuffer(t *testing.T) {
 	t.Setenv(envH3BidiDuplexCoord, "1")
 	t.Setenv(envH3BidiDownloadWake, "1")

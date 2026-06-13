@@ -22,8 +22,8 @@ func masqueTCPConnectStreamHTTP3EnableDatagrams(opts ClientOptions) bool {
 	return session.TCPConnectStreamHTTP3EnableDatagrams(opts)
 }
 
-// MasqueTCPConnectStreamQUICConfig exposes bulk TCP CONNECT-stream QUIC tuning for isolated
-// clients (masque-thin-client, h3 authority) without importing package h3.
+// MasqueTCPConnectStreamQUICConfig exposes bulk TCP CONNECT-stream QUIC tuning for external
+// dial/bootstrap callers without importing package h3.
 func MasqueTCPConnectStreamQUICConfig(opts ClientOptions) *quic.Config {
 	return session.TCPConnectStreamQUICConfig(opts)
 }

@@ -36,7 +36,7 @@ func TestArchREFSRCH2OAudit(t *testing.T) {
 	t.Logf("REF-SRC-H2O audit: %d rows (%d parity, %d gaps); KPI root = client S2C WINDOW_UPDATE", len(ArchREFSRCH2OAudit), parity, gaps)
 }
 
-// TestArchREFSRCThinRelayParityAudit (REF-SRC-THIN-1/2): masquethin relay delegates to stream/relay.go.
+// TestArchREFSRCThinRelayParityAudit (REF-SRC-THIN-1/2): removed masquethin path; prod relay is stream/relay.go.
 func TestArchREFSRCThinRelayParityAudit(t *testing.T) {
 	if len(ArchREFSRCThinRelayAudit) < 2 {
 		t.Fatalf("ArchREFSRCThinRelayAudit: %d rows want >= 2", len(ArchREFSRCThinRelayAudit))
@@ -49,7 +49,7 @@ func TestArchREFSRCThinRelayParityAudit(t *testing.T) {
 	if !strings.Contains(strm.RelayGoAuditSource(), "RelayTCPTunnel") {
 		t.Fatal("stream/relay.go embed missing RelayTCPTunnel anchor")
 	}
-	t.Log("REF-SRC-THIN-2 verdict: masquethin/relay.go delegates 100%% to stream/relay.go (2 symbols)")
+	t.Log("REF-SRC-THIN-2 verdict: removed masquethin path; prod relay is stream/relay.go (RelayTCPTunnel)")
 }
 
 // TestArchREFSRCThinVsSBServerAudit (REF-SRC-THIN-3/4): documents thin fast vs sb slow attribution.
@@ -62,5 +62,5 @@ func TestArchREFSRCThinVsSBServerAudit(t *testing.T) {
 			t.Fatalf("incomplete thin vs sb row: %+v", row)
 		}
 	}
-	t.Log("REF-SRC-THIN-3 verdict: thin ~554 = bind/authority path; relay code identical; prod ~15 = client wire FC")
+	t.Log("REF-SRC-THIN-3 verdict: removed thin bench leg; relay code identical; prod ~15 = client wire FC")
 }
