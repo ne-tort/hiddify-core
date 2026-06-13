@@ -24,7 +24,9 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
-	"github.com/sagernet/sing-box/transport/masque/session"
+	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	"github.com/sagernet/sing-box/transport/masque/httpx"
+	msess "github.com/sagernet/sing-box/transport/masque/session"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -63,7 +65,7 @@ func (n *connectIPTeardownOrderNetstack) Close() error {
 }
 
 func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 		HTTPLayerFallback: true,
 		IPConn:            &connectip.Conn{},
 	})
@@ -91,7 +93,7 @@ func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
 }
 
 func TestReleaseOpenedConnectIPSessionTeardownOrder(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 		IPConn: &connectip.Conn{},
 	})
 	orderNS := &connectIPTeardownOrderNetstack{
@@ -250,14 +252,14 @@ func TestCoreSessionGetTCPRoundTripperUnderSessionMutex(t *testing.T) {
 	t.Parallel()
 	// CONNECT-IP (openIPSessionLocked) and ListenPacket/connect_ip dial while holding s.Mu.
 	// getTCPRoundTripper must not acquire s.Mu or the session deadlocks before the network round-trip.
-	naked := newTestCoreSession(session.CoreSession{})
+	naked := newTestCoreSession(msess.CoreSession{})
 	naked.Mu.Lock()
 	rt := naked.getTCPRoundTripper(http.DefaultTransport)
 	naked.Mu.Unlock()
 	if rt != http.DefaultTransport {
 		t.Fatalf("expected DefaultTransport without override, got %T", rt)
 	}
-	injected := newTestCoreSession(session.CoreSession{
+	injected := newTestCoreSession(msess.CoreSession{
 			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return nil, errors.New("stub")
 		}),
@@ -273,7 +275,7 @@ func TestCoreSessionGetTCPRoundTripperUnderSessionMutex(t *testing.T) {
 func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 	var mu sync.Mutex
 	var dialHosts []string
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
@@ -333,7 +335,7 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 }
 
 func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
@@ -365,8 +367,8 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid destination")
 	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability, got %v", err)
+	if !errors.Is(err, msess.ErrCapability) {
+		t.Fatalf("expected msess.ErrCapability, got %v", err)
 	}
 	if session.HopIndex != 0 {
 		t.Fatalf("expected hop chain untouched (invalid destination), hopIndex=%d", session.HopIndex)
@@ -377,7 +379,7 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 }
 
 func TestCoreSessionAdvanceHop(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			HopOrder: []HopOptions{
 			{Tag: "h1", Server: "h1.example", Port: 443},
 			{Tag: "h2", Via: "h1", Server: "h2.example", Port: 8443},
@@ -396,7 +398,7 @@ func TestCoreSessionAdvanceHop(t *testing.T) {
 
 func TestResetHopTemplatesClearsTCPNetstack(t *testing.T) {
 	ns := &nopTCPNetstack{}
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
@@ -423,7 +425,7 @@ func TestResetHopTemplatesClearsTCPNetstack(t *testing.T) {
 }
 
 func TestResetHopTemplatesClearsTCPHTTPTransport(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
@@ -449,7 +451,7 @@ func TestResetHopTemplatesClearsTCPHTTPTransport(t *testing.T) {
 
 func TestResetHopTemplatesClearsSharedIPH3Refs(t *testing.T) {
 	shared := &http3.Transport{}
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server: "entry.example",
 			Hops: []HopOptions{
@@ -475,7 +477,7 @@ func TestResetHopTemplatesClearsSharedIPH3Refs(t *testing.T) {
 
 func TestResetTCPHTTPTransportClearsSharedIPH3Refs(t *testing.T) {
 	shared := &http3.Transport{}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:     "example.com",
 			ServerPort: 443,
@@ -493,7 +495,7 @@ func TestResetTCPHTTPTransportClearsSharedIPH3Refs(t *testing.T) {
 }
 
 func TestResetHopTemplatesClearsDialPeerOnInnerHop(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:     "entry.example",
 			DialPeer:   "203.0.113.77",
@@ -521,7 +523,7 @@ func TestResetHopTemplatesClearsDialPeerOnInnerHop(t *testing.T) {
 }
 
 func TestResetHopTemplatesPreservesHTTPOverlay(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:                   "entry.example",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
@@ -552,7 +554,7 @@ func TestResetHopTemplatesPreservesHTTPOverlay(t *testing.T) {
 
 func TestMaybeRecordHTTPLayerCacheSuccessSkipsInnerHop(t *testing.T) {
 	var calls atomic.Int32
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:                   "hop2.example",
 			ServerPort:               8443,
@@ -582,7 +584,7 @@ func TestDialConnectIPAttemptHookRecordsHTTPLayerCacheSuccess(t *testing.T) {
 	okConn := &connectip.Conn{}
 	var gotLayer atomic.Value
 	s := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: "connect_ip",
 			Server:        "example.com",
@@ -718,10 +720,10 @@ func TestApplyConnectIPFlowScopeRejectsUnsupportedFlowVariable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsupported flow forwarding variable to fail fast")
 	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability for unsupported flow forwarding variable, got: %v", err)
+	if !errors.Is(err, msess.ErrCapability) {
+		t.Fatalf("expected msess.ErrCapability for unsupported flow forwarding variable, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for unsupported flow forwarding variable, got: %s", got)
 	}
 }
@@ -755,10 +757,10 @@ func TestTransportMalformedScopedFlowBoundaryParity(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected malformed scoped classification helper to fail for invalid target")
 	}
-	if actualClass != ErrorClassCapability {
+	if actualClass != msess.ErrorClassCapability {
 		t.Fatalf("expected transport malformed scope classification capability, got: %s (err=%v)", actualClass, err)
 	}
-	if resultClass != ErrorClassCapability {
+	if resultClass != msess.ErrorClassCapability {
 		t.Fatalf("expected wrapped malformed scope classification capability, got: %s (err=%v)", resultClass, err)
 	}
 }
@@ -835,7 +837,7 @@ func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 }
 
 func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TCPTransport: "connect_stream",
 		},
@@ -844,19 +846,19 @@ func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-tcp network to fail fast in core session")
 	}
-	if !errors.Is(err, ErrUnsupportedNetwork) {
-		t.Fatalf("expected ErrUnsupportedNetwork for non-tcp core boundary reject, got: %v", err)
+	if !errors.Is(err, msess.ErrUnsupportedNetwork) {
+		t.Fatalf("expected msess.ErrUnsupportedNetwork for non-tcp core boundary reject, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "unsupported network in masque session") {
 		t.Fatalf("unexpected non-tcp boundary error: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for non-tcp core boundary reject, got: %s", got)
 	}
 }
 
 func TestCoreSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TCPTransport: "auto",
 		},
@@ -865,16 +867,16 @@ func TestCoreSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing
 	if err == nil {
 		t.Fatal("expected tcp_transport=auto to fail with deterministic path-not-implemented error")
 	}
-	if !errors.Is(err, ErrTCPPathNotImplemented) {
-		t.Fatalf("expected ErrTCPPathNotImplemented, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPPathNotImplemented) {
+		t.Fatalf("expected msess.ErrTCPPathNotImplemented, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for auto transport path reject, got: %s", got)
 	}
 }
 
 func TestCoreSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TCPTransport: "connect_ip",
 		},
@@ -883,10 +885,10 @@ func TestCoreSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected tcp_transport=connect_ip to fail as TUN-only TCP path")
 	}
-	if !errors.Is(err, ErrTCPOverConnectIP) {
-		t.Fatalf("expected ErrTCPOverConnectIP, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPOverConnectIP) {
+		t.Fatalf("expected msess.ErrTCPOverConnectIP, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for connect_ip tcp reject, got: %s", got)
 	}
 }
@@ -896,10 +898,10 @@ func TestStreamResolveDestinationHostRejectsInvalidDestination(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid destination to be rejected")
 	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability for invalid destination, got: %v", err)
+	if !errors.Is(err, msess.ErrCapability) {
+		t.Fatalf("expected msess.ErrCapability for invalid destination, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for invalid destination boundary reject, got: %s", got)
 	}
 }
@@ -946,13 +948,20 @@ func TestStreamIsRetryableTCPStreamError(t *testing.T) {
 	if !strm.IsRetryableTCPStreamError(http2.ConnectionError(http2.ErrCodeProtocol)) {
 		t.Fatal("expected http2 connection error to be retryable")
 	}
+	joined := errors.Join(strm.Errs.TCPConnectStreamFailed, &quic.IdleTimeoutError{})
+	if !strm.IsRetryableTCPStreamError(joined) {
+		t.Fatal("expected errors.Join with idle timeout to be retryable")
+	}
+	if !strm.IsRetryableTCPStreamError(errors.New("http3: transport is closed")) {
+		t.Fatal("expected http3 transport closed to be retryable")
+	}
 }
 
 func TestStreamTCPConnectStreamErrMayBenefitFromNextHop(t *testing.T) {
 	if strm.TCPConnectStreamErrMayBenefitFromNextHop(nil) {
 		t.Fatal("nil error must not benefit from next hop")
 	}
-	capErr := errors.Join(ErrCapability, errors.New("invalid destination"))
+	capErr := errors.Join(msess.ErrCapability, errors.New("invalid destination"))
 	if strm.TCPConnectStreamErrMayBenefitFromNextHop(capErr) {
 		t.Fatal("capability errors must not consume hops")
 	}
@@ -962,22 +971,22 @@ func TestStreamTCPConnectStreamErrMayBenefitFromNextHop(t *testing.T) {
 }
 
 func TestCoreSessionDialDirectTCPRejectsInvalidDestination(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{})
+	session := newTestCoreSession(msess.CoreSession{})
 	_, err := session.dialDirectTCP(context.Background(), "tcp", M.Socksaddr{})
 	if err == nil {
 		t.Fatal("expected direct tcp dial to reject invalid destination")
 	}
-	if !errors.Is(err, ErrCapability) {
-		t.Fatalf("expected ErrCapability for direct dial invalid destination, got: %v", err)
+	if !errors.Is(err, msess.ErrCapability) {
+		t.Fatalf("expected msess.ErrCapability for direct dial invalid destination, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassCapability {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
 		t.Fatalf("expected capability class for direct dial invalid destination, got: %s", got)
 	}
 }
 
 func TestConnectIPPacketSessionCloseKeepsSharedConnOwnedByCoreSession(t *testing.T) {
 	sharedConn := &connectip.Conn{}
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Caps: CapabilitySet{ConnectIP: true},
 			IPConn: sharedConn,
 		})
@@ -1005,7 +1014,7 @@ func TestConnectIPPacketSessionCloseKeepsSharedConnOwnedByCoreSession(t *testing
 }
 
 func TestCoreSessionCloseClearsConnectIPHTTPStateAndIsIdempotent(t *testing.T) {
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			IPHTTP: &http3.Transport{},
 			IPHTTPConn: &http3.ClientConn{},
 		})
@@ -1089,7 +1098,7 @@ func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 	defer pc.Close()
 
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
@@ -1127,7 +1136,7 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 	}
 	var call atomic.Uint32
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
@@ -1144,7 +1153,7 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 			n := call.Add(1)
 			switch n {
 			case 1:
-				// Must not match IsMasqueHTTPLayerSwitchableFailure substrings (would consume fallback on first dial).
+				// Must not match httpx.IsLayerSwitchableFailure substrings (would consume fallback on first dial).
 				return nil, errors.New("nonswitchable_stub_udp_dial_1")
 			case 2:
 				return nil, errors.New("Extended CONNECT not supported on this path")
@@ -1183,7 +1192,7 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 	var call atomic.Uint32
 	var testSess *coreSession
 	testSess = func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 				TransportMode:            "connect_udp",
 				MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
@@ -1221,14 +1230,14 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 		t.Fatalf("expected h2 transport churn then success (2 CONNECT-UDP attempts), got %d", call.Load())
 	}
 	defer pc.Close()
-	if inner, ok := pc.(*masqueUDPDatagramSplitConn); !ok || inner.PacketConn != okPC {
+	if inner, ok := pc.(*cudp.DatagramSplitConn); !ok || inner.PacketConn != okPC {
 		t.Fatalf("expected masque udp split wrapper around stub PacketConn, got %T %+v", pc, pc)
 	}
 }
 
 func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t *testing.T) {
 	var h3RoundTrips atomic.Uint32
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
@@ -1282,7 +1291,7 @@ func TestOpenIPSessionFailureClearsHTTPFallbackLatchForNextAttempt(t *testing.T)
 		t.Fatalf("build ip template: %v", err)
 	}
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
@@ -1317,7 +1326,7 @@ func TestOpenIPSessionHTTPFallbackRunsAfterIPH3ReconnectDialSwitchableFailure(t 
 	}
 	var call atomic.Uint32
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
@@ -1365,7 +1374,7 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 	okConn := &connectip.Conn{}
 	var call atomic.Uint32
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode:            "connect_ip",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
@@ -1413,7 +1422,7 @@ func TestDialConnectIPHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:    "t",
 			Server: "127.0.0.1",
@@ -1434,7 +1443,7 @@ func TestDialConnectIPHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 }
 
 func TestDialConnectIPHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1449,10 +1458,10 @@ func TestDialConnectIPHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrConnectIPTemplateNotConfigured) {
+	if !errors.Is(dialErr, msess.ErrConnectIPTemplateNotConfigured) {
 		t.Fatalf("unexpected err: %v", dialErr)
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(dialErr) {
+	if httpx.IsLayerSwitchableFailure(dialErr) {
 		t.Fatal("missing IP template must not imply http_layer_fallback")
 	}
 }
@@ -1462,7 +1471,7 @@ func TestDialUDPOverHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1482,7 +1491,7 @@ func TestDialUDPOverHTTP2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 }
 
 func TestDialUDPOverHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1493,16 +1502,16 @@ func TestDialUDPOverHTTP2ReturnsErrWhenTemplateNil(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrConnectUDPTemplateNotConfigured) {
+	if !errors.Is(dialErr, msess.ErrConnectUDPTemplateNotConfigured) {
 		t.Fatalf("unexpected err: %v", dialErr)
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(dialErr) {
+	if httpx.IsLayerSwitchableFailure(dialErr) {
 		t.Fatal("nil template is a config error; must not imply http_layer_fallback")
 	}
 }
 
 func TestDialUDPAddrH3ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1515,16 +1524,16 @@ func TestDialUDPAddrH3ReturnsErrWhenTemplateNil(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrConnectUDPTemplateNotConfigured) {
+	if !errors.Is(dialErr, msess.ErrConnectUDPTemplateNotConfigured) {
 		t.Fatalf("unexpected err: %v", dialErr)
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(dialErr) {
+	if httpx.IsLayerSwitchableFailure(dialErr) {
 		t.Fatal("nil template is a config error; must not imply http_layer_fallback")
 	}
 }
 
 func TestDialUDPAddrH2ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1543,10 +1552,10 @@ func TestDialUDPAddrH2ReturnsErrWhenTemplateNil(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrConnectUDPTemplateNotConfigured) {
+	if !errors.Is(dialErr, msess.ErrConnectUDPTemplateNotConfigured) {
 		t.Fatalf("unexpected err: %v", dialErr)
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(dialErr) {
+	if httpx.IsLayerSwitchableFailure(dialErr) {
 		t.Fatal("nil template is a config error; must not imply http_layer_fallback")
 	}
 }
@@ -1561,7 +1570,7 @@ func TestDialTCPStreamH2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1573,12 +1582,12 @@ func TestDialTCPStreamH2ReturnsCanceledBeforeTCPConfig(t *testing.T) {
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 }
 
-// H2 CONNECT-stream must join ErrTCPConnectStreamFailed for early transport failures (parity with H3 and with in-loop errors).
+// H2 CONNECT-stream must join msess.ErrTCPConnectStreamFailed for early transport failures (parity with H3 and with in-loop errors).
 func TestDialTCPStreamH2JoinsErrWhenH2TransportUnconfigured(t *testing.T) {
 	u, err := url.Parse("https://example.com/masque/tcp/example.com/443")
 	if err != nil {
@@ -1589,15 +1598,15 @@ func TestDialTCPStreamH2JoinsErrWhenH2TransportUnconfigured(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	_, dialErr := s.dialTCPStreamH2(context.Background(), u, opts, "example.com", M.Socksaddr{Port: 443})
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 	if !strings.Contains(dialErr.Error(), "tcp dialer is not configured") {
 		t.Fatalf("expected tcp dialer error substring, got %v", dialErr)
@@ -1617,7 +1626,7 @@ func TestDialTCPStreamH2ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 			return nil, errors.New("unexpected tcp dial")
 		},
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	var attempts atomic.Uint32
@@ -1638,8 +1647,8 @@ func TestDialTCPStreamH2ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("expected single RoundTrip attempt, got %d", got)
@@ -1659,7 +1668,7 @@ func TestDialTCPStreamH2StopsFailedRequestRelayBeforeRetry(t *testing.T) {
 			return nil, errors.New("unexpected tcp dial")
 		},
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	var attempts atomic.Uint32
@@ -1703,7 +1712,7 @@ func TestDialUDPAddrH3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1729,7 +1738,7 @@ func TestDialUDPAddrH2ReturnsCanceledBeforeDialUDPOverHTTP2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build udp template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1756,7 +1765,7 @@ func TestDialUDPAddrH2ReturnsCanceledBeforeDialUDPOverHTTP2(t *testing.T) {
 }
 
 func TestDialConnectIPAttemptH3ReturnsErrWhenTemplateNil(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1768,10 +1777,10 @@ func TestDialConnectIPAttemptH3ReturnsErrWhenTemplateNil(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrConnectIPTemplateNotConfigured) {
+	if !errors.Is(dialErr, msess.ErrConnectIPTemplateNotConfigured) {
 		t.Fatalf("unexpected err: %v", dialErr)
 	}
-	if IsMasqueHTTPLayerSwitchableFailure(dialErr) {
+	if httpx.IsLayerSwitchableFailure(dialErr) {
 		t.Fatal("missing IP template must not imply http_layer_fallback")
 	}
 }
@@ -1781,7 +1790,7 @@ func TestDialConnectIPAttemptH3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1806,7 +1815,7 @@ func TestDialConnectIPAttemptH2ReturnsCanceledBeforeLayerWorkClearsFallbackLatch
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1835,7 +1844,7 @@ func TestDialConnectIPAttemptH2ReturnsCanceledBeforeLayerWorkClearsFallbackLatch
 
 // Parity with openIPSessionLocked: cached HTTP/3 client conn must not short-circuit a canceled ctx.
 func TestOpenHTTP3ClientConnReturnsCanceledBeforeReuse(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1857,9 +1866,38 @@ func TestOpenHTTP3ClientConnReturnsCanceledBeforeReuse(t *testing.T) {
 	}
 }
 
+func TestEnsureH2UDPTransportSetsDisableCompression(t *testing.T) {
+	ctx := context.Background()
+	s := newTestCoreSession(msess.CoreSession{
+		Options: ClientOptions{
+			Server: "example.com",
+			TCPDial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("dial not used in this test")
+			},
+		},
+	})
+	tr, err := s.ensureH2UDPTransport(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tr.DisableCompression {
+		t.Fatal("H2 MASQUE dataplane must not negotiate gzip (breaks CONNECT stream framing)")
+	}
+	tr2, err := s.ensureH2UDPTransport(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr2 != tr {
+		t.Fatal("expected cached H2 UDP transport reuse")
+	}
+	if !tr2.DisableCompression {
+		t.Fatal("expected DisableCompression on reused transport")
+	}
+}
+
 // Parity with openHTTP3ClientConn: cached HTTP/2 overlay transport must not short-circuit a canceled ctx.
 func TestEnsureH2UDPTransportReturnsCanceledBeforeReuse(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "127.0.0.1",
@@ -1886,7 +1924,7 @@ func TestEnsureH2UDPTransportReturnsCanceledBeforeReuse(t *testing.T) {
 
 // Parity with dial paths: a canceled ctx must not hit the reuse shortcut (success with existing ipConn).
 func TestOpenIPSessionLockedReturnsCanceledBeforeReuse(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{Tag: "t"},
 			Caps: CapabilitySet{ConnectIP: true},
 			IPConn: &connectip.Conn{},
@@ -1910,7 +1948,7 @@ func TestOpenIPSessionLockedCanceledDialDoesNotAdvanceHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "hop1.example",
@@ -1966,7 +2004,7 @@ func TestOpenIPSessionLockedCanceledDialInnerLoopDoesNotAdvanceHopAgain(t *testi
 	if err != nil {
 		t.Fatalf("template: %v", err)
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Tag:        "t",
 			Server:     "hop1.example",
@@ -2028,7 +2066,7 @@ func TestDialTCPStreamHTTP3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2040,8 +2078,8 @@ func TestDialTCPStreamHTTP3ReturnsCanceledBeforeLayerLog(t *testing.T) {
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 }
 
@@ -2056,7 +2094,7 @@ func TestDialTCPStreamHTTP3ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 		Server:     "127.0.0.1",
 		ServerPort: 443,
 	}
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: opts,
 		})
 	var attempts atomic.Uint32
@@ -2077,8 +2115,8 @@ func TestDialTCPStreamHTTP3ReturnsCanceledAfterRoundTripSuccess(t *testing.T) {
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("expected single RoundTrip attempt, got %d", got)
@@ -2098,7 +2136,7 @@ func TestListenPacketConnectIPSkipsDestinationResolution(t *testing.T) {
 	}
 	okConn := &connectip.Conn{}
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: "connect_ip",
 		},
@@ -2130,7 +2168,7 @@ func TestListenPacketConnectIPCanceledBeforeNewConnectIPUDPPacketConn(t *testing
 	okConn := &connectip.Conn{}
 	ctx, cancel := context.WithCancel(context.Background())
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: "connect_ip",
 		},
@@ -2168,7 +2206,7 @@ func TestListenPacketConnectIPCanceledBeforeNewConnectIPUDPPacketConn(t *testing
 }
 
 func TestReleaseOpenedConnectIPSessionIfAbandonedClearsHTTPLayers(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{},
 		})
 	s.IPConn = &connectip.Conn{}
@@ -2194,7 +2232,7 @@ func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 	var hookCalls atomic.Uint32
 	okConn := &connectip.Conn{}
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{TransportMode: "connect_ip"},
 			Caps: CapabilitySet{ConnectIP: true},
 		})
@@ -2219,7 +2257,7 @@ func TestOpenIPSessionCanceledBeforeLockSkipsConnectIPDial(t *testing.T) {
 	var hookCalls atomic.Uint32
 	okConn := &connectip.Conn{}
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{TransportMode: "connect_ip"},
 			Caps: CapabilitySet{ConnectIP: true},
 		})
@@ -2247,7 +2285,7 @@ func TestListenPacketCanceledSkipsUDPDialHook(t *testing.T) {
 	}
 	var dials atomic.Uint32
 	s := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
@@ -2280,7 +2318,7 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 	var dials atomic.Uint32
 	ctx, cancel := context.WithCancel(context.Background())
 	s := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
@@ -2304,7 +2342,7 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 }
 
 func TestDialContextCanceledBeforeTCPBranches(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
@@ -2322,7 +2360,7 @@ func TestDialContextCanceledBeforeTCPBranches(t *testing.T) {
 }
 
 func TestDialConnectIPTCPCanceledClearsHTTPFallbackLatch(t *testing.T) {
-	s := newTestCoreSession(session.CoreSession{
+	s := newTestCoreSession(msess.CoreSession{
 			Caps: CapabilitySet{ConnectIP: true},
 			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectIP,
@@ -2353,7 +2391,7 @@ func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 	listenDone := make(chan error, 1)
 	var startOnce atomic.Bool
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: "connect_udp",
 		},
@@ -2437,7 +2475,7 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 	}()
 	addr := ln.Addr().(*net.TCPAddr)
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", uint16(addr.Port))
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
@@ -2467,7 +2505,7 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 
 func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
@@ -2485,14 +2523,14 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 		}),
 		})
 	_, err := session.DialContext(context.Background(), "tcp", dest)
-	if !errors.Is(err, ErrAuthFailed) {
-		t.Fatalf("expected ErrAuthFailed without direct fallback, got: %v", err)
+	if !errors.Is(err, msess.ErrAuthFailed) {
+		t.Fatalf("expected msess.ErrAuthFailed without direct fallback, got: %v", err)
 	}
 }
 
 func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", 9)
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
@@ -2507,15 +2545,15 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 		}),
 		})
 	_, err := session.DialContext(context.Background(), "tcp", dest)
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 }
 
 func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
 	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			session := newTestCoreSession(session.CoreSession{
+			session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
@@ -2532,10 +2570,10 @@ func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
 				}),
 		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-			if !errors.Is(err, ErrAuthFailed) {
-				t.Fatalf("expected ErrAuthFailed for status=%d, got: %v", statusCode, err)
+			if !errors.Is(err, msess.ErrAuthFailed) {
+				t.Fatalf("expected msess.ErrAuthFailed for status=%d, got: %v", statusCode, err)
 			}
-			if got := ClassifyError(err); got != ErrorClassAuth {
+			if got := msess.ClassifyError(err); got != msess.ErrorClassAuth {
 				t.Fatalf("expected auth class for status=%d, got: %s", statusCode, got)
 			}
 		})
@@ -2549,7 +2587,7 @@ func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
 		http.StatusServiceUnavailable,
 	} {
 		t.Run(http.StatusText(statusCode), func(t *testing.T) {
-			session := newTestCoreSession(session.CoreSession{
+			session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
@@ -2563,10 +2601,10 @@ func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
 				}),
 		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-			if !errors.Is(err, ErrTCPConnectStreamFailed) {
-				t.Fatalf("expected ErrTCPConnectStreamFailed for non-auth non-2xx status=%d, got: %v", statusCode, err)
+			if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+				t.Fatalf("expected msess.ErrTCPConnectStreamFailed for non-auth non-2xx status=%d, got: %v", statusCode, err)
 			}
-			if got := ClassifyError(err); got != ErrorClassDial {
+			if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 				t.Fatalf("expected dial class for non-auth non-2xx status=%d, got: %s", statusCode, got)
 			}
 		})
@@ -2583,7 +2621,7 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 	for name, retryErr := range retryableErrors {
 		t.Run(name, func(t *testing.T) {
 			attempts := 0
-			session := newTestCoreSession(session.CoreSession{
+			session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
@@ -2595,10 +2633,10 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 				}),
 		})
 			_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-			if !errors.Is(err, ErrTCPConnectStreamFailed) {
-				t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+			if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+				t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 			}
-			if got := ClassifyError(err); got != ErrorClassDial {
+			if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 				t.Fatalf("expected dial class for retryable roundtrip error, got: %s", got)
 			}
 			if attempts != 3 {
@@ -2611,7 +2649,7 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 	retryErr := timeoutNetError{msg: "timeout while connecting"}
 	attempts := 0
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2623,13 +2661,13 @@ func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 		}),
 		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, retryErr) {
 		t.Fatalf("expected retry-exhausted error to preserve the last roundtrip cause, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for retry-exhausted roundtrip error, got: %s", got)
 	}
 	if attempts != 3 {
@@ -2640,7 +2678,7 @@ func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 func TestDialTCPStreamNonRetryableRoundTripErrorDoesNotRetryAndKeepsDialClass(t *testing.T) {
 	attempts := 0
 	nonRetryableErr := errors.New("tls: bad certificate")
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2652,13 +2690,13 @@ func TestDialTCPStreamNonRetryableRoundTripErrorDoesNotRetryAndKeepsDialClass(t 
 		}),
 		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, nonRetryableErr) {
 		t.Fatalf("expected non-retryable roundtrip error to preserve cause, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for non-retryable roundtrip error, got: %s", got)
 	}
 	if attempts != 1 {
@@ -2675,7 +2713,7 @@ func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *tes
 		time.Sleep(5 * time.Millisecond)
 		cancel()
 	}()
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2690,13 +2728,13 @@ func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *tes
 		}),
 		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class when retry loop is cancelled during backoff, got: %s", got)
 	}
 	if attempts != 1 {
@@ -2708,7 +2746,7 @@ func TestDialTCPStreamPreAdvanceHopJoinsCauseWhenCanceledAtChainEnd(t *testing.T
 	handshakeErr := errors.New("handshake before hop advance cancel")
 	ctx, cancel := context.WithCancel(context.Background())
 	session := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2723,7 +2761,7 @@ func TestDialTCPStreamPreAdvanceHopJoinsCauseWhenCanceledAtChainEnd(t *testing.T
 	}()
 	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) || !errors.Is(err, context.Canceled) || !errors.Is(err, handshakeErr) {
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) || !errors.Is(err, context.Canceled) || !errors.Is(err, handshakeErr) {
 		t.Fatalf("expected joined handshake+cancel, got: %v", err)
 	}
 }
@@ -2736,7 +2774,7 @@ func TestListenPacketUDPChainEndJoinsCauseWhenCanceledAtHopExhaustion(t *testing
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := func() *coreSession {
-		s := newTestCoreSession(session.CoreSession{
+		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
@@ -2760,7 +2798,7 @@ func TestDialTCPStreamOuterLoopJoinsContextCauseWhenCanceledDuringRoundTrip(t *t
 	entered := make(chan struct{})
 	resume := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2779,8 +2817,8 @@ func TestDialTCPStreamOuterLoopJoinsContextCauseWhenCanceledDuringRoundTrip(t *t
 		close(resume)
 	}()
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed in chain, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed in chain, got: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled in chain (outer-loop join), got: %v", err)
@@ -2794,7 +2832,7 @@ func TestDialTCPStreamContextCanceledBeforeFirstRoundTripStopsWithoutAttempt(t *
 	attempts := 0
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2806,13 +2844,13 @@ func TestDialTCPStreamContextCanceledBeforeFirstRoundTripStopsWithoutAttempt(t *
 		}),
 		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for cancel-before-roundtrip path, got: %s", got)
 	}
 	if attempts != 0 {
@@ -2824,7 +2862,7 @@ func TestDialTCPStreamContextDeadlineExceededBeforeFirstRoundTripStopsWithoutAtt
 	attempts := 0
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2836,13 +2874,13 @@ func TestDialTCPStreamContextDeadlineExceededBeforeFirstRoundTripStopsWithoutAtt
 		}),
 		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for deadline-before-roundtrip path, got: %s", got)
 	}
 	if attempts != 0 {
@@ -2854,7 +2892,7 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 	attempts := 0
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2866,13 +2904,13 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 		}),
 		})
 	_, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class when retry loop is stopped by deadline during backoff, got: %s", got)
 	}
 	if attempts != 1 {
@@ -2882,7 +2920,7 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 
 func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *testing.T) {
 	attempts := 0
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2894,13 +2932,13 @@ func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *test
 		}),
 		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for roundtrip context cancellation, got: %s", got)
 	}
 	if attempts != 1 {
@@ -2910,7 +2948,7 @@ func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *test
 
 func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry(t *testing.T) {
 	attempts := 0
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2922,13 +2960,13 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 		}),
 		})
 	_, err := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context deadline cause to be preserved, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected dial class for roundtrip deadline, got: %s", got)
 	}
 	if attempts != 1 {
@@ -2938,7 +2976,7 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 
 func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -2965,13 +3003,13 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 	time.Sleep(25 * time.Millisecond)
 	buf := make([]byte, 8)
 	_, err = conn.Read(buf)
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected relay-phase read error to preserve msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected relay-phase read error to preserve context deadline cause, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected relay-phase deadline to classify as dial, got: %s", got)
 	}
 }
@@ -2979,7 +3017,7 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	relayCtx, relayCancel := context.WithCancel(context.Background())
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
@@ -3003,13 +3041,13 @@ func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 
 	buf := make([]byte, 8)
 	_, err = conn.Read(buf)
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected relay-phase read error to preserve ErrTCPConnectStreamFailed, got: %v", err)
+	if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected relay-phase read error to preserve msess.ErrTCPConnectStreamFailed, got: %v", err)
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected relay-phase read error to preserve context cancel cause, got: %v", err)
 	}
-	if got := ClassifyError(err); got != ErrorClassDial {
+	if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 		t.Fatalf("expected relay-phase cancel to classify as dial, got: %s", got)
 	}
 }
@@ -3117,10 +3155,10 @@ func TestDialTCPStreamInProcessHTTP3ProxyAuthAndPolicyStatusesMapToAuthClass(t *
 			t.Cleanup(func() { _ = session.Close() })
 
 			_, err = session.DialContext(waitCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-			if !errors.Is(err, ErrAuthFailed) {
-				t.Fatalf("expected ErrAuthFailed for status=%d, got: %v", statusCode, err)
+			if !errors.Is(err, msess.ErrAuthFailed) {
+				t.Fatalf("expected msess.ErrAuthFailed for status=%d, got: %v", statusCode, err)
 			}
-			if got := ClassifyError(err); got != ErrorClassAuth {
+			if got := msess.ClassifyError(err); got != msess.ErrorClassAuth {
 				t.Fatalf("expected auth class for status=%d, got: %s", statusCode, got)
 			}
 		})
@@ -3151,10 +3189,10 @@ func TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass(t *testing
 			t.Cleanup(func() { _ = session.Close() })
 
 			_, err = session.DialContext(waitCtx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", 443))
-			if !errors.Is(err, ErrTCPConnectStreamFailed) {
-				t.Fatalf("expected ErrTCPConnectStreamFailed for non-auth status=%d, got: %v", statusCode, err)
+			if !errors.Is(err, msess.ErrTCPConnectStreamFailed) {
+				t.Fatalf("expected msess.ErrTCPConnectStreamFailed for non-auth status=%d, got: %v", statusCode, err)
 			}
-			if got := ClassifyError(err); got != ErrorClassDial {
+			if got := msess.ClassifyError(err); got != msess.ErrorClassDial {
 				t.Fatalf("expected dial class for non-auth status=%d, got: %s", statusCode, got)
 			}
 		})
@@ -3297,11 +3335,11 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivity
 	}
 }
 
-func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter)) int {
-	t.Helper()
+func startInProcessTCPConnectProxy(tb testing.TB, handler func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter)) int {
+	tb.Helper()
 	quicConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
-		t.Fatalf("listen quic udp: %v", err)
+		tb.Fatalf("listen quic udp: %v", err)
 	}
 	proxyPort := quicConn.LocalAddr().(*net.UDPAddr).Port
 
@@ -3325,7 +3363,7 @@ func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, target
 		defer serveWG.Done()
 		_ = server.Serve(quicConn)
 	}()
-	t.Cleanup(func() {
+	tb.Cleanup(func() {
 		_ = server.Close()
 		serveWG.Wait()
 		_ = quicConn.Close()
@@ -3335,7 +3373,7 @@ func startInProcessTCPConnectProxy(t *testing.T, handler func(targetHost, target
 }
 
 func TestConnectIPObservabilitySnapshotIncludesHTTP3StreamDatagramQueueDrops(t *testing.T) {
-	snapshot := ConnectIPObservabilitySnapshot()
+	snapshot := mcip.ObservabilitySnapshot()
 	raw, ok := snapshot["http3_stream_datagram_queue_drop_total"]
 	if !ok {
 		t.Fatal("expected http3_stream_datagram_queue_drop_total in ConnectIPObservabilitySnapshot")
@@ -3346,7 +3384,7 @@ func TestConnectIPObservabilitySnapshotIncludesHTTP3StreamDatagramQueueDrops(t *
 }
 
 func TestConnectIPObservabilitySnapshotIncludesQUICDatagramRcvQueueDrops(t *testing.T) {
-	snapshot := ConnectIPObservabilitySnapshot()
+	snapshot := mcip.ObservabilitySnapshot()
 	raw, ok := snapshot["quic_datagram_rcv_queue_drop_total"]
 	if !ok {
 		t.Fatal("expected quic_datagram_rcv_queue_drop_total in ConnectIPObservabilitySnapshot")

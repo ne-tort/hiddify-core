@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
@@ -108,8 +110,14 @@ func TestConnectIPTCPForwarderPipeE2E(t *testing.T) {
 	}
 }
 
+type pipePacketSession interface {
+	ReadPacket([]byte) (int, error)
+	WritePacket([]byte) ([]byte, error)
+	Close() error
+}
+
 type pipePacketPlaneConn struct {
-	session      *masquePacketPipeSession
+	session      pipePacketSession
 	peerPrefixes []netip.Prefix
 }
 
@@ -175,6 +183,34 @@ func (s *masquePacketPipeSession) Close() error {
 		close(s.closeCh)
 	})
 	return nil
+}
+
+// benignOncePipeSession injects one remote QUIC NO_ERROR (0x100) on the next WritePacket
+// after ArmTeardown0x100 — models H3 half-close during server CONNECT-IP egress drain.
+type benignOncePipeSession struct {
+	inner *masquePacketPipeSession
+	armed atomic.Bool
+	fired atomic.Bool
+}
+
+func (s *benignOncePipeSession) ArmTeardown0x100() {
+	s.armed.Store(true)
+}
+
+func (s *benignOncePipeSession) ReadPacket(buffer []byte) (int, error) {
+	return s.inner.ReadPacket(buffer)
+}
+
+func (s *benignOncePipeSession) WritePacket(buffer []byte) ([]byte, error) {
+	if s.armed.Load() && !s.fired.Load() {
+		s.fired.Store(true)
+		return nil, &quic.ApplicationError{ErrorCode: 0x100, Remote: true}
+	}
+	return s.inner.WritePacket(buffer)
+}
+
+func (s *benignOncePipeSession) Close() error {
+	return s.inner.Close()
 }
 
 func runMasquePipeIngressRelay(sess *masquePacketPipeSession, ns *cip.Netstack) func() {

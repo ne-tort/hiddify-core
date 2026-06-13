@@ -64,6 +64,66 @@ func TestDeliverTCPIngressActiveNetstack(t *testing.T) {
 	}
 }
 
+func TestDeliverTCPIngressAckOnlySkipsOutboundDrain(t *testing.T) {
+	sess := &packetPipeSession{
+		recvCh:  make(chan []byte, 8),
+		sendCh:  make(chan []byte, 8),
+		closeCh: make(chan struct{}),
+	}
+	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	ackOnly := buildTestIPv4TCP(t, 0x10, nil)
+	if IPv4TCPHasPayload(ackOnly) {
+		t.Fatal("ACK-only fixture must not carry payload")
+	}
+	ok := DeliverTCPIngress(ackOnly, TCPIngressDeliverHooks{
+		ActiveNetstack: func() *Netstack { return stack },
+	})
+	if !ok {
+		t.Fatal("expected deliver for ACK-only segment")
+	}
+	if stack.outboundCh != nil {
+		t.Fatal("ACK-only ingress must not start outbound drain writer")
+	}
+}
+
+func TestDeliverTCPIngressPayloadSchedulesOutboundDrain(t *testing.T) {
+	sess := &packetPipeSession{
+		recvCh:  make(chan []byte, 8),
+		sendCh:  make(chan []byte, 8),
+		closeCh: make(chan struct{}),
+	}
+	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	withPayload := buildTestIPv4TCP(t, 0x10, []byte("payload"))
+	if !IPv4TCPHasPayload(withPayload) {
+		t.Fatal("fixture must carry TCP payload")
+	}
+	ok := DeliverTCPIngress(withPayload, TCPIngressDeliverHooks{
+		ActiveNetstack: func() *Netstack { return stack },
+	})
+	if !ok {
+		t.Fatal("expected deliver for payload segment")
+	}
+	if stack.outboundCh == nil {
+		t.Fatal("payload ingress must schedule outbound drain")
+	}
+}
+
 func TestDeliverTCPIngressInjectFallback(t *testing.T) {
 	sess := &packetPipeSession{
 		recvCh:  make(chan []byte, 8),

@@ -54,6 +54,7 @@ func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (ne
 			host.BumpTCPInstallInflight(-1)
 		}
 		host.UnlockSession()
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	}
 	var ns TCPNetstack
@@ -68,6 +69,7 @@ func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (ne
 			host.BumpTCPInstallInflight(-1)
 			host.UnlockSession()
 			host.ReleaseAbandonedIPSession()
+			host.ClearHTTPFallbackAfterGiveUp()
 			return nil, nerr
 		}
 		if host.TCPNetstack() == nil {
@@ -94,6 +96,9 @@ func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (ne
 	conn, dialErr := ns.DialContext(ctx, dest)
 	if NetstackDebugEnabled() {
 		log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), dialErr)
+	}
+	if dialErr != nil {
+		host.ClearHTTPFallbackAfterGiveUp()
 	}
 	return conn, dialErr
 }

@@ -135,6 +135,12 @@ func (c *streamFlowController) shouldQueueWindowUpdate() bool {
 	return !c.receivedFinalOffset && c.hasWindowUpdate()
 }
 
+func (c *streamFlowController) ShouldQueueWindowUpdate() bool {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	return c.shouldQueueWindowUpdate()
+}
+
 func (c *streamFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteCount {
 	// If we already received the final offset for this stream, the peer won't need any additional flow control credit.
 	if c.receivedFinalOffset {

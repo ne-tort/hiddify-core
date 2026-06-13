@@ -352,3 +352,31 @@ func (m *streamsMap) UseResetMaps() {
 	m.reset = false
 	m.mutex.Unlock()
 }
+
+// WakeBlockedSendStreams signals blocked Write() waiters on all outgoing send streams
+// after peer MAX_DATA opens connection-level FC. Covers streams dropped from the framer
+// active set while conn-blocked (belt-and-suspenders over activeStreams-only wake).
+func (m *streamsMap) WakeBlockedSendStreams() {
+	bidi := m.outgoingBidiStreams
+	uni := m.outgoingUniStreams
+
+	bidi.mutex.RLock()
+	bidiStreams := make([]*Stream, 0, len(bidi.streams))
+	for _, str := range bidi.streams {
+		bidiStreams = append(bidiStreams, str)
+	}
+	bidi.mutex.RUnlock()
+	for _, str := range bidiStreams {
+		str.wakeBlockedSendHalf()
+	}
+
+	uni.mutex.RLock()
+	uniStreams := make([]*SendStream, 0, len(uni.streams))
+	for _, str := range uni.streams {
+		uniStreams = append(uniStreams, str)
+	}
+	uni.mutex.RUnlock()
+	for _, str := range uniStreams {
+		str.wakeBlockedWriter(str.sender)
+	}
+}

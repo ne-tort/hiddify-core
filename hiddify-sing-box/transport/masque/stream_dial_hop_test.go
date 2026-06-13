@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"net"
@@ -191,10 +192,10 @@ func TestConnectStreamChosenLogFields(t *testing.T) {
 }
 
 func TestStreamIsConnectStreamHTTP400(t *testing.T) {
-	if !strm.IsConnectStreamHTTP400(errors.Join(ErrTCPConnectStreamFailed, errors.New("status=400 url=x"))) {
+	if !strm.IsConnectStreamHTTP400(errors.Join(session.ErrTCPConnectStreamFailed, errors.New("status=400 url=x"))) {
 		t.Fatal("expected HTTP 400 detection")
 	}
-	if strm.IsConnectStreamHTTP400(ErrCapability) {
+	if strm.IsConnectStreamHTTP400(session.ErrCapability) {
 		t.Fatal("capability error must not match HTTP 400")
 	}
 }

@@ -44,11 +44,14 @@ func TestConnectUsePipeUploadEnv(t *testing.T) {
 		{"pipe", true},
 		{"0", false},
 		{"off", false},
+		{"bidi", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.env, func(t *testing.T) {
 			t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", tc.env)
-			t.Setenv("MASQUE_CONNECT_AUTHORITY_PIPE_UPLOAD", "")
+			if got := ConnectStreamUsePipeUpload(); got != tc.want {
+				t.Fatalf("ConnectStreamUsePipeUpload() = %v, want %v", got, tc.want)
+			}
 			if got := ConnectUsePipeUpload(); got != tc.want {
 				t.Fatalf("ConnectUsePipeUpload() = %v, want %v", got, tc.want)
 			}
@@ -56,10 +59,26 @@ func TestConnectUsePipeUploadEnv(t *testing.T) {
 	}
 	t.Run("legacy_h3_stream_0", func(t *testing.T) {
 		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "")
-		t.Setenv("MASQUE_CONNECT_AUTHORITY_PIPE_UPLOAD", "")
 		t.Setenv("MASQUE_CONNECT_STREAM_H3_STREAM", "0")
-		if !ConnectUsePipeUpload() {
+		if !ConnectStreamUsePipeUpload() {
 			t.Fatal("expected pipe when H3_STREAM=0")
+		}
+	})
+	t.Run("explicit_h3_stream_1", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "")
+		t.Setenv("MASQUE_CONNECT_STREAM_H3_STREAM", "1")
+		if ConnectStreamUsePipeUpload() {
+			t.Fatal("expected bidi stream when H3_STREAM=1")
+		}
+	})
+	t.Run("thin_overrides_pipe_default", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
+		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
+		if ConnectStreamUsePipeUpload() {
+			t.Fatal("thin must force bidi stream even when PIPE_UPLOAD=1")
+		}
+		if BidiDuplexCoordEnabled() {
+			t.Fatal("thin must disable duplex_coord")
 		}
 	})
 }

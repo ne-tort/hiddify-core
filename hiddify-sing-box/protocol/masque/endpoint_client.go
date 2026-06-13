@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	stdlog "log"
@@ -113,9 +114,9 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 	e.mu.RUnlock()
 	if runtime == nil {
 		if err := e.lastStartError(); err != nil {
-			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "masque startup failed"))
+			return nil, errors.Join(session.ErrTransportInit, E.Cause(err, "masque startup failed"))
 		}
-		return nil, errors.Join(TM.ErrTransportInit, E.New("masque startup in progress"))
+		return nil, errors.Join(session.ErrTransportInit, E.New("masque startup in progress"))
 	}
 	return runtime.DialContext(ctx, network, destination)
 }
@@ -126,9 +127,9 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	e.mu.RUnlock()
 	if runtime == nil {
 		if err := e.lastStartError(); err != nil {
-			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "masque startup failed"))
+			return nil, errors.Join(session.ErrTransportInit, E.Cause(err, "masque startup failed"))
 		}
-		return nil, errors.Join(TM.ErrTransportInit, E.New("masque startup in progress"))
+		return nil, errors.Join(session.ErrTransportInit, E.New("masque startup in progress"))
 	}
 	return runtime.ListenPacket(ctx, destination)
 }
@@ -224,7 +225,6 @@ func (e *Endpoint) startRuntime() {
 		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
 		ConnectIPScopeIPProto:    e.options.ConnectIPScopeIPProto,
 		TemplateTCP:              e.options.TemplateTCP,
-		TemplateConnect:          e.options.TemplateConnect,
 		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
 		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
 		TCPTransport:             normalizeTCPTransport(e.options.TCPTransport),

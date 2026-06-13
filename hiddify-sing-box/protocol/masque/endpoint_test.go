@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"net/http"
@@ -9,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/adapter"
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -58,7 +59,7 @@ func TestWarpEndpointStartupErrorIsObservable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected startup error to be returned")
 	}
-	if got := TM.ClassifyError(err); got != TM.ErrorClassTransport {
+	if got := session.ClassifyError(err); got != session.ErrorClassTransport {
 		t.Fatalf("expected startup error class transport_init, got %s (err=%v)", got, err)
 	}
 }
@@ -826,6 +827,47 @@ func TestParseTCPTargetFromRequestRelaxedRejectsNonLoopbackTemplateHost(t *testi
 	}
 }
 
+func TestParseConnectUDPRequestWildcardListenStrictAuthorityRejectsPublicHost(t *testing.T) {
+	t.Parallel()
+	opts := option.MasqueEndpointOptions{Listen: "0.0.0.0", ListenPort: 8443}
+	if !masqueServerShouldRelaxTemplateAuthority(opts, masqueTemplateFieldUDP) {
+		t.Fatal("expected relax for wildcard listen with empty template_udp")
+	}
+	udpRaw, _, _ := resolveMasqueServerTemplateURLs(opts)
+	template, err := uritemplate.New(udpRaw)
+	if err != nil {
+		t.Fatalf("template init: %v", err)
+	}
+	if !strings.Contains(udpRaw, "127.0.0.1:8443") {
+		t.Fatalf("default wildcard template authority: got %q", udpRaw)
+	}
+
+	req, err := http.NewRequest(http.MethodConnect, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "203.0.113.1:8443"
+	req.Header.Set(":protocol", "connect-udp")
+	req.RequestURI = "/masque/udp/example.com/443"
+	if _, err := qmasque.ParseRequest(req, template); err == nil {
+		t.Fatal("expected strict parse to reject public :authority vs loopback template")
+	}
+
+	relaxed := masqueHTTPRequestForTemplateParse(req, template, true)
+	if _, err := qmasque.ParseRequest(relaxed, template); err != nil {
+		t.Fatalf("relaxed wildcard parse: %v", err)
+	}
+
+	reqPortMismatch, _ := http.NewRequest(http.MethodConnect, "", nil)
+	reqPortMismatch.Host = "203.0.113.1:9443"
+	reqPortMismatch.Header.Set(":protocol", "connect-udp")
+	reqPortMismatch.RequestURI = "/masque/udp/example.com/443"
+	relaxedPort := masqueHTTPRequestForTemplateParse(reqPortMismatch, template, true)
+	if _, err := qmasque.ParseRequest(relaxedPort, template); err == nil {
+		t.Fatal("expected port mismatch to reject even when relaxed")
+	}
+}
+
 func TestWarpEndpointCloseBeforeAsyncStartCompletes(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-close-race", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
@@ -877,7 +919,7 @@ func TestWarpEndpointStartupInProgressIsTransportInit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error while startup not finished and ctx short")
 	}
-	if !errors.Is(err, TM.ErrTransportInit) {
+	if !errors.Is(err, session.ErrTransportInit) {
 		t.Fatalf("expected ErrTransportInit sentinel, got %v", err)
 	}
 }
@@ -906,7 +948,7 @@ func TestWarpEndpointListenPacketStartupInProgressIsTransportInit(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected error while startup not finished and ctx short")
 	}
-	if !errors.Is(err, TM.ErrTransportInit) {
+	if !errors.Is(err, session.ErrTransportInit) {
 		t.Fatalf("expected ErrTransportInit sentinel, got %v", err)
 	}
 }
@@ -928,7 +970,7 @@ func TestWarpEndpointListenPacketStartupFailedPreservesCause(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected startup-failed error")
 	}
-	if !errors.Is(err, TM.ErrTransportInit) {
+	if !errors.Is(err, session.ErrTransportInit) {
 		t.Fatalf("expected ErrTransportInit sentinel, got %v", err)
 	}
 	if !errors.Is(err, startCause) {

@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	stdlog "log"
@@ -203,14 +204,14 @@ func (e *WarpEndpoint) waitRuntime(ctx context.Context) (CM.Runtime, error) {
 			return rt, nil
 		}
 		if err := e.lastStartError(); err != nil {
-			return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
+			return nil, errors.Join(session.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
 		}
 		select {
 		case <-ctx.Done():
 			if err := e.lastStartError(); err != nil {
-				return nil, errors.Join(TM.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
+				return nil, errors.Join(session.ErrTransportInit, E.Cause(err, "warp_masque startup failed"))
 			}
-			return nil, errors.Join(TM.ErrTransportInit, E.Cause(context.Cause(ctx), "warp_masque startup not finished"))
+			return nil, errors.Join(session.ErrTransportInit, E.Cause(context.Cause(ctx), "warp_masque startup not finished"))
 		case <-tick.C:
 		}
 	}
@@ -448,7 +449,6 @@ func (e *WarpEndpoint) startRuntime() {
 			ConnectIPScopeTarget:        e.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       e.options.ConnectIPScopeIPProto,
 			TemplateTCP:                 e.options.TemplateTCP,
-			TemplateConnect:             e.options.TemplateConnect,
 			FallbackPolicy:              normalizeFallbackPolicy(e.options.FallbackPolicy),
 			TCPMode:                     normalizeTCPMode(e.options.TCPMode),
 			TCPTransport:                normalizeTCPTransport(e.options.TCPTransport),

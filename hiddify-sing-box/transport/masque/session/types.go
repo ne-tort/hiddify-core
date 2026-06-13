@@ -57,7 +57,6 @@ type ClientOptions struct {
 	ConnectIPScopeTarget  string
 	ConnectIPScopeIPProto uint8
 	TemplateTCP           string
-	TemplateConnect       string
 	FallbackPolicy        string
 	TCPMode               string
 	TCPTransport          string

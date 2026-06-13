@@ -40,12 +40,14 @@ func ListenPacket(host ListenHost, ctx context.Context, destination M.Socksaddr)
 
 	targetHost, err := host.ResolveDestination(destination)
 	if err != nil {
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	}
 	target := net.JoinHostPort(targetHost, strconv.Itoa(int(destination.Port)))
 
 	udpClient, templateUDP, writeMax, httpLayer, err := host.PrepareUDP()
 	if err != nil {
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	}
 

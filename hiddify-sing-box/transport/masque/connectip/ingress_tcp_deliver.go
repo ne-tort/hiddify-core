@@ -13,7 +13,7 @@ type TCPIngressDeliverHooks struct {
 // schedules QUIC send wake for upload ACK-clock / download DATA delivery.
 func DeliverTCPIngress(pkt []byte, h TCPIngressDeliverHooks) bool {
 	deliver := func(ns *Netstack) {
-		ns.InjectInboundClone(pkt)
+		ns.InjectInboundOwned(CloneInboundFrame(pkt))
 		if IPv4TCPHasPayload(pkt) {
 			ns.ScheduleOutboundDrain()
 		}

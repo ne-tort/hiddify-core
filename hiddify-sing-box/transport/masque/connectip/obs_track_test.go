@@ -2,7 +2,6 @@ package connectip
 
 import (
 	"errors"
-	"sync/atomic"
 	"testing"
 )
 
@@ -52,18 +51,38 @@ func TestObsTrackPacketPlaneHooks(t *testing.T) {
 	}
 }
 
-func TestObsTrackDisabledWhenEventsOff(t *testing.T) {
+func TestObsTrackServerWriteIteration(t *testing.T) {
 	t.Parallel()
-	var called atomic.Bool
+	var txLen, ptb int
+	var writeErr error
 	SetObs(Obs{
-		EventsEnabled: func() bool { return false },
-		OnPacketRx:    func(int) { called.Store(true) },
+		OnPacketTx:        func(n int) { txLen = n },
+		OnPacketWriteFail: func(err error, _ bool) { writeErr = err },
+		OnPacketPTBRx:     func() { ptb++ },
 	})
 	t.Cleanup(func() { SetObs(Obs{}) })
 
-	TrackPacketRx(100)
-	if called.Load() {
-		t.Fatal("expected no hook when EventsEnabled is false")
+	TrackServerWriteIteration(64, 32, nil)
+	if txLen != 64 || ptb != 1 || writeErr != nil {
+		t.Fatalf("success+ptb: tx=%d ptb=%d writeErr=%v", txLen, ptb, writeErr)
+	}
+
+	TrackServerWriteIteration(0, 0, errTestObsTrack)
+	if !errors.Is(writeErr, errTestObsTrack) {
+		t.Fatalf("write fail: %v", writeErr)
+	}
+}
+
+func TestObsTrackPacketCountersWithoutObsEnv(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_OBS", "")
+	SetObs(CounterObsHooks())
+	t.Cleanup(func() { SetObs(Obs{}) })
+
+	before := ObservabilitySnapshot()["connect_ip_packet_rx_total"].(uint64)
+	TrackPacketRx(128)
+	after := ObservabilitySnapshot()["connect_ip_packet_rx_total"].(uint64)
+	if after != before+1 {
+		t.Fatalf("packet_rx_total: before=%d after=%d want %d", before, after, before+1)
 	}
 }
 

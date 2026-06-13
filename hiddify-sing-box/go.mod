@@ -18,6 +18,7 @@ require (
 	github.com/go-chi/render v1.0.3
 	github.com/godbus/dbus/v5 v5.2.1
 	github.com/gofrs/uuid/v5 v5.4.0
+	github.com/google/pprof v0.0.0-20211214055906-6f57359322fd
 	github.com/insomniacslk/dhcp v0.0.0-20251020182700-175e84fbb167
 	github.com/keybase/go-keychain v0.0.1
 	github.com/libdns/acmedns v0.5.0

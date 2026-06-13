@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // H2ConnectStreamProto is the :protocol header value for Extended CONNECT over HTTP/2 (RFC 8441).
@@ -78,7 +77,7 @@ func DialHTTP2ConnectStream(
 	log.Printf("masque_http_layer_attempt layer=h2 tag=%s tcp_stream=1 target=%s dial=%s",
 		strings.TrimSpace(logIn.Tag), tcpLogHost, dialAddr)
 
-	const maxAttempts = 3
+	maxAttempts := ConnectStreamDialMaxAttempts()
 	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		select {
@@ -126,13 +125,16 @@ func DialHTTP2ConnectStream(
 				TraceTCPf("masque tcp connect_stream h2 retry host=%s port=%d attempt=%d error_class=%s err=%v",
 					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
 				host.ResetH2ConnectStreamTransport()
-				if backoffErr := waitContextBackoff(ctx, time.Duration(attempt+1)*50*time.Millisecond); backoffErr != nil {
+				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, errors.Join(Errs.TCPConnectStreamFailed, backoffErr)
 				}
 				continue
 			}
 			TraceTCPf("masque tcp connect_stream h2 failed host=%s port=%d status=roundtrip_error error_class=%s err=%v",
 				targetHost, targetPort, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
+			if IsRetryableTCPStreamError(roundTripErr) {
+				host.ResetH2ConnectStreamTransport()
+			}
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, fmt.Errorf("masque h2: tcp connect-stream roundtrip: %w", roundTripErr))
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -161,6 +163,9 @@ func DialHTTP2ConnectStream(
 		return hooks.TunnelFromResponse(streamCtx, resp, pw, targetHost, targetPort)
 	}
 	if lastRoundTripErr != nil {
+		if IsRetryableTCPStreamError(lastRoundTripErr) {
+			host.ResetH2ConnectStreamTransport()
+		}
 		return nil, errors.Join(Errs.TCPConnectStreamFailed, lastRoundTripErr)
 	}
 	return nil, Errs.TCPConnectStreamFailed

@@ -2,6 +2,12 @@
 
 package masque
 
+import mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+
+func init() {
+	mcip.RegisterObservabilitySnapshotMerger(mergeConnectIPDatagramOBSMetrics)
+}
+
 func mergeConnectIPDatagramOBSMetrics(out map[string]any) {
 	// Patched QUIC/http3 exposes real counters via build tag hiddify_quic_datagram_metrics.
 	out["http3_stream_datagram_queue_drop_total"] = uint64(0)

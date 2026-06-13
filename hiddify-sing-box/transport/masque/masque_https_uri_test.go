@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"errors"
 	"fmt"
 	"net/url"
@@ -136,15 +137,15 @@ func TestMasqueTCPBracketRetryEligible(t *testing.T) {
 
 func TestIsMasqueTCPConnectStreamHTTP400(t *testing.T) {
 	t.Parallel()
-	err := fmt.Errorf("%w: status=400 url=x", ErrTCPConnectStreamFailed)
+	err := fmt.Errorf("%w: status=400 url=x", session.ErrTCPConnectStreamFailed)
 	if !strm.IsConnectStreamHTTP400(err) {
 		t.Fatal("expected 400")
 	}
-	if strm.IsConnectStreamHTTP400(fmt.Errorf("%w: status=403 url=x", ErrTCPConnectStreamFailed)) {
+	if strm.IsConnectStreamHTTP400(fmt.Errorf("%w: status=403 url=x", session.ErrTCPConnectStreamFailed)) {
 		t.Fatal("403 not 400")
 	}
 	if strm.IsConnectStreamHTTP400(errors.New("status=400")) {
-		t.Fatal("missing ErrTCPConnectStreamFailed")
+		t.Fatal("missing session.ErrTCPConnectStreamFailed")
 	}
 }
 

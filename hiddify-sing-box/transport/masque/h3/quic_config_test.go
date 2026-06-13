@@ -16,6 +16,19 @@ func TestH3QUICPacketPlaneConfigIdleAndWindows(t *testing.T) {
 	if cfg.KeepAlivePeriod != 15*time.Second {
 		t.Fatalf("KeepAlivePeriod: got %v want 15s", cfg.KeepAlivePeriod)
 	}
+	t.Setenv("MASQUE_QUIC_KEEPALIVE_MS", "5000")
+	cfgFast := PacketPlaneQUICConfig(&quic.Config{})
+	if cfgFast.KeepAlivePeriod != 5*time.Second {
+		t.Fatalf("KeepAlivePeriod with env: got %v want 5s", cfgFast.KeepAlivePeriod)
+	}
+	if cfgFast.HandshakeIdleTimeout != 15*time.Second {
+		t.Fatalf("HandshakeIdleTimeout default: got %v want 15s", cfgFast.HandshakeIdleTimeout)
+	}
+	t.Setenv("MASQUE_QUIC_HANDSHAKE_IDLE_MS", "15000")
+	cfgHS := PacketPlaneQUICConfig(&quic.Config{})
+	if cfgHS.HandshakeIdleTimeout != 15*time.Second {
+		t.Fatalf("HandshakeIdleTimeout with env: got %v want 15s", cfgHS.HandshakeIdleTimeout)
+	}
 	if cfg.InitialStreamReceiveWindow != defaultInitialStreamRecvWindow {
 		t.Fatalf("InitialStreamReceiveWindow: got %d want %d", cfg.InitialStreamReceiveWindow, defaultInitialStreamRecvWindow)
 	}
@@ -24,10 +37,46 @@ func TestH3QUICPacketPlaneConfigIdleAndWindows(t *testing.T) {
 	}
 }
 
+func TestH3QUICConnectStreamExperimentalCannotShrinkBulkFCFloor(t *testing.T) {
+	base := TCPConnectStreamQUICConfig(QUICDialProfile{})
+	// Simulate quic_experimental shrinking windows below P8 floor.
+	base.InitialStreamReceiveWindow = 4096
+	base.MaxStreamReceiveWindow = 4096
+	base.InitialConnectionReceiveWindow = 8192
+	base.MaxConnectionReceiveWindow = 8192
+
+	FinalizeConnectStreamQUICConfig(base)
+	if base.InitialStreamReceiveWindow < BulkStreamFCFloorBytes {
+		t.Fatalf("InitialStreamReceiveWindow: got %d want >= P8 floor %d", base.InitialStreamReceiveWindow, BulkStreamFCFloorBytes)
+	}
+	if base.MaxStreamReceiveWindow < 128<<20 {
+		t.Fatalf("MaxStreamReceiveWindow: got %d want prod boost >= %d", base.MaxStreamReceiveWindow, 128<<20)
+	}
+}
+
+func TestH3QUICServerExperimentalCannotShrinkBulkFCFloor(t *testing.T) {
+	cfg := HTTPServerQUICConfig()
+	cfg.InitialStreamReceiveWindow = 4096
+	cfg.MaxStreamReceiveWindow = 4096
+	cfg.InitialConnectionReceiveWindow = 8192
+	cfg.MaxConnectionReceiveWindow = 8192
+
+	FinalizeConnectStreamQUICConfig(cfg)
+	if cfg.InitialStreamReceiveWindow < BulkStreamFCFloorBytes {
+		t.Fatalf("server InitialStreamReceiveWindow: got %d want >= P8 floor %d", cfg.InitialStreamReceiveWindow, BulkStreamFCFloorBytes)
+	}
+	if cfg.MaxStreamReceiveWindow < 128<<20 {
+		t.Fatalf("server MaxStreamReceiveWindow: got %d want prod boost >= %d", cfg.MaxStreamReceiveWindow, 128<<20)
+	}
+}
+
 func TestH3QUICConnectStreamAndServerWindowFloors(t *testing.T) {
 	cli := TCPConnectStreamQUICConfig(QUICDialProfile{})
 	if cli.InitialPacketSize != DefaultUDPInitialPacketSize {
 		t.Fatalf("connect-stream InitialPacketSize: got %d want %d", cli.InitialPacketSize, DefaultUDPInitialPacketSize)
+	}
+	if cli.InitialStreamReceiveWindow < BulkStreamFCFloorBytes {
+		t.Fatalf("connect-stream InitialStreamReceiveWindow: got %d want >= P8 floor %d", cli.InitialStreamReceiveWindow, BulkStreamFCFloorBytes)
 	}
 	if cli.InitialStreamReceiveWindow < 128<<20 {
 		t.Fatalf("connect-stream InitialStreamReceiveWindow: got %d want >= %d", cli.InitialStreamReceiveWindow, 128<<20)

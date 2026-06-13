@@ -32,6 +32,9 @@ type IngressHost interface {
 	IngressTCPNetstackForInject() *Netstack
 	IngressTCPFastPath(pkt []byte) bool
 	IngressDeliverTCP(pkt []byte) bool
+	// IngressDeliverTCPNoFlush is like IngressDeliverTCP but defers MasqueWakeSend flush to IngressFlushAckWake.
+	IngressDeliverTCPNoFlush(pkt []byte) bool
+	IngressFlushAckWake()
 	IngressOnReadFatal(err error)
 	IngressDebugLog(pkt []byte, n int, hasNS bool, inflight bool)
 	IngressObsEvent(name string)
@@ -220,10 +223,11 @@ func (ing *Ingress) EnqueuePreTCP(pkt []byte) {
 	if len(pkt) == 0 {
 		return
 	}
-	dup := bytes.Clone(pkt)
+	dup := CloneInboundFrame(pkt)
 	ing.preTCPMu.Lock()
 	defer ing.preTCPMu.Unlock()
 	if len(ing.preTCPBuf) >= PreTCPNetstackIngressMax {
+		IncPreTCPIngressDropTotal()
 		ing.host.IngressEngineDrop("pre_tcp_ingress_cap")
 		return
 	}
@@ -238,7 +242,7 @@ func (ing *Ingress) FlushPreTCP(ns *Netstack) {
 	ing.preTCPMu.Lock()
 	defer ing.preTCPMu.Unlock()
 	for _, p := range ing.preTCPBuf {
-		ns.InjectInboundClone(p)
+		ns.InjectInboundOwned(p)
 	}
 	ing.preTCPBuf = ing.preTCPBuf[:0]
 	ns.ScheduleOutboundDrain()
@@ -285,6 +289,8 @@ func (ing *Ingress) runLoop(ctx context.Context) {
 		ing.loopMu.Unlock()
 	}()
 	readBuffer := make([]byte, 64*1024)
+	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
+	defer tryCancel()
 	consecutiveRetryableFailures := 0
 	const retryableReadFailureLimit = 32
 
@@ -326,31 +332,42 @@ func (ing *Ingress) runLoop(ctx context.Context) {
 		if n <= 0 {
 			continue
 		}
-		pkt := readBuffer[:n]
-		if NetstackDebugEnabled() && n >= 20 {
-			ing.host.IngressDebugLog(pkt, n, ing.host.IngressTCPNetstack() != nil, ing.host.IngressTCPInstallInflight())
-		}
-		if ing.host.IngressTCPFastPath(pkt) {
-			if ing.host.IngressDeliverTCP(pkt) {
-				continue
+		ing.dispatchIngressFrame(readBuffer[:n])
+		for {
+			n2, err2 := reader(tryCtx, readBuffer)
+			if err2 != nil || n2 <= 0 {
+				break
 			}
+			ing.dispatchIngressFrame(readBuffer[:n2])
 		}
-		if _, _, icmpPortUnreach := ParseICMPPortUnreachablePeer(pkt); icmpPortUnreach {
-			if ing.DeliverIPv4UDPBridged(pkt) {
-				continue
-			}
-		}
-		if bridgeable, malformed := ClassifyIPv4UDPBridgeCandidate(pkt); malformed {
-			ing.host.IngressEngineDrop("ingress_udp_malformed")
-			continue
-		} else if bridgeable {
-			if ing.DeliverIPv4UDPBridged(pkt) {
-				continue
-			}
-		}
-		if ing.host.IngressDeliverTCP(pkt) {
-			continue
-		}
-		ing.host.IngressEngineDrop("ingress_drop_no_consumer")
+		ing.host.IngressFlushAckWake()
 	}
+}
+
+func (ing *Ingress) dispatchIngressFrame(pkt []byte) {
+	if NetstackDebugEnabled() && len(pkt) >= 20 {
+		ing.host.IngressDebugLog(pkt, len(pkt), ing.host.IngressTCPNetstack() != nil, ing.host.IngressTCPInstallInflight())
+	}
+	if ing.host.IngressTCPFastPath(pkt) {
+		if ing.host.IngressDeliverTCPNoFlush(pkt) {
+			return
+		}
+	}
+	if _, _, icmpPortUnreach := ParseICMPPortUnreachablePeer(pkt); icmpPortUnreach {
+		if ing.DeliverIPv4UDPBridged(pkt) {
+			return
+		}
+	}
+	if bridgeable, malformed := ClassifyIPv4UDPBridgeCandidate(pkt); malformed {
+		ing.host.IngressEngineDrop("ingress_udp_malformed")
+		return
+	} else if bridgeable {
+		if ing.DeliverIPv4UDPBridged(pkt) {
+			return
+		}
+	}
+	if ing.host.IngressDeliverTCPNoFlush(pkt) {
+		return
+	}
+	ing.host.IngressEngineDrop("ingress_drop_no_consumer")
 }

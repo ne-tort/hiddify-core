@@ -69,6 +69,19 @@ func TestBootstrapWaitPolicy(t *testing.T) {
 			t.Fatal("strict mode must not advertise profile-local fallback")
 		}
 	})
+
+	t.Run("legacy_h2_disables_control_capsules", func(t *testing.T) {
+		policy := LegacyH2BootstrapPolicy(false, "172.16.0.2", "")
+		if policy.SendRequestAddresses {
+			t.Fatal("legacy h2 must not send RequestAddresses")
+		}
+		if policy.RequestAddressesTimeout != 0 {
+			t.Fatal("legacy h2 must not use request timeout")
+		}
+		if !policy.AdvertiseProfileLocal {
+			t.Fatal("expected profile-local advertise fallback on legacy h2")
+		}
+	})
 }
 
 func TestSessionPrefixWaitMatchesNetstack(t *testing.T) {

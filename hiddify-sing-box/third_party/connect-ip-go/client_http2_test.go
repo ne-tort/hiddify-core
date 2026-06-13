@@ -122,6 +122,25 @@ func TestDialHTTP2LegacyCfConnectIPPlainConnectUsqueParity(t *testing.T) {
 	require.Equal(t, "", gotUA)
 }
 
+func TestH2IngressUploadWriterReturnsPipeWriter(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	conn := newProxiedConn(&h2CapsulePipeStream{body: io.NopCloser(pr), pipeW: pw, pipeR: pr}, true)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	upload := conn.H2IngressUploadWriter()
+	require.NotNil(t, upload)
+	_, err := upload.Write([]byte{1, 2, 3})
+	require.NoError(t, err)
+}
+
+func TestH2IngressUploadWriterNilWhenNotH2(t *testing.T) {
+	require.Nil(t, ((*Conn)(nil)).H2IngressUploadWriter())
+}
+
 func TestH2LegacyDatagramStreamStripsAndRestoresContextID(t *testing.T) {
 	reader, writer := io.Pipe()
 	packet := []byte{0x45, 0x00, 0x00, 0x14}

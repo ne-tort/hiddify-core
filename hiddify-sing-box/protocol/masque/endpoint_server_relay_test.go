@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"io"
 	"net"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -106,7 +106,7 @@ func TestServerHandleTCPConnectRequestAuthDenied(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
-	if got := TM.ClassifyError(TM.ErrAuthFailed); got != TM.ErrorClassAuth {
+	if got := session.ClassifyError(session.ErrAuthFailed); got != session.ErrorClassAuth {
 		t.Fatalf("expected auth class for denied auth path, got: %s", got)
 	}
 }
@@ -129,7 +129,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
-	if got := TM.ClassifyError(TM.ErrPolicyFallbackDenied); got != TM.ErrorClassPolicy {
+	if got := session.ClassifyError(session.ErrPolicyFallbackDenied); got != session.ErrorClassPolicy {
 		t.Fatalf("expected policy class for denied policy path, got: %s", got)
 	}
 }
@@ -154,7 +154,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
-	if got := TM.ClassifyError(TM.ErrPolicyFallbackDenied); got != TM.ErrorClassPolicy {
+	if got := session.ClassifyError(session.ErrPolicyFallbackDenied); got != session.ErrorClassPolicy {
 		t.Fatalf("expected policy class for blocked port path, got: %s", got)
 	}
 }

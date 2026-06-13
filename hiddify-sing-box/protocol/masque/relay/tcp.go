@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	TM "github.com/sagernet/sing-box/transport/masque"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 // UseLegacyFlushRelay selects the old template relay (per-read flush, prime chunk).
@@ -27,5 +27,5 @@ func TCPForward(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser,
 
 // TCPTunnel relays CONNECT tunneled TCP via transport/masque stream (h2o-style).
 func TCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter) error {
-	return TM.RelayTCPTunnel(ctx, targetConn, reqBody, responseWriter)
+	return strm.RelayTCPTunnel(ctx, targetConn, reqBody, responseWriter)
 }

@@ -12,6 +12,23 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+func isLoopbackDialHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		switch strings.ToLower(host) {
+		case "localhost", "localhost.localdomain":
+			return true
+		default:
+			return strings.HasSuffix(strings.ToLower(host), ".localhost")
+		}
+	}
+	return addr.IsLoopback()
+}
+
 // ErrTemplateCapability marks template/scope configuration incompatible with CONNECT-IP flow forwarding.
 var ErrTemplateCapability = errors.New("masque capability mismatch")
 
@@ -30,11 +47,21 @@ func ResolveTLSServerName(options ClientOptions) string {
 }
 
 // QuicDialCandidateHost is the UDP/QUIC packet destination host (DialPeer when set, else Server).
+// When Server is loopback but TLS SNI names a non-loopback edge, dial SNI instead of loopback
+// (co-located listen 0.0.0.0 + dial 127.0.0.1 caps CONNECT-stream ~15 Mbit/s — REF1-2 hairpin).
 func QuicDialCandidateHost(options ClientOptions) string {
 	if h := strings.TrimSpace(options.DialPeer); h != "" {
 		return h
 	}
-	return strings.TrimSpace(options.Server)
+	server := strings.TrimSpace(options.Server)
+	if server == "" || !isLoopbackDialHost(server) {
+		return server
+	}
+	sni := strings.TrimSpace(ResolveTLSServerName(options))
+	if sni != "" && !isLoopbackDialHost(sni) && !strings.EqualFold(sni, server) {
+		return sni
+	}
+	return server
 }
 
 // MasqueDialTarget keeps hostname-based dial target intact for custom QUIC dialers.

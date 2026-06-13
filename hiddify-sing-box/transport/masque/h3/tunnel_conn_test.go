@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	C "github.com/sagernet/sing-box/constant"
 )
 
 func TestTunnelConnFromConnectResponseRequiresHTTPStreamer(t *testing.T) {
@@ -19,6 +21,38 @@ func TestTunnelConnFromConnectResponseRequiresHTTPStreamer(t *testing.T) {
 	_, err := tunnelConnFromConnectResponse(t.Context(), resp, nil, "127.0.0.1", 5201)
 	if !errors.Is(err, errHTTPStreamerMissing) {
 		t.Fatalf("expected errHTTPStreamerMissing, got %v", err)
+	}
+}
+
+func TestTunnelConnWriteChunksH3Upload(t *testing.T) {
+	t.Setenv(envH3UploadChunkKB, "4")
+	var got []int
+	c := NewTunnelConn(TunnelConnParams{
+		Writer: &chunkRecordWriter{fn: func(p []byte) (int, error) {
+			got = append(got, len(p))
+			return len(p), nil
+		}},
+		Local:  &net.TCPAddr{},
+		Remote: &net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
+	})
+	if _, err := c.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("expected chunked pipe upload, got %v", got)
+	}
+}
+
+func TestTunnelConnRouteCopyMarkers(t *testing.T) {
+	var (
+		_ C.RouteConnectionCopyWriterTo   = (*TunnelConn)(nil)
+		_ C.RouteConnectionCopyReaderFrom = (*TunnelConn)(nil)
+	)
+}
+
+func TestTunnelConnWriteToBufferLen(t *testing.T) {
+	if tunnelWriteToBufLen != 64*1024 {
+		t.Fatalf("tunnelWriteToBufLen=%d want 65536 (relay parity)", tunnelWriteToBufLen)
 	}
 }
 

@@ -69,7 +69,6 @@ func (r *body) Read(b []byte) (int, error) {
 	if err := r.checkContentLengthViolation(); err != nil {
 		return n, err
 	}
-	masqueWakeSendAfterReceiveRead(r.str, n)
 	return n, maybeReplaceError(err)
 }
 
@@ -117,7 +116,6 @@ func newResponseBody(str *Stream, contentLength int64, done chan<- struct{}) *hi
 
 func (r *hijackableBody) Read(b []byte) (int, error) {
 	n, err := r.body.Read(b)
-	masqueWakeSendAfterReceiveRead(r.body.str, n)
 	if err != nil {
 		r.requestDone()
 	}

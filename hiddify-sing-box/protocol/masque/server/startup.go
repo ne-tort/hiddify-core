@@ -18,22 +18,7 @@ func MasqueListenAddr(listenHost string, listenPort uint16) string {
 	return net.JoinHostPort(host, strconv.Itoa(int(listenPort)))
 }
 
-// AuthorityStartupFlags reports authority-only H3 listen and minimal mux for Start().
-func AuthorityStartupFlags(tcpRelay string, options option.MasqueEndpointOptions) (authorityH3Only bool, authorityMinimal bool) {
-	authorityH3Only = tcpRelay == option.MasqueTCPRelayAuthority
-	authorityMinimal = authorityH3Only && AuthorityServerMinimalForOptions(options)
-	return authorityH3Only, authorityMinimal
-}
-
-// BuildStartupHandler selects the HTTP handler before dual-bind listen (full mux vs authority minimal).
-func BuildStartupHandler(host MuxHost, tcpRelay string, options option.MasqueEndpointOptions) (http.Handler, error) {
-	_, authorityMinimal := AuthorityStartupFlags(tcpRelay, options)
-	if authorityMinimal {
-		return NewAuthorityMinimalHandler(TCPConnectAuthorityHost{
-			Options:   options,
-			Dialer:    host.Dialer,
-			Authorize: host.Authorize,
-		}), nil
-	}
+// BuildStartupHandler builds the template TCP relay HTTP mux for server listen.
+func BuildStartupHandler(host MuxHost, tcpRelay string, _ option.MasqueEndpointOptions) (http.Handler, error) {
 	return BuildMuxHandler(host, tcpRelay)
 }

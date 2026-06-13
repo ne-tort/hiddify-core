@@ -39,8 +39,12 @@ func NewSessionBootstrapParams(tag, warpConnectIPProtocol, profileLocalIPv4, pro
 }
 
 // RunPostDialBootstrap runs WARP consumer and generic server bootstrap after CONNECT-IP dial.
-func RunPostDialBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
-	if err := WarpConsumerBootstrap(conn, p); err != nil {
+// dpCtx should be DataplaneContext(openCtx) so bootstrap is not tied to the open caller cancel.
+func RunPostDialBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionBootstrapParams) error {
+	if dpCtx == nil {
+		dpCtx = context.Background()
+	}
+	if err := WarpConsumerBootstrap(dpCtx, conn, p); err != nil {
 		return err
 	}
 	return GenericServerBootstrap(conn, p)
@@ -110,7 +114,10 @@ func maybeAdvertiseProfileLocalRoutes(conn BootstrapConn, p SessionBootstrapPara
 // WarpConsumerBootstrap runs minimal consumer-WARP capsules after CONNECT-IP succeeds (H3/H2).
 // usque never sends catch-all AdvertiseRoute nor explicit 0.0.0.0/0 ADDRESS_REQUEST — only an empty
 // ADDRESS_REQUEST (RFC9484 peer-specific) matches connect-ip-go docs; the edge then emits ADDRESS_ASSIGN.
-func WarpConsumerBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
+func WarpConsumerBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionBootstrapParams) error {
+	if dpCtx == nil {
+		dpCtx = context.Background()
+	}
 	if conn == nil {
 		return nil
 	}
@@ -120,8 +127,7 @@ func WarpConsumerBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
 		return nil
 	}
 	if !conn.ControlCapsulesSupported() {
-		log.Printf("masque connect_ip bootstrap: cf-connect-ip legacy h2 has no control capsules; using profile/local-prefix fallbacks tag=%s", tag)
-		return nil
+		return runLegacyH2ConsumerBootstrap(dpCtx, conn, p, tag)
 	}
 	// MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES must not bypass bootstrap for consumer WARP: without
 	// RequestAddresses(empty) the edge often never emits ADDRESS_ASSIGN, gVisor stays on 198.18.0.1,
@@ -152,7 +158,7 @@ func WarpConsumerBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
 	)
 	prefixes, errLP := WaitForNonEmptyAssignedPrefixes(conn, policy.FirstWait)
 	if len(prefixes) == 0 && policy.SendRequestAddresses {
-		initCtx, cancel := context.WithTimeout(context.Background(), policy.RequestAddressesTimeout)
+		initCtx, cancel := context.WithTimeout(dpCtx, policy.RequestAddressesTimeout)
 		var requested []cip.RequestedAddress
 		errReq := conn.RequestAddresses(initCtx, requested)
 		cancel()
@@ -183,6 +189,40 @@ func WarpConsumerBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
 		return fmt.Errorf("warp masque connect-ip no assigned prefixes after bootstrap within %s", policy.FirstWait+policy.SecondWait)
 	}
 	log.Printf("masque connect_ip bootstrap: assigned prefix count=%d tag=%s", len(prefixes), tag)
+	return nil
+}
+
+func runLegacyH2ConsumerBootstrap(_ context.Context, conn BootstrapConn, p SessionBootstrapParams, tag string) error {
+	profileV4 := strings.TrimSpace(p.ProfileLocalIPv4)
+	profileV6 := strings.TrimSpace(p.ProfileLocalIPv6)
+	policy := LegacyH2BootstrapPolicy(BootstrapRequireAssignedPrefix(), profileV4, profileV6)
+	log.Printf("masque connect_ip bootstrap: cf-connect-ip legacy h2 has no control capsules; passive prefix wait profile_local=%v require_prefix=%v first_wait=%s second_wait=%s advertise_profile_local=%v tag=%s",
+		policy.ProfileLocal,
+		policy.RequirePrefix,
+		PrefixWaitLogValue(policy.FirstWait),
+		PrefixWaitLogValue(policy.SecondWait),
+		policy.AdvertiseProfileLocal,
+		tag,
+	)
+	prefixes, errLP := WaitForNonEmptyAssignedPrefixes(conn, policy.FirstWait)
+	if len(prefixes) == 0 && policy.SecondWait > 0 {
+		prefixes, errLP = WaitForNonEmptyAssignedPrefixes(conn, policy.SecondWait)
+	}
+	if len(prefixes) == 0 {
+		if !policy.RequirePrefix {
+			log.Printf("masque connect_ip bootstrap: legacy h2 no assigned prefixes after passive waits (continuing; netstack waits LocalPrefixes) tag=%s err=%v", tag, errLP)
+			if policy.AdvertiseProfileLocal {
+				maybeAdvertiseProfileLocalRoutes(conn, p)
+			}
+			return nil
+		}
+		_ = conn.Close()
+		if errLP != nil {
+			return fmt.Errorf("warp masque connect-ip legacy h2 no assigned prefixes after bootstrap: %w", errLP)
+		}
+		return fmt.Errorf("warp masque connect-ip legacy h2 no assigned prefixes after bootstrap within %s", policy.FirstWait+policy.SecondWait)
+	}
+	log.Printf("masque connect_ip bootstrap: legacy h2 assigned prefix count=%d tag=%s", len(prefixes), tag)
 	return nil
 }
 

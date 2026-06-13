@@ -228,6 +228,44 @@ func (c *MockStreamFlowControllerIsNewlyBlockedCall) DoAndReturn(f func() bool) 
 	return c
 }
 
+// ShouldQueueWindowUpdate mocks base method.
+func (m *MockStreamFlowController) ShouldQueueWindowUpdate() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ShouldQueueWindowUpdate")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ShouldQueueWindowUpdate indicates an expected call of ShouldQueueWindowUpdate.
+func (mr *MockStreamFlowControllerMockRecorder) ShouldQueueWindowUpdate() *MockStreamFlowControllerShouldQueueWindowUpdateCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ShouldQueueWindowUpdate", reflect.TypeOf((*MockStreamFlowController)(nil).ShouldQueueWindowUpdate))
+	return &MockStreamFlowControllerShouldQueueWindowUpdateCall{Call: call}
+}
+
+// MockStreamFlowControllerShouldQueueWindowUpdateCall wrap *gomock.Call
+type MockStreamFlowControllerShouldQueueWindowUpdateCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockStreamFlowControllerShouldQueueWindowUpdateCall) Return(arg0 bool) *MockStreamFlowControllerShouldQueueWindowUpdateCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockStreamFlowControllerShouldQueueWindowUpdateCall) Do(f func() bool) *MockStreamFlowControllerShouldQueueWindowUpdateCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockStreamFlowControllerShouldQueueWindowUpdateCall) DoAndReturn(f func() bool) *MockStreamFlowControllerShouldQueueWindowUpdateCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // SendWindowSize mocks base method.
 func (m *MockStreamFlowController) SendWindowSize() protocol.ByteCount {
 	m.ctrl.T.Helper()

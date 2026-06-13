@@ -1,7 +1,6 @@
 package connectip
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -40,6 +39,30 @@ var netstackOutboundBufPool = sync.Pool{
 	},
 }
 
+var netstackInboundBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 1600)
+		return &b
+	},
+}
+
+// CloneInboundFrame copies one IP datagram for single-owner ingress transfer.
+func CloneInboundFrame(data []byte) []byte {
+	n := len(data)
+	if n == 0 {
+		return nil
+	}
+	bp := netstackInboundBufPool.Get().(*[]byte)
+	b := *bp
+	if cap(b) < n {
+		b = make([]byte, n)
+	} else {
+		b = b[:n]
+	}
+	copy(b, data)
+	return b
+}
+
 func borrowOutboundBuf(n int) []byte {
 	bp := netstackOutboundBufPool.Get().(*[]byte)
 	b := *bp
@@ -61,9 +84,12 @@ func returnOutboundBuf(b []byte) {
 
 // NetstackOptions configures a CONNECT-IP gVisor TCP stack.
 type NetstackOptions struct {
-	LocalIPv4 netip.Addr
-	LocalIPv6 netip.Addr
-	MTU       int
+	LocalIPv4            netip.Addr
+	LocalIPv6            netip.Addr
+	MTU                  int
+	OutboundQueueMetrics *OutboundQueueMetrics
+	// OnOutboundQueued runs when gVisor egress is queued for WritePacket (download ACK wake).
+	OnOutboundQueued func()
 }
 
 // Netstack is the CONNECT-IP client userspace TCP stack backed by WritePacket egress.
@@ -82,9 +108,11 @@ type Netstack struct {
 	terminalErr          atomic.Value
 	done                 chan struct{}
 	outboundOnce         sync.Once
-	outboundCh           chan []byte
+	outboundCh           chan outboundItem
+	outboundMetrics      *OutboundQueueMetrics
 	outboundPoke         chan struct{}
 	outboundWG           sync.WaitGroup
+	onOutboundQueued     func()
 }
 
 // NewNetstack constructs a CONNECT-IP TCP netstack with explicit local addresses.
@@ -167,12 +195,14 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 	}
 
 	s := &Netstack{
-		session:     session,
-		gStack:      gStack,
-		endpoint:    endpoint,
-		done:        make(chan struct{}),
-		installedV4: opts.LocalIPv4,
-		installedV6: opts.LocalIPv6,
+		session:          session,
+		gStack:           gStack,
+		endpoint:         endpoint,
+		done:             make(chan struct{}),
+		installedV4:      opts.LocalIPv4,
+		installedV6:      opts.LocalIPv6,
+		outboundMetrics:  opts.OutboundQueueMetrics,
+		onOutboundQueued: opts.OnOutboundQueued,
 	}
 	s.notifyHandle = endpoint.AddNotify(s)
 	return s, nil
@@ -245,8 +275,8 @@ func (s *Netstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
 	}
 }
 
-// InjectInboundClone injects an owned IP frame copy into the gVisor stack.
-func (s *Netstack) InjectInboundClone(data []byte) {
+// InjectInboundOwned injects an owned IP frame into the gVisor stack without copying payload bytes.
+func (s *Netstack) InjectInboundOwned(data []byte) {
 	if len(data) == 0 {
 		return
 	}
@@ -257,7 +287,7 @@ func (s *Netstack) InjectInboundClone(data []byte) {
 		return
 	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(bytes.Clone(data)),
+		Payload: buffer.MakeWithData(data),
 	})
 	switch data[0] >> 4 {
 	case 4:
@@ -276,6 +306,14 @@ func (s *Netstack) InjectInboundClone(data []byte) {
 		}
 		packet.DecRef()
 	}
+}
+
+// InjectInboundClone clones pkt then injects it (borrowed slices from the ingress read buffer).
+func (s *Netstack) InjectInboundClone(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	s.InjectInboundOwned(CloneInboundFrame(data))
 }
 
 func addStackAddress(gStack *stack.Stack, nic int, addr netip.Addr) error {
@@ -380,20 +418,7 @@ func (s *Netstack) FailWithError(err error) {
 }
 
 func (s *Netstack) injectPacket(packetBytes []byte) {
-	if len(packetBytes) == 0 {
-		return
-	}
-	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(bytes.Clone(packetBytes)),
-	})
-	switch packetBytes[0] >> 4 {
-	case 4:
-		s.endpoint.InjectInbound(ipv4.ProtocolNumber, packet)
-	case 6:
-		s.endpoint.InjectInbound(ipv6.ProtocolNumber, packet)
-	default:
-		packet.DecRef()
-	}
+	s.InjectInboundOwned(packetBytes)
 }
 
 // Close tears down the netstack and packet session.

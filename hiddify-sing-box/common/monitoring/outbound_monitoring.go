@@ -312,6 +312,10 @@ func (m *OutboundMonitoring) Start(stage adapter.StartStage) error {
 		m.logger.Info("registered ", len(m.groups), " outbound groups for monitoring")
 		m.loadHistory()
 	case adapter.StartStatePostStart:
+		if BenchSkipURLTest() {
+			m.started = true
+			return nil
+		}
 		for i := 0; i < m.workersCount; i++ {
 			m.workerWG.Add(1)
 			go m.workerLoop()
@@ -647,6 +651,9 @@ func (m *OutboundMonitoring) tester(parent context.Context, tag string) (adapter
 }
 
 func (m *OutboundMonitoring) startCycleOnce() bool {
+	if BenchSkipURLTest() {
+		return false
+	}
 	if !m.cycleRunning.CompareAndSwap(false, true) {
 		return false
 	}
@@ -863,7 +870,7 @@ func (m *OutboundMonitoring) makeGroup(tag string) *groupState {
 }
 
 func (m *OutboundMonitoring) Touch() {
-	if !m.started {
+	if !m.started || BenchSkipURLTest() {
 		return
 	}
 	m.access.Lock()

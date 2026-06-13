@@ -177,6 +177,8 @@ func TestStreamSendWindow(t *testing.T) {
 }
 
 func TestStreamWindowUpdate(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
+	t.Setenv("MASQUE_QUIC_WINDOW_UPDATE_THRESHOLD", "0.25")
 	fc := NewStreamFlowController(
 		42,
 		NewConnectionFlowController(

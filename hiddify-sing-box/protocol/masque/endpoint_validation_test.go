@@ -290,29 +290,20 @@ func TestValidateWarpMasqueRejectInvalidDataplanePortStrategy(t *testing.T) {
 	}
 }
 
-func TestValidateMasqueConnectAuthorityClientContract(t *testing.T) {
+func TestValidateMasqueConnectStreamClientContract(t *testing.T) {
 	t.Parallel()
-	bad := applyMasqueClientMasqueDefaults(optionMasqueClient(option.MasqueTCPTransportConnectAuthority, "https://x/tcp/{target_host}/{target_port}", ""))
-	if err := validateMasqueOptions(bad); err == nil {
-		t.Fatal("expected template_tcp + connect_authority error")
-	}
-	bad2 := applyMasqueClientMasqueDefaults(optionMasqueClient(option.MasqueTCPTransportConnectStream, "", "https://x/"))
-	if err := validateMasqueOptions(bad2); err == nil {
-		t.Fatal("expected template_connect + connect_stream error")
-	}
-	ok := applyMasqueClientMasqueDefaults(optionMasqueClient(option.MasqueTCPTransportConnectAuthority, "", ""))
+	ok := applyMasqueClientMasqueDefaults(optionMasqueClient(option.MasqueTCPTransportConnectStream, ""))
 	if err := validateMasqueOptions(ok); err != nil {
 		t.Fatalf("expected ok: %v", err)
 	}
 }
 
-func optionMasqueClient(tcpTransport, templateTCP, templateConnect string) option.MasqueEndpointOptions {
+func optionMasqueClient(tcpTransport, templateTCP string) option.MasqueEndpointOptions {
 	return option.MasqueEndpointOptions{
-		ServerOptions:   option.ServerOptions{Server: "masque.example", ServerPort: 443},
-		TransportMode:   option.MasqueTransportModeConnectUDP,
-		TCPTransport:    tcpTransport,
-		TemplateTCP:     templateTCP,
-		TemplateConnect: templateConnect,
+		ServerOptions: option.ServerOptions{Server: "masque.example", ServerPort: 443},
+		TransportMode: option.MasqueTransportModeConnectUDP,
+		TCPTransport:  tcpTransport,
+		TemplateTCP:   templateTCP,
 	}
 }
 

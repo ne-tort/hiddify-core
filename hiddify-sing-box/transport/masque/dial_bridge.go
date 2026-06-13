@@ -23,7 +23,7 @@ func joinTemplateCapability(err error) error {
 		return nil
 	}
 	if errors.Is(err, session.ErrTemplateCapability) {
-		return errors.Join(ErrCapability, err)
+		return errors.Join(session.ErrCapability, err)
 	}
 	return err
 }

@@ -25,6 +25,7 @@ func CloseConnectIPDataplaneLockedAssumeMu(s *CoreSession, host ConnectIPTeardow
 		_ = s.IPConn.Close()
 		s.IPConn = nil
 	}
+	s.IPHTTPH2Upload = nil
 	host.JoinConnectIPIngress()
 	if s.TCPNetstack != nil {
 		_ = s.TCPNetstack.Close()

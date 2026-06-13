@@ -11,10 +11,16 @@ import (
 
 // FinishSessionDial runs post-dial bootstrap after CONNECT-IP tunnel open succeeds.
 func FinishSessionDial(conn BootstrapConn, bootstrap SessionBootstrapParams) error {
+	return FinishSessionDialWithContext(context.Background(), conn, bootstrap)
+}
+
+// FinishSessionDialWithContext runs bootstrap on dpCtx after tunnel open. Callers should pass
+// DataplaneContext(openCtx) so a canceled open ctx does not abort ADDRESS_ASSIGN bootstrap.
+func FinishSessionDialWithContext(dpCtx context.Context, conn BootstrapConn, bootstrap SessionBootstrapParams) error {
 	if conn == nil {
 		return nil
 	}
-	return RunPostDialBootstrap(conn, bootstrap)
+	return RunPostDialBootstrap(dpCtx, conn, bootstrap)
 }
 
 // DialH2TunnelWithBootstrap opens CONNECT-IP over HTTP/2 and runs session bootstrap.
@@ -23,7 +29,7 @@ func DialH2TunnelWithBootstrap(ctx context.Context, rt http.RoundTripper, templa
 	if err != nil || conn == nil {
 		return conn, err
 	}
-	if err := FinishSessionDial(conn, bootstrap); err != nil {
+	if err := FinishSessionDialWithContext(DataplaneContext(ctx), conn, bootstrap); err != nil {
 		return nil, err
 	}
 	return conn, nil
@@ -35,7 +41,7 @@ func DialH3TunnelWithBootstrap(ctx context.Context, clientConn *http3.ClientConn
 	if err != nil || conn == nil {
 		return conn, err
 	}
-	if err := FinishSessionDial(conn, bootstrap); err != nil {
+	if err := FinishSessionDialWithContext(DataplaneContext(ctx), conn, bootstrap); err != nil {
 		return nil, err
 	}
 	return conn, nil

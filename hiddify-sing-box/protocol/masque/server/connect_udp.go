@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -10,9 +11,51 @@ import (
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go/http3"
 	TM "github.com/sagernet/sing-box/transport/masque"
+	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 )
 
 const masqueRequestProtocolConnectUDP = "connect-udp"
+
+// ConnectUDPTargetPolicy mirrors CONNECT-stream / CONNECT-IP onward ACL for CONNECT-UDP (H2+H3).
+type ConnectUDPTargetPolicy struct {
+	AllowPrivateTargets bool
+	AllowedTargetPorts  []uint16
+	BlockedTargetPorts  []uint16
+}
+
+var errConnectUDPTargetPortDenied = errors.New("connect-udp: port policy denied")
+
+func checkConnectUDPTargetPolicy(ctx context.Context, target string, policy ConnectUDPTargetPolicy) error {
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		return err
+	}
+	if _, allowErr := ResolveTCPTargetForDial(ctx, host, policy.AllowPrivateTargets); allowErr != nil {
+		return allowErr
+	}
+	if !AllowTCPPort(portStr, policy.AllowedTargetPorts, policy.BlockedTargetPorts) {
+		return errConnectUDPTargetPortDenied
+	}
+	return nil
+}
+
+func connectUDPTargetPolicyHTTPStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if errors.Is(err, errConnectUDPTargetPortDenied) {
+		return http.StatusForbidden
+	}
+	if strings.Contains(err.Error(), "private target denied") {
+		return http.StatusForbidden
+	}
+	var addrErr *net.AddrError
+	var parseErr *net.ParseError
+	if errors.As(err, &addrErr) || errors.As(err, &parseErr) {
+		return http.StatusBadRequest
+	}
+	return http.StatusBadRequest
+}
 
 // ExtendedMasqueTunnelProtocol returns the CONNECT tunnel pseudo-protocol
 // (:protocol header on H2 or Proto on H3).
@@ -68,7 +111,11 @@ func ConnectUDPResolveDialToHTTPStatus(err error) int {
 }
 
 // HandleConnectUDP serves RFC 9298 CONNECT-UDP over HTTP/3 (masque-go proxy) or HTTP/2 capsule relay.
-func HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *qmasque.Request, udpProxy *qmasque.Proxy) {
+func HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *qmasque.Request, udpProxy *qmasque.Proxy, policy ConnectUDPTargetPolicy) {
+	if polErr := checkConnectUDPTargetPolicy(r.Context(), parsed.Target, policy); polErr != nil {
+		w.WriteHeader(connectUDPTargetPolicyHTTPStatus(polErr))
+		return
+	}
 	if _, ok := w.(http3.HTTPStreamer); ok {
 		if err := udpProxy.Proxy(w, parsed); err != nil {
 			w.WriteHeader(http.StatusBadGateway)
@@ -125,5 +172,5 @@ func HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *qmasque.Re
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	_ = TM.ServeH2ConnectUDP(w, r, conn)
+	_ = cudp.ServeH2(w, r, conn)
 }

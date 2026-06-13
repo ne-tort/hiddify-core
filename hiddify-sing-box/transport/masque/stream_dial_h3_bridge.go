@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"io"
 	"net"
@@ -51,8 +52,8 @@ func streamDialH3Hooks(options ClientOptions) strm.DialH3Hooks {
 		},
 		UsePipeUpload: h3.ConnectUsePipeUpload,
 		RequestURL:    MasqueTCPConnectStreamRequestURL,
-		ClassifyError: func(err error) string { return string(ClassifyError(err)) },
-		AuthFailed:    ErrAuthFailed,
+		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },
+		AuthFailed:    session.ErrAuthFailed,
 	}
 }
 
@@ -61,7 +62,8 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 	if portNum <= 0 {
 		portNum = 443
 	}
-	return strm.DialHTTP3ConnectStream(ctx, streamDialH3Hooks(options), tcpStreamDialH3Host{s: s}, tcpURL, strm.DialH3LogInput{
+	hooks := streamDialH3Hooks(options)
+	logIn := strm.DialH3LogInput{
 		Tag:        options.Tag,
 		TCPURLHost: tcpURL.Host,
 		Server:     options.Server,
@@ -69,7 +71,33 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 		ResolveDialAddr: func(port int) string {
 			return masqueDialTarget(masqueQuicDialCandidateHost(options), port)
 		},
-	}, targetHost, targetPort, tcpHTTP)
+	}
+	host := tcpStreamDialH3Host{s: s}
+	if h3.ConnectStreamUseDualConnect() {
+		// P2 download leg: pipe mode keeps S2C drain off coordinated bidi (no duplex_coord on download leg).
+		download, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, true, "download")
+		if err != nil {
+			return nil, err
+		}
+		upload, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, true, "upload")
+		if err != nil {
+			_ = download.Close()
+			return nil, err
+		}
+		var local, remote net.Addr
+		if download != nil {
+			local = download.LocalAddr()
+			remote = download.RemoteAddr()
+		}
+		return strm.NewTunnelConn(h3.NewDualTunnelConn(h3.DualTunnelConnParams{
+			Download: download,
+			Upload:   upload,
+			Ctx:      ctx,
+			Local:    local,
+			Remote:   remote,
+		})), nil
+	}
+	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP)
 }
 
 func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritemplate.Template, options ClientOptions, destination M.Socksaddr, httpLayer string, tcpHTTP *http3.Transport, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error) {

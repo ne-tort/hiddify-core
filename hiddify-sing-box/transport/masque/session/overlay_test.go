@@ -7,8 +7,11 @@ import (
 	"testing"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/yosida95/uritemplate/v3"
+	"golang.org/x/net/http2"
 )
 
 type overlayTestNetstack struct {
@@ -26,42 +29,39 @@ func (n *overlayTestNetstack) Close() error {
 	return nil
 }
 
-type overlaySwitchHostFake struct {
-	cancelIngress      int
-	teardownHTTP       int
-	closeAuthority     int
-	closeUDP           int
-	closeH2            int
-	logTag, logFrom, logTo string
+type overlayLifecycleHostFake struct {
+	cancelIngress int
+	closeH2       int
 }
 
-func (f *overlaySwitchHostFake) ClearPreTCPNetstackIngress() {}
-func (f *overlaySwitchHostFake) JoinConnectIPIngress()       {}
-func (f *overlaySwitchHostFake) ClearIPIngressPacketReader() {}
-
-func (f *overlaySwitchHostFake) CancelConnectIPIngress() {
-	f.cancelIngress++
+func (f *overlayLifecycleHostFake) CancelConnectIPIngress() { f.cancelIngress++ }
+func (f *overlayLifecycleHostFake) JoinConnectIPIngress()   {}
+func (f *overlayLifecycleHostFake) ClearPreTCPNetstackIngress() {
+}
+func (f *overlayLifecycleHostFake) ClearIPIngressPacketReader() {}
+func (f *overlayLifecycleHostFake) EmitObservabilityEvent(string) {
+}
+func (f *overlayLifecycleHostFake) IncConnectIPSessionReset(string) {}
+func (f *overlayLifecycleHostFake) BuildHopTemplates() (*uritemplate.Template, *uritemplate.Template, *uritemplate.Template, error) {
+	return nil, nil, nil, nil
+}
+func (f *overlayLifecycleHostFake) CloseUDPClient() {}
+func (f *overlayLifecycleHostFake) ResetIPH3TransportLockedAssumeMu()  {}
+func (f *overlayLifecycleHostFake) ResetH2UDPTransportLockedAssumeMu() {}
+func (f *overlayLifecycleHostFake) CloseAllH2ClientTransports()        { f.closeH2++ }
+func (f *overlayLifecycleHostFake) CloseH2MasqueClientTransport(*http2.Transport) {
 }
 
-func (f *overlaySwitchHostFake) TeardownOverlayHTTPLockedAssumeMu() {
-	f.teardownHTTP++
-}
-
-func (f *overlaySwitchHostFake) CloseConnectAuthorityClient() error {
-	f.closeAuthority++
-	return nil
-}
-
-func (f *overlaySwitchHostFake) CloseUDPClientLockedAssumeMu() {
-	f.closeUDP++
-}
-
-func (f *overlaySwitchHostFake) CloseAllH2ClientTransports() {
-	f.closeH2++
-}
-
-func (f *overlaySwitchHostFake) OverlaySwitchLog(tag, from, to string) {
-	f.logTag, f.logFrom, f.logTo = tag, from, to
+func TestTeardownOverlayHTTPLockedAssumeMu(t *testing.T) {
+	shared := &http3.Transport{}
+	s := &CoreSession{
+		IPHTTP:  shared,
+		TCPHTTP: shared,
+	}
+	TeardownOverlayHTTPLockedAssumeMu(s)
+	if s.IPHTTP != nil || s.TCPHTTP != nil || s.IPHTTPConn != nil || s.IPHTTPH2Upload != nil {
+		t.Fatal("expected all overlay HTTP state cleared")
+	}
 }
 
 func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
@@ -74,7 +74,7 @@ func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 		ipConnStillSet: func() bool { return s.IPConn != nil },
 	}
 	s.TCPNetstack = orderNS
-	host := &overlaySwitchHostFake{}
+	host := &overlayLifecycleHostFake{}
 
 	s.Mu.Lock()
 	switched := TryHTTPFallbackSwitchLockedAssumeMu(s, host, errors.New("Extended CONNECT refused"))
@@ -91,11 +91,8 @@ func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 	if CurrentUDPHTTPLayer(s) != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected overlay pivot to h2, got %q", CurrentUDPHTTPLayer(s))
 	}
-	if host.cancelIngress != 1 || host.teardownHTTP != 1 || host.closeAuthority != 1 || host.closeUDP != 1 || host.closeH2 != 1 {
+	if host.cancelIngress != 1 || host.closeH2 != 1 {
 		t.Fatalf("unexpected host calls: %+v", host)
-	}
-	if host.logFrom != option.MasqueHTTPLayerH3 || host.logTo != option.MasqueHTTPLayerH2 {
-		t.Fatalf("unexpected log from=%q to=%q", host.logFrom, host.logTo)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
-	"github.com/sagernet/sing-box/transport/masque/session"
+	msess "github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -50,7 +50,7 @@ func TestCoreSessionDialUsesFakeHTTPLayer(t *testing.T) {
 		},
 	})
 
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 		Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
@@ -64,7 +64,7 @@ func TestCoreSessionDialUsesFakeHTTPLayer(t *testing.T) {
 		Caps:        CapabilitySet{ConnectTCP: true, ConnectUDP: true, ConnectIP: true},
 		UDPClient:   &qmasque.Client{},
 	})
-	BindHookLayer(session, layer)
+	httpx.BindHookLayer(session, layer)
 
 	if got := session.currentUDPHTTPLayer(); got != option.MasqueHTTPLayerH3 {
 		t.Fatalf("overlay want h3 got %q", got)
@@ -72,8 +72,8 @@ func TestCoreSessionDialUsesFakeHTTPLayer(t *testing.T) {
 
 	dest := M.ParseSocksaddrHostPort("example.com", 443)
 	_, dialErr := session.DialContext(context.Background(), "tcp", dest)
-	if dialErr == nil || !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("DialContext: want ErrTCPConnectStreamFailed, got %v", dialErr)
+	if dialErr == nil || !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("DialContext: want msess.ErrTCPConnectStreamFailed, got %v", dialErr)
 	}
 	if tcpHits.Load() != 1 {
 		t.Fatalf("tcpRoundTripper via HookLayer: want 1 call, got %d", tcpHits.Load())
@@ -108,7 +108,7 @@ func TestBindHookLayerTCPRoundTripSuccessPath(t *testing.T) {
 		t.Fatalf("buildTemplates: %v", err)
 	}
 
-	session := newTestCoreSession(session.CoreSession{
+	session := newTestCoreSession(msess.CoreSession{
 		Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
@@ -119,7 +119,7 @@ func TestBindHookLayerTCPRoundTripSuccessPath(t *testing.T) {
 		TemplateTCP: templateTCP,
 		Caps:        CapabilitySet{ConnectTCP: true},
 	})
-	BindHookLayer(session, httpx.NewHookLayer(option.MasqueHTTPLayerH3, httpx.HookFuncs{
+	httpx.BindHookLayer(session, httpx.NewHookLayer(option.MasqueHTTPLayerH3, httpx.HookFuncs{
 		TCPRoundTrip: func(*http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -135,7 +135,7 @@ func TestBindHookLayerTCPRoundTripSuccessPath(t *testing.T) {
 	if dialErr == nil {
 		t.Fatal("expected error building tunnel from stub 200 response")
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("want ErrTCPConnectStreamFailed, got %v", dialErr)
+	if !errors.Is(dialErr, msess.ErrTCPConnectStreamFailed) {
+		t.Fatalf("want msess.ErrTCPConnectStreamFailed, got %v", dialErr)
 	}
 }

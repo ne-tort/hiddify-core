@@ -41,7 +41,7 @@ func TestBootstrapRequireAssignedPrefix(t *testing.T) {
 
 func TestWarpConsumerBootstrapSkipsNonWarpProtocol(t *testing.T) {
 	conn := &fakeBootstrapConn{}
-	if err := WarpConsumerBootstrap(conn, SessionBootstrapParams{
+	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		WarpConnectIPProtocol: "connect-ip",
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -52,8 +52,9 @@ func TestWarpConsumerBootstrapSkipsNonWarpProtocol(t *testing.T) {
 }
 
 func TestWarpConsumerBootstrapSkipsLegacyH2WithoutCapsules(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{controlCapsules: false}
-	if err := WarpConsumerBootstrap(conn, SessionBootstrapParams{
+	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
 		WarpConnectIPProtocol: "cf-connect-ip",
 	}); err != nil {
@@ -61,6 +62,27 @@ func TestWarpConsumerBootstrapSkipsLegacyH2WithoutCapsules(t *testing.T) {
 	}
 	if conn.requestCalls != 0 {
 		t.Fatalf("expected no RequestAddresses without control capsules, got %d", conn.requestCalls)
+	}
+	if len(conn.advertised) != 0 {
+		t.Fatalf("expected no AdvertiseRoute without profile local, got %d", len(conn.advertised))
+	}
+}
+
+func TestWarpConsumerBootstrapLegacyH2ProfileLocalAdvertisesRoutes(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
+	conn := &fakeBootstrapConn{controlCapsules: false}
+	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
+		Tag:                   "t1",
+		WarpConnectIPProtocol: "cf-connect-ip",
+		ProfileLocalIPv4:      "172.16.0.2",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn.requestCalls != 0 {
+		t.Fatalf("legacy h2 must not RequestAddresses, got %d", conn.requestCalls)
+	}
+	if len(conn.advertised) != 1 {
+		t.Fatalf("expected profile-local AdvertiseRoute fallback, got %d routes", len(conn.advertised))
 	}
 }
 
@@ -70,7 +92,7 @@ func TestWarpConsumerBootstrapUsesExistingPrefixes(t *testing.T) {
 		controlCapsules: true,
 		current:         []netip.Prefix{prefix},
 	}
-	if err := WarpConsumerBootstrap(conn, SessionBootstrapParams{
+	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
 		WarpConnectIPProtocol: "cf-connect-ip",
 	}); err != nil {
@@ -87,7 +109,7 @@ func TestWarpConsumerBootstrapRequestAddressesOnEmptyPrefixes(t *testing.T) {
 		controlCapsules: true,
 		notify:          make(chan []netip.Prefix),
 	}
-	if err := WarpConsumerBootstrap(conn, SessionBootstrapParams{
+	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
 		WarpConnectIPProtocol: "cf-connect-ip",
 	}); err != nil {
@@ -104,7 +126,7 @@ func TestWarpConsumerBootstrapRequestAddressesErrorClosesConn(t *testing.T) {
 		controlCapsules: true,
 		requestErr:      errors.New("request failed"),
 	}
-	err := WarpConsumerBootstrap(conn, SessionBootstrapParams{
+	err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
 		WarpConnectIPProtocol: "cf-connect-ip",
 	})

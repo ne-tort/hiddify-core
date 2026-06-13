@@ -13,7 +13,7 @@ import (
 )
 
 // HookFuncs mirrors coreSession test injection points (phase A0).
-// Bind to a session via masque.BindHookLayer — production code leaves these nil.
+// Bind to a session via httpx.BindHookLayer — production code leaves these nil.
 type HookFuncs struct {
 	// ConnectIP substitutes dialConnectIPAttemptHook (CONNECT-IP).
 	ConnectIP func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error)
@@ -31,7 +31,7 @@ type HookLayer struct {
 
 var _ HTTPLayer = (*HookLayer)(nil)
 
-var errHookLayerUnbound = errors.New("httpx: HookLayer requires masque.BindHookLayer on coreSession")
+var errHookLayerUnbound = errors.New("httpx: HookLayer requires httpx.BindHookLayer on coreSession")
 
 // NewHookLayer builds a fake overlay for package tests. name must be "h2" or "h3".
 func NewHookLayer(name string, hooks HookFuncs) *HookLayer {

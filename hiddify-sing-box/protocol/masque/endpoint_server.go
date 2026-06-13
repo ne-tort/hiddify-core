@@ -16,7 +16,6 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/auth"
 	"github.com/sagernet/sing-box/protocol/masque/server"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/yosida95/uritemplate/v3"
@@ -46,8 +45,6 @@ type ServerEndpoint struct {
 	dialer         net.Dialer
 	// singServerTLS holds sing-box inbound TLS lifecycle (ACME, cert reload); closed with the endpoint.
 	singServerTLS btls.ServerConfig
-	// authorityThin is set for minimal+std TLS path (masque-thin-server parity listen/Serve).
-	authorityThin *TM.AuthorityHTTPServer
 }
 
 func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
@@ -94,7 +91,6 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 					e.logger.Error("masque server stopped: ", err)
 				}
 			},
-			OnAuthorityThinServeEnd: func() { e.ready.Store(false) },
 		},
 	})
 	if startErr != nil {
@@ -103,7 +99,6 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	applied := server.MapMasqueEndpointStartResult(startOutcome)
 	e.compiledAuth = applied.CompiledAuth
 	e.singServerTLS = applied.SingServerTLS
-	e.authorityThin = applied.AuthorityThin
 	e.server = applied.H3Server
 	e.packetConn = applied.PacketConn
 	e.http2Server = applied.HTTP2Server
@@ -146,7 +141,6 @@ func (e *ServerEndpoint) Close() error {
 	e.closing.Store(true)
 	e.ready.Store(false)
 	err := server.CloseMasqueEndpoint(server.MasqueEndpointCloseInput{
-		AuthorityThin: e.authorityThin,
 		Stack: server.MasqueStack{
 			H3Server:       e.server,
 			PacketConn:     e.packetConn,
@@ -156,7 +150,6 @@ func (e *ServerEndpoint) Close() error {
 		UDPProxy:      e.udpProxy,
 		SingServerTLS: e.singServerTLS,
 	})
-	e.authorityThin = nil
 	e.udpProxy = nil
 	e.singServerTLS = nil
 	e.server = nil

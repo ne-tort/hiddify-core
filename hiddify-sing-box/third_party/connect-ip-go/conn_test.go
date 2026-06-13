@@ -232,6 +232,74 @@ func TestReadFromStreamRejectsOversizedAddressAssignDeclaredLength(t *testing.T)
 	require.ErrorContains(t, err, "exceeds max")
 }
 
+func httpDatagramCapsuleFrame(payload []byte) []byte {
+	frame := quicvarint.Append(nil, uint64(capsuleTypeHTTPDatagram))
+	frame = quicvarint.Append(frame, uint64(len(payload)))
+	frame = append(frame, payload...)
+	return frame
+}
+
+func TestReadFromStreamDropsDatagramWhenIngressChannelFull(t *testing.T) {
+	packet, err := (&ipv4.Header{
+		Version:  4,
+		Len:      20,
+		TTL:      64,
+		Src:      net.IPv4(192, 168, 0, 10),
+		Dst:      net.IPv4(10, 1, 2, 3),
+		Protocol: 17,
+	}).Marshal()
+	require.NoError(t, err)
+	payload := append([]byte{0x00}, packet...)
+	assign := (&addressAssignCapsule{
+		AssignedAddresses: []AssignedAddress{{IPPrefix: netip.MustParsePrefix("192.168.0.10/32")}},
+	}).append(nil)
+	streamBytes := append(httpDatagramCapsuleFrame(payload), httpDatagramCapsuleFrame([]byte{0x00, 0xde, 0xad})...)
+	streamBytes = append(streamBytes, assign...)
+
+	ingress := make(chan []byte, 1)
+	ingress <- []byte{0x01} // occupy channel so next datagram is dropped, not blocked
+
+	conn := &Conn{
+		str:                    &bytesStream{reader: bytes.NewReader(streamBytes)},
+		datagramCapsuleIngress: ingress,
+		assignedAddressNotify:  make(chan struct{}, 1),
+		closeChan:              make(chan struct{}),
+	}
+	err = conn.readFromStream()
+	require.ErrorIs(t, err, io.EOF)
+
+	select {
+	case <-conn.assignedAddressNotify:
+	default:
+		t.Fatal("expected ADDRESS_ASSIGN after dropping HTTP_DATAGRAM on full ingress channel")
+	}
+}
+
+type closeTrackingReadCloser struct {
+	io.Reader
+	closeCalls int
+}
+
+func (c *closeTrackingReadCloser) Close() error {
+	c.closeCalls++
+	return nil
+}
+
+func TestReadFromStreamH2DefersStreamClose(t *testing.T) {
+	body := &closeTrackingReadCloser{Reader: bytes.NewReader(nil)}
+	pr, pw := io.Pipe()
+	str := &h2CapsulePipeStream{body: body, pipeW: pw, pipeR: pr}
+	conn := &Conn{
+		str:                    str,
+		closeChan:              make(chan struct{}),
+		datagramCapsuleIngress: make(chan []byte, 1),
+	}
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 0, body.closeCalls, "h2 CONNECT-IP must defer str.Close until Conn.Close")
+	_ = conn.Close()
+}
+
 var ipv6Header = []byte{
 	0x60, 0x00, 0x00, 0x00, // Version, Traffic Class, Flow Label
 	0x00, 0x20, 59, 64, // Payload Length, Next Header, Hop Limit

@@ -35,6 +35,7 @@ type observabilityCounters struct {
 	engineICMPFeedbackTotal                   atomic.Uint64
 	enginePMTUUpdateTotal                     atomic.Uint64
 	engineEffectiveUDPPayload                 atomic.Uint64
+	preTCPIngressDropTotal                    atomic.Uint64
 	bridgeUDPTXAttemptTotal                   atomic.Uint64
 	bridgeBuildTotal                          atomic.Uint64
 	bridgeWriteEnterTotal                     atomic.Uint64
@@ -130,6 +131,11 @@ func IncReadDropReason(reason string) {
 	obsCounters.mu.Lock()
 	obsCounters.packetReadDropByReason[reason]++
 	obsCounters.mu.Unlock()
+}
+
+// IncPreTCPIngressDropTotal records a pre-TCP netstack ingress cap drop.
+func IncPreTCPIngressDropTotal() {
+	obsCounters.preTCPIngressDropTotal.Add(1)
 }
 
 // IncEngineDropReason records a CONNECT-IP engine drop reason.
@@ -314,6 +320,7 @@ func ObservabilitySnapshot() map[string]any {
 		"connect_ip_engine_pmtu_update_total":                        obsCounters.enginePMTUUpdateTotal.Load(),
 		"connect_ip_engine_pmtu_update_reason_total":                 pmtuUpdateReasons,
 		"connect_ip_engine_effective_udp_payload":                    obsCounters.engineEffectiveUDPPayload.Load(),
+		"connect_ip_pre_tcp_ingress_drop_total":                      obsCounters.preTCPIngressDropTotal.Load(),
 		"connect_ip_bridge_udp_tx_attempt_total":                     obsCounters.bridgeUDPTXAttemptTotal.Load(),
 		"connect_ip_bridge_build_total":                              obsCounters.bridgeBuildTotal.Load(),
 		"connect_ip_bridge_write_enter_total":                        obsCounters.bridgeWriteEnterTotal.Load(),
@@ -329,6 +336,7 @@ func ObservabilitySnapshot() map[string]any {
 		"connect_ip_capsule_unknown_total":                           libconnectip.UnknownCapsuleTotal(),
 		"connect_ip_datagram_context_unknown_total":                  libconnectip.UnknownContextDatagramTotal(),
 		"connect_ip_datagram_malformed_total":                        libconnectip.MalformedDatagramTotal(),
+		"connect_ip_stream_capsule_datagram_ingress_drop_total":      libconnectip.StreamCapsuleDatagramIngressDropTotal(),
 		"connect_ip_policy_drop_icmp_total":                          libconnectip.PolicyDropICMPTotal(),
 		"connect_ip_policy_drop_icmp_attempt_total":                  libconnectip.PolicyDropICMPAttemptTotal(),
 		"connect_ip_policy_drop_icmp_reason_total":                   policyDropICMPReasonSnapshot(),

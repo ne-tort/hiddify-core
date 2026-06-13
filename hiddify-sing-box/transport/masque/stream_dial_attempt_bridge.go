@@ -2,7 +2,6 @@ package masque
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log"
 	"net"
@@ -10,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/session"
@@ -42,34 +40,16 @@ func (h tcpStreamAttemptDialHost) PrepareAttemptLocked() (strm.AttemptSnapshot, 
 		t, err := uritemplate.New(raw)
 		if err != nil {
 			s.Mu.Unlock()
-			return strm.AttemptSnapshot{}, nil, errors.Join(ErrCapability, E.Cause(err, "invalid TCP MASQUE template"))
+			return strm.AttemptSnapshot{}, nil, errors.Join(session.ErrCapability, E.Cause(err, "invalid TCP MASQUE template"))
 		}
 		s.TemplateTCP = t
 	}
 	templateTCP := s.TemplateTCP
 	options := s.Options
-	var tcpHTTP *http3.Transport
-	if httpLayer != option.MasqueHTTPLayerH2 && s.TCPHTTP == nil {
-		tlsMerged := masqueClientTLSConfig(options)
-		s.TCPHTTP = &http3.Transport{
-			EnableDatagrams:    masqueTCPConnectStreamHTTP3EnableDatagrams(options),
-			DisableCompression: true,
-			TLSClientConfig:    tlsMerged,
-			Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
-				port := int(s.Options.ServerPort)
-				if port <= 0 {
-					port = 443
-				}
-				target := masqueDialTarget(masqueQuicDialCandidateHost(s.Options), port)
-				cfg := session.ApplyQUICExperimentalOptions(
-					masqueTCPConnectStreamQUICConfig(options),
-					options.QUICExperimental,
-				)
-				return s.quicDialWithPolicy("client_connect_stream")(ctx, target, tlsCfg, cfg)
-			},
-		}
-		applyWarpMasqueHTTP3TransportFields(s.TCPHTTP, options)
+	if httpLayer != option.MasqueHTTPLayerH2 {
+		session.EnsureTCPHTTPTransportLockedAssumeMu(&s.CoreSession)
 	}
+	var tcpHTTP *http3.Transport
 	if httpLayer != option.MasqueHTTPLayerH2 {
 		tcpHTTP = s.TCPHTTP
 	}

@@ -88,4 +88,10 @@ func (c *TunnelConn) WriteTo(w io.Writer) (int64, error) {
 // RouteConnectionCopyWriterTo opts into route io.WriterTo bulk download when the inner conn supports it.
 func (c *TunnelConn) RouteConnectionCopyWriterTo() {}
 
-var _ C.RouteConnectionCopyWriterTo = (*TunnelConn)(nil)
+// RouteConnectionCopyReaderFrom opts into route io.ReaderFrom bulk upload when the inner conn supports it.
+func (c *TunnelConn) RouteConnectionCopyReaderFrom() {}
+
+var (
+	_ C.RouteConnectionCopyWriterTo   = (*TunnelConn)(nil)
+	_ C.RouteConnectionCopyReaderFrom = (*TunnelConn)(nil)
+)

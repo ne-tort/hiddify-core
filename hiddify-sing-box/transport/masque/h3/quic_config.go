@@ -3,6 +3,7 @@ package h3
 import (
 	"crypto/tls"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,10 @@ func (p QUICDialProfile) hasWarpClientCert() bool {
 const DefaultUDPInitialPacketSize uint16 = 1420
 
 const (
+	// BulkStreamFCFloorBytes is the minimum CONNECT-stream QUIC stream FC that escapes the
+	// bench-shaped 64 KiB/RTT ceiling (S43 L256 → >21 Mbit/s @ 35 ms). Prod configs use 128 MiB.
+	BulkStreamFCFloorBytes = 256 * 1024
+
 	defaultInitialStreamRecvWindow     = 16 << 20  // 16 MiB
 	defaultMaxStreamRecvWindow         = 96 << 20  // 96 MiB
 	defaultInitialConnectionRecvWindow = 24 << 20  // ≥ 1.5 × stream initial
@@ -42,8 +47,11 @@ func PacketPlaneQUICConfig(base *quic.Config) *quic.Config {
 	if base.MaxIdleTimeout == 0 {
 		base.MaxIdleTimeout = 24 * time.Hour
 	}
+	if base.HandshakeIdleTimeout == 0 {
+		base.HandshakeIdleTimeout = packetPlaneHandshakeIdleTimeout()
+	}
 	if base.KeepAlivePeriod == 0 {
-		base.KeepAlivePeriod = 15 * time.Second
+		base.KeepAlivePeriod = packetPlaneKeepAlivePeriod()
 	}
 	if base.InitialStreamReceiveWindow == 0 {
 		base.InitialStreamReceiveWindow = defaultInitialStreamRecvWindow
@@ -78,6 +86,33 @@ func boostTCPBulkStreamQUICReceiveWindows(cfg *quic.Config) {
 	if cfg.InitialConnectionReceiveWindow < connMax {
 		cfg.InitialConnectionReceiveWindow = connMax
 	}
+}
+
+// EnforceConnectStreamBulkFCFloor raises QUIC receive windows to at least BulkStreamFCFloorBytes.
+// Called after quic_experimental merge so lab knobs cannot reintroduce the 64 KiB/RTT ceiling.
+func EnforceConnectStreamBulkFCFloor(cfg *quic.Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.InitialStreamReceiveWindow < BulkStreamFCFloorBytes {
+		cfg.InitialStreamReceiveWindow = BulkStreamFCFloorBytes
+	}
+	if cfg.MaxStreamReceiveWindow < BulkStreamFCFloorBytes {
+		cfg.MaxStreamReceiveWindow = BulkStreamFCFloorBytes
+	}
+	const connFloor = BulkStreamFCFloorBytes * 2
+	if cfg.InitialConnectionReceiveWindow < connFloor {
+		cfg.InitialConnectionReceiveWindow = connFloor
+	}
+	if cfg.MaxConnectionReceiveWindow < connFloor {
+		cfg.MaxConnectionReceiveWindow = connFloor
+	}
+}
+
+// FinalizeConnectStreamQUICConfig applies P8 bulk FC floor then prod window boost after experimental merge.
+func FinalizeConnectStreamQUICConfig(cfg *quic.Config) {
+	EnforceConnectStreamBulkFCFloor(cfg)
+	boostTCPBulkStreamQUICReceiveWindows(cfg)
 }
 
 // NewPacketPlaneQUICConfig returns CONNECT-UDP/IP defaults with datagrams enabled.
@@ -119,7 +154,7 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 			InitialPacketSize: DefaultUDPInitialPacketSize,
 		})
 	}
-	boostTCPBulkStreamQUICReceiveWindows(cfg)
+	FinalizeConnectStreamQUICConfig(cfg)
 	return cfg
 }
 
@@ -141,6 +176,37 @@ func TCPConnectStreamHTTP3EnableDatagrams(profile QUICDialProfile) bool {
 	return false
 }
 
+// packetPlaneKeepAlivePeriod tunes QUIC PING cadence (MASQUE_QUIC_KEEPALIVE_MS).
+// Shorter keepalive helps Docker/NAT field paths where 15s idle gaps drop UDP mappings.
+func packetPlaneKeepAlivePeriod() time.Duration {
+	const defaultPeriod = 15 * time.Second
+	raw := strings.TrimSpace(os.Getenv("MASQUE_QUIC_KEEPALIVE_MS"))
+	if raw == "" {
+		return defaultPeriod
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return defaultPeriod
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// packetPlaneHandshakeIdleTimeout tunes pre-handshake idle budget (MASQUE_QUIC_HANDSHAKE_IDLE_MS).
+// Field remote paths with higher RTT may need >5s (stock quic-go default).
+func packetPlaneHandshakeIdleTimeout() time.Duration {
+	// Field remote paths with higher RTT need >5s (REF1-2); default matches bench tuning.
+	const defaultPeriod = 15 * time.Second
+	raw := strings.TrimSpace(os.Getenv("MASQUE_QUIC_HANDSHAKE_IDLE_MS"))
+	if raw == "" {
+		return defaultPeriod
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return defaultPeriod
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func tcpStreamHTTP3LegacyDatagramsEnv() bool {
 	raw := strings.TrimSpace(strings.ToLower(os.Getenv("HIDDIFY_MASQUE_TCP_HTTP3_LEGACY_DATAGRAMS")))
 	switch raw {
@@ -157,6 +223,6 @@ func HTTPServerQUICConfig() *quic.Config {
 		EnableDatagrams:   true,
 		InitialPacketSize: DefaultUDPInitialPacketSize,
 	})
-	boostTCPBulkStreamQUICReceiveWindows(cfg)
+	FinalizeConnectStreamQUICConfig(cfg)
 	return cfg
 }

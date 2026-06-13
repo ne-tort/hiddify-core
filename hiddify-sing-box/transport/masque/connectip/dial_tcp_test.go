@@ -161,6 +161,9 @@ func TestDialTCPFactoryErrorReleasesSessionAndClearsIngress(t *testing.T) {
 	if host.installInflight.Load() != 0 {
 		t.Fatalf("installInflight=%d want 0", host.installInflight.Load())
 	}
+	if !host.fallbackCleared.Load() {
+		t.Fatal("expected fallback latch cleared on netstack factory failure")
+	}
 }
 
 func TestDialTCPReusesExistingNetstack(t *testing.T) {
@@ -185,5 +188,22 @@ func TestDialTCPReusesExistingNetstack(t *testing.T) {
 	}
 	if host.ingressStartCount.Load() != 0 {
 		t.Fatalf("ingressStartCount=%d want 0 when netstack already present", host.ingressStartCount.Load())
+	}
+}
+
+func TestDialTCPNetstackDialFailureClearsFallback(t *testing.T) {
+	host := &dialTCPFakeHost{
+		tcpNetstack: &dialTCPFakeNetstack{
+			dial: func(context.Context, M.Socksaddr) (net.Conn, error) {
+				return nil, errors.New("netstack dial refused")
+			},
+		},
+	}
+	_, err := DialTCP(context.Background(), host, M.ParseSocksaddrHostPort("127.0.0.1", 443))
+	if err == nil || err.Error() != "netstack dial refused" {
+		t.Fatalf("expected netstack dial error, got %v", err)
+	}
+	if !host.fallbackCleared.Load() {
+		t.Fatal("expected fallback latch cleared on netstack dial failure")
 	}
 }

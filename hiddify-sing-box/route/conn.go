@@ -17,7 +17,6 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
-	tmasque "github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -310,12 +309,15 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	// It also implements io.ReaderFrom so upload can bulk-read from TUN (parity with std io.Copy).
 	// Prefer explicit WriterTo/ReadFrom when advertised: avoids choosing the splice path when a
 	// wrapper still exposes syscall.Conn on an inner fd, and keeps MASQUE bulk semantics first.
+	branch := selectConnectionCopyBranch(sourceReader, destinationWriter)
+	traceRouteConnectionCopyBranch(string(branch), direction, sourceReader, destinationWriter)
 	var err error
-	if wt, ok := sourceReader.(interface {
-		io.WriterTo
-		C.RouteConnectionCopyWriterTo
-	}); ok {
-		traceRouteConnectionCopyBranch("writer_to", direction, sourceReader, destinationWriter)
+	switch branch {
+	case connectionCopyBranchWriterTo:
+		wt := sourceReader.(interface {
+			io.WriterTo
+			C.RouteConnectionCopyWriterTo
+		})
 		var written int64
 		written, err = wt.WriteTo(destinationWriter)
 		if written > 0 {
@@ -326,11 +328,11 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 				counter(written)
 			}
 		}
-	} else if rf, ok := destinationWriter.(interface {
-		io.ReaderFrom
-		C.RouteConnectionCopyReaderFrom
-	}); ok {
-		traceRouteConnectionCopyBranch("reader_from", direction, sourceReader, destinationWriter)
+	case connectionCopyBranchReaderFrom:
+		rf := destinationWriter.(interface {
+			io.ReaderFrom
+			C.RouteConnectionCopyReaderFrom
+		})
 		var read int64
 		read, err = rf.ReadFrom(sourceReader)
 		if read > 0 {
@@ -341,8 +343,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 				counter(read)
 			}
 		}
-	} else {
-		traceRouteConnectionCopyBranch("copy_counters", direction, sourceReader, destinationWriter)
+	default:
 		_, err = bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
 	}
 	if err != nil {
@@ -376,6 +377,30 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 			m.logger.TraceContext(ctx, "connection download closed")
 		}
 	}
+}
+
+type connectionCopyBranch string
+
+const (
+	connectionCopyBranchWriterTo     connectionCopyBranch = "writer_to"
+	connectionCopyBranchReaderFrom   connectionCopyBranch = "reader_from"
+	connectionCopyBranchCopyCounters connectionCopyBranch = "copy_counters"
+)
+
+func selectConnectionCopyBranch(sourceReader io.Reader, destinationWriter io.Writer) connectionCopyBranch {
+	if _, ok := sourceReader.(interface {
+		io.WriterTo
+		C.RouteConnectionCopyWriterTo
+	}); ok {
+		return connectionCopyBranchWriterTo
+	}
+	if _, ok := destinationWriter.(interface {
+		io.ReaderFrom
+		C.RouteConnectionCopyReaderFrom
+	}); ok {
+		return connectionCopyBranchReaderFrom
+	}
+	return connectionCopyBranchCopyCounters
 }
 
 func traceRouteConnectionCopyBranch(branch string, direction bool, sourceReader io.Reader, destinationWriter io.Writer) {
@@ -478,8 +503,8 @@ func copyPacketDownload(ctx context.Context, source N.PacketReader, destination 
 		buffer.Reset()
 		destinationAddr, err := source.ReadPacket(buffer)
 		if err != nil {
-			if tmasque.IsUDPPortUnreachable(err) {
-				remote := tmasque.UDPPortUnreachableRemote(err, destinationAddr)
+			if isUDPPortUnreachable(err) {
+				remote := udpPortUnreachableRemote(err, destinationAddr)
 				if !remote.IsValid() {
 					if pc, ok := destination.(interface{ RemoteAddr() net.Addr }); ok && pc.RemoteAddr() != nil {
 						remote = M.SocksaddrFromNet(pc.RemoteAddr()).Unwrap()

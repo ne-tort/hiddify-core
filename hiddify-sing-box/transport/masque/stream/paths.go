@@ -7,10 +7,20 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 )
+
+const bidiTunnelWriteToBufLen = 64 * 1024
+
+var bidiTunnelWriteToBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, bidiTunnelWriteToBufLen)
+		return &b
+	},
+}
 
 // DownloadPath is the CONNECT-stream download half (response body / stream read).
 type DownloadPath interface {
@@ -31,10 +41,18 @@ type TunnelPaths struct {
 }
 
 type downloadPathAdapter struct {
-	inner io.ReadCloser
+	inner  io.ReadCloser
+	readMu sync.Mutex // serialize drain vs Read vs WriteTo on one H2 response body
 }
 
-func (a *downloadPathAdapter) Read(p []byte) (int, error) { return a.inner.Read(p) }
+func (a *downloadPathAdapter) Read(p []byte) (int, error) {
+	if a == nil || a.inner == nil {
+		return 0, io.EOF
+	}
+	a.readMu.Lock()
+	defer a.readMu.Unlock()
+	return a.inner.Read(p)
+}
 
 func (a *downloadPathAdapter) Close() error {
 	if a.inner == nil {
@@ -83,12 +101,14 @@ func NewTunnelPaths(body io.ReadCloser, upload io.WriteCloser) TunnelPaths {
 
 // ConnFromTunnelPaths assembles net.Conn from explicit upload/download halves.
 func ConnFromTunnelPaths(ctx context.Context, paths TunnelPaths, local, remote net.Addr) net.Conn {
-	return &bidiTunnelConn{
+	c := &bidiTunnelConn{
 		ctx:    ctx,
 		paths:  paths,
 		local:  local,
 		remote: remote,
 	}
+	c.maybeStartDownloadDrain()
+	return c
 }
 
 // bidiTunnelConn implements net.Conn over explicit TunnelPaths (H2 thin tunnel today).
@@ -99,6 +119,64 @@ type bidiTunnelConn struct {
 	remote   net.Addr
 	uploadDL connDeadlines
 	uploadMu sync.Mutex
+
+	downloadMu     sync.Mutex
+	drainOnce      sync.Once
+	drainStopped   int32
+	downloadActive int32 // WriteTo in progress — H2 bidi upload scheduling (parity h3.TunnelConn)
+}
+
+func readDownloadPath(dl DownloadPath, p []byte) (int, error) {
+	if dl == nil {
+		return 0, io.EOF
+	}
+	n, err := dl.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, errors.Join(Errs.TCPConnectStreamFailed, err)
+	}
+	return n, err
+}
+
+func (c *bidiTunnelConn) readDownloadLocked(p []byte) (int, error) {
+	return readDownloadPath(c.paths.Download, p)
+}
+
+func (c *bidiTunnelConn) stopDownloadDrain() {
+	atomic.StoreInt32(&c.drainStopped, 1)
+}
+
+func (c *bidiTunnelConn) maybeStartDownloadDrain() {
+	if !H2BidiDownloadDrainEnabled() || c.paths.Download == nil {
+		return
+	}
+	c.drainOnce.Do(func() {
+		go c.runDownloadDrain()
+	})
+}
+
+func (c *bidiTunnelConn) runDownloadDrain() {
+	buf := make([]byte, 32*1024)
+	for {
+		if c.ctx != nil {
+			if err := context.Cause(c.ctx); err != nil {
+				return
+			}
+		}
+		if atomic.LoadInt32(&c.drainStopped) > 0 || atomic.LoadInt32(&c.downloadActive) > 0 {
+			return
+		}
+		if c.paths.Download == nil {
+			return
+		}
+		n, err := readDownloadPath(c.paths.Download, buf)
+		if n > 0 {
+			continue
+		}
+		if err != nil {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (c *bidiTunnelConn) Read(p []byte) (int, error) {
@@ -107,17 +185,14 @@ func (c *bidiTunnelConn) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	if c.paths.Download == nil {
-		return 0, io.EOF
-	}
-	n, err := c.paths.Download.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return n, errors.Join(Errs.TCPConnectStreamFailed, err)
-	}
-	return n, err
+	c.stopDownloadDrain()
+	c.downloadMu.Lock()
+	defer c.downloadMu.Unlock()
+	return c.readDownloadLocked(p)
 }
 
 func (c *bidiTunnelConn) Write(p []byte) (int, error) {
+	c.maybeStartDownloadDrain()
 	c.uploadMu.Lock()
 	defer c.uploadMu.Unlock()
 	if c.uploadDL.writeTimeoutExceeded() {
@@ -137,6 +212,7 @@ func (c *bidiTunnelConn) Write(p []byte) (int, error) {
 }
 
 func (c *bidiTunnelConn) ReadFrom(r io.Reader) (int64, error) {
+	c.maybeStartDownloadDrain()
 	c.uploadMu.Lock()
 	defer c.uploadMu.Unlock()
 	if c.paths.Upload == nil {
@@ -153,14 +229,39 @@ func (c *bidiTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	if c.paths.Download == nil {
 		return 0, io.EOF
 	}
-	n, err := io.Copy(w, c.paths.Download)
+	c.stopDownloadDrain()
+	atomic.AddInt32(&c.downloadActive, 1)
+	defer atomic.AddInt32(&c.downloadActive, -1)
+	bp := bidiTunnelWriteToBufPool.Get().(*[]byte)
+	defer bidiTunnelWriteToBufPool.Put(bp)
+	reader := &bidiTunnelDownloadReader{c: c}
+	n, err := io.CopyBuffer(w, reader, *bp)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return n, errors.Join(Errs.TCPConnectStreamFailed, err)
 	}
 	return n, err
 }
 
+// DownloadActive reports whether WriteTo is draining the response half (iperf -R duplex).
+func (c *bidiTunnelConn) DownloadActive() bool {
+	return c != nil && atomic.LoadInt32(&c.downloadActive) > 0
+}
+
+type bidiTunnelDownloadReader struct {
+	c *bidiTunnelConn
+}
+
+func (r *bidiTunnelDownloadReader) Read(p []byte) (int, error) {
+	if r == nil || r.c == nil {
+		return 0, io.EOF
+	}
+	r.c.downloadMu.Lock()
+	defer r.c.downloadMu.Unlock()
+	return r.c.readDownloadLocked(p)
+}
+
 func (c *bidiTunnelConn) Close() error {
+	c.stopDownloadDrain()
 	var err error
 	if c.paths.Upload != nil {
 		err = errors.Join(err, c.paths.Upload.Close())
@@ -204,8 +305,11 @@ func (c *bidiTunnelConn) SetWriteDeadline(t time.Time) error {
 
 func (*bidiTunnelConn) RouteConnectionCopyWriterTo() {}
 
+func (*bidiTunnelConn) RouteConnectionCopyReaderFrom() {}
+
 var (
-	_ io.ReaderFrom                 = (*bidiTunnelConn)(nil)
-	_ io.WriterTo                   = (*bidiTunnelConn)(nil)
-	_ C.RouteConnectionCopyWriterTo = (*bidiTunnelConn)(nil)
+	_ io.ReaderFrom                   = (*bidiTunnelConn)(nil)
+	_ io.WriterTo                     = (*bidiTunnelConn)(nil)
+	_ C.RouteConnectionCopyWriterTo   = (*bidiTunnelConn)(nil)
+	_ C.RouteConnectionCopyReaderFrom = (*bidiTunnelConn)(nil)
 )

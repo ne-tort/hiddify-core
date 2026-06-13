@@ -53,6 +53,22 @@ func DialHTTP3ConnectStream(
 	targetPort uint16,
 	tcpHTTP *http3.Transport,
 ) (net.Conn, error) {
+	return DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, hooks.UsePipeUpload(), "")
+}
+
+// DialHTTP3ConnectStreamLeg dials one CONNECT-stream leg with an explicit pipe/bidi choice (P2 dual dial).
+func DialHTTP3ConnectStreamLeg(
+	ctx context.Context,
+	hooks DialH3Hooks,
+	host DialH3Host,
+	tcpURL *url.URL,
+	logIn DialH3LogInput,
+	targetHost string,
+	targetPort uint16,
+	tcpHTTP *http3.Transport,
+	usePipe bool,
+	legLabel string,
+) (net.Conn, error) {
 	serverHost := tcpURL.Host
 	if serverHost == "" {
 		serverHost = net.JoinHostPort(logIn.Server, strconv.Itoa(int(logIn.ServerPort)))
@@ -74,17 +90,16 @@ func DialHTTP3ConnectStream(
 		return nil, errors.Join(Errs.TCPConnectStreamFailed, context.Cause(ctx))
 	default:
 	}
-	log.Printf("masque_http_layer_attempt layer=h3 tag=%s tcp_stream=1 target=%s dial=%s",
-		strings.TrimSpace(logIn.Tag), tcpLogHost, dialAddr)
-	const maxAttempts = 3
+	log.Printf("masque_http_layer_attempt layer=h3 tag=%s tcp_stream=1 target=%s dial=%s%s",
+		strings.TrimSpace(logIn.Tag), tcpLogHost, dialAddr, dialH3LegLogSuffix(legLabel))
+	maxAttempts := ConnectStreamDialMaxAttempts()
 	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
-		TraceTCPf("masque tcp connect_stream request host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
+		TraceTCPf("masque tcp connect_stream request host=%s port=%d attempt=%d%s", targetHost, targetPort, attempt+1, dialH3LegLogSuffix(legLabel))
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
-		usePipe := hooks.UsePipeUpload()
 		req, pr, pw, reqErr := hooks.BuildRequest(streamCtx, hooks.RequestURL(tcpURL), serverHost, usePipe)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
@@ -113,13 +128,16 @@ func DialHTTP3ConnectStream(
 				TraceTCPf("masque tcp connect_stream retry host=%s port=%d attempt=%d error_class=%s err=%v",
 					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
 				tcpHTTP = host.ResetHTTP3Transport()
-				if backoffErr := waitContextBackoff(ctx, time.Duration(attempt+1)*50*time.Millisecond); backoffErr != nil {
+				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, errors.Join(Errs.TCPConnectStreamFailed, backoffErr)
 				}
 				continue
 			}
 			TraceTCPf("masque tcp connect_stream failed host=%s port=%d status=roundtrip_error error_class=%s err=%v",
 				targetHost, targetPort, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
+			if IsRetryableTCPStreamError(roundTripErr) {
+				host.ResetHTTP3Transport()
+			}
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, roundTripErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -151,8 +169,8 @@ func DialHTTP3ConnectStream(
 			_ = resp.Body.Close()
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
-		TraceTCPf("masque tcp connect_stream success host=%s port=%d status=%d pipe_upload=%t",
-			targetHost, targetPort, resp.StatusCode, usePipe)
+		TraceTCPf("masque tcp connect_stream success host=%s port=%d status=%d pipe_upload=%t%s",
+			targetHost, targetPort, resp.StatusCode, usePipe, dialH3LegLogSuffix(legLabel))
 		stopReqCtxRelay(true)
 		conn, err := hooks.TunnelFromResponse(streamCtx, resp, pw, targetHost, targetPort)
 		if err != nil {
@@ -165,6 +183,9 @@ func DialHTTP3ConnectStream(
 		return conn, nil
 	}
 	if lastRoundTripErr != nil {
+		if IsRetryableTCPStreamError(lastRoundTripErr) {
+			host.ResetHTTP3Transport()
+		}
 		return nil, errors.Join(Errs.TCPConnectStreamFailed, lastRoundTripErr)
 	}
 	return nil, Errs.TCPConnectStreamFailed
@@ -182,4 +203,11 @@ func waitContextBackoff(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+func dialH3LegLogSuffix(legLabel string) string {
+	if legLabel == "" {
+		return ""
+	}
+	return " dual_leg=" + legLabel
 }

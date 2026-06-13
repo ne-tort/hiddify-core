@@ -33,9 +33,9 @@ func MasqueHTTPServerQUICConfig() *quic.Config {
 	return session.HTTPServerQUICConfig()
 }
 
-// MasqueAuthorityHTTPServerQUICConfig is QUIC tuning for authority-only HTTP/3 listeners (no datagram plane).
-func MasqueAuthorityHTTPServerQUICConfig() *quic.Config {
-	return session.AuthorityHTTPServerQUICConfig()
+// MasqueH3HTTPServerQUICConfig is QUIC tuning for standalone HTTP/3 listeners (no datagram plane).
+func MasqueH3HTTPServerQUICConfig() *quic.Config {
+	return session.H3HTTPServerQUICConfig()
 }
 
 // ErrQUICPacketConnContract is re-exported from session for protocol/masque and tests.

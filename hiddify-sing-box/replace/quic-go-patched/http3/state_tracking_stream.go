@@ -5,11 +5,27 @@ import (
 	"errors"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 )
 
 const streamDatagramQueueLen = 32
+
+var (
+	streamDatagramQueueDropTotal     atomic.Uint64
+	streamDatagramRecvClosedDropTotal atomic.Uint64
+)
+
+// StreamDatagramQueueDropTotal returns process-wide count of stream datagram enqueue drops (queue full).
+func StreamDatagramQueueDropTotal() uint64 {
+	return streamDatagramQueueDropTotal.Load()
+}
+
+// StreamDatagramRecvClosedDropTotal returns process-wide count of datagram enqueue drops after recv closed.
+func StreamDatagramRecvClosedDropTotal() uint64 {
+	return streamDatagramRecvClosedDropTotal.Load()
+}
 
 // stateTrackingStream is an implementation of quic.Stream that delegates
 // to an underlying stream
@@ -107,9 +123,6 @@ func (s *stateTrackingStream) CancelRead(e quic.StreamErrorCode) {
 
 func (s *stateTrackingStream) Read(b []byte) (int, error) {
 	n, err := s.Stream.Read(b)
-	if n > 0 && masqueWakeSendOnReceiveRead() {
-		quic.MasqueWakeStreamSend(s.Stream)
-	}
 	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
 		s.closeReceive(err)
 	}
@@ -139,13 +152,26 @@ func (s *stateTrackingStream) enqueueDatagram(data []byte) {
 	defer s.mx.Unlock()
 
 	if s.recvErr != nil {
+		streamDatagramRecvClosedDropTotal.Add(1)
 		return
 	}
 	if len(s.queue) >= streamDatagramQueueLen {
+		streamDatagramQueueDropTotal.Add(1)
 		return
 	}
 	s.queue = append(s.queue, data)
 	s.signalHasDatagram()
+}
+
+func (s *stateTrackingStream) TryReceiveDatagram() ([]byte, bool) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+	if len(s.queue) > 0 {
+		data := s.queue[0]
+		s.queue = s.queue[1:]
+		return data, true
+	}
+	return nil, false
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {

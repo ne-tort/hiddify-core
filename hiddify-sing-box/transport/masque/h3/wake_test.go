@@ -50,3 +50,18 @@ func TestIngressAckWakeOnReceiveReadEnv(t *testing.T) {
 		})
 	}
 }
+
+// TestConnectIPIngressWakeIsolatedFromBidiReadWake documents wake isolation on a shared QUIC conn:
+// MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ=0 disables CONNECT-stream bidi Read wake, but CONNECT-IP
+// ingress ACK wake still runs via FlushConnectIPIngressAckWake.
+func TestConnectIPIngressWakeIsolatedFromBidiReadWake(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ", "0")
+	if IngressAckWakeOnReceiveRead() {
+		t.Fatal("bidi read wake must be disabled for localize")
+	}
+	wake := &stubMasqueWakeSender{}
+	FlushConnectIPIngressAckWake("h3", wake)
+	if wake.calls != 1 {
+		t.Fatalf("CONNECT-IP ingress wake must stay enabled, got %d MasqueWakeSend calls", wake.calls)
+	}
+}

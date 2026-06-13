@@ -109,6 +109,7 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
+	masqueWakeSendAfterReceiveRead(s, n)
 	return n, err
 }
 
@@ -132,7 +133,8 @@ func (s *Stream) Write(b []byte) (int, error) {
 	if _, err := s.datagramStream.Write(s.buf); err != nil {
 		return 0, err
 	}
-	return s.datagramStream.Write(b)
+	n, err := s.datagramStream.Write(b)
+	return n, err
 }
 
 func (s *Stream) writeUnframed(b []byte) (int, error) {

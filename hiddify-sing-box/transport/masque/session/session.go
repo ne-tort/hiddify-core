@@ -1,6 +1,7 @@
 package session
 
 import (
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -9,7 +10,6 @@ import (
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go/http3"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
-	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
@@ -29,10 +29,10 @@ type CoreSession struct {
 	UDPHTTPLayer             atomic.Value // "h3" | "h2"
 	IPConn                   *connectip.Conn
 	IPHTTPConn               *http3.ClientConn
+	// IPHTTPH2Upload is the CONNECT-IP HTTP/2 Extended CONNECT upload half (ingress ACK wake poke).
+	IPHTTPH2Upload           io.Writer
 	IPHTTP                   *http3.Transport
 	TCPHTTP                  *http3.Transport
-	AuthorityClient          *h3t.AuthorityClient
-	AuthorityClientMu        sync.Mutex
 	TemplateUDP              *uritemplate.Template
 	TemplateIP               *uritemplate.Template
 	TemplateTCP              *uritemplate.Template

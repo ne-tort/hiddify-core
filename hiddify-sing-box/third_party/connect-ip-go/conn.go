@@ -128,6 +128,10 @@ func MalformedDatagramTotal() uint64 {
 	return malformedDatagramTotal.Load()
 }
 
+func StreamCapsuleDatagramIngressDropTotal() uint64 {
+	return streamCapsuleDatagramIngressDropTotal.Load()
+}
+
 func PolicyDropICMPTotal() uint64 {
 	return policyDropICMPTotal.Load()
 }
@@ -383,7 +387,7 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 		if err != nil {
 			// Normal end of CONNECT-IP request body: parity with masque H2 CONNECT-UDP ReadFrom /
 			// streamConn (do not wrap io.EOF in dataplane text or spam "handling stream failed").
-			if !errors.Is(err, io.EOF) {
+			if !errors.Is(err, io.EOF) && !IsBenignStreamTeardownError(err) {
 				log.Printf("handling stream failed: %v", err)
 			}
 			c.mu.Lock()
@@ -457,7 +461,7 @@ func (c *Conn) pumpH3QUICDatagrams() {
 			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
 				return
 			}
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || IsBenignStreamTeardownError(err) {
 				return
 			}
 			c.mu.Lock()

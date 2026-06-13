@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"io"
@@ -50,10 +51,10 @@ func testStreamDialH2Hooks() strm.DialH2Hooks {
 		NewConnectUploadBody: func(pr *io.PipeReader) io.Reader { return pr },
 		RequestURL:           func(u *url.URL) string { return u.String() },
 		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, targetHost string, targetPort uint16) (net.Conn, error) {
-			return nil, ErrTCPConnectStreamFailed
+			return nil, session.ErrTCPConnectStreamFailed
 		},
-		ClassifyError: func(err error) string { return string(ClassifyError(err)) },
-		AuthFailed:    ErrAuthFailed,
+		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },
+		AuthFailed:    session.ErrAuthFailed,
 	}
 }
 
@@ -75,8 +76,8 @@ func TestStreamDialHTTP2ConnectStreamReturnsCanceledBeforeAttempt(t *testing.T) 
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 }
 
@@ -109,8 +110,8 @@ func TestStreamDialHTTP2ConnectStreamReturnsCanceledAfterRoundTripSuccess(t *tes
 	if !errors.Is(dialErr, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", dialErr)
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 	if got := attempts.Load(); got != 1 {
 		t.Fatalf("expected single RoundTrip attempt, got %d", got)
@@ -133,10 +134,42 @@ func TestStreamDialHTTP2ConnectStreamJoinsErrWhenTransportUnconfigured(t *testin
 	if dialErr == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(dialErr, ErrTCPConnectStreamFailed) {
-		t.Fatalf("expected ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
 	if !strings.Contains(dialErr.Error(), "tcp dialer is not configured") {
 		t.Fatalf("expected tcp dialer error substring, got %v", dialErr)
+	}
+}
+
+func TestStreamDialHTTP2ConnectStreamResetsOverlayAfterRetryExhausted(t *testing.T) {
+	u, err := url.Parse("https://example.com/masque/tcp/example.com/443")
+	if err != nil {
+		t.Fatalf("parse tcp url: %v", err)
+	}
+	var attempts atomic.Uint32
+	retryErr := errors.New("connection reset by peer")
+	host := &streamDialH2FakeHost{
+		rt: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			attempts.Add(1)
+			return nil, retryErr
+		}),
+	}
+	_, dialErr := strm.DialHTTP2ConnectStream(context.Background(), testStreamDialH2Hooks(), host, u, strm.DialH2LogInput{
+		Tag:        "t",
+		Server:     "127.0.0.1",
+		ServerPort: 443,
+	}, "example.com", 443)
+	if dialErr == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
+		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("expected 3 RoundTrip attempts, got %d", got)
+	}
+	if got := host.resetN.Load(); got != 3 {
+		t.Fatalf("expected overlay reset on each retry plus final failure (resets=3), got %d", got)
 	}
 }

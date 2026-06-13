@@ -3,6 +3,8 @@ package session
 import (
 	"errors"
 	"net"
+
+	"github.com/sagernet/sing-box/transport/masque/httpx"
 )
 
 type ErrorClass string
@@ -58,6 +60,11 @@ func init() {
 		TCPOverConnectIP:      ErrTCPOverConnectIP,
 		Capability:            ErrCapability,
 	})
+	httpx.RegisterNonSwitchableSentinel(
+		ErrConnectUDPTemplateNotConfigured,
+		ErrConnectIPTemplateNotConfigured,
+		ErrAuthFailed,
+	)
 }
 
 // ClassifyError maps masque sentinel errors to stable observability classes.

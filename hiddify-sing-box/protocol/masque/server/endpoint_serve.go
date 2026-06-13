@@ -8,7 +8,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	TM "github.com/sagernet/sing-box/transport/masque"
+	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
 	E "github.com/sagernet/sing/common/exceptions"
 	"golang.org/x/net/http2"
 )
@@ -28,12 +28,11 @@ type MasqueStack struct {
 	TCPTLSListener net.Listener
 }
 
-// LaunchMasqueStackConfig drives dual-bind listen and HTTP/3 + optional HTTP/2 collateral serve.
+// LaunchMasqueStackConfig drives dual-bind listen and HTTP/3 + HTTP/2 collateral serve.
 type LaunchMasqueStackConfig struct {
 	Handler           http.Handler
 	ListenHost        string
 	ListenPort        uint16
-	AuthorityH3Only   bool
 	HTTP3TLS          *tls.Config
 	CollateralTLS     *tls.Config
 	H3QUICConfig      *quic.Config
@@ -42,7 +41,7 @@ type LaunchMasqueStackConfig struct {
 	Hooks             MasqueServeHooks
 }
 
-// LaunchMasqueStack binds UDP (+ TCP unless authority H3-only), starts HTTP/3 and optional HTTP/2 servers.
+// LaunchMasqueStack binds UDP and TCP, starts HTTP/3 and HTTP/2 servers.
 func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 	addr := MasqueListenAddr(cfg.ListenHost, cfg.ListenPort)
 	h3Srv := &http3.Server{
@@ -53,17 +52,16 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 	}
 	h3Srv.QUICConfig = cfg.H3QUICConfig
 	bind, bindErr := DualBindMasqueListeners(DualBindConfig{
-		ListenHost:        cfg.ListenHost,
-		ListenPort:        cfg.ListenPort,
-		AuthorityH3Only:   cfg.AuthorityH3Only,
-		ValidateUDP:       cfg.ValidateUDP,
+		ListenHost:  cfg.ListenHost,
+		ListenPort:  cfg.ListenPort,
+		ValidateUDP: cfg.ValidateUDP,
 	})
 	if bindErr != nil {
 		return nil, E.Cause(bindErr, "listen masque server")
 	}
 	packetConn := bind.PacketConn
 	tcpRaw := bind.TCPRaw
-	if !cfg.AuthorityH3Only && tcpRaw == nil {
+	if tcpRaw == nil {
 		_ = packetConn.Close()
 		return nil, E.New("masque server: UDP/TCP dual listen exhausted retries")
 	}
@@ -71,29 +69,27 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 		H3Server:   h3Srv,
 		PacketConn: packetConn,
 	}
-	if !cfg.AuthorityH3Only {
-		if cfg.CollateralTLS == nil {
-			_ = packetConn.Close()
-			return nil, E.New("masque server: missing TLS config for HTTP/2 collateral listener")
-		}
-		tcpTLS := cfg.CollateralTLS.Clone()
-		tcpTLS.NextProtos = []string{"h2", "http/1.1"}
-		tcpLn := tls.NewListener(tcpRaw, tcpTLS)
-		stack.TCPTLSListener = tcpLn
-		http2Srv := &http.Server{
-			Handler:           cfg.Handler,
-			ReadHeaderTimeout: 30 * time.Second,
-			ReadTimeout:       0,
-			WriteTimeout:      0,
-		}
-		if err := http2.ConfigureServer(http2Srv, TM.MasqueBulkHTTP2ServerConfig()); err != nil {
-			_ = tcpLn.Close()
-			_ = packetConn.Close()
-			return nil, E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
-		}
-		stack.HTTP2Server = http2Srv
-		go serveMasqueHTTP2(http2Srv, tcpLn, cfg.Hooks)
+	if cfg.CollateralTLS == nil {
+		_ = packetConn.Close()
+		return nil, E.New("masque server: missing TLS config for HTTP/2 collateral listener")
 	}
+	tcpTLS := cfg.CollateralTLS.Clone()
+	tcpTLS.NextProtos = []string{"h2", "http/1.1"}
+	tcpLn := tls.NewListener(tcpRaw, tcpTLS)
+	stack.TCPTLSListener = tcpLn
+	http2Srv := &http.Server{
+		Handler:           cfg.Handler,
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+	}
+	if err := http2.ConfigureServer(http2Srv, mh2.BulkHTTP2ServerConfig()); err != nil {
+		_ = tcpLn.Close()
+		_ = packetConn.Close()
+		return nil, E.Cause(err, "configure masque HTTP/2 server (RFC 8441 Extended CONNECT)")
+	}
+	stack.HTTP2Server = http2Srv
+	go serveMasqueHTTP2(http2Srv, tcpLn, cfg.Hooks)
 	go serveMasqueHTTP3(h3Srv, packetConn, cfg.Hooks)
 	return stack, nil
 }

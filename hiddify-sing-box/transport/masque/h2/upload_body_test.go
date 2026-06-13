@@ -40,6 +40,23 @@ func TestUploadFlushPolicyFromEnv(t *testing.T) {
 	}
 }
 
+func TestH2ConnectChunkedUploadWriterFlushRequestBody(t *testing.T) {
+	t.Setenv(envUploadChunkKB, "4")
+	inner := &chunkRecordFlusherWriter{
+		chunkRecordWriter: chunkRecordWriter{fn: func(p []byte) (int, error) {
+			return len(p), nil
+		}},
+	}
+	policy := H2UploadFlushPolicy()
+	w := policy.Wrap(inner)
+	if _, err := w.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
+		t.Fatal(err)
+	}
+	if inner.flushCalls < 2 {
+		t.Fatalf("expected FlushRequestBody per chunk, got %d flushes", inner.flushCalls)
+	}
+}
+
 func TestH2ConnectChunkedUploadWriterSplitsWrites(t *testing.T) {
 	t.Setenv(envUploadChunkKB, "4")
 	var got []int
@@ -76,3 +93,13 @@ type chunkRecordWriter struct {
 func (w *chunkRecordWriter) Write(p []byte) (int, error) { return w.fn(p) }
 
 func (w *chunkRecordWriter) Close() error { return nil }
+
+type chunkRecordFlusherWriter struct {
+	chunkRecordWriter
+	flushCalls int
+}
+
+func (w *chunkRecordFlusherWriter) Flush() error {
+	w.flushCalls++
+	return nil
+}

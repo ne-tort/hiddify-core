@@ -116,6 +116,21 @@ func (s *h2CapsulePipeStream) closePipeWriter() error {
 	return s.pipeW.Close()
 }
 
+// H2IngressUploadWriter returns the Extended CONNECT upload half for ingress ACK wake poke.
+// Nil when the dataplane is not HTTP/2 (e.g. HTTP/3 QUIC stream).
+func (c *Conn) H2IngressUploadWriter() io.Writer {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	str := c.str
+	c.mu.Unlock()
+	if h2x, ok := str.(*h2CapsulePipeStream); ok && h2x.pipeW != nil {
+		return h2x.pipeW
+	}
+	return nil
+}
+
 func (s *h2CapsulePipeStream) closePipeReader() error {
 	if s.pipeR == nil {
 		return nil

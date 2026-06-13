@@ -20,12 +20,25 @@ func TestObservabilitySnapshotPolicyReasonContract(t *testing.T) {
 	}
 }
 
+func TestObservabilitySnapshotIncludesStreamCapsuleIngressDrop(t *testing.T) {
+	t.Parallel()
+	snapshot := ObservabilitySnapshot()
+	raw, ok := snapshot["connect_ip_stream_capsule_datagram_ingress_drop_total"]
+	if !ok {
+		t.Fatal("expected connect_ip_stream_capsule_datagram_ingress_drop_total in ObservabilitySnapshot")
+	}
+	if _, ok := raw.(uint64); !ok {
+		t.Fatalf("unexpected type for connect_ip_stream_capsule_datagram_ingress_drop_total: %T", raw)
+	}
+}
+
 func TestObservabilitySnapshotIncludesNetstackNotifyMetrics(t *testing.T) {
 	t.Parallel()
 	snapshot := ObservabilitySnapshot()
 	for _, key := range []string{
 		"connect_ip_netstack_write_notify_retry_continue_drop_total",
 		"connect_ip_netstack_write_notify_slow_iteration_total",
+		"connect_ip_pre_tcp_ingress_drop_total",
 	} {
 		raw, ok := snapshot[key]
 		if !ok {

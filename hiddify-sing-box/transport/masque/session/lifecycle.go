@@ -26,7 +26,6 @@ type LifecycleHost interface {
 	ResetH2UDPTransportLockedAssumeMu()
 	CloseAllH2ClientTransports()
 	CloseH2MasqueClientTransport(tr *http2.Transport)
-	CloseConnectAuthorityClient() error
 }
 
 // LifecycleClose tears down CONNECT-IP, ingress, QUIC/H2 overlays (ipConn → ingress → netstack order).
@@ -56,6 +55,7 @@ func LifecycleClose(s *CoreSession, host LifecycleHost) error {
 	s.IPHTTP = nil
 	s.TCPHTTP = nil
 	s.IPHTTPConn = nil
+	s.IPHTTPH2Upload = nil
 	udpClient = s.UDPClient
 	s.UDPClient = nil
 	s.Mu.Unlock()
@@ -95,9 +95,6 @@ func LifecycleClose(s *CoreSession, host LifecycleHost) error {
 	if tcpHTTP != nil && tcpHTTP != ipHTTP {
 		errs = append(errs, tcpHTTP.Close())
 	}
-	if err := host.CloseConnectAuthorityClient(); err != nil {
-		errs = append(errs, err)
-	}
 	host.EmitObservabilityEvent("session_close_end")
 	return errors.Join(errs...)
 }
@@ -118,6 +115,7 @@ func ResetHopTemplates(s *CoreSession, host LifecycleHost) error {
 		_ = s.IPConn.Close()
 		s.IPConn = nil
 	}
+	s.IPHTTPH2Upload = nil
 	host.JoinConnectIPIngress()
 	if s.TCPNetstack != nil {
 		_ = s.TCPNetstack.Close()
@@ -144,6 +142,7 @@ func ResetHopTemplates(s *CoreSession, host LifecycleHost) error {
 		s.IPHTTP = nil
 	}
 	s.IPHTTPConn = nil
+	s.IPHTTPH2Upload = nil
 	if s.TCPHTTP != nil {
 		s.TCPHTTP.Close()
 		s.TCPHTTP = nil

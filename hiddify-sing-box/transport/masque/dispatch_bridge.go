@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 
-	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -26,29 +25,11 @@ func (h dispatchHost) UnsupportedNetworkError(network string) error {
 }
 
 func (h dispatchHost) ErrTCPPathNotImplemented() error {
-	return ErrTCPPathNotImplemented
+	return session.ErrTCPPathNotImplemented
 }
 
 func (h dispatchHost) ErrTCPOverConnectIPRequiresConnectIPMode() error {
-	return ErrTCPOverConnectIP
-}
-
-func (s *coreSession) authorityDialHooks() session.AuthorityDialHooks {
-	return session.AuthorityDialHooks{
-		ClientTLSConfig:      masqueClientTLSConfig,
-		TCPConnectQUICConfig: masqueTCPConnectStreamQUICConfig,
-		ResolveDestHost:      resolveDestinationHost,
-		QuicDialCandidate:    masqueQuicDialCandidateHost,
-		DialTarget:           masqueDialTarget,
-		RecordH3LayerSuccess: func() {
-			s.maybeRecordHTTPLayerCacheSuccess(option.MasqueHTTPLayerH3)
-		},
-		ResetHTTPFallbackBudget: s.resetHTTPFallbackBudgetAfterSuccess,
-	}
-}
-
-func (h dispatchHost) DialTCPConnectAuthority(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	return session.DialTCPConnectAuthority(&h.s.CoreSession, h.s.authorityDialHooks(), ctx, destination)
+	return session.ErrTCPOverConnectIP
 }
 
 func (h dispatchHost) DialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {

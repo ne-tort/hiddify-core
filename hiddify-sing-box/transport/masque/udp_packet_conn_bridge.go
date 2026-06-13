@@ -38,7 +38,7 @@ func newConnectIPUDPPacketConn(ctx context.Context, ipSess IPPacketSession, core
 		prefixes := bridgeCfg.PrefixSource.CurrentAssignedPrefixes()
 		var err error
 		if len(prefixes) == 0 {
-			prefixCtx, cancel := context.WithTimeout(ctx, time.Second)
+			prefixCtx, cancel := context.WithTimeout(mcip.DataplaneContext(ctx), time.Second)
 			prefixes, err = bridgeCfg.PrefixSource.LocalPrefixes(prefixCtx)
 			cancel()
 		}

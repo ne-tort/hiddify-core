@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/transport/masque/httpx"
 )
 
 func TestClassifyError(t *testing.T) {
@@ -26,5 +27,18 @@ func TestClassifyError(t *testing.T) {
 	}
 	if ClassifyError(ErrUnsupportedNetwork) != ErrorClassCapability {
 		t.Fatal("expected capability error class for unsupported network sentinel")
+	}
+}
+
+func TestSessionErrorsRegisteredAsNonSwitchable(t *testing.T) {
+	t.Parallel()
+	for _, err := range []error{
+		ErrConnectUDPTemplateNotConfigured,
+		ErrConnectIPTemplateNotConfigured,
+		ErrAuthFailed,
+	} {
+		if httpx.IsLayerSwitchableFailure(err) {
+			t.Fatalf("expected non-switchable sentinel: %v", err)
+		}
 	}
 }

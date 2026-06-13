@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"errors"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"net"
 	"strings"
 	"sync"
@@ -43,7 +44,7 @@ func wrapStartRouterCancel(err error) error {
 		return nil
 	}
 	if errors.Is(err, context.Canceled) {
-		return errors.Join(T.ErrLifecycleClosed, err)
+		return errors.Join(session.ErrLifecycleClosed, err)
 	}
 	return err
 }
@@ -64,25 +65,24 @@ type RuntimeOptions struct {
 	Tag    string
 	Server string
 	// DialPeer overrides the QUIC/UDP dial host when non-empty (see transport/masque.ClientOptions.DialPeer).
-	DialPeer                    string
-	ServerPort                  uint16
-	TransportMode               string
-	TemplateUDP                 string
-	TemplateIP                  string
-	ConnectIPScopeTarget        string
-	ConnectIPScopeIPProto       uint8
-	TemplateTCP                 string
-	TemplateConnect             string
-	FallbackPolicy              string
-	TCPMode                     string
-	TCPTransport                string
-	ServerToken                 string
-	ClientBasicUsername         string
-	ClientBasicPassword         string
+	DialPeer              string
+	ServerPort            uint16
+	TransportMode         string
+	TemplateUDP           string
+	TemplateIP            string
+	ConnectIPScopeTarget  string
+	ConnectIPScopeIPProto uint8
+	TemplateTCP           string
+	FallbackPolicy        string
+	TCPMode               string
+	TCPTransport          string
+	ServerToken           string
+	ClientBasicUsername   string
+	ClientBasicPassword   string
 	// MasqueQUICCryptoTLS is *tls.Config for QUIC/HTTP3 (stdlib); required unless WarpMasqueClientCert is set.
 	MasqueQUICCryptoTLS *tls.Config
 	// MasqueTCPDialTLS performs TLS over TCP for HTTP/2 overlay (supports uTLS when configured in outbound_tls).
-	MasqueTCPDialTLS func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
+	MasqueTCPDialTLS            func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
 	QUICExperimental            T.QUICExperimentalOptions
 	ConnectIPDatagramCeiling    uint32
 	Chain                       []ChainHop
@@ -181,7 +181,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			ConnectIPScopeTarget:        r.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       r.options.ConnectIPScopeIPProto,
 			TemplateTCP:                 r.options.TemplateTCP,
-			TemplateConnect:             r.options.TemplateConnect,
 			FallbackPolicy:              r.options.FallbackPolicy,
 			TCPMode:                     r.options.TCPMode,
 			TCPTransport:                r.options.TCPTransport,
@@ -301,7 +300,7 @@ func (r *runtimeImpl) notReadyDialErr() error {
 }
 
 func runtimeClosedErr() error {
-	return errors.Join(T.ErrLifecycleClosed, E.New("runtime is closed"))
+	return errors.Join(session.ErrLifecycleClosed, E.New("runtime is closed"))
 }
 
 // DialContext, ListenPacket and OpenIPSession forward to the active coreSession built in Start;

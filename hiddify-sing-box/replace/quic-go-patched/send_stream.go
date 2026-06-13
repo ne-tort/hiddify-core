@@ -546,16 +546,9 @@ func (s *SendStream) enableResetStreamAt() {
 }
 
 func (s *SendStream) updateSendWindow(limit protocol.ByteCount) {
-	updated := s.flowController.UpdateSendWindow(limit)
-	if !updated { // duplicate or reordered MAX_STREAM_DATA frame
-		return
-	}
-	s.mutex.Lock()
-	hasStreamData := s.dataForWriting != nil || s.nextFrame != nil
-	s.mutex.Unlock()
-	if hasStreamData {
-		s.sender.onHasStreamData(s.streamID, s)
-	}
+	s.flowController.UpdateSendWindow(limit)
+	// Always re-poke blocked Write() waiters (parity poke-renotify on duplicate MAX_STREAM_DATA).
+	s.wakeBlockedWriter(s.sender)
 }
 
 func (s *SendStream) handleStopSendingFrame(f *wire.StopSendingFrame) {
@@ -646,6 +639,31 @@ func (s *SendStream) closeForShutdown(err error) {
 	}
 	s.mutex.Unlock()
 	s.signalWrite()
+}
+
+// wakeBlockedWriter unblocks Write() and re-enqueues send work when peer flow control
+// opens (MAX_STREAM_DATA / MAX_DATA). Re-notifies the framer when data is buffered but
+// the stream was dropped from activeStreams while blocked on conn FC (K-REF-B stall).
+func (s *SendStream) wakeBlockedWriter(sender streamSender) {
+	s.mutex.Lock()
+	pending := len(s.dataForWriting) > 0 || s.nextFrame != nil || len(s.retransmissionQueue) > 0
+	id := s.streamID
+	s.mutex.Unlock()
+	// Always poke writeChan: duplicate MAX_STREAM_DATA / MAX_DATA renotify must unblock
+	// Write() even when buffered-data check races with the writer goroutine (K-REF-B field).
+	s.signalWrite()
+	if !pending {
+		return
+	}
+	if sender != nil {
+		sender.onHasStreamData(id, s)
+	}
+}
+
+// wakePendingWriter pokes writeChan when peer MAX_DATA opens connection-level send credit
+// and a Write() is blocked with buffered data (parity updateSendWindow signalWrite).
+func (s *SendStream) wakePendingWriter() {
+	s.wakeBlockedWriter(nil)
 }
 
 // signalWrite performs a non-blocking send on the writeChan

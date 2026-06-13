@@ -2,9 +2,11 @@ package quic
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
@@ -58,6 +60,7 @@ type Stream struct {
 	sender                 streamSender
 	receiveStreamCompleted bool
 	sendStreamCompleted    bool
+	masqueDownloadActive   atomic.Bool
 }
 
 var (
@@ -114,7 +117,43 @@ func (s *Stream) StreamID() protocol.StreamID {
 // Read can be made to time out using [Stream.SetReadDeadline] and [Stream.SetDeadline].
 // If the stream was canceled, the error is a [StreamError].
 func (s *Stream) Read(p []byte) (int, error) {
-	return s.receiveStr.Read(p)
+	n, err := s.receiveStr.Read(p)
+	masqueWakeAfterDownloadRead(s, n)
+	return n, err
+}
+
+// WriteTo implements [io.WriterTo] for prod route writer_to download drains.
+func (s *Stream) WriteTo(w io.Writer) (int64, error) {
+	wasActive := s.masqueIsDownloadActive()
+	if !wasActive {
+		MasqueSetBidiDownloadActive(s, true)
+		defer MasqueSetBidiDownloadActive(s, false)
+	}
+	return masqueStreamWriteTo(w, s.Read, func() { masqueWakeAfterDownloadDelivery(s) })
+}
+
+func (s *Stream) setMasqueDownloadActive(active bool) {
+	if s == nil {
+		return
+	}
+	s.masqueDownloadActive.Store(active)
+}
+
+func (s *Stream) masqueIsDownloadActive() bool {
+	return s != nil && s.masqueDownloadActive.Load()
+}
+
+func (s *Stream) wakeBlockedSendHalf() {
+	if s == nil || s.sendStr == nil {
+		return
+	}
+	s.sendStr.wakeBlockedWriter(s.sendStr.sender)
+}
+
+// MasqueIsBidiDownloadActive reports whether MasqueSetBidiDownloadActive marked this stream
+// download-active (server hijack relay / client WriteTo download leg).
+func MasqueIsBidiDownloadActive(s *Stream) bool {
+	return s != nil && s.masqueIsDownloadActive()
 }
 
 // Peek fills b with stream data, without consuming the stream data.
@@ -130,7 +169,9 @@ func (s *Stream) Peek(b []byte) (int, error) {
 // Write can be made to time out using [Stream.SetWriteDeadline] or [Stream.SetDeadline].
 // If the stream was canceled, the error is a [StreamError].
 func (s *Stream) Write(p []byte) (int, error) {
-	return s.sendStr.Write(p)
+	n, err := s.sendStr.Write(p)
+	masqueWakeAfterDownloadWrite(s, n)
+	return n, err
 }
 
 // SetReliableBoundary marks the data written to this stream so far as reliable.

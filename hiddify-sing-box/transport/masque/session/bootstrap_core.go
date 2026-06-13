@@ -15,7 +15,6 @@ func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templa
 	tcpTransport := NormalizeTCPTransport(options.TCPTransport)
 	tm := strings.ToLower(strings.TrimSpace(options.TransportMode))
 	tcpCapable := tcpTransport == option.MasqueTCPTransportConnectStream ||
-		tcpTransport == option.MasqueTCPTransportConnectAuthority ||
 		(tcpTransport == option.MasqueTCPTransportConnectIP && tm == option.MasqueTransportModeConnectIP)
 	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
 	if effectiveCeiling <= 0 {

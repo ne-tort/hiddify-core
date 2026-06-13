@@ -34,8 +34,8 @@ func HTTPServerQUICConfig() *quic.Config {
 	return h3t.HTTPServerQUICConfig()
 }
 
-// AuthorityHTTPServerQUICConfig is QUIC tuning for authority-only HTTP/3 listeners (no datagram plane).
-func AuthorityHTTPServerQUICConfig() *quic.Config {
+// H3HTTPServerQUICConfig is QUIC tuning for standalone HTTP/3 listeners without datagram plane.
+func H3HTTPServerQUICConfig() *quic.Config {
 	cfg := HTTPServerQUICConfig()
 	if cfg != nil {
 		cfg.EnableDatagrams = false

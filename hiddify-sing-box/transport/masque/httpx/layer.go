@@ -15,6 +15,9 @@ type IPPacketSession interface {
 }
 
 // HTTPLayer is the H2/H3 overlay for CONNECT-stream, CONNECT-IP, and CONNECT-UDP.
+//
+// Deprecated: production uses coreSession bridges (transport/masque/*_bridge.go).
+// Bind HookLayer via httpx.BindHookLayer for package tests only.
 type HTTPLayer interface {
 	LayerName() string // "h2" | "h3"
 	DialConnectStream(ctx context.Context, dest M.Socksaddr) (net.Conn, error)

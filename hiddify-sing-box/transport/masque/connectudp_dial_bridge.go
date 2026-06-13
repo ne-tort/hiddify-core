@@ -44,7 +44,7 @@ func (h connectUDPDialHost) ResetHTTPFallbackBudgetAfterSuccess() {
 }
 
 func (h connectUDPDialHost) ErrTemplateNotConfigured() error {
-	return ErrConnectUDPTemplateNotConfigured
+	return session.ErrConnectUDPTemplateNotConfigured
 }
 
 func (h connectUDPDialHost) observabilityInput(template *uritemplate.Template, target string) connectudp.ObservabilityInput {

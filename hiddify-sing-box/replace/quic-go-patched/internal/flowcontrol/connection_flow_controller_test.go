@@ -13,6 +13,7 @@ import (
 )
 
 func TestConnectionFlowControlWindowUpdate(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
 	fc := NewConnectionFlowController(
 		100, // initial receive window
 		100, // max receive window

@@ -17,6 +17,8 @@ const (
 	remoteWriteBuf        = 2 << 20
 	remoteFlushBatch      = 64 * 1024
 	writeQueueDepth       = 512
+	downloadQueueDepth    = 512
+	writePacketMaxPersist = 128
 	kernelBuf             = 16 << 20
 	icmpRelayMax          = 8
 )

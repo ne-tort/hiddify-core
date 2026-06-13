@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"io"
 	"net"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/relay"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -85,7 +85,7 @@ func HandleTCPConnectRequest(host TCPConnectHost, w http.ResponseWriter, r *http
 	debugf("masque tcp connect dial start host=%s resolved_host=%s port=%s dial_addr=%s", targetHost, resolvedHost, targetPort, dialAddr)
 	targetConn, dialErr := host.Dialer.DialContext(r.Context(), "tcp", dialAddr)
 	if dialErr != nil {
-		debugf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, TM.ClassifyError(errors.Join(TM.ErrTCPDial, dialErr)), dialErr)
+		debugf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, dialErr)), dialErr)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}

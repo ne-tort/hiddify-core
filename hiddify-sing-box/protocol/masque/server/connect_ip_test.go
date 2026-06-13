@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,7 +16,6 @@ import (
 	connectip "github.com/quic-go/connect-ip-go"
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -204,6 +204,15 @@ func TestConnectIPMaxICMPRelayInvariant(t *testing.T) {
 	}
 }
 
+func TestConnectIPMaxParseDropPerReadInvariant(t *testing.T) {
+	if ConnectIPMaxParseDropPerRead < 1 {
+		t.Fatalf("ConnectIPMaxParseDropPerRead must be positive, got %d", ConnectIPMaxParseDropPerRead)
+	}
+	if ConnectIPMaxParseDropPerRead != 64 {
+		t.Fatalf("ConnectIPMaxParseDropPerRead=%d want 64", ConnectIPMaxParseDropPerRead)
+	}
+}
+
 func TestConnectIPRequestErrorStatusAndClass(t *testing.T) {
 	templateUnsupported := uritemplate.MustNew("https://localhost:1234/masque/ip/{unsupported}")
 	unsupportedReq := makeConnectIPTestRequest(t, "https://localhost:1234/masque/ip/value")
@@ -214,8 +223,8 @@ func TestConnectIPRequestErrorStatusAndClass(t *testing.T) {
 	if got := ConnectIPRequestErrorHTTPStatus(unsupportedErr); got != 501 {
 		t.Fatalf("unexpected status for unsupported variable: got=%d want=501", got)
 	}
-	if got := ConnectIPRequestErrorClass(ConnectIPRequestErrorHTTPStatus(unsupportedErr)); got != TM.ErrorClassCapability {
-		t.Fatalf("unexpected class for unsupported variable: got=%s want=%s", got, TM.ErrorClassCapability)
+	if got := ConnectIPRequestErrorClass(ConnectIPRequestErrorHTTPStatus(unsupportedErr)); got != session.ErrorClassCapability {
+		t.Fatalf("unexpected class for unsupported variable: got=%s want=%s", got, session.ErrorClassCapability)
 	}
 
 	templateMalformed := uritemplate.MustNew("https://localhost:1234/masque/ip/{target}/{ipproto}")
@@ -227,15 +236,36 @@ func TestConnectIPRequestErrorStatusAndClass(t *testing.T) {
 	if got := ConnectIPRequestErrorHTTPStatus(malformedErr); got != 400 {
 		t.Fatalf("unexpected status for malformed target: got=%d want=400", got)
 	}
-	if got := ConnectIPRequestErrorClass(ConnectIPRequestErrorHTTPStatus(malformedErr)); got != TM.ErrorClassCapability {
-		t.Fatalf("unexpected class for malformed target: got=%s want=%s", got, TM.ErrorClassCapability)
+	if got := ConnectIPRequestErrorClass(ConnectIPRequestErrorHTTPStatus(malformedErr)); got != session.ErrorClassCapability {
+		t.Fatalf("unexpected class for malformed target: got=%s want=%s", got, session.ErrorClassCapability)
 	}
 
 	if got := ConnectIPRequestErrorHTTPStatus(errors.New("generic parse issue")); got != 400 {
 		t.Fatalf("unexpected fallback status for generic parse error: got=%d want=400", got)
 	}
-	if got := ConnectIPRequestErrorClass(418); got != TM.ErrorClassUnknown {
-		t.Fatalf("unexpected fallback class for unknown status: got=%s want=%s", got, TM.ErrorClassUnknown)
+	if got := ConnectIPRequestErrorClass(418); got != session.ErrorClassUnknown {
+		t.Fatalf("unexpected fallback class for unknown status: got=%s want=%s", got, session.ErrorClassUnknown)
+	}
+}
+
+func TestConnectIPRouteSetupTimeoutDefault(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "")
+	if got := ConnectIPRouteSetupTimeout(); got != defaultConnectIPRouteSetupTimeout {
+		t.Fatalf("default timeout=%v want %v", got, defaultConnectIPRouteSetupTimeout)
+	}
+}
+
+func TestConnectIPRouteSetupTimeoutEnvOverride(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "5s")
+	if got := ConnectIPRouteSetupTimeout(); got != 5*time.Second {
+		t.Fatalf("env timeout=%v want 5s", got)
+	}
+}
+
+func TestConnectIPRouteSetupTimeoutEnvInvalidFallsBack(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "not-a-duration")
+	if got := ConnectIPRouteSetupTimeout(); got != defaultConnectIPRouteSetupTimeout {
+		t.Fatalf("invalid env timeout=%v want default %v", got, defaultConnectIPRouteSetupTimeout)
 	}
 }
 
@@ -276,23 +306,23 @@ func TestConnectIPRouteAdvertiseErrorClass(t *testing.T) {
 			if !errors.Is(err, connectip.ErrInvalidRouteAdvertisement) {
 				t.Fatalf("expected typed invalid route advertisement error, got: %v", err)
 			}
-			if got := ConnectIPRouteAdvertiseErrorClass(err); got != TM.ErrorClassCapability {
-				t.Fatalf("unexpected class for invalid route advertisement: got=%s want=%s err=%v", got, TM.ErrorClassCapability, err)
+			if got := ConnectIPRouteAdvertiseErrorClass(err); got != session.ErrorClassCapability {
+				t.Fatalf("unexpected class for invalid route advertisement: got=%s want=%s err=%v", got, session.ErrorClassCapability, err)
 			}
 		})
 	}
 
-	if got := ConnectIPRouteAdvertiseErrorClass(errors.New("transport write failed")); got != TM.ErrorClassTransport {
-		t.Fatalf("unexpected class for generic route advertise failure: got=%s want=%s", got, TM.ErrorClassTransport)
+	if got := ConnectIPRouteAdvertiseErrorClass(errors.New("transport write failed")); got != session.ErrorClassTransport {
+		t.Fatalf("unexpected class for generic route advertise failure: got=%s want=%s", got, session.ErrorClassTransport)
 	}
-	if got := ConnectIPRouteAdvertiseErrorClass(net.ErrClosed); got != TM.ErrorClassLifecycle {
-		t.Fatalf("unexpected class for net.ErrClosed route advertise failure: got=%s want=%s", got, TM.ErrorClassLifecycle)
+	if got := ConnectIPRouteAdvertiseErrorClass(net.ErrClosed); got != session.ErrorClassLifecycle {
+		t.Fatalf("unexpected class for net.ErrClosed route advertise failure: got=%s want=%s", got, session.ErrorClassLifecycle)
 	}
-	if got := ConnectIPRouteAdvertiseErrorClass(&connectip.CloseError{Remote: true}); got != TM.ErrorClassLifecycle {
-		t.Fatalf("unexpected class for remote close route advertise failure: got=%s want=%s", got, TM.ErrorClassLifecycle)
+	if got := ConnectIPRouteAdvertiseErrorClass(&connectip.CloseError{Remote: true}); got != session.ErrorClassLifecycle {
+		t.Fatalf("unexpected class for remote close route advertise failure: got=%s want=%s", got, session.ErrorClassLifecycle)
 	}
-	if got := ConnectIPRouteAdvertiseErrorClass(nil); got != TM.ErrorClassUnknown {
-		t.Fatalf("unexpected class for nil route advertise failure: got=%s want=%s", got, TM.ErrorClassUnknown)
+	if got := ConnectIPRouteAdvertiseErrorClass(nil); got != session.ErrorClassUnknown {
+		t.Fatalf("unexpected class for nil route advertise failure: got=%s want=%s", got, session.ErrorClassUnknown)
 	}
 }
 
@@ -302,8 +332,8 @@ func TestConnectIPRouteAdvertisePeerCloseLifecycleParity(t *testing.T) {
 		connectip.ErrInvalidRouteAdvertisement,
 	)
 	actualClass := ConnectIPRouteAdvertiseErrorClass(actualErr)
-	if actualClass != TM.ErrorClassCapability {
-		t.Fatalf("unexpected class for invalid route advertisement validation reject: got=%s want=%s err=%v", actualClass, TM.ErrorClassCapability, actualErr)
+	if actualClass != session.ErrorClassCapability {
+		t.Fatalf("unexpected class for invalid route advertisement validation reject: got=%s want=%s err=%v", actualClass, session.ErrorClassCapability, actualErr)
 	}
 
 	testCases := []struct {
@@ -319,18 +349,44 @@ func TestConnectIPRouteAdvertisePeerCloseLifecycleParity(t *testing.T) {
 			err:  errors.Join(errors.New("peer aborted route advertise"), &connectip.CloseError{Remote: true}),
 		},
 	}
-	resultClass := TM.ErrorClassUnknown
+	resultClass := session.ErrorClassUnknown
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ConnectIPRouteAdvertiseErrorClass(tc.err)
-			if got != TM.ErrorClassLifecycle {
-				t.Fatalf("unexpected class for peer-close lifecycle parity: got=%s want=%s err=%v", got, TM.ErrorClassLifecycle, tc.err)
+			if got != session.ErrorClassLifecycle {
+				t.Fatalf("unexpected class for peer-close lifecycle parity: got=%s want=%s err=%v", got, session.ErrorClassLifecycle, tc.err)
 			}
 			resultClass = got
 		})
 	}
 
 	writeRouteAdvertiseDualSignalArtifactIfRequested(t, actualClass, resultClass)
+}
+
+func TestConnectIPServerWriteErrorClass(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want session.ErrorClass
+	}{
+		{name: "nil", err: nil, want: session.ErrorClassUnknown},
+		{name: "closed", err: net.ErrClosed, want: session.ErrorClassLifecycle},
+		{name: "canceled", err: context.Canceled, want: session.ErrorClassLifecycle},
+		{name: "remote_close", err: &connectip.CloseError{Remote: true}, want: session.ErrorClassLifecycle},
+		{name: "flow_forwarding", err: connectip.ErrFlowForwardingUnsupported, want: session.ErrorClassCapability},
+		{name: "deadline", err: context.DeadlineExceeded, want: session.ErrorClassTransport},
+		{name: "fatal", err: errors.New("unexpected write fault"), want: session.ErrorClassUnknown},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ConnectIPServerWriteErrorClass(tc.err); got != tc.want {
+				t.Fatalf("ConnectIPServerWriteErrorClass() = %s want %s", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestConnectIPClientWriteCeilingServerReadPacketParity verifies that the largest IPv4
@@ -416,7 +472,7 @@ type ioEOF struct{}
 
 func (ioEOF) Error() string { return "EOF" }
 
-func writeRouteAdvertiseDualSignalArtifactIfRequested(t *testing.T, actualClass, resultClass TM.ErrorClass) {
+func writeRouteAdvertiseDualSignalArtifactIfRequested(t *testing.T, actualClass, resultClass session.ErrorClass) {
 	t.Helper()
 
 	artifactPath := os.Getenv("MASQUE_ROUTE_ADVERTISE_ARTIFACT_PATH")
@@ -425,10 +481,10 @@ func writeRouteAdvertiseDualSignalArtifactIfRequested(t *testing.T, actualClass,
 	}
 
 	artifact := map[string]any{
-		"ok":                     actualClass == TM.ErrorClassCapability && resultClass == TM.ErrorClassLifecycle,
+		"ok":                     actualClass == session.ErrorClassCapability && resultClass == session.ErrorClassLifecycle,
 		"actual_error_class":     string(actualClass),
 		"result_error_class":     string(resultClass),
-		"error_class_consistent": actualClass == TM.ErrorClassCapability && resultClass == TM.ErrorClassLifecycle,
+		"error_class_consistent": actualClass == session.ErrorClassCapability && resultClass == session.ErrorClassLifecycle,
 		"error_source":           "runtime",
 	}
 

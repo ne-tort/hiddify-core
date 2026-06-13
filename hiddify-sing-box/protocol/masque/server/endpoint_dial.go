@@ -3,11 +3,11 @@ package server
 import (
 	"context"
 	"errors"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"net"
 	"strconv"
 	"strings"
 
-	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -36,7 +36,7 @@ func DialEndpointTCP(ctx context.Context, dialer net.Dialer, startupErr error, n
 	if destination.Addr.IsValid() {
 		return dialer.DialContext(ctx, network, net.JoinHostPort(destination.Addr.String(), strconv.Itoa(int(destination.Port))))
 	}
-	return nil, errors.Join(TM.ErrCapability, E.New("invalid destination"))
+	return nil, errors.Join(session.ErrCapability, E.New("invalid destination"))
 }
 
 // ListenEndpointPacket opens an ephemeral UDP socket for the server endpoint adapter.

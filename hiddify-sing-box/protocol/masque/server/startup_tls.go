@@ -16,37 +16,19 @@ type StartupTLSOutcome struct {
 	HTTP3TLS      *tls.Config
 	CollateralTLS *tls.Config
 	SingServerTLS btls.ServerConfig
-	UseStdTLS     bool
 }
 
 // StartupTLSConfig inputs for inbound TLS before dual-bind listen.
 type StartupTLSConfig struct {
-	Ctx              context.Context
-	InboundTLS       *option.InboundTLSOptions
-	HTTPLayer        string
-	AuthorityH3Only  bool
-	AuthorityMinimal bool
-	Logger           log.ContextLogger
+	Ctx        context.Context
+	InboundTLS *option.InboundTLSOptions
+	HTTPLayer  string
+	Logger     log.ContextLogger
 }
 
-// PrepareMasqueStartupTLS builds HTTP/3 and collateral TLS for full or authority-minimal startup.
+// PrepareMasqueStartupTLS builds HTTP/3 and collateral TLS for server startup.
 func PrepareMasqueStartupTLS(cfg StartupTLSConfig) (*StartupTLSOutcome, error) {
-	useStdTLS := cfg.AuthorityMinimal && AuthorityUseStdTLS()
-	if useStdTLS {
-		stdTLS, tlsErr := LoadAuthorityStdTLS(cfg.InboundTLS)
-		if tlsErr != nil {
-			return nil, tlsErr
-		}
-		if cfg.Logger != nil {
-			cfg.Logger.Info("masque authority server: std tls (thin parity), minimal=", cfg.AuthorityMinimal)
-		}
-		return &StartupTLSOutcome{
-			HTTP3TLS:  http3.ConfigureTLSConfig(stdTLS),
-			UseStdTLS: true,
-		}, nil
-	}
-
-	inTLS, err := PrepareInboundTLS(cfg.InboundTLS, cfg.HTTPLayer, cfg.AuthorityH3Only)
+	inTLS, err := PrepareInboundTLS(cfg.InboundTLS, cfg.HTTPLayer, false)
 	if err != nil {
 		return nil, err
 	}

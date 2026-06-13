@@ -2,6 +2,7 @@ package connectudp
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/quic-go/quic-go/quicvarint"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
@@ -22,6 +24,11 @@ const (
 	// H2ResponseBodyBufSize coalesces HTTP/2 CONNECT-UDP response-body reads for RFC 9297
 	// capsule parsing (parity ServeH2 br and masque-go prefetch).
 	H2ResponseBodyBufSize = 64 * 1024
+	// H2DownlinkCoalesceThreshold batches server downlink capsule wire bytes before FlushResponse
+	// (parity stream/relay.go 32 KiB batch; max-burst path, not paced KPI).
+	H2DownlinkCoalesceThreshold = 32 * 1024
+	// H2DownlinkCoalesceMaxDelay bounds latency when a single small datagram stays below threshold.
+	H2DownlinkCoalesceMaxDelay = 2 * time.Millisecond
 )
 
 func isH2ServeTransientReadErr(err error) bool {
@@ -76,20 +83,77 @@ func isH2ServeTerminalConnErr(err error) bool {
 		strings.Contains(s, "pipe is being closed")
 }
 
-// H2ResponseWriter serializes downlink capsule writes + flush (connect-ip-go h2ServerCapsuleStream parity).
+// H2ResponseWriter serializes downlink capsule writes + batched flush (connect-ip-go h2ServerCapsuleStream parity).
 type H2ResponseWriter struct {
 	http.ResponseWriter
-	mu sync.Mutex
+	mu          sync.Mutex
+	pending     bytes.Buffer
+	flushTimer  *time.Timer
+	flushTimerC chan struct{}
 }
 
 // WriteUDPPayloadAsCapsules frames udpPayload as RFC 9297 DATAGRAM capsules on the HTTP/2 response body.
 func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := h2c.WriteUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload); err != nil {
+	if len(udpPayload) == 0 {
+		if err := w.flushPendingLocked(); err != nil {
+			return err
+		}
+		return h2c.WriteDatagramCapsule(w.ResponseWriter, nil)
+	}
+	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&w.pending, udpPayload); err != nil {
+		return err
+	}
+	if w.pending.Len() >= H2DownlinkCoalesceThreshold {
+		return w.flushPendingLocked()
+	}
+	w.armFlushTimerLocked()
+	return nil
+}
+
+// FlushPending pushes buffered downlink capsules (called on relay shutdown and after coalesce delay).
+func (w *H2ResponseWriter) FlushPending() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.flushPendingLocked()
+}
+
+func (w *H2ResponseWriter) armFlushTimerLocked() {
+	if w.flushTimer != nil {
+		return
+	}
+	w.flushTimerC = make(chan struct{})
+	timerC := w.flushTimerC
+	w.flushTimer = time.AfterFunc(H2DownlinkCoalesceMaxDelay, func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.flushTimerC != timerC {
+			return
+		}
+		w.stopFlushTimerLocked()
+		_ = w.flushPendingLocked()
+	})
+}
+
+func (w *H2ResponseWriter) stopFlushTimerLocked() {
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+	w.flushTimerC = nil
+}
+
+func (w *H2ResponseWriter) flushPendingLocked() error {
+	w.stopFlushTimerLocked()
+	if w.pending.Len() == 0 {
+		return nil
+	}
+	if _, err := h2c.WriteAll(w.ResponseWriter, w.pending.Bytes()); err != nil {
 		return err
 	}
 	h2c.FlushResponse(w.ResponseWriter)
+	w.pending.Reset()
 	return nil
 }
 
@@ -178,6 +242,7 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		defer wg.Done()
 		defer shutdownRelay()
 		defer closeUDPConn()
+		defer func() { _ = downlinkW.FlushPending() }()
 		select {
 		case <-downlinkReady:
 		case <-r.Context().Done():

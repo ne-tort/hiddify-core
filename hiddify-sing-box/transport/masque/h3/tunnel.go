@@ -12,28 +12,85 @@ import (
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
-// ConnectUsePipeUpload selects the legacy request-body pipe for tunneled upload.
-// Default is one *http3.Stream for both directions (RFC 9114 CONNECT tunnel).
-func ConnectUsePipeUpload() bool {
-	for _, key := range []string{
-		"MASQUE_CONNECT_STREAM_PIPE_UPLOAD",
-		"MASQUE_CONNECT_AUTHORITY_PIPE_UPLOAD",
-	} {
+func connectEnvPipeUpload(keys ...string) bool {
+	for _, key := range keys {
 		switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
 		case "1", "true", "yes", "on", "pipe":
 			return true
+		case "0", "false", "no", "off", "bidi", "stream":
+			return false
 		}
 	}
-	// Legacy opt-out names (deprecated).
-	for _, key := range []string{
-		"MASQUE_CONNECT_STREAM_H3_STREAM",
-		"MASQUE_CONNECT_AUTHORITY_H3_STREAM",
-	} {
+	return false
+}
+
+func connectEnvPipeUploadExplicit(keys ...string) (bool, bool) {
+	for _, key := range keys {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		switch strings.ToLower(raw) {
+		case "1", "true", "yes", "on", "pipe":
+			return true, true
+		case "0", "false", "no", "off", "bidi", "stream":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func connectEnvLegacyH3StreamOptOut(keys ...string) bool {
+	for _, key := range keys {
 		if raw := strings.TrimSpace(os.Getenv(key)); raw != "" {
 			return raw == "0"
 		}
 	}
 	return false
+}
+
+// ConnectStreamUseDualConnect selects P2 dual CONNECT-stream (separate download + upload tunnels).
+// Opt-in sketch: MASQUE_CONNECT_STREAM_DUAL_CONNECT=1. When enabled, pipe/bidi env is ignored for dial.
+func ConnectStreamUseDualConnect() bool {
+	return connectEnvPipeUpload("MASQUE_CONNECT_STREAM_DUAL_CONNECT")
+}
+
+// ConnectStreamThinEnabled selects Invisv-shaped CONNECT-stream dial: nil Body, HTTPStreamer → *http3.Stream,
+// io.CopyBuffer WriteTo without duplex_coord. Opt-in: MASQUE_CONNECT_STREAM_THIN=1 (REF3-4).
+func ConnectStreamThinEnabled() bool {
+	return connectEnvPipeUpload("MASQUE_CONNECT_STREAM_THIN")
+}
+
+// ConnectStreamUsePipeUpload selects pipe upload for CONNECT-stream (template_tcp).
+// Default: h3_stream (nil Body, Invisv-shaped bidi). Legacy pipe: MASQUE_CONNECT_STREAM_PIPE_UPLOAD=1
+// or MASQUE_CONNECT_STREAM_H3_STREAM=0. Disabled when dual CONNECT or thin mode is on.
+func ConnectStreamUsePipeUpload() bool {
+	if ConnectStreamThinEnabled() || ConnectStreamUseDualConnect() {
+		return false
+	}
+	if on, ok := connectEnvPipeUploadExplicit("MASQUE_CONNECT_STREAM_PIPE_UPLOAD"); ok {
+		return on
+	}
+	if connectEnvLegacyH3StreamOptOut("MASQUE_CONNECT_STREAM_H3_STREAM") {
+		return true
+	}
+	if raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_STREAM_H3_STREAM")); raw == "1" {
+		return false
+	}
+	return false
+}
+
+// ConnectUsePipeUpload reports pipe mode for CONNECT-stream.
+func ConnectUsePipeUpload() bool {
+	return ConnectStreamUsePipeUpload()
+}
+
+// ConnectTunnelUsesPipeUpload reports whether a non-nil CONNECT request body should use pipe tunnel mode.
+func ConnectTunnelUsesPipeUpload(reqBody io.WriteCloser) bool {
+	if reqBody != nil {
+		return true
+	}
+	return ConnectStreamUsePipeUpload()
 }
 
 // ConnectTunnelFromResponse builds the standard MASQUE H3 TCP tunnel after CONNECT succeeds.

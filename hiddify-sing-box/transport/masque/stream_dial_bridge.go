@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"net"
@@ -26,7 +27,7 @@ func (h tcpStreamDialHopHost) HTTPLayerFallbackEnabled() bool {
 }
 
 func (h tcpStreamDialHopHost) IsAuthFailure(err error) bool {
-	return errors.Is(err, ErrAuthFailed) || ClassifyError(err) == ErrorClassAuth
+	return errors.Is(err, session.ErrAuthFailed) || session.ClassifyError(err) == session.ErrorClassAuth
 }
 
 func (h tcpStreamDialHopHost) ClearHTTPFallbackAfterGiveUp() {

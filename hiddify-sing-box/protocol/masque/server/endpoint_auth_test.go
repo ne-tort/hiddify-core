@@ -18,6 +18,45 @@ func TestAuthorizeMasqueRequestNilCompiledNoAuthConfigured(t *testing.T) {
 	}
 }
 
+func TestAuthorizeMasqueRequestLazyCompileInvalidConfigFailClosed(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "https://masque.local/masque/ip/*", nil)
+	var compiled *auth.Compiled
+	opts := option.MasqueEndpointOptions{
+		ServerAuth: &option.MasqueServerAuthOptions{
+			Policy: "not-a-policy",
+		},
+	}
+	if AuthorizeMasqueRequest(req, &compiled, opts, false) {
+		t.Fatal("expected deny on lazy compile failure when endpoint not started")
+	}
+	if compiled != nil {
+		t.Fatal("compiled auth must stay nil after compile failure")
+	}
+}
+
+func TestAuthorizeMasqueRequestLazyCompileStoresValidAuth(t *testing.T) {
+	t.Parallel()
+	token := "lazy-token"
+	req := httptest.NewRequest(http.MethodGet, "https://masque.local/masque/udp/*", nil)
+	var compiled *auth.Compiled
+	opts := option.MasqueEndpointOptions{
+		ServerAuth: &option.MasqueServerAuthOptions{
+			BearerTokens: []string{token},
+		},
+	}
+	if AuthorizeMasqueRequest(req, &compiled, opts, false) {
+		t.Fatal("expected deny without bearer token after lazy compile")
+	}
+	if compiled == nil {
+		t.Fatal("expected compiled auth cached after lazy compile")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if !AuthorizeMasqueRequest(req, &compiled, opts, false) {
+		t.Fatal("expected allow with bearer token after lazy compile cache")
+	}
+}
+
 func TestAuthorizeMasqueRequestCompiledDeny(t *testing.T) {
 	t.Parallel()
 	token := "secret-token"

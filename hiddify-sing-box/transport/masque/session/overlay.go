@@ -1,6 +1,7 @@
 package session
 
 import (
+	"log"
 	"strings"
 	"sync/atomic"
 
@@ -46,8 +47,33 @@ func MaybeRecordHTTPLayerCacheSuccess(s *CoreSession, layer string) {
 	s.Options.HTTPLayerSuccess(layer, HTTPLayerCacheDialIdentityForSession(s))
 }
 
+// TeardownOverlayHTTPLockedAssumeMu closes shared H3 transports after overlay pivot. Caller holds s.Mu.
+func TeardownOverlayHTTPLockedAssumeMu(s *CoreSession) {
+	if s.IPHTTP != nil {
+		s.IPHTTP.Close()
+		if s.TCPHTTP == s.IPHTTP {
+			s.TCPHTTP = nil
+		}
+		s.IPHTTP = nil
+		s.IPHTTPConn = nil
+		s.IPHTTPH2Upload = nil
+	}
+	if s.TCPHTTP != nil {
+		s.TCPHTTP.Close()
+		s.TCPHTTP = nil
+	}
+}
+
+// CloseUDPClientLockedAssumeMu closes the QUIC CONNECT-UDP client during overlay pivot. Caller holds s.Mu.
+func CloseUDPClientLockedAssumeMu(s *CoreSession) {
+	if s.UDPClient != nil {
+		_ = s.UDPClient.Close()
+		s.UDPClient = nil
+	}
+}
+
 // TryHTTPFallbackSwitch attempts H3↔H2 overlay pivot after a switchable handshake failure.
-func TryHTTPFallbackSwitch(s *CoreSession, host OverlaySwitchHost, err error) bool {
+func TryHTTPFallbackSwitch(s *CoreSession, host LifecycleHost, err error) bool {
 	s.Mu.Lock()
 	ok := TryHTTPFallbackSwitchLockedAssumeMu(s, host, err)
 	s.Mu.Unlock()
@@ -55,7 +81,7 @@ func TryHTTPFallbackSwitch(s *CoreSession, host OverlaySwitchHost, err error) bo
 }
 
 // TryHTTPFallbackSwitchLockedAssumeMu pivots overlay when http_layer_fallback is enabled. Caller holds s.Mu.
-func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host OverlaySwitchHost, err error) bool {
+func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host LifecycleHost, err error) bool {
 	if !s.HTTPLayerFallback || err == nil || !httpx.IsLayerSwitchableFailure(err) {
 		return false
 	}
@@ -73,12 +99,11 @@ func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host OverlaySwitchHost,
 		s.HTTPFallbackConsumed.Store(false)
 		return false
 	}
-	host.OverlaySwitchLog(strings.TrimSpace(s.Options.Tag), cur, next)
+	log.Printf("masque_http_layer_fallback tag=%s from=%s to=%s", strings.TrimSpace(s.Options.Tag), cur, next)
 	host.CancelConnectIPIngress()
 	CloseConnectIPDataplaneLockedAssumeMu(s, host)
-	host.TeardownOverlayHTTPLockedAssumeMu()
-	_ = host.CloseConnectAuthorityClient()
-	host.CloseUDPClientLockedAssumeMu()
+	TeardownOverlayHTTPLockedAssumeMu(s)
+	CloseUDPClientLockedAssumeMu(s)
 	host.CloseAllH2ClientTransports()
 	s.UDPHTTPLayer.Store(next)
 	return true

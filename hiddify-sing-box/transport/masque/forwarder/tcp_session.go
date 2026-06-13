@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -37,7 +39,9 @@ type tcpForwardSession struct {
 	synAckOpts []byte
 
 	remoteReaderOnce sync.Once
+	remoteFinSent    bool
 	closed           atomic.Bool
+	ackPending       atomic.Bool
 }
 
 func (s *tcpForwardSession) add() {
@@ -131,7 +135,7 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 			return
 		}
 		s.rcvNxt += uint32(len(payload))
-		_ = s.sendAckOnly()
+		_ = s.scheduleAckOnly()
 		if err := s.maybeFlushRemote(len(payload) <= 512); err != nil {
 			go s.close()
 			return
@@ -148,16 +152,37 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 			return
 		}
 		s.rcvNxt++
-		_ = s.sendAckOnly()
+		_ = s.scheduleAckOnly()
 		if cw, ok := s.remote.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 	}
 }
 
-func (s *tcpForwardSession) sendAckOnly() error {
+func (s *tcpForwardSession) sendFinOnRemoteClose() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.remoteFinSent || !s.established {
+		return nil
+	}
+	s.remoteFinSent = true
 	opts := s.buildTimestampOption()
 	pkt := buildIPv4TCPPacket(
+		s.flow.dstAddr, s.flow.srcAddr,
+		s.flow.dstPort, s.flow.srcPort,
+		s.sndNxt, s.rcvNxt,
+		header.TCPFlagFin|header.TCPFlagAck,
+		65535,
+		nil,
+		opts,
+	)
+	s.sndNxt++
+	return s.f.enqueueWrite(pkt)
+}
+
+func (s *tcpForwardSession) buildAckOnlyPacket() []byte {
+	opts := s.buildTimestampOption()
+	return buildIPv4TCPPacket(
 		s.flow.dstAddr, s.flow.srcAddr,
 		s.flow.dstPort, s.flow.srcPort,
 		s.sndNxt, s.rcvNxt,
@@ -166,6 +191,17 @@ func (s *tcpForwardSession) sendAckOnly() error {
 		nil,
 		opts,
 	)
+}
+
+func (s *tcpForwardSession) scheduleAckOnly() error {
+	if !s.ackPending.CompareAndSwap(false, true) {
+		return nil
+	}
+	return s.f.scheduleAck(s)
+}
+
+func (s *tcpForwardSession) sendAckOnly() error {
+	pkt := s.buildAckOnlyPacket()
 	return s.f.enqueueWrite(pkt)
 }
 
@@ -210,40 +246,43 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 		}
 		_ = s.remote.SetReadDeadline(time.Now().Add(30 * time.Second))
 		n, err := s.remote.Read(buf)
+		if n > 0 {
+			off := 0
+			for off < n {
+				if err := ctx.Err(); err != nil {
+					return
+				}
+				chunk := n - off
+				if chunk > maxSeg {
+					chunk = maxSeg
+				}
+				payload := buf[off : off+chunk]
+				s.mu.Lock()
+				seq := s.sndNxt
+				s.sndNxt += uint32(chunk)
+				rcvNxt := s.rcvNxt
+				opts := s.buildTimestampOption()
+				s.mu.Unlock()
+				pkt := buildIPv4TCPPacket(
+					s.flow.dstAddr, s.flow.srcAddr,
+					s.flow.dstPort, s.flow.srcPort,
+					seq, rcvNxt,
+					header.TCPFlagPsh|header.TCPFlagAck,
+					65535,
+					payload,
+					opts,
+				)
+				if err := s.f.enqueueDownload(pkt); err != nil {
+					return
+				}
+				off += chunk
+			}
+		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				_ = s.sendFinOnRemoteClose()
+			}
 			return
-		}
-		if n == 0 {
-			continue
-		}
-		off := 0
-		for off < n {
-			if err := ctx.Err(); err != nil {
-				return
-			}
-			chunk := n - off
-			if chunk > maxSeg {
-				chunk = maxSeg
-			}
-			payload := buf[off : off+chunk]
-			s.mu.Lock()
-			seq := s.sndNxt
-			s.sndNxt += uint32(chunk)
-			opts := s.buildTimestampOption()
-			pkt := buildIPv4TCPPacket(
-				s.flow.dstAddr, s.flow.srcAddr,
-				s.flow.dstPort, s.flow.srcPort,
-				seq, s.rcvNxt,
-				header.TCPFlagPsh|header.TCPFlagAck,
-				65535,
-				payload,
-				opts,
-			)
-			s.mu.Unlock()
-			if err := s.f.enqueueWrite(pkt); err != nil {
-				return
-			}
-			off += chunk
 		}
 	}
 }

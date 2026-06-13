@@ -29,8 +29,7 @@ func NewDirectSession(_ context.Context, options ClientOptions) (ClientSession, 
 		capabilities: CapabilitySet{
 			ConnectUDP: true,
 			ConnectIP:  false,
-			ConnectTCP: tcpTransport == option.MasqueTCPTransportConnectStream ||
-				tcpTransport == option.MasqueTCPTransportConnectAuthority,
+			ConnectTCP: tcpTransport == option.MasqueTCPTransportConnectStream,
 		},
 	}, nil
 }

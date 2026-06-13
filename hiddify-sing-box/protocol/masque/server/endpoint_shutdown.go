@@ -43,11 +43,19 @@ func ShutdownMasqueEndpoint(cfg ShutdownMasqueEndpointConfig) error {
 	}
 	var packetErr error
 	if cfg.Stack != nil {
+		drainBudget := timeout / 4
+		if drainBudget < time.Second {
+			drainBudget = time.Second
+		}
+		waitConnectIPRoutesDrained(drainBudget)
 		if cfg.Stack.H3Server != nil {
 			_ = cfg.Stack.H3Server.Close()
 		}
 		if cfg.Stack.PacketConn != nil {
 			packetErr = cfg.Stack.PacketConn.Close()
+			if packetErr != nil && ExpectedShutdownError(packetErr) {
+				packetErr = nil
+			}
 		}
 	}
 	return packetErr

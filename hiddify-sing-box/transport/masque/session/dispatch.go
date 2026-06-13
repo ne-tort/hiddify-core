@@ -25,8 +25,6 @@ func NormalizeTCPTransport(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case option.MasqueTCPTransportConnectStream:
 		return option.MasqueTCPTransportConnectStream
-	case option.MasqueTCPTransportConnectAuthority:
-		return option.MasqueTCPTransportConnectAuthority
 	case option.MasqueTCPTransportConnectIP:
 		return option.MasqueTCPTransportConnectIP
 	default:
@@ -47,7 +45,6 @@ type DispatchHost interface {
 	ErrTCPPathNotImplemented() error
 	ErrTCPOverConnectIPRequiresConnectIPMode() error
 
-	DialTCPConnectAuthority(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
 	DialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
 	DialConnectIPTCP(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
 	DialDirectTCP(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error)
@@ -65,9 +62,10 @@ type DispatchHost interface {
 	OpenIPSessionLocked(ctx context.Context) (IPPacketSession, error)
 }
 
-// DispatchDialContext routes TCP dials by tcp_transport (CONNECT-stream, authority, connect-ip).
+// DispatchDialContext routes TCP dials by tcp_transport (CONNECT-stream, connect-ip).
 func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if !IsTCPNetwork(network) {
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, host.UnsupportedNetworkError(network)
 	}
 	select {
@@ -77,15 +75,6 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 	default:
 	}
 	switch NormalizeTCPTransport(s.Options.TCPTransport) {
-	case option.MasqueTCPTransportConnectAuthority:
-		conn, err := host.DialTCPConnectAuthority(ctx, destination)
-		if err == nil {
-			host.RecordTCPDialSuccess()
-			return conn, nil
-		}
-		host.RecordTCPDialFailure()
-		host.RecordTCPDialErrorClass(err)
-		return nil, err
 	case option.MasqueTCPTransportConnectStream:
 		conn, err := host.DialTCPStream(ctx, destination)
 		if err == nil {
@@ -99,6 +88,7 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 			if dirErr != nil {
 				host.RecordTCPDialFailure()
 				host.RecordTCPDialErrorClass(dirErr)
+				host.ClearHTTPFallbackAfterGiveUp()
 				return nil, dirErr
 			}
 			host.RecordTCPDialSuccess()
@@ -106,12 +96,14 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 		}
 		host.RecordTCPDialFailure()
 		host.RecordTCPDialErrorClass(err)
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	case option.MasqueTCPTransportConnectIP:
 		if !strings.EqualFold(strings.TrimSpace(s.Options.TransportMode), option.MasqueTransportModeConnectIP) {
 			err := errors.Join(host.ErrTCPOverConnectIPRequiresConnectIPMode(), errors.New("tcp_transport connect_ip requires transport_mode connect_ip"))
 			host.RecordTCPDialFailure()
 			host.RecordTCPDialErrorClass(err)
+			host.ClearHTTPFallbackAfterGiveUp()
 			return nil, err
 		}
 		conn, err := host.DialConnectIPTCP(ctx, destination)
@@ -125,6 +117,7 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 			if dirErr != nil {
 				host.RecordTCPDialFailure()
 				host.RecordTCPDialErrorClass(dirErr)
+				host.ClearHTTPFallbackAfterGiveUp()
 				return nil, dirErr
 			}
 			host.RecordTCPDialSuccess()
@@ -132,10 +125,12 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 		}
 		host.RecordTCPDialFailure()
 		host.RecordTCPDialErrorClass(err)
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	default:
 		host.RecordTCPDialFailure()
 		host.RecordTCPDialErrorClass(host.ErrTCPPathNotImplemented())
+		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, host.ErrTCPPathNotImplemented()
 	}
 }

@@ -1,6 +1,7 @@
 package masque
 
 import (
+	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
@@ -31,11 +32,11 @@ func (h lifecycleHost) ClearIPIngressPacketReader() {
 }
 
 func (h lifecycleHost) EmitObservabilityEvent(name string) {
-	emitConnectIPObservabilityEvent(name)
+	cip.EmitObservabilityEvent(name)
 }
 
 func (h lifecycleHost) IncConnectIPSessionReset(reason string) {
-	incConnectIPSessionReset(reason)
+	cip.IncSessionReset(reason)
 }
 
 func (h lifecycleHost) BuildHopTemplates() (udp, ip, tcp *uritemplate.Template, err error) {
@@ -63,10 +64,6 @@ func (h lifecycleHost) CloseAllH2ClientTransports() {
 
 func (h lifecycleHost) CloseH2MasqueClientTransport(tr *http2.Transport) {
 	closeH2MasqueClientTransport(tr)
-}
-
-func (h lifecycleHost) CloseConnectAuthorityClient() error {
-	return session.CloseConnectAuthorityClient(&h.s.CoreSession)
 }
 
 func (s *coreSession) Close() error {

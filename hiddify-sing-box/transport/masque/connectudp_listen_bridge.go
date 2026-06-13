@@ -3,6 +3,7 @@ package masque
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 
 	qmasque "github.com/quic-go/masque-go"
@@ -121,7 +122,19 @@ func (h connectUDPListenHost) CurrentHTTPLayer() string {
 }
 
 func (h connectUDPListenHost) WrapDatagramSplit(pc net.PacketConn, writeMax int, httpLayer string) net.PacketConn {
-	return newMasqueUDPDatagramSplitConn(pc, writeMax, httpLayer)
+	return connectudp.NewDatagramSplitConn(pc, connectudp.DatagramSplitOptions{
+		MaxPayload: writeMax,
+		HTTPLayer:  httpLayer,
+		MapICMP: func(addr net.Addr, err error) error {
+			return connectudp.NewPortUnreachableError(addr)
+		},
+		MapDataplaneErr: func(op string, err error) error {
+			if err == nil || httpLayer != option.MasqueHTTPLayerH3 {
+				return err
+			}
+			return fmt.Errorf("masque h3 dataplane connect-udp %s: %w", op, err)
+		},
+	})
 }
 
 func (s *coreSession) listenPacketConnectUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

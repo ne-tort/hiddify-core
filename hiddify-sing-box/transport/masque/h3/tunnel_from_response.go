@@ -32,16 +32,18 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, req
 			rel.ReleaseHTTPStream()
 		}
 		params := TunnelConnParams{
-			H3Stream: str,
-			Ctx:      streamCtx,
-			Local:    &net.TCPAddr{},
-			Remote:   remoteAddr,
+			H3Stream:        str,
+			Ctx:             streamCtx,
+			Local:           &net.TCPAddr{},
+			Remote:          remoteAddr,
+			RouteBidiDuplex: true,
 		}
-		if reqBody != nil && ConnectUsePipeUpload() {
+		if ConnectTunnelUsesPipeUpload(reqBody) {
 			params.H3Stream = nil
 			params.Reader = str
 			params.Writer = reqBody
 		}
+		applyTunnelConnParamsHook(&params)
 		return NewTunnelConn(params), nil
 	}
 	return nil, errHTTPStreamerMissing
@@ -50,19 +52,21 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, req
 func tunnelConnFromPipeFallback(ctx context.Context, resp *http.Response, reqBody io.WriteCloser, targetHost string, targetPort uint16) (*TunnelConn, error) {
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
 	streamCtx := context.WithoutCancel(ctx)
-	return NewTunnelConn(TunnelConnParams{
+	params := TunnelConnParams{
 		Reader: resp.Body,
 		Writer: reqBody,
 		Ctx:    streamCtx,
 		Local:  &net.TCPAddr{},
 		Remote: remoteAddr,
-	}), nil
+	}
+	applyTunnelConnParamsHook(&params)
+	return NewTunnelConn(params), nil
 }
 
 func dialTunnelConnFromResponse(ctx context.Context, resp *http.Response, reqBody io.WriteCloser, targetHost string, targetPort uint16, allowPipeFallback bool) (*TunnelConn, string, error) {
 	conn, err := tunnelConnFromConnectResponse(ctx, resp, reqBody, targetHost, targetPort)
 	if err == nil {
-		if reqBody != nil && ConnectUsePipeUpload() {
+		if ConnectTunnelUsesPipeUpload(reqBody) {
 			return conn, "h3_pipe_up", nil
 		}
 		return conn, "h3_stream", nil

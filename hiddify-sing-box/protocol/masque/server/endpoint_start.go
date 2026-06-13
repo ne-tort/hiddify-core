@@ -13,19 +13,16 @@ import (
 
 // EndpointLifecycleHooks wires ServerEndpoint atomic state for background serve goroutines.
 type EndpointLifecycleHooks struct {
-	IsClosing               func() bool
-	OnReadyFalse            func()
-	OnServeError            func(error)
-	OnAuthorityThinServeEnd func()
+	IsClosing    func() bool
+	OnReadyFalse func()
+	OnServeError func(error)
 }
 
 // MasqueEndpointStartResult holds resources produced by a successful RunMasqueEndpointStart.
 type MasqueEndpointStartResult struct {
-	CompiledAuth    *auth.Compiled
-	SingServerTLS   btls.ServerConfig
-	AuthorityThin   *TM.AuthorityHTTPServer
-	Stack           *MasqueStack
-	AuthorityH3Only bool
+	CompiledAuth  *auth.Compiled
+	SingServerTLS btls.ServerConfig
+	Stack         *MasqueStack
 }
 
 // MasqueEndpointStartConfig drives compile → TLS → handler → listen for ServerEndpoint.Start.
@@ -43,8 +40,6 @@ type MasqueEndpointStartConfig struct {
 func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartResult, error) {
 	var out MasqueEndpointStartResult
 	tcpRelay := cfg.TCPRelay
-	authorityH3Only, authorityMinimal := AuthorityStartupFlags(tcpRelay, cfg.Options)
-	out.AuthorityH3Only = authorityH3Only
 
 	compiled, compileErr := auth.Compile(cfg.Options)
 	if compileErr != nil {
@@ -53,12 +48,10 @@ func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartR
 	out.CompiledAuth = compiled
 
 	tlsOutcome, tlsErr := PrepareMasqueStartupTLS(StartupTLSConfig{
-		Ctx:              cfg.Ctx,
-		InboundTLS:       cfg.Options.InboundTLS,
-		HTTPLayer:        cfg.HTTPLayer,
-		AuthorityH3Only:  authorityH3Only,
-		AuthorityMinimal: authorityMinimal,
-		Logger:           cfg.Logger,
+		Ctx:        cfg.Ctx,
+		InboundTLS: cfg.Options.InboundTLS,
+		HTTPLayer:  cfg.HTTPLayer,
+		Logger:     cfg.Logger,
 	})
 	if tlsErr != nil {
 		return out, tlsErr
@@ -70,33 +63,7 @@ func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartR
 		return out, buildErr
 	}
 
-	addr := MasqueListenAddr(cfg.Options.Listen, cfg.Options.ListenPort)
-	listenHost, _, _ := net.SplitHostPort(addr)
-	if authorityMinimal && tlsOutcome.UseStdTLS {
-		thin, thinErr := LaunchAuthorityThinHTTPServer(httpHandler, addr, tlsOutcome.HTTP3TLS, AuthorityThinListenHooks{
-			IsClosing: cfg.Lifecycle.IsClosing,
-			OnServeError: func(serveErr error) {
-				if cfg.Lifecycle.OnServeError != nil {
-					cfg.Lifecycle.OnServeError(serveErr)
-				}
-			},
-			OnServeEnd: cfg.Lifecycle.OnAuthorityThinServeEnd,
-		})
-		if thinErr != nil {
-			return out, thinErr
-		}
-		out.AuthorityThin = thin
-		out.Stack = &MasqueStack{
-			H3Server:   thin.Server,
-			PacketConn: thin.PacketConn,
-		}
-		return out, nil
-	}
-
-	quicCfg := TM.MasqueHTTPServerQUICConfig()
-	if authorityH3Only {
-		quicCfg = TM.MasqueAuthorityHTTPServerQUICConfig()
-	}
+	listenHost, _, _ := net.SplitHostPort(MasqueListenAddr(cfg.Options.Listen, cfg.Options.ListenPort))
 	serveHooks := MasqueServeHooks{
 		IsClosing:    cfg.Lifecycle.IsClosing,
 		OnReadyFalse: cfg.Lifecycle.OnReadyFalse,
@@ -106,11 +73,10 @@ func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartR
 		Handler:           httpHandler,
 		ListenHost:        listenHost,
 		ListenPort:        cfg.Options.ListenPort,
-		AuthorityH3Only:   authorityH3Only,
 		HTTP3TLS:          tlsOutcome.HTTP3TLS,
 		CollateralTLS:     tlsOutcome.CollateralTLS,
-		H3QUICConfig:      quicCfg,
-		EnableH3Datagrams: !authorityH3Only,
+		H3QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
+		EnableH3Datagrams: true,
 		ValidateUDP: func(pc net.PacketConn) error {
 			return TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen")
 		},

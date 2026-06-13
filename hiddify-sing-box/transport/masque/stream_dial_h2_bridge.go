@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"io"
 	"net"
@@ -44,8 +45,8 @@ func streamDialH2Hooks(options ClientOptions) strm.DialH2Hooks {
 		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, targetHost string, targetPort uint16) (net.Conn, error) {
 			return h2c.ConnectTunnelFromResponse(ctx, resp, upload, targetHost, targetPort)
 		},
-		ClassifyError: func(err error) string { return string(ClassifyError(err)) },
-		AuthFailed:    ErrAuthFailed,
+		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },
+		AuthFailed:    session.ErrAuthFailed,
 	}
 }
 

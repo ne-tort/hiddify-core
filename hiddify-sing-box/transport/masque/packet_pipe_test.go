@@ -1,11 +1,16 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
+	"context"
 	"errors"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 type packetPipeSession struct {
@@ -67,42 +72,80 @@ func (s *packetPipeSession) Close() error {
 	return nil
 }
 
-func runIngressRelay(sess IPPacketSession, ns *connectIPTCPNetstack) func() {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		readBuffer := make([]byte, 64*1024)
-		consecutiveRetryableFailures := 0
-		const retryableReadFailureLimit = 32
-		for {
-			n, err := sess.ReadPacket(readBuffer)
-			if err != nil {
-				if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
-					return
-				}
-				if isRetryablePacketReadError(err) {
-					consecutiveRetryableFailures++
-					incConnectIPReadDropReason("retryable_read_error")
-					if consecutiveRetryableFailures < retryableReadFailureLimit {
-						time.Sleep(2 * time.Millisecond)
-						continue
-					}
-					incConnectIPReadDropReason("retryable_read_exhausted")
-					incConnectIPSessionReset("read_retry_exhausted")
-				} else {
-					incConnectIPReadDropReason("fatal_read_error")
-					incConnectIPSessionReset("read_exit")
-				}
-				ns.FailWithError(errors.Join(ErrTransportInit, err))
-				return
-			}
-			consecutiveRetryableFailures = 0
-			if n <= 0 {
-				continue
-			}
-			ns.InjectInboundClone(readBuffer[:n])
+type localizeIngressHost struct {
+	sess IPPacketSession
+	ns   *connectIPTCPNetstack
+}
+
+func (h *localizeIngressHost) IngressTransportModeOK() bool { return h.sess != nil }
+
+func (h *localizeIngressHost) IngressPacketReader() func(context.Context, []byte) (int, error) {
+	if h.sess == nil {
+		return nil
+	}
+	return func(_ context.Context, buf []byte) (int, error) {
+		return h.sess.ReadPacket(buf)
+	}
+}
+
+func (h *localizeIngressHost) IngressTCPInstallInflight() bool        { return false }
+func (h *localizeIngressHost) IngressTCPNetstack() *connectIPTCPNetstack { return h.ns }
+func (h *localizeIngressHost) IngressTCPNetstackForInject() *connectIPTCPNetstack {
+	return h.ns
+}
+
+func (h *localizeIngressHost) IngressTCPFastPath(pkt []byte) bool {
+	return cip.TCPIngressFastPath(pkt, true, h.ns != nil, false)
+}
+
+func (h *localizeIngressHost) IngressDeliverTCP(pkt []byte) bool {
+	return h.IngressDeliverTCPNoFlush(pkt)
+}
+
+func (h *localizeIngressHost) IngressDeliverTCPNoFlush(pkt []byte) bool {
+	if h.ns == nil {
+		return false
+	}
+	return cip.DeliverTCPIngress(pkt, cip.TCPIngressDeliverHooks{
+		ActiveNetstack: func() *cip.Netstack { return h.ns },
+	})
+}
+
+func (h *localizeIngressHost) IngressFlushAckWake() {}
+
+type localizeIngressHostWithWake struct {
+	localizeIngressHost
+	flushes *atomic.Int32
+}
+
+func (h *localizeIngressHostWithWake) IngressFlushAckWake() {
+	if h.flushes != nil {
+		h.flushes.Add(1)
+	}
+}
+
+func (h *localizeIngressHost) IngressOnReadFatal(err error) {
+	if h.ns != nil {
+		h.ns.FailWithError(errors.Join(session.ErrTransportInit, err))
+	}
+}
+
+func (h *localizeIngressHost) IngressDebugLog([]byte, int, bool, bool) {}
+func (h *localizeIngressHost) IngressObsEvent(string)                {}
+func (h *localizeIngressHost) IngressEngineDrop(string)              {}
+func (h *localizeIngressHost) IngressReadDrop(string)                {}
+func (h *localizeIngressHost) IngressSessionReset(string)            {}
+
+// startConnectIPIngressRelay runs the production connectip.Ingress demux loop for localize benches.
+func startConnectIPIngressRelay(sess IPPacketSession, ns *connectIPTCPNetstack, wakeFlushes ...*atomic.Int32) func() {
+	var host cip.IngressHost = &localizeIngressHost{sess: sess, ns: ns}
+	if len(wakeFlushes) > 0 && wakeFlushes[0] != nil {
+		host = &localizeIngressHostWithWake{
+			localizeIngressHost: localizeIngressHost{sess: sess, ns: ns},
+			flushes:             wakeFlushes[0],
 		}
-	}()
-	return wg.Wait
+	}
+	ing := cip.NewIngress(host)
+	ing.MaybeStart(ns != nil)
+	return func() { ing.StopGracefully() }
 }

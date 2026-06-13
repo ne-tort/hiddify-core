@@ -5,27 +5,13 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
-	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 )
 
 // ErrDeadlineUnsupported is returned when the underlying stream does not support deadlines.
 var ErrDeadlineUnsupported = errors.New("stream: deadline not supported")
-
-// H2ConnectTunnelFromResponse builds a thin RFC 8441 tunnel after CONNECT succeeds.
-func H2ConnectTunnelFromResponse(streamCtx context.Context, resp *http.Response, upload *io.PipeWriter, targetHost string, targetPort uint16) (net.Conn, error) {
-	if resp == nil || resp.Body == nil || upload == nil {
-		return nil, Errs.TCPConnectStreamFailed
-	}
-	remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
-	paths := NewTunnelPaths(resp.Body, upload)
-	inner := ConnFromTunnelPaths(streamCtx, paths, &net.TCPAddr{}, remoteAddr)
-	return NewTunnelConn(inner), nil
-}
 
 // h2ConnectStreamResponseBody wraps the HTTP/2 CONNECT response body for deadline-aware download I/O.
 type h2ConnectStreamResponseBody struct {

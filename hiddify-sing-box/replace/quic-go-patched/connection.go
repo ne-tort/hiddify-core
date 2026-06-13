@@ -1919,6 +1919,9 @@ func (c *Conn) handleFrame(
 		err = c.streamsMap.HandleResetStreamFrame(frame, rcvTime)
 	case *wire.MaxDataFrame:
 		c.connFlowController.UpdateSendWindow(frame.MaximumData)
+		// Re-poke all blocked send streams on duplicate MAX_DATA too (parity poke-renotify).
+		c.streamsMap.WakeBlockedSendStreams()
+		c.scheduleSending()
 	case *wire.MaxStreamDataFrame:
 		err = c.streamsMap.HandleMaxStreamDataFrame(frame)
 	case *wire.MaxStreamsFrame:
@@ -2954,6 +2957,9 @@ func (c *Conn) scheduleSending() {
 	case c.sendingScheduled <- struct{}{}:
 	default:
 	}
+	if masqueScheduleSendingHook != nil {
+		masqueScheduleSendingHook()
+	}
 }
 
 // tryQueueingUndecryptablePacket queues a packet for which we're missing the decryption keys.
@@ -2998,13 +3004,33 @@ func (c *Conn) queueControlFrame(f wire.Frame) {
 
 func (c *Conn) onHasConnectionData() { c.scheduleSending() }
 
+func (c *Conn) masqueSetBidiSendBoost(id protocol.StreamID, active bool) {
+	c.framer.setBidiSendBoost(id, active)
+	if testMasqueBidiBoostHook != nil {
+		testMasqueBidiBoostHook(uint64(id), active)
+	}
+	if active {
+		c.scheduleSending()
+	}
+}
+
 func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
-	c.framer.AddActiveStream(id, str)
+	if c.framer.AddActiveStream(id, str) {
+		// Belt-and-suspenders: re-promote must also nudge send half (parity poke-renotify).
+		str.signalWrite()
+	}
 	c.scheduleSending()
 }
 
 func (c *Conn) onHasStreamControlFrame(id protocol.StreamID, str streamControlFrameGetter) {
 	c.framer.AddStreamWithControlFrames(id, str)
+	if sendHandler, err := c.streamsMap.getSendStream(id); err == nil {
+		if st, ok := sendHandler.(*Stream); ok {
+			// First MAX_STREAM_DATA queue and renotify: nudge send when download-active
+			// (K-REF-B stall when receive Read queues FC but upload Write blocked).
+			masqueWakeOnControlFrameRenotify(st, c.framer.isBidiSendBoost(id))
+		}
+	}
 	c.scheduleSending()
 }
 

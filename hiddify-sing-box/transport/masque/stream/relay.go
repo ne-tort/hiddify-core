@@ -1,6 +1,7 @@
 package stream
 
 import (
+	_ "embed"
 	"context"
 	"errors"
 	"fmt"
@@ -15,8 +16,16 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// RelayTunnelBufLen matches h2o proxy.max-buffer-size (65536) on MASQUE CONNECT tunnels.
+//go:embed relay.go
+var relayGoAuditSource string
+
+// RelayGoAuditSource returns relay.go source for frozen delegate audits (REF-SRC-THIN-2).
+func RelayGoAuditSource() string { return relayGoAuditSource }
+
 const RelayTunnelBufLen = 64 * 1024
+
+// RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
+const RelayTunnelFlushBytes = RelayTunnelBufLen
 
 var relayTunnelBufPool = sync.Pool{
 	New: func() any {
@@ -55,11 +64,19 @@ func RelayUploadFromStream() bool {
 	}
 }
 
+// RelayCONNECTH3Leg injects an HTTP/3 bidi relay leg for in-process tests (S37) without a live QUIC stack.
+type RelayCONNECTH3Leg interface {
+	MasqueRelayCONNECTH3Leg() io.ReadWriteCloser
+}
+
 // RelayTCPTunnel relays CONNECT tunneled TCP like h2o proxy.tunnel (64 KiB io.CopyBuffer, full duplex).
 func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter) error {
 	if RelayUseHTTP3StreamHijack() {
-		if str := h3StreamFromCONNECTRelay(reqBody, responseWriter); str != nil {
-			return relayTCPTunnelH3Stream(ctx, targetConn, reqBody, str)
+		if leg := h3StreamFromCONNECTRelay(reqBody, responseWriter); leg != nil {
+			// Parity h3.TunnelConn: release CONNECT req.Body after hijack so http3 request
+			// bookkeeping does not stall bidi relay (responseWriter or reqBody path).
+			releaseConnectRelayRequestBody(reqBody)
+			return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg)
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -110,49 +127,42 @@ func relayTunnelPrimeDownload(conn net.Conn) ([]byte, error) {
 	return nil, err
 }
 
-// relayTunnelDownloadRelay copies onward TCP → CONNECT response with a flush per read (H2 iperf -R).
+// relayTunnelDownloadRelay copies onward TCP → CONNECT response; H2 path primes iperf banner
+// then bulk-copies with io.CopyBuffer (64 KiB, h2o proxy.tunnel parity) and batch flush at EOF.
 func relayTunnelDownloadRelay(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	buf := *bp
+	var written int64
 	if prime, err := relayTunnelPrimeDownload(src); err != nil {
 		return 0, err
 	} else if len(prime) > 0 {
 		if _, err := out.Write(prime); err != nil {
 			return int64(len(prime)), err
 		}
-		relayTunnelFlushNow(out, responseWriter)
+		written += int64(len(prime))
+		// H2 EnableFullDuplex: small iperf banner must reach the client download drain
+		// before onward TCP blocks on upload-only targets (connect-stream-h2 docker hang).
+		relayTunnelFlushFinal(out, responseWriter)
 	}
-	bp := relayTunnelBufPool.Get().(*[]byte)
-	defer relayTunnelBufPool.Put(bp)
-	buf := *bp
-	var written int64
-	for {
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := out.Write(buf[:nr])
-			written += int64(nw)
-			if ew != nil {
-				return written, ew
-			}
-			if nw < nr {
-				return written, io.ErrShortWrite
-			}
-			relayTunnelFlushNow(out, responseWriter)
-		}
-		if er != nil {
-			if errors.Is(er, io.EOF) {
-				return written, nil
-			}
-			return written, er
-		}
-		if nr == 0 {
-			return written, nil
-		}
+	n, err := io.CopyBuffer(out, src, buf)
+	written += n
+	if err != nil && !errors.Is(err, io.EOF) {
+		return written, err
 	}
+	relayTunnelFlushFinal(out, responseWriter)
+	return written, nil
+}
+
+func relayTunnelFlushFinal(out io.Writer, responseWriter http.ResponseWriter) {
+	if fw, ok := out.(*relayTunnelFlushWriter); ok {
+		fw.flushNow()
+		return
+	}
+	relayTunnelFlushNow(out, responseWriter)
 }
 
 func relayTunnelFlushNow(out io.Writer, responseWriter http.ResponseWriter) {
-	if fw, ok := out.(*relayTunnelFlushWriter); ok {
-		fw.flushNow()
-	}
 	if rw, ok := out.(http.ResponseWriter); ok {
 		_ = http.NewResponseController(rw).Flush()
 	}
@@ -180,7 +190,7 @@ func (f *relayTunnelFlushWriter) Write(p []byte) (int, error) {
 		return n, err
 	}
 	f.pending += n
-	if f.pending >= 32*1024 {
+	if f.pending >= RelayTunnelFlushBytes {
 		f.flushNow()
 	}
 	return n, nil
@@ -193,17 +203,42 @@ func (f *relayTunnelFlushWriter) flushNow() {
 	}
 }
 
-func relayTCPTunnelH3Stream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, str *http3.Stream) error {
+// RelayTCPTunnelBidiStream runs the HTTP/3 hijack relay path (io.CopyBuffer both halves, no H2 per-read flush).
+// Used by RelayTCPTunnel when HTTPStreamer hijacks *http3.Stream; also for in-proc localize benches.
+func RelayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
+	return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, bidi)
+}
+
+// RelayTunnelDownloadH2Style copies onward TCP → CONNECT response with batched 64 KiB flush (H2 EnableFullDuplex path).
+func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
+	return relayTunnelDownloadRelay(out, responseWriter, src)
+}
+
+// relayTCPTunnelBidiStream is the H3 hijack relay: full-duplex io.CopyBuffer on the QUIC stream leg.
+// Per-read HTTP flush (relayTunnelDownloadRelay) is intentionally omitted — QUIC stream framing delivers
+// download data without H2 ResponseWriter batching; docker ~130 down on connect-stream-h3 is client bidi credit.
+func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type closeWriter interface {
 		CloseWrite() error
 	}
-	uploadSrc := relayTunnelUploadSource(reqBody, str)
+	uploadSrc := relayTunnelUploadSource(reqBody, bidi)
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
+	// Mark download-active before both relay goroutines so upload reads get framer
+	// bidi-boost + eager WINDOW poke from the first chunk (race: upload started first).
+	if bidi != nil {
+		relayTunnelSetBidiDownloadActive(bidi, true)
+		defer relayTunnelSetBidiDownloadActive(bidi, false)
+	}
 	go func() {
-		_, err := relayTunnelCopyBuffer(targetConn, uploadSrc)
+		var err error
+		if RelayBidiDownloadWriteWakeEnabled() && bidi != nil {
+			_, err = relayTunnelCopyBufferBidiUpload(targetConn, uploadSrc, bidi)
+		} else {
+			_, err = relayTunnelCopyBuffer(targetConn, uploadSrc)
+		}
 		_ = reqBody.Close()
 		if cw, ok := targetConn.(closeWriter); ok {
 			_ = cw.CloseWrite()
@@ -211,18 +246,32 @@ func relayTCPTunnelH3Stream(ctx context.Context, targetConn net.Conn, reqBody io
 		uploadErrCh <- err
 	}()
 	go func() {
-		_, err := relayTunnelCopyBuffer(str, targetConn)
+		_, err := relayTunnelCopyBufferBidiDownload(bidi, targetConn, bidi)
 		downloadErrCh <- err
 	}()
 	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
 }
 
+func releaseConnectRelayRequestBody(reqBody io.ReadCloser) {
+	if reqBody == nil || reqBody == http.NoBody {
+		return
+	}
+	if rel, ok := reqBody.(http3.ResponseStreamReleaser); ok {
+		rel.ReleaseHTTPStream()
+	}
+}
+
 // h3StreamFromCONNECTRelay prefers responseWriter hijack (thin server order), then req.Body.
-func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.ResponseWriter) *http3.Stream {
+func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.ResponseWriter) io.ReadWriteCloser {
 	if os.Getenv("MASQUE_RELAY_LOG_HIJACK") == "1" {
 		_, wHS := responseWriter.(http3.HTTPStreamer)
 		_, bHS := reqBody.(http3.HTTPStreamer)
 		fmt.Fprintf(os.Stderr, "masque relay hijack probe writer_httpstreamer=%v body_httpstreamer=%v\n", wHS, bHS)
+	}
+	if p, ok := responseWriter.(RelayCONNECTH3Leg); ok {
+		if leg := p.MasqueRelayCONNECTH3Leg(); leg != nil {
+			return leg
+		}
 	}
 	if hs, ok := responseWriter.(http3.HTTPStreamer); ok {
 		if str := hs.HTTPStream(); str != nil {
@@ -230,6 +279,11 @@ func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.Respons
 		}
 	}
 	if reqBody != nil {
+		if p, ok := reqBody.(RelayCONNECTH3Leg); ok {
+			if leg := p.MasqueRelayCONNECTH3Leg(); leg != nil {
+				return leg
+			}
+		}
 		if hs, ok := reqBody.(http3.HTTPStreamer); ok {
 			if str := hs.HTTPStream(); str != nil {
 				if rel, ok := reqBody.(http3.ResponseStreamReleaser); ok {
@@ -242,15 +296,15 @@ func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.Respons
 	return nil
 }
 
-func relayTunnelUploadSource(reqBody io.ReadCloser, str *http3.Stream) io.Reader {
-	if str == nil {
+func relayTunnelUploadSource(reqBody io.ReadCloser, uploadLeg io.Reader) io.Reader {
+	if uploadLeg == nil {
 		return reqBody
 	}
 	if reqBody == nil || reqBody == http.NoBody {
-		return str
+		return uploadLeg
 	}
 	if RelayUploadFromStream() {
-		return str
+		return uploadLeg
 	}
 	return reqBody
 }
@@ -259,6 +313,68 @@ func relayTunnelCopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
 	bp := relayTunnelBufPool.Get().(*[]byte)
 	defer relayTunnelBufPool.Put(bp)
 	return io.CopyBuffer(dst, src, *bp)
+}
+
+// relayTunnelCopyBufferBidiUpload copies client upload → onward TCP with per-chunk bidi wake
+// so download halves stay scheduled during server upload drain (prod STREAM_HIJACK path).
+func relayTunnelCopyBufferBidiUpload(dst io.Writer, src io.Reader, bidi any) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+				relayTunnelWakeBidiAfterUploadRead(bidi)
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
+}
+
+// relayTunnelCopyBufferBidiDownload copies onward TCP → hijacked H3 stream with per-chunk
+// bidi wake so upload halves stay scheduled during server download (prod STREAM_HIJACK path).
+func relayTunnelCopyBufferBidiDownload(dst io.Writer, src io.Reader, bidi any) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+				relayTunnelWakeBidiAfterDownloadWrite(bidi)
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
 }
 
 // relayTunnelUnblockPeerRead nudges a blocked download relay when the upload half finished

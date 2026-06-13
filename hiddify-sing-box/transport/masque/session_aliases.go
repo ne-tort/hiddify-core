@@ -15,7 +15,5 @@ type (
 	HTTPLayerCacheDialIdentity = session.HTTPLayerCacheDialIdentity
 	QUICExperimentalOptions    = session.QUICExperimentalOptions
 	QUICDialFunc               = session.QUICDialFunc
-	MasqueTCPDialFunc          = session.MasqueTCPDialFunc
-	CoreClientFactory          = session.CoreClientFactory
-	DirectClientFactory        = session.DirectClientFactory
+	MasqueTCPDialFunc = session.MasqueTCPDialFunc
 )

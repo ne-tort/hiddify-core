@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"net"
@@ -72,7 +73,7 @@ func TestStreamDialAttemptCanceledBeforeDial(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !errors.Is(err, ErrTCPConnectStreamFailed) {
+	if !errors.Is(err, session.ErrTCPConnectStreamFailed) {
 		t.Fatalf("err=%v", err)
 	}
 	if host.dialCalls != 0 {
@@ -84,7 +85,7 @@ func TestStreamDialAttemptBracketRetryOnHTTP400(t *testing.T) {
 	host := &streamDialAttemptFakeHost{
 		tag:          "bracket",
 		bracketRetry: true,
-		dialErr:      errors.Join(ErrTCPConnectStreamFailed, errors.New("status=400 url=x")),
+		dialErr:      errors.Join(session.ErrTCPConnectStreamFailed, errors.New("status=400 url=x")),
 	}
 	conn, err := strm.DialAttempt(context.Background(), host, M.ParseSocksaddrHostPort("2001:db8::1", 443))
 	if err != nil {

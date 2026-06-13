@@ -183,13 +183,13 @@ func TestConnectIPTCPNetstackBenignTeardownFlushesOutboundQueue(t *testing.T) {
 
 	payload := []byte{0x45, 0x00, 0x00, 0x28}
 	stack.outboundOnce.Do(func() {
-		stack.outboundCh = make(chan []byte, netstackOutboundQueueDepth)
+		stack.outboundCh = make(chan outboundItem, netstackOutboundQueueDepth)
 	})
 	const staleQueued = 8
 	for i := 0; i < staleQueued; i++ {
 		p := borrowOutboundBuf(len(payload))
 		copy(p, payload)
-		stack.outboundCh <- p
+		stack.outboundCh <- outboundItem{payload: p, persist: 0}
 	}
 	if depth := stack.OutboundQueueDepth(); depth != staleQueued {
 		t.Fatalf("setup queue depth=%d want %d", depth, staleQueued)

@@ -35,6 +35,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ^1.25.6
+      - name: MASQUE layered Go gates (AGENTS.md smoke)
+        run: bash scripts/go-test-masque-gates.sh
       - name: MASQUE unit and race gates
         run: |
           cd hiddify-sing-box
@@ -132,6 +134,35 @@ jobs:
     with:
       upload-artifact: ${{ github.event_name == 'push' }}
 
+  masque-perf-localize:
+    name: MASQUE Perf Localize (optional)
+    runs-on: ubuntu-latest
+    if: "${{!contains(github.event.head_commit.message, 'release: version')}}"
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          fetch-depth: 0
+          submodules: 'recursive'
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ^1.25.6
+      - name: MASQUE perf localize gate
+        run: |
+          cd hiddify-sing-box
+          output=$(go test ./transport/masque -run 'LocalizeBottleneck|WriteQueueDepth|LocalizeHarness|BenchCeiling|ConnectStreamLocalizeDownloadWriteTo|ConnectStreamLocalizeBottleneckWriteTo|MeasureTCPDownloadWriteTo|PerfLocalizeGatePattern' -count=1 -timeout 180s 2>&1) || exit_code=$?
+          echo "$output"
+          if [ "${exit_code:-0}" -ne 0 ]; then
+            echo "perf localize gate failed (exit ${exit_code})" >&2
+            exit "${exit_code}"
+          fi
+          if echo "$output" | grep -q '\[no tests to run\]'; then
+            echo "perf localize gate matched zero tests" >&2
+            exit 1
+          fi
+
   masque-nightly-perf:
     name: MASQUE Nightly Perf
     runs-on: ubuntu-latest
@@ -147,6 +178,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ^1.25.6
+      - name: CONNECT-stream WriteTo cpuprofile artifact (S20)
+        run: |
+          cd hiddify-sing-box
+          mkdir -p ../runtime/cpuprofile
+          go test ./transport/masque -run 'NightlyCpuprofileWriteTo' -cpuprofile=../runtime/cpuprofile/masque-connect-stream-writeto.prof -count=1 -timeout 120s
       - name: MASQUE CONNECT-STREAM non-auth matrix gate (nightly pre-docker typed helper)
         run: |
           cd hiddify-sing-box
@@ -197,7 +233,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: masque-nightly-perf-runtime
-          path: experiments/router/stand/l3router/runtime/*.json
+          path: |
+            experiments/router/stand/l3router/runtime/*.json
+            runtime/cpuprofile/*.prof
       - name: Stop MASQUE stand
         if: always()
         run: |

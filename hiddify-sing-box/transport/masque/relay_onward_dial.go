@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+
+	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
 )
 
 // MasqueOnwardTCPDialAddr maps the proxied destination to a host TCP dial target.
@@ -16,5 +18,5 @@ func MasqueOnwardTCPDialAddr(host string, port uint16) string {
 	if err != nil {
 		return net.JoinHostPort(trimmed, strconv.Itoa(int(port)))
 	}
-	return connectIPForwarderDialAddr(addr, port)
+	return fwd.DialAddr(addr, port)
 }

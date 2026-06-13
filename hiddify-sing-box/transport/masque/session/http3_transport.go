@@ -8,6 +8,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
+	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // OpenH3ClientConn dials or reuses the HTTP/3 client stack for CONNECT-IP overlay.
@@ -62,6 +63,39 @@ func ResetIPH3TransportLockedAssumeMu(s *CoreSession) {
 	s.IPHTTPConn = nil
 }
 
+// NewTCPConnectStreamHTTP3Transport builds the CONNECT-stream HTTP/3 overlay transport.
+func NewTCPConnectStreamHTTP3Transport(s *CoreSession) *http3.Transport {
+	tcpTLS := ClientTLSConfig(s.Options)
+	quicCfgBase := TCPConnectStreamQUICConfig(s.Options)
+	quicDial := QuicDialWithPolicy("client_connect_stream", s.Options.QUICDial)
+	transport := &http3.Transport{
+		EnableDatagrams:    TCPConnectStreamHTTP3EnableDatagrams(s.Options),
+		DisableCompression: true,
+		TLSClientConfig:    tcpTLS,
+		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
+			port := int(s.Options.ServerPort)
+			if port <= 0 {
+				port = 443
+			}
+			target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
+			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
+			h3t.FinalizeConnectStreamQUICConfig(cfg)
+			return quicDial(ctx, target, tlsCfg, cfg)
+		},
+	}
+	ApplyWarpHTTP3TransportFields(transport, s.Options)
+	return transport
+}
+
+// EnsureTCPHTTPTransportLockedAssumeMu lazily allocates CONNECT-stream HTTP/3 transport.
+// Caller must hold s.Mu. No-op when overlay is H2 or TCPHTTP is already set.
+func EnsureTCPHTTPTransportLockedAssumeMu(s *CoreSession) {
+	if CurrentUDPHTTPLayer(s) == option.MasqueHTTPLayerH2 || s.TCPHTTP != nil {
+		return
+	}
+	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
+}
+
 // ResetTCPHTTPTransport rebuilds the CONNECT-stream HTTP overlay transport (H3 or H2 pool).
 func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 	if CurrentUDPHTTPLayer(s) == option.MasqueHTTPLayerH2 {
@@ -77,22 +111,5 @@ func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 		}
 		s.TCPHTTP.Close()
 	}
-	tcpTLS := ClientTLSConfig(s.Options)
-	quicCfgBase := TCPConnectStreamQUICConfig(s.Options)
-	quicDial := QuicDialWithPolicy("client_connect_stream", s.Options.QUICDial)
-	s.TCPHTTP = &http3.Transport{
-		EnableDatagrams:    TCPConnectStreamHTTP3EnableDatagrams(s.Options),
-		DisableCompression: true,
-		TLSClientConfig:    tcpTLS,
-		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
-			port := int(s.Options.ServerPort)
-			if port <= 0 {
-				port = 443
-			}
-			target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
-			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
-			return quicDial(ctx, target, tlsCfg, cfg)
-		},
-	}
-	ApplyWarpHTTP3TransportFields(s.TCPHTTP, s.Options)
+	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
 }

@@ -3,9 +3,14 @@
 package masque
 
 import (
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
+
+func init() {
+	mcip.RegisterObservabilitySnapshotMerger(mergeConnectIPDatagramOBSMetrics)
+}
 
 func mergeConnectIPDatagramOBSMetrics(out map[string]any) {
 	out["http3_stream_datagram_queue_drop_total"] = http3.StreamDatagramQueueDropTotal()

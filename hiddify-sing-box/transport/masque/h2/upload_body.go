@@ -71,6 +71,7 @@ func (w *chunkedUploadWriter) Write(p []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
+		FlushRequestBody(w.inner)
 		p = p[wrote:]
 	}
 	return total, nil

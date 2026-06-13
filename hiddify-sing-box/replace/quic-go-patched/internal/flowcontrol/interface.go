@@ -26,6 +26,8 @@ type StreamFlowController interface {
 	// and there won't be any further calls to AddBytesRead.
 	Abandon()
 	IsNewlyBlocked() bool
+	// ShouldQueueWindowUpdate reports whether a MAX_STREAM_DATA frame should be sent without consuming the update.
+	ShouldQueueWindowUpdate() bool
 }
 
 // The ConnectionFlowController is the flow controller for the connection.

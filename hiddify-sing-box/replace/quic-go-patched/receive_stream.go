@@ -475,6 +475,31 @@ func (s *ReceiveStream) handleResetStreamFrameImpl(frame *wire.ResetStreamFrame,
 	return nil
 }
 
+func (s *ReceiveStream) masquePokeDownloadReceiveWindow() bool {
+	s.mutex.Lock()
+	if s.isRemoteCancellationEffective() {
+		s.mutex.Unlock()
+		return false
+	}
+	already := s.queuedMaxStreamData
+	if !already {
+		if !s.flowController.ShouldQueueWindowUpdate() {
+			s.mutex.Unlock()
+			return false
+		}
+		s.queuedMaxStreamData = true
+	}
+	streamID := s.streamID
+	s.mutex.Unlock()
+	// Schedule MAX_STREAM_DATA immediately (parity Read path after AddBytesRead).
+	// Re-notify when already queued so a stalled framer re-prioritizes control frames
+	// between WriteTo chunk deliveries (K-REF-B ~15 Mbit/s without re-poke wake).
+	s.sender.onHasStreamControlFrame(streamID, s)
+	// Conn-level MAX_DATA renotify (parity Read queuedConnWindowUpdate → onHasConnectionData).
+	s.sender.onHasConnectionData()
+	return true
+}
+
 func (s *ReceiveStream) getControlFrame(now monotime.Time) (_ ackhandler.Frame, ok, hasMore bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

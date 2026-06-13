@@ -13,7 +13,6 @@ const masqueDynPortBindAttempts = 512
 type DualBindConfig struct {
 	ListenHost        string
 	ListenPort        uint16
-	AuthorityH3Only   bool
 	SkipUDPValidation bool
 	ValidateUDP       func(net.PacketConn) error
 	ListenUDP         func(network, address string) (net.PacketConn, error)
@@ -26,7 +25,7 @@ type DualBindResult struct {
 	TCPRaw     net.Listener
 }
 
-// DualBindMasqueListeners binds UDP for HTTP/3 and, unless AuthorityH3Only, TCP on the same port for HTTP/2.
+// DualBindMasqueListeners binds UDP for HTTP/3 and TCP on the same port for HTTP/2.
 // When ListenPort is 0, retries up to masqueDynPortBindAttempts on ephemeral TCP EADDRINUSE (Windows parallel tests).
 func DualBindMasqueListeners(cfg DualBindConfig) (DualBindResult, error) {
 	listenUDP := cfg.ListenUDP
@@ -44,7 +43,7 @@ func DualBindMasqueListeners(cfg DualBindConfig) (DualBindResult, error) {
 		maxAttempts = masqueDynPortBindAttempts
 	}
 	var (
-		result         DualBindResult
+		result           DualBindResult
 		lastTCPListenErr error
 	)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -57,10 +56,6 @@ func DualBindMasqueListeners(cfg DualBindConfig) (DualBindResult, error) {
 				_ = pc.Close()
 				return DualBindResult{}, fmt.Errorf("validate quic transport packetconn: %w", err)
 			}
-		}
-		if cfg.AuthorityH3Only {
-			result.PacketConn = pc
-			return result, nil
 		}
 		us := pc.LocalAddr()
 		uaddr, uok := us.(*net.UDPAddr)

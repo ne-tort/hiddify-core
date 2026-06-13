@@ -3,25 +3,7 @@ package server
 import (
 	"net"
 	"testing"
-
-	TM "github.com/sagernet/sing-box/transport/masque"
 )
-
-func TestCloseMasqueEndpointAuthorityThinClosesPacketConn(t *testing.T) {
-	t.Parallel()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen udp: %v", err)
-	}
-	thin := &TM.AuthorityHTTPServer{PacketConn: pc}
-	if err := CloseMasqueEndpoint(MasqueEndpointCloseInput{AuthorityThin: thin}); err != nil {
-		t.Fatalf("close authority thin: %v", err)
-	}
-	buf := make([]byte, 1)
-	if _, _, err := pc.ReadFrom(buf); err == nil {
-		t.Fatal("expected closed packet conn after authority thin close")
-	}
-}
 
 func TestCloseMasqueEndpointFullStackDelegatesToShutdown(t *testing.T) {
 	t.Parallel()

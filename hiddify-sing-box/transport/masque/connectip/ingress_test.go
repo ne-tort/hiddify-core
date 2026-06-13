@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"net/netip"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
@@ -123,6 +125,61 @@ func TestEnqueuePreTCPNetstackIngressCap(t *testing.T) {
 	}
 }
 
+func TestEnqueuePreTCPOwnsFrameCopy(t *testing.T) {
+	host := &ingressTestHost{}
+	ing := NewIngress(host)
+	readBuf := []byte{0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2}
+	ing.EnqueuePreTCP(readBuf)
+	readBuf[0] = 0x60
+	ing.preTCPMu.Lock()
+	got := ing.preTCPBuf[0][0]
+	ing.preTCPMu.Unlock()
+	if got != 0x45 {
+		t.Fatalf("pre-TCP buffer must own a copy: got ver=%d want 4", got>>4)
+	}
+}
+
+func TestPreTCPIngressDropObsCounter(t *testing.T) {
+	host := &ingressTestHost{}
+	ing := NewIngress(host)
+	pkt := []byte{0x45, 0, 0, 40, 0, 0, 0, 0, 64, 6, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2}
+	for i := 0; i < PreTCPNetstackIngressMax; i++ {
+		ing.EnqueuePreTCP(pkt)
+	}
+	before := ObservabilitySnapshot()["connect_ip_pre_tcp_ingress_drop_total"].(uint64)
+	ing.EnqueuePreTCP(pkt)
+	after := ObservabilitySnapshot()["connect_ip_pre_tcp_ingress_drop_total"].(uint64)
+	if after != before+1 {
+		t.Fatalf("pre_tcp drop counter: before=%d after=%d want +1", before, after)
+	}
+}
+
+func TestFlushPreTCPUsesOwnedFrames(t *testing.T) {
+	host := &ingressTestHost{}
+	ing := NewIngress(host)
+	pkt := buildTestIPv4TCP(t, 0x10, []byte("x"))
+	ing.EnqueuePreTCP(pkt)
+
+	sess := &packetPipeSession{
+		recvCh:  make(chan []byte, 8),
+		sendCh:  make(chan []byte, 8),
+		closeCh: make(chan struct{}),
+	}
+	ns, err := NewNetstack(context.Background(), sess, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer ns.Close()
+
+	ing.FlushPreTCP(ns)
+	if ing.PreTCPBuffered() != 0 {
+		t.Fatalf("buffered=%d want 0 after flush", ing.PreTCPBuffered())
+	}
+}
+
 func TestIPv4TCPIngressWakeCandidateNarrow(t *testing.T) {
 	synOnly := buildTestIPv4TCP(t, 0x02, nil)
 	if IPv4TCPIngressWakeCandidate(synOnly) {
@@ -171,9 +228,115 @@ func (h *ingressTestHost) IngressTCPNetstack() *Netstack             { return ni
 func (h *ingressTestHost) IngressTCPNetstackForInject() *Netstack    { return nil }
 func (h *ingressTestHost) IngressTCPFastPath([]byte) bool            { return false }
 func (h *ingressTestHost) IngressDeliverTCP([]byte) bool            { return false }
+func (h *ingressTestHost) IngressDeliverTCPNoFlush([]byte) bool     { return false }
+func (h *ingressTestHost) IngressFlushAckWake()                     {}
 func (h *ingressTestHost) IngressOnReadFatal(error)                  {}
 func (h *ingressTestHost) IngressDebugLog([]byte, int, bool, bool)   {}
 func (h *ingressTestHost) IngressObsEvent(string)                    {}
 func (h *ingressTestHost) IngressEngineDrop(reason string)           { h.engineDrops = append(h.engineDrops, reason) }
 func (h *ingressTestHost) IngressReadDrop(string)                    {}
 func (h *ingressTestHost) IngressSessionReset(string)                {}
+
+// TestIngressBurstCoalescesAckWake verifies prefetch-style reads coalesce MasqueWakeSend flush.
+func TestIngressBurstCoalescesAckWake(t *testing.T) {
+	sess := &packetPipeSession{
+		recvCh:  make(chan []byte, 8),
+		sendCh:  make(chan []byte, 8),
+		closeCh: make(chan struct{}),
+	}
+	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create stack: %v", err)
+	}
+	defer stack.Close()
+
+	pkts := [][]byte{
+		buildTestIPv4TCP(t, 0x10, []byte("a")),
+		buildTestIPv4TCP(t, 0x10, []byte("b")),
+		buildTestIPv4TCP(t, 0x10, []byte("c")),
+	}
+	host := &ingressBurstWakeHost{
+		ns:   stack,
+		pkts: pkts,
+	}
+	ing := NewIngress(host)
+	ing.MaybeStart(true)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if host.delivers.Load() >= 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	defer ing.StopGracefully()
+
+	if host.delivers.Load() != 3 {
+		t.Fatalf("delivers=%d want 3", host.delivers.Load())
+	}
+	if host.flushes.Load() != 1 {
+		t.Fatalf("flushes=%d want 1 coalesced wake per burst", host.flushes.Load())
+	}
+}
+
+type ingressBurstWakeHost struct {
+	ns       *Netstack
+	pkts     [][]byte
+	readIdx  int
+	delivers atomic.Int32
+	flushes  atomic.Int32
+}
+
+func (h *ingressBurstWakeHost) IngressTransportModeOK() bool { return true }
+
+func (h *ingressBurstWakeHost) IngressPacketReader() func(context.Context, []byte) (int, error) {
+	return func(ctx context.Context, buf []byte) (int, error) {
+		if h.readIdx >= len(h.pkts) {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			return 0, context.Canceled
+		}
+		if ctx.Err() != nil && h.readIdx == 0 {
+			return 0, ctx.Err()
+		}
+		pkt := h.pkts[h.readIdx]
+		h.readIdx++
+		return copy(buf, pkt), nil
+	}
+}
+
+func (h *ingressBurstWakeHost) IngressTCPInstallInflight() bool        { return false }
+func (h *ingressBurstWakeHost) IngressTCPNetstack() *Netstack          { return h.ns }
+func (h *ingressBurstWakeHost) IngressTCPNetstackForInject() *Netstack { return h.ns }
+
+func (h *ingressBurstWakeHost) IngressTCPFastPath(pkt []byte) bool {
+	return TCPIngressFastPath(pkt, true, h.ns != nil, false)
+}
+
+func (h *ingressBurstWakeHost) IngressDeliverTCPNoFlush(pkt []byte) bool {
+	if !DeliverTCPIngress(pkt, TCPIngressDeliverHooks{
+		ActiveNetstack: func() *Netstack { return h.ns },
+		OnAfterDeliver: func([]byte, *Netstack) { h.delivers.Add(1) },
+	}) {
+		return false
+	}
+	return true
+}
+
+func (h *ingressBurstWakeHost) IngressDeliverTCP(pkt []byte) bool {
+	ok := h.IngressDeliverTCPNoFlush(pkt)
+	h.IngressFlushAckWake()
+	return ok
+}
+
+func (h *ingressBurstWakeHost) IngressFlushAckWake() { h.flushes.Add(1) }
+
+func (h *ingressBurstWakeHost) IngressOnReadFatal(error)                {}
+func (h *ingressBurstWakeHost) IngressDebugLog([]byte, int, bool, bool)   {}
+func (h *ingressBurstWakeHost) IngressObsEvent(string)                    {}
+func (h *ingressBurstWakeHost) IngressEngineDrop(string)                  {}
+func (h *ingressBurstWakeHost) IngressReadDrop(string)                    {}
+func (h *ingressBurstWakeHost) IngressSessionReset(string)                {}

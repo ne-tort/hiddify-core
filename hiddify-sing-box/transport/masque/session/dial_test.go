@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"crypto/tls"
 	"errors"
 	"strings"
 	"testing"
@@ -129,6 +130,28 @@ func TestQuicDialCandidateHostPrefersDialPeer(t *testing.T) {
 	got := session.QuicDialCandidateHost(session.ClientOptions{Server: "host.example", DialPeer: "1.2.3.4"})
 	if got != "1.2.3.4" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestQuicDialCandidateHostAvoidsLoopbackHairpinViaTLS(t *testing.T) {
+	tlsCfg := &tls.Config{ServerName: "193.233.216.26"}
+	got := session.QuicDialCandidateHost(session.ClientOptions{
+		Server:              "127.0.0.1",
+		MasqueQUICCryptoTLS: tlsCfg,
+	})
+	if got != "193.233.216.26" {
+		t.Fatalf("loopback server + public SNI: got %q want 193.233.216.26", got)
+	}
+	got = session.QuicDialCandidateHost(session.ClientOptions{
+		Server:              "127.0.0.1",
+		MasqueQUICCryptoTLS: &tls.Config{ServerName: "127.0.0.1"},
+	})
+	if got != "127.0.0.1" {
+		t.Fatalf("loopback server + loopback SNI: got %q want 127.0.0.1", got)
+	}
+	got = session.QuicDialCandidateHost(session.ClientOptions{Server: "edge.example.com"})
+	if got != "edge.example.com" {
+		t.Fatalf("non-loopback server unchanged: got %q", got)
 	}
 }
 

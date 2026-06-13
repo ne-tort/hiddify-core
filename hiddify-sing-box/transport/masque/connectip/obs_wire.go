@@ -7,6 +7,9 @@ func CounterObsHooks() Obs {
 		OnPacketRx: func(n int) {
 			rxSeq := obsCounters.packetRxTotal.Add(1)
 			obsCounters.bytesRxTotal.Add(uint64(n))
+			if !obsEventsEnabled() {
+				return
+			}
 			if obsCounters.firstRxMarkerEmitted.CompareAndSwap(0, 1) {
 				EmitObservabilityEvent("first_packet_rx")
 			}
@@ -15,6 +18,9 @@ func CounterObsHooks() Obs {
 		OnPacketTx: func(ipLen int) {
 			txSeq := obsCounters.packetTxTotal.Add(1)
 			obsCounters.bytesTxTotal.Add(uint64(ipLen))
+			if !obsEventsEnabled() {
+				return
+			}
 			if obsCounters.firstTxMarkerEmitted.CompareAndSwap(0, 1) {
 				EmitObservabilityEvent("first_packet_tx")
 			}
@@ -23,21 +29,29 @@ func CounterObsHooks() Obs {
 		OnPacketReadExit: func(err error) {
 			obsCounters.packetReadExitTotal.Add(1)
 			IncReadDropReason(ClassifyWriteError(err))
-			EmitObservabilityEvent("packet_read_exit")
+			if obsEventsEnabled() {
+				EmitObservabilityEvent("packet_read_exit")
+			}
 		},
 		OnPacketWriteFail: func(err error, ceiling bool) {
 			obsCounters.packetWriteFailTotal.Add(1)
 			if ceiling {
 				IncWriteFailReason("ceiling_reject")
-				EmitObservabilityEvent("packet_write_fail_ceiling")
+				if obsEventsEnabled() {
+					EmitObservabilityEvent("packet_write_fail_ceiling")
+				}
 				return
 			}
 			IncWriteFailReason(ClassifyWriteError(err))
-			EmitObservabilityEvent("packet_write_fail")
+			if obsEventsEnabled() {
+				EmitObservabilityEvent("packet_write_fail")
+			}
 		},
 		OnPacketPTBRx: func() {
 			obsCounters.ptbRxTotal.Add(1)
-			maybeEmitPTBObs("packet_ptb_rx")
+			if obsEventsEnabled() {
+				maybeEmitPTBObs("packet_ptb_rx")
+			}
 		},
 		OnReadInject: func() {
 			obsCounters.netstackReadInjectTotal.Add(1)

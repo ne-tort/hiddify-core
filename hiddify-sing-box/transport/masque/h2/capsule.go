@@ -155,18 +155,23 @@ func FlushResponse(w io.Writer) {
 	}
 }
 
-// FlushRequestBody flushes CONNECT-UDP uplink request bodies when supported.
+// FlushRequestBody flushes Extended CONNECT uplink request bodies when supported.
+// CONNECT-IP H2 upload is usually *io.PipeWriter (no flush); consume-only poke is safe.
 func FlushRequestBody(w io.Writer) {
 	if w == nil {
 		return
 	}
 	if f, ok := w.(interface{ Flush() error }); ok {
 		_ = f.Flush()
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
 
-// WriteDatagramCapsule serializes one RFC 9297 DATAGRAM capsule (context id 0 + UDP payload).
-func WriteDatagramCapsule(w io.Writer, udpPayload []byte) error {
+// AppendDatagramCapsuleWire serializes one RFC 9297 DATAGRAM capsule without flushing.
+func AppendDatagramCapsuleWire(w io.Writer, udpPayload []byte) error {
 	dgram := make([]byte, 1+len(udpPayload))
 	dgram[0] = 0
 	copy(dgram[1:], udpPayload)
@@ -174,7 +179,33 @@ func WriteDatagramCapsule(w io.Writer, udpPayload []byte) error {
 	if err := writeCapsule(&buf, CapsuleTypeDatagram, dgram); err != nil {
 		return err
 	}
-	if _, err := WriteAll(w, buf.Bytes()); err != nil {
+	_, err := WriteAll(w, buf.Bytes())
+	return err
+}
+
+// AppendUDPPayloadAsDatagramCapsules splits a UDP payload into DATAGRAM capsules without flushing.
+func AppendUDPPayloadAsDatagramCapsules(w io.Writer, udpPayload []byte) error {
+	if len(udpPayload) == 0 {
+		return AppendDatagramCapsuleWire(w, nil)
+	}
+	step := MaxUDPPayloadPerDatagramCapsule()
+	for offset := 0; offset < len(udpPayload); {
+		end := offset + step
+		if end > len(udpPayload) {
+			end = len(udpPayload)
+		}
+		if err := AppendDatagramCapsuleWire(w, udpPayload[offset:end]); err != nil {
+			return err
+		}
+		offset = end
+	}
+	return nil
+}
+
+// WriteDatagramCapsule serializes one RFC 9297 DATAGRAM capsule (context id 0 + UDP payload).
+// G54: flushes once per capsule (burst/interactive path). Batch callers use Append* + one terminal flush.
+func WriteDatagramCapsule(w io.Writer, udpPayload []byte) error {
+	if err := AppendDatagramCapsuleWire(w, udpPayload); err != nil {
 		return err
 	}
 	if rw, ok := w.(http.ResponseWriter); ok {
@@ -187,19 +218,13 @@ func WriteDatagramCapsule(w io.Writer, udpPayload []byte) error {
 
 // WriteUDPPayloadAsDatagramCapsules splits a UDP payload into a sequence of DATAGRAM capsules.
 func WriteUDPPayloadAsDatagramCapsules(w io.Writer, udpPayload []byte) error {
-	if len(udpPayload) == 0 {
-		return WriteDatagramCapsule(w, nil)
+	if err := AppendUDPPayloadAsDatagramCapsules(w, udpPayload); err != nil {
+		return err
 	}
-	step := MaxUDPPayloadPerDatagramCapsule()
-	for offset := 0; offset < len(udpPayload); {
-		end := offset + step
-		if end > len(udpPayload) {
-			end = len(udpPayload)
-		}
-		if err := WriteDatagramCapsule(w, udpPayload[offset:end]); err != nil {
-			return err
-		}
-		offset = end
+	if rw, ok := w.(http.ResponseWriter); ok {
+		FlushResponse(rw)
+	} else {
+		FlushRequestBody(w)
 	}
 	return nil
 }

@@ -2,6 +2,8 @@ package masque
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -13,14 +15,16 @@ import (
 
 	"github.com/quic-go/quic-go"
 	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
+	"github.com/sagernet/gvisor/pkg/tcpip"
+	"github.com/sagernet/gvisor/pkg/tcpip/header"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
 // connectIPLocalizeVerdict bands (Mbit/s) for in-process upload benches.
 const (
-	connectIPLocalizeFastMbps   = 80.0
-	connectIPLocalizeCeilingMax = 28.0
-	connectIPLocalizeCeilingMin = 4.0
+	connectIPLocalizeFastMbps     = 80.0 // docker BENCH_CONNECT_IP_MIN_UP_MBIT; in-proc instant L1 floor
+	connectIPLocalizeCeilingMax   = 28.0
+	connectIPLocalizeCeilingMin   = 4.0
 )
 
 type connectIPUploadBenchResult struct {
@@ -32,6 +36,8 @@ type connectIPUploadBenchResult struct {
 
 func (r connectIPUploadBenchResult) ok() bool { return r.err == nil }
 
+// measureTCPDownloadMbps drains via conn.Read (legacy anti-pattern for CONNECT-stream KPI:
+// skips downloadActive / framer boost — use measureTCPDownloadWriteToMbps for synth gates).
 func measureTCPDownloadMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
 	deadline := time.Now().Add(duration)
 	buf := make([]byte, 256*1024)
@@ -60,6 +66,64 @@ func measureTCPDownloadMbps(conn net.Conn, duration time.Duration) (int64, float
 		secs = 1
 	}
 	return total, float64(total*8) / secs / 1e6, nil
+}
+
+var errBenchDuration = errors.New("masque: bench duration elapsed")
+
+type benchWriteToSink struct {
+	deadline time.Time
+	total    int64
+}
+
+func (s *benchWriteToSink) Write(p []byte) (int, error) {
+	if time.Now().After(s.deadline) {
+		return 0, errBenchDuration
+	}
+	s.total += int64(len(p))
+	return len(p), nil
+}
+
+// measureTCPDownloadCopyMbps drains conn via io.Copy (route connectionCopy writer_to:
+// io.Copy invokes source.WriteTo when present — not conn.Read).
+func measureTCPDownloadCopyMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+	deadline := time.Now().Add(duration)
+	_ = conn.SetReadDeadline(deadline)
+	defer conn.SetReadDeadline(time.Time{})
+	sink := &benchWriteToSink{deadline: deadline}
+	_, err := io.Copy(sink, conn)
+	if err != nil && err != errBenchDuration && err != io.EOF {
+		if sink.total == 0 {
+			return 0, 0, err
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return sink.total, float64(sink.total*8) / secs / 1e6, nil
+}
+
+// measureTCPDownloadWriteToMbps drains conn via io.WriterTo (prod route writer_to path).
+func measureTCPDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+	wt, ok := conn.(io.WriterTo)
+	if !ok {
+		return 0, 0, fmt.Errorf("masque: conn lacks io.WriterTo (prod download path)")
+	}
+	deadline := time.Now().Add(duration)
+	_ = conn.SetReadDeadline(deadline)
+	defer conn.SetReadDeadline(time.Time{})
+	sink := &benchWriteToSink{deadline: deadline}
+	_, err := wt.WriteTo(sink)
+	if err != nil && err != errBenchDuration && err != io.EOF {
+		if sink.total == 0 {
+			return 0, 0, err
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return sink.total, float64(sink.total*8) / secs / 1e6, nil
 }
 
 func measureTCPUploadMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
@@ -113,9 +177,11 @@ type connectIPUploadHarness struct {
 
 // connectIPUploadHarnessOpts configures the harness remote TCP target (forwarder onward dial).
 type connectIPUploadHarnessOpts struct {
-	remoteEcho     bool
-	onRemoteAccept func()
-	WriteQueueMetrics *fwd.WriteQueueMetrics
+	remoteEcho         bool
+	onRemoteAccept     func()
+	WriteQueueMetrics  *fwd.WriteQueueMetrics
+	IngressWakeFlushes *atomic.Int32
+	OutboundWakeCalls  *atomic.Int32
 }
 
 func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
@@ -128,9 +194,10 @@ func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectI
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 
 	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
-		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
-		LocalIPv6: netip.MustParseAddr("fd00::2"),
-		MTU:       1372,
+		LocalIPv4:        netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6:        netip.MustParseAddr("fd00::2"),
+		MTU:              1372,
+		OnOutboundQueued: outboundWakeHook(o.OutboundWakeCalls),
 	})
 	if err != nil {
 		t.Fatalf("client netstack: %v", err)
@@ -167,14 +234,14 @@ func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectI
 	fwdCtx, fwdCancel := context.WithCancel(context.Background())
 	fwdDone := make(chan error, 1)
 	go func() {
-		fwdOpts := ConnectIPTCPForwarderOptions{AllowPrivateTargets: true}
+		fwdOpts := fwd.ConnectIPTCPForwarderOptions{AllowPrivateTargets: true}
 		if o.WriteQueueMetrics != nil {
 			fwdOpts.WriteQueueMetrics = o.WriteQueueMetrics
 		}
-		fwdDone <- RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, fwdOpts)
+		fwdDone <- fwd.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, fwdOpts)
 	}()
 
-	waitIngress := runIngressRelay(clientSess, clientNS)
+	waitIngress := startConnectIPIngressRelay(clientSess, clientNS, o.IngressWakeFlushes)
 
 	return &connectIPUploadHarness{
 		clientSess:  clientSess,
@@ -278,6 +345,65 @@ func verdictConnectIPUpload(l0, l1, l3 connectIPUploadBenchResult) string {
 	}
 }
 
+// TestWindowedPacketBridgeDownloadBand checks S2C window + client ACK credit in isolation.
+func TestWindowedPacketBridgeDownloadBand(t *testing.T) {
+	const duration = 400 * time.Millisecond
+	client, server := newWindowedPacketPair(35*time.Millisecond, 64*1024)
+	defer client.Close()
+	defer server.Close()
+
+	src := tcpip.AddrFrom4([4]byte{198, 18, 0, 1})
+	dst := tcpip.AddrFrom4([4]byte{198, 18, 0, 2})
+	payload := make([]byte, 1200)
+
+	var total atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 2048)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			n, err := client.ReadPacket(buf)
+			if err != nil {
+				return
+			}
+			total.Add(int64(n))
+			ackPkt := fwd.BuildIPv4TCPPacket(dst, src, 443, 40000, 1, 1, header.TCPFlagAck, 65535, nil, nil)
+			if _, err := client.WritePacket(ackPkt); err != nil {
+				return
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(duration)
+	var seq uint32 = 1
+	go func() {
+		for time.Now().Before(deadline) {
+			dataPkt := fwd.BuildIPv4TCPPacket(src, dst, 40000, 443, seq, 1, header.TCPFlagPsh|header.TCPFlagAck, 65535, payload, nil)
+			if _, err := server.WritePacket(dataPkt); err != nil {
+				return
+			}
+			seq += uint32(len(payload))
+		}
+	}()
+	time.Sleep(duration)
+	close(stop)
+	wg.Wait()
+
+	n := total.Load()
+	mbps := float64(n*8) / duration.Seconds() / 1e6
+	t.Logf("windowed bridge download band: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < connectIPLocalizeCeilingMin || mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("bridge download %.1f Mbit/s want %.0f–%.0f", mbps, connectIPLocalizeCeilingMin, connectIPLocalizeCeilingMax)
+	}
+}
+
 // TestMasqueConnectIPLocalizeBottleneck localizes connect-ip TUN upload (~15 Mbit/s field).
 func TestMasqueConnectIPLocalizeBottleneck(t *testing.T) {
 	const duration = 400 * time.Millisecond
@@ -285,15 +411,12 @@ func TestMasqueConnectIPLocalizeBottleneck(t *testing.T) {
 	l0 := benchConnectIPUploadLayer(t, "L0", nil, duration)
 	l1 := benchConnectIPUploadLayer(t, "L1", instantPacketLink{}, duration)
 	l2 := benchConnectIPUploadLayer(t, "L2", windowedPacketLink{
-		rtt:         35 * time.Millisecond,
+		rtt:         localizeBenchRTT,
 		windowBytes: 16 << 20,
 	}, duration)
-	l3 := benchConnectIPUploadLayer(t, "L3", windowedPacketLink{
-		rtt:         35 * time.Millisecond,
-		windowBytes: 64 * 1024,
-	}, duration)
+	l3 := benchConnectIPUploadLayer(t, "L3", benchWindowedPacketLink(), duration)
 	l256 := benchConnectIPUploadLayer(t, "L256", windowedPacketLink{
-		rtt:         35 * time.Millisecond,
+		rtt:         localizeBenchRTT,
 		windowBytes: 256 * 1024,
 	}, duration)
 
@@ -304,23 +427,110 @@ func TestMasqueConnectIPLocalizeBottleneck(t *testing.T) {
 		t.Logf("connect-ip localize %s: %.1f Mbit/s (%d bytes)", r.layer, r.mbps, r.bytes)
 	}
 
+	if l1.mbps < connectIPLocalizeFastMbps {
+		t.Fatalf("upload L1 slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectIPLocalizeFastMbps)
+	}
+	if l3.mbps < connectIPLocalizeCeilingMin || l3.mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("upload L3 windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectIPLocalizeCeilingMin, connectIPLocalizeCeilingMax)
+	}
+
 	v := verdictConnectIPUpload(l0, l1, l3)
 	t.Logf("connect-ip localize verdict: %s", v)
 }
 
-func startConnectIPDownloadHarness(t *testing.T, link packetLink) *connectIPUploadHarness {
-	t.Helper()
-	clientSess, serverSess := link.endpoints()
-	return startConnectIPLocalizePipeHarness(t, clientSess, serverSess)
+// TestConnectIPLocalizeForwarderWakeAndWriteQueueMetrics ties client egress wake hooks and forwarder
+// writeCh occupancy under bench-shaped windowed upload (~64 KiB / 35 ms RTT).
+func TestConnectIPLocalizeForwarderWakeAndWriteQueueMetrics(t *testing.T) {
+	inj := newLocalizeInjectors()
+	h := startConnectIPUploadHarness(t, benchWindowedPacketLink(), inj.connectIPOpts())
+	defer h.close()
+
+	conn := h.dialRemote(t)
+	defer conn.Close()
+
+	n, mbps, err := measureTCPUploadMbps(conn, 400*time.Millisecond)
+	if err != nil {
+		t.Fatalf("windowed upload: %v", err)
+	}
+	if n < 32*1024 {
+		t.Fatalf("windowed upload=%d bytes too small for wake+queue profiling", n)
+	}
+
+	depthHigh := inj.WriteQueueMetrics.DepthHigh.Load()
+	calls := inj.OutboundWakeCalls.Load()
+	flushes := inj.IngressWakeFlushes.Load()
+	t.Logf("forwarder wake+queue: depthHigh=%d outboundWake=%d ingressFlush=%d upload=%.1f Mbit/s (%d bytes)",
+		depthHigh, calls, flushes, mbps, n)
+
+	if depthHigh == 0 {
+		t.Fatal("expected writeCh occupancy under windowed link")
+	}
+	if depthHigh >= uint64(fwd.WriteQueueDepth) {
+		t.Fatalf("writeCh depthHigh=%d must stay below capacity %d", depthHigh, fwd.WriteQueueDepth)
+	}
+	if calls == 0 {
+		t.Fatal("expected client outbound wake hook during windowed upload")
+	}
+	if mbps < connectIPLocalizeCeilingMin || mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("upload %.1f Mbit/s want %.0f–%.0f", mbps, connectIPLocalizeCeilingMin, connectIPLocalizeCeilingMax)
+	}
 }
 
-func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPacketSession) *connectIPUploadHarness {
+// TestConnectIPLocalizeForwarderDownloadWindowedWriteTo (S66, S72): forwarder download under
+// bench-shaped windowed packet link via WriteTo drain (prod route writer_to pattern).
+func TestConnectIPLocalizeForwarderDownloadWindowedWriteTo(t *testing.T) {
+	var metrics fwd.WriteQueueMetrics
+	h := startConnectIPDownloadHarness(t, benchWindowedPacketLink(), connectIPUploadHarnessOpts{WriteQueueMetrics: &metrics})
+	defer h.close()
+
+	conn := h.dialRemote(t)
+	defer conn.Close()
+
+	n, mbps, err := measureTCPDownloadWriteToMbps(benchConnWriteTo{conn}, localizeBenchDuration)
+	if err != nil {
+		t.Fatalf("windowed WriteTo download: %v", err)
+	}
+	if n < localizeBenchMinBytes {
+		t.Fatalf("bytes=%d want >= %d (forwarder download localize contract)", n, localizeBenchMinBytes)
+	}
+	// WriteTo forwarder path runs ~4–5 Mbit/s (Read-path L3 band: TestMasqueConnectIPLocalizeDownload).
+	const forwarderWriteToMbpsFloor = 3.5
+	if mbps < forwarderWriteToMbpsFloor || mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("WriteTo download %.1f Mbit/s want %.1f–%.0f", mbps, forwarderWriteToMbpsFloor, connectIPLocalizeCeilingMax)
+	}
+
+	depthHigh := metrics.DepthHigh.Load()
+	t.Logf("forwarder download windowed WriteTo: depthHigh=%d bytes=%d mbps=%.1f", depthHigh, n, mbps)
+	if depthHigh > 1 {
+		t.Fatalf("download DATA writeCh depthHigh=%d want <= 1 (ACK-only on queue)", depthHigh)
+	}
+}
+
+func startConnectIPDownloadHarness(t *testing.T, link packetLink, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
 	t.Helper()
+	clientSess, serverSess := link.endpoints()
+	return startConnectIPLocalizePipeHarness(t, clientSess, serverSess, opts...)
+}
+
+func outboundWakeHook(calls *atomic.Int32) func() {
+	if calls == nil {
+		return nil
+	}
+	return func() { calls.Add(1) }
+}
+
+func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPacketSession, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
+	t.Helper()
+	var o connectIPUploadHarnessOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
-		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
-		LocalIPv6: netip.MustParseAddr("fd00::2"),
-		MTU:       1372,
+		LocalIPv4:        netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6:        netip.MustParseAddr("fd00::2"),
+		MTU:              1372,
+		OnOutboundQueued: outboundWakeHook(o.OutboundWakeCalls),
 	})
 	if err != nil {
 		t.Fatalf("client netstack: %v", err)
@@ -351,30 +561,142 @@ func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPa
 	fwdCtx, fwdCancel := context.WithCancel(context.Background())
 	fwdDone := make(chan error, 1)
 	go func() {
-		fwdDone <- RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, ConnectIPTCPForwarderOptions{
-			AllowPrivateTargets: true,
-		})
+		fwdOpts := fwd.ConnectIPTCPForwarderOptions{AllowPrivateTargets: true}
+		if o.WriteQueueMetrics != nil {
+			fwdOpts.WriteQueueMetrics = o.WriteQueueMetrics
+		}
+		fwdDone <- fwd.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, serverConn, fwdOpts)
 	}()
 	return &connectIPUploadHarness{
 		clientSess: clientSess, serverConn: serverConn, clientNS: clientNS,
-		waitIngress: runIngressRelay(clientSess, clientNS),
+		waitIngress: startConnectIPIngressRelay(clientSess, clientNS, o.IngressWakeFlushes),
 		fwdCancel: fwdCancel, fwdDone: fwdDone, remoteLn: ln,
 	}
 }
 
-func TestMasqueConnectIPLocalizeDownload(t *testing.T) {
-	const duration = 400 * time.Millisecond
-	h := startConnectIPDownloadHarness(t, instantPacketLink{})
+func benchConnectIPDownloadLayer(t *testing.T, layer string, link packetLink, duration time.Duration) connectIPUploadBenchResult {
+	t.Helper()
+	if layer == "L0" {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return connectIPUploadBenchResult{layer: layer, err: err}
+		}
+		defer ln.Close()
+		go func() {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			buf := make([]byte, 256*1024)
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := c.Write(buf); err != nil {
+					return
+				}
+			}
+		}()
+		conn, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			return connectIPUploadBenchResult{layer: layer, err: err}
+		}
+		defer conn.Close()
+		n, mbps, err := measureTCPDownloadMbps(conn, duration)
+		return connectIPUploadBenchResult{layer: layer, mbps: mbps, bytes: n, err: err}
+	}
+
+	h := startConnectIPDownloadHarness(t, link)
 	defer h.close()
 	conn := h.dialRemote(t)
 	defer conn.Close()
 	n, mbps, err := measureTCPDownloadMbps(conn, duration)
-	if err != nil {
-		t.Fatalf("download bench: %v", err)
+	return connectIPUploadBenchResult{layer: layer, mbps: mbps, bytes: n, err: err}
+}
+
+func verdictConnectIPDownload(l0, l1, l3 connectIPUploadBenchResult) string {
+	switch {
+	case !l0.ok() || !l1.ok() || !l3.ok():
+		return "FAIL: bench error"
+	case l1.mbps >= connectIPLocalizeFastMbps && l3.mbps >= connectIPLocalizeCeilingMin && l3.mbps <= connectIPLocalizeCeilingMax:
+		return "masque connect-ip packet plane: L1 fast download, L3 windowed ~64KiB/RTT band → S2C DATA window + client ACK credit (not per-segment RTT sleep)"
+	case l1.mbps < connectIPLocalizeFastMbps && l0.mbps >= connectIPLocalizeFastMbps:
+		return "masque connect-ip: L0 fast, L1 download slow → forwarder pumpRemoteToClient or client ingress (not wire RTT)"
+	case l1.mbps >= connectIPLocalizeFastMbps && l3.mbps > connectIPLocalizeCeilingMax:
+		return "L3 window model did not reproduce download ceiling (harness calibration)"
+	default:
+		return "inconclusive: review download layer Mbps"
 	}
-	t.Logf("connect-ip download L1: %.1f Mbit/s (%d bytes)", mbps, n)
-	if mbps < connectIPLocalizeFastMbps {
-		t.Fatalf("download L1 slow: %.1f Mbit/s (want >= %.0f)", mbps, connectIPLocalizeFastMbps)
+}
+
+// TestMasqueConnectIPLocalizeDownload checks instant L1 and windowed L3 download bands.
+func TestMasqueConnectIPLocalizeDownload(t *testing.T) {
+	const duration = 400 * time.Millisecond
+
+	l0 := benchConnectIPDownloadLayer(t, "L0", nil, duration)
+	l1 := benchConnectIPDownloadLayer(t, "L1", instantPacketLink{}, duration)
+	l3 := benchConnectIPDownloadLayer(t, "L3", benchWindowedPacketLink(), duration)
+
+	for _, r := range []connectIPUploadBenchResult{l0, l1, l3} {
+		if r.err != nil {
+			t.Fatalf("%s: %v", r.layer, r.err)
+		}
+		t.Logf("connect-ip localize download %s: %.1f Mbit/s (%d bytes)", r.layer, r.mbps, r.bytes)
+	}
+
+	if l1.mbps < connectIPLocalizeFastMbps {
+		t.Fatalf("download L1 slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectIPLocalizeFastMbps)
+	}
+	if l3.mbps < connectIPLocalizeCeilingMin || l3.mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("download L3 windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectIPLocalizeCeilingMin, connectIPLocalizeCeilingMax)
+	}
+
+	v := verdictConnectIPDownload(l0, l1, l3)
+	t.Logf("connect-ip localize download verdict: %s", v)
+}
+
+// TestConnectIPDockerTUNKPIInProcGuard proxies docker connect-ip-h3-tun KPI on instant packet link
+// (upload/download ≥80 Mbit/s in-proc). Docker tcp_down≥350 @ netem: TestMasqueDockerBenchConnectIPH3TunKPIContract + bench-history.
+func TestConnectIPDockerTUNKPIInProcGuard(t *testing.T) {
+	t.Run("upload", func(t *testing.T) {
+		h := startConnectIPUploadHarness(t, instantPacketLink{})
+		defer h.close()
+		conn := h.dialRemote(t)
+		defer conn.Close()
+		bytes, mbps, err := measureTCPUploadMbps(conn, localizeBenchDuration)
+		if err != nil {
+			t.Fatalf("upload: %v", err)
+		}
+		t.Logf("connect-ip docker upload KPI proxy: %.1f Mbit/s (%d B)", mbps, bytes)
+		if mbps < connectIPLocalizeFastMbps {
+			t.Fatalf("upload %.1f Mbit/s want >= %.0f (docker tcp_up KPI)", mbps, connectIPLocalizeFastMbps)
+		}
+	})
+
+	t.Run("download", func(t *testing.T) {
+		h := startConnectIPDownloadHarness(t, instantPacketLink{})
+		defer h.close()
+		conn := h.dialRemote(t)
+		defer conn.Close()
+		bytes, mbps, err := measureTCPDownloadMbps(conn, localizeBenchDuration)
+		if err != nil {
+			t.Fatalf("download: %v", err)
+		}
+		t.Logf("connect-ip docker download KPI proxy: %.1f Mbit/s (%d B)", mbps, bytes)
+		if mbps < connectIPLocalizeFastMbps {
+			t.Fatalf("download %.1f Mbit/s want >= %.0f (docker in-proc L1 floor)", mbps, connectIPLocalizeFastMbps)
+		}
+	})
+}
+
+// TestConnectIPForwarderDownloadWindowedBand (S72): L3 forwarder download stays in windowed ceiling band (Read path).
+func TestConnectIPForwarderDownloadWindowedBand(t *testing.T) {
+	r := benchConnectIPDownloadLayer(t, "L3", benchWindowedPacketLink(), localizeBenchDuration)
+	if r.err != nil {
+		t.Fatalf("L3 download: %v", r.err)
+	}
+	t.Logf("forwarder download windowed band: %.1f Mbit/s (%d bytes)", r.mbps, r.bytes)
+	if r.mbps < connectIPLocalizeCeilingMin || r.mbps > connectIPLocalizeCeilingMax {
+		t.Fatalf("L3 download %.1f Mbit/s want %.0f–%.0f", r.mbps, connectIPLocalizeCeilingMin, connectIPLocalizeCeilingMax)
 	}
 }
 
@@ -431,17 +753,33 @@ func waitConnectIPRecycleReady(t *testing.T, h *connectIPUploadHarness, fired *a
 	}
 }
 
+const connectIPEgressDrainTimeout = 2 * time.Second
+
 func flushConnectIPEgressAfterClose(h *connectIPUploadHarness) {
+	waitConnectIPEgressDrained(nil, h)
+}
+
+// waitConnectIPEgressDrained spins outbound drain until the client queue is empty.
+// When tb is non-nil, failure to drain within connectIPEgressDrainTimeout fails the test.
+func waitConnectIPEgressDrained(tb testing.TB, h *connectIPUploadHarness) {
 	if h == nil || h.clientNS == nil {
 		return
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(connectIPEgressDrainTimeout)
 	for time.Now().Before(deadline) {
 		h.clientNS.ScheduleOutboundDrain()
 		if h.clientNS.OutboundQueueDepth() == 0 {
+			if err := h.clientNS.TerminalError(); err != nil && tb != nil {
+				tb.Helper()
+				tb.Fatalf("unexpected terminal netstack error after egress drain: %v", err)
+			}
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	if tb != nil {
+		tb.Helper()
+		tb.Fatalf("outbound queue not drained after %v (depth=%d)", connectIPEgressDrainTimeout, h.clientNS.OutboundQueueDepth())
 	}
 }
 
@@ -507,10 +845,10 @@ func (w windowedPacketLink) endpoints() (IPPacketSession, IPPacketSession) {
 
 func newWindowedPacketPair(rtt time.Duration, windowBytes int) (IPPacketSession, IPPacketSession) {
 	if windowBytes <= 0 {
-		windowBytes = 64 * 1024
+		windowBytes = localizeBenchWindowBytes
 	}
 	if rtt <= 0 {
-		rtt = 35 * time.Millisecond
+		rtt = localizeBenchRTT
 	}
 	bridge := &windowedPacketBridge{
 		rtt:         rtt,
@@ -574,33 +912,59 @@ const (
 )
 
 type windowedPacketBridge struct {
-	mu             sync.Mutex
-	cond           *sync.Cond
-	rtt            time.Duration
-	windowBytes    int
-	inflightC2S    int
-	pendingRelease int
-	releaseTimer   *time.Timer
-	clientRx       chan []byte
-	serverRx       chan []byte
-	closed         bool
+	mu               sync.Mutex
+	cond             *sync.Cond
+	rtt              time.Duration
+	windowBytes      int
+	inflightC2S      int
+	inflightS2C      int
+	pendingRelease   int
+	pendingReleaseS2C int
+	releaseTimer     *time.Timer
+	clientRx         chan []byte
+	serverRx         chan []byte
+	closed           bool
 }
 
 func (b *windowedPacketBridge) write(role bridgeRole, pkt []byte) error {
+	tcpPayload := -1
+	tcpAckOnly := false
+	tcpOK := false
+	if payloadLen, ackOnly, ok := connectIPLocalizeTCPMeta(pkt); ok {
+		tcpPayload = payloadLen
+		tcpAckOnly = ackOnly
+		tcpOK = true
+	}
+	isC2SData := role == bridgeRoleClient && tcpOK && tcpPayload > 0
+	isS2CData := role == bridgeRoleServer && tcpOK && tcpPayload > 0
+	isAck := tcpOK && tcpAckOnly
+
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
 		return net.ErrClosed
 	}
-	if role == bridgeRoleClient {
-		for b.inflightC2S+len(pkt) > b.windowBytes && !b.closed {
+	if isC2SData {
+		charge := tcpPayload
+		for b.inflightC2S+charge > b.windowBytes && !b.closed {
 			b.cond.Wait()
 		}
 		if b.closed {
 			b.mu.Unlock()
 			return net.ErrClosed
 		}
-		b.inflightC2S += len(pkt)
+		b.inflightC2S += charge
+	}
+	if isS2CData {
+		charge := tcpPayload
+		for b.inflightS2C+charge > b.windowBytes && !b.closed {
+			b.cond.Wait()
+		}
+		if b.closed {
+			b.mu.Unlock()
+			return net.ErrClosed
+		}
+		b.inflightS2C += charge
 	}
 	b.mu.Unlock()
 
@@ -609,27 +973,65 @@ func (b *windowedPacketBridge) write(role bridgeRole, pkt []byte) error {
 		dst = b.clientRx
 	}
 	p := append([]byte(nil), pkt...)
-	if role == bridgeRoleServer {
-		// Model TCP ACK clock: data may reach the forwarder immediately; credit returns after RTT.
-		if b.rtt > 0 {
-			time.Sleep(b.rtt)
-		}
-		credit := connectIPLocalizeAckCredit(pkt)
+	if isAck && role == bridgeRoleServer && b.rtt > 0 {
+		// Upload ACK clock: server→client ACK delivery is RTT-delayed.
+		time.Sleep(b.rtt)
+	}
+
+	deliver := func() error {
 		select {
 		case dst <- p:
-			b.releaseC2S(credit)
+			if isAck {
+				credit := connectIPLocalizeAckCredit(pkt)
+				if role == bridgeRoleServer {
+					b.releaseC2S(credit)
+				} else {
+					b.scheduleReleaseS2C(credit)
+				}
+			}
 			return nil
 		default:
-			b.releaseC2S(credit)
+			if isAck {
+				credit := connectIPLocalizeAckCredit(pkt)
+				if role == bridgeRoleServer {
+					b.releaseC2S(credit)
+				} else {
+					b.scheduleReleaseS2C(credit)
+				}
+			}
 			return io.ErrShortBuffer
 		}
 	}
-	select {
-	case dst <- p:
-		return nil
-	default:
-		return io.ErrShortBuffer
+	return deliver()
+}
+
+func connectIPLocalizeIsIPv4TCP(pkt []byte) bool {
+	return len(pkt) >= 20 && pkt[0]>>4 == 4 && pkt[9] == 6
+}
+
+func connectIPLocalizeTCPMeta(pkt []byte) (payloadLen int, ackOnly bool, ok bool) {
+	if !connectIPLocalizeIsIPv4TCP(pkt) {
+		return -1, false, false
 	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl+14 > len(pkt) {
+		return -1, false, false
+	}
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < 20 || ihl+doff > len(pkt) {
+		return -1, false, false
+	}
+	payloadLen = len(pkt) - ihl - doff
+	ackOnly = payloadLen == 0 && pkt[ihl+13]&0x10 != 0
+	return payloadLen, ackOnly, true
+}
+
+func connectIPLocalizeTCPPayloadLen(pkt []byte) int {
+	payloadLen, _, ok := connectIPLocalizeTCPMeta(pkt)
+	if !ok {
+		return -1
+	}
+	return payloadLen
 }
 
 // connectIPLocalizeAckCredit estimates TCP window credit returned by one server→client segment.
@@ -677,6 +1079,36 @@ func (b *windowedPacketBridge) flushRelease() {
 	b.mu.Unlock()
 }
 
+func (b *windowedPacketBridge) scheduleReleaseS2C(credit int) {
+	if credit <= 0 {
+		return
+	}
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.pendingReleaseS2C += credit
+	if b.releaseTimer == nil && b.rtt > 0 {
+		b.releaseTimer = time.AfterFunc(b.rtt, b.flushRelease)
+	} else if b.releaseTimer == nil {
+		b.flushReleaseS2CLocked()
+	}
+	b.mu.Unlock()
+}
+
+func (b *windowedPacketBridge) flushReleaseS2CLocked() {
+	credit := b.pendingReleaseS2C
+	b.pendingReleaseS2C = 0
+	if credit > 0 {
+		b.inflightS2C -= credit
+		if b.inflightS2C < 0 {
+			b.inflightS2C = 0
+		}
+		b.cond.Broadcast()
+	}
+}
+
 func (b *windowedPacketBridge) flushReleaseLocked() {
 	if b.releaseTimer != nil {
 		b.releaseTimer.Stop()
@@ -691,6 +1123,7 @@ func (b *windowedPacketBridge) flushReleaseLocked() {
 		}
 		b.cond.Broadcast()
 	}
+	b.flushReleaseS2CLocked()
 }
 
 func (b *windowedPacketBridge) releaseC2S(n int) {

@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
@@ -8,12 +9,12 @@ import (
 
 func init() {
 	cip.SetErrors(cip.Errors{
-		StackInit:      ErrTCPStackInit,
-		Dial:           ErrTCPDial,
-		Closed:         ErrLifecycleClosed,
-		DialRequiresIP: ErrTCPOverConnectIP,
-		Transport:      ErrTransportInit,
-		Capability:     ErrCapability,
+		StackInit:      session.ErrTCPStackInit,
+		Dial:           session.ErrTCPDial,
+		Closed:         session.ErrLifecycleClosed,
+		DialRequiresIP: session.ErrTCPOverConnectIP,
+		Transport:      session.ErrTransportInit,
+		Capability:     session.ErrCapability,
 	})
 	cip.SetObs(cip.CounterObsHooks())
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,6 +96,82 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 	if err != nil {
 		t.Fatalf("expected clean shutdown on request EOF, got: %v", err)
 	}
+}
+
+// TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce verifies coalesced downlink still
+// performs exactly one FlushResponse per logical flush (G41: no double-flush inside WriteDatagramCapsule).
+func TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	w := &H2ResponseWriter{ResponseWriter: rec}
+	if err := w.WriteUDPPayloadAsCapsules([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("small payload should coalesce before flush, flushes=%d want 0", got)
+	}
+	if err := w.FlushPending(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("flushes=%d want 1 after FlushPending", got)
+	}
+	rec.flushes.Store(0)
+	if err := w.WriteUDPPayloadAsCapsules(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("empty ICMP capsule flushes=%d want 1 (immediate path)", got)
+	}
+}
+
+// TestH2ResponseWriterDownlinkCoalesceBatchesFlush verifies burst downlink batches capsule
+// wire bytes at H2DownlinkCoalesceThreshold instead of flushing per UDP read (max-burst path).
+func TestServeH2DownlinkCoalesceBatchesFlush(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	w := &H2ResponseWriter{ResponseWriter: rec}
+	const chunk = 4096
+	const nChunks = 10 // 40 KiB → expect 2 flushes (32 KiB threshold + final), not 10
+	payload := bytes.Repeat([]byte{'u'}, chunk)
+	for i := 0; i < nChunks; i++ {
+		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("mid-burst flushes=%d want 1 at 32 KiB threshold", got)
+	}
+	if err := w.FlushPending(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 2 {
+		t.Fatalf("final flushes=%d want 2 (32 KiB batch + remainder)", got)
+	}
+}
+
+type flushCountResponseWriter struct {
+	mu   sync.Mutex
+	hdr  http.Header
+	body bytes.Buffer
+	flushes atomic.Int32
+}
+
+func (w *flushCountResponseWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = make(http.Header)
+	}
+	return w.hdr
+}
+
+func (w *flushCountResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Write(p)
+}
+
+func (w *flushCountResponseWriter) WriteHeader(int) {}
+
+func (w *flushCountResponseWriter) Flush() {
+	w.flushes.Add(1)
 }
 
 func TestWriteUDPPayloadAsH2DatagramCapsulesEmpty(t *testing.T) {

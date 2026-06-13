@@ -1,6 +1,7 @@
 package masque
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"crypto/tls"
 	"log"
@@ -115,6 +116,6 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 		ResolveDialAddr: func() string {
 			return masqueDialTarget(masqueQuicDialCandidateHost(opts), portNum)
 		},
-		ErrTemplateNotConfigured: ErrConnectUDPTemplateNotConfigured,
+		ErrTemplateNotConfigured: session.ErrConnectUDPTemplateNotConfigured,
 	}, template, target)
 }

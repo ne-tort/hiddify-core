@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,6 +104,27 @@ func runUDPEcho(t *testing.T, addr *net.UDPAddr) *net.UDPConn {
 		}
 	}()
 	return c
+}
+
+func runUDPSink(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, *atomic.Int64) {
+	t.Helper()
+	c, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("listen sink udp: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+	var received atomic.Int64
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, _, err := c.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			received.Add(int64(n))
+		}
+	}()
+	return c, &received
 }
 
 // startInProcessMasqueUDPProxy serves HTTP/3 on an ephemeral UDP port. register must add handlers

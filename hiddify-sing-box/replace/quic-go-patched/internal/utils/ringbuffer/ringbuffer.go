@@ -29,6 +29,21 @@ func (r *RingBuffer[T]) Empty() bool {
 	return !r.full && r.headPos == r.tailPos
 }
 
+// PushFront inserts a new element at the front of the queue.
+func (r *RingBuffer[T]) PushFront(t T) {
+	if r.full || len(r.ring) == 0 {
+		r.grow()
+	}
+	r.headPos--
+	if r.headPos < 0 {
+		r.headPos = len(r.ring) - 1
+	}
+	r.ring[r.headPos] = t
+	if r.headPos == r.tailPos {
+		r.full = true
+	}
+}
+
 // PushBack adds a new element.
 // If the ring buffer is full, its capacity is increased first.
 func (r *RingBuffer[T]) PushBack(t T) {

@@ -4,10 +4,11 @@
 // Refactor map, layer checklists, and target package layout live in the hiddify-app repo:
 // docs/masque/layers/ (see AGENTS.md at repo root).
 //
-// Intended decomposition (in progress):
-//   - session/     coreSession, dial, lifecycle
-//   - h2/, h3/     HTTP transport
-//   - stream/      TCP bidi CONNECT-stream dataplane
-//   - connectip/   CONNECT-IP packet plane + gVisor netstack
-//   - connectudp/  CONNECT-UDP
+// Package layout (see docs/masque/layers/TARGET-PACKAGES.md):
+//   session/, httpx/  — dial, lifecycle, HTTP layer switch
+//   h2/, h3/          — HTTP transport
+//   stream/           — CONNECT-stream dataplane
+//   connectip/        — CONNECT-IP client packet plane
+//   forwarder/        — TCP/UDP termination (shared with server)
+//   connectudp/       — CONNECT-UDP
 package masque

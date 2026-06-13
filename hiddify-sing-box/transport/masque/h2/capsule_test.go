@@ -4,12 +4,76 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/quic-go/quic-go/quicvarint"
 )
+
+type flushCountResponseWriter struct {
+	mu      sync.Mutex
+	hdr     http.Header
+	body    bytes.Buffer
+	flushes atomic.Int32
+}
+
+func (w *flushCountResponseWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = make(http.Header)
+	}
+	return w.hdr
+}
+
+func (w *flushCountResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Write(p)
+}
+
+func (w *flushCountResponseWriter) Flush() {
+	w.flushes.Add(1)
+}
+
+// TestWriteDatagramCapsulePerCapsuleFlush (G54/L1a-H1): each WriteDatagramCapsule flushes once.
+func TestWriteDatagramCapsulePerCapsuleFlush(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	for i := 0; i < 3; i++ {
+		if err := WriteDatagramCapsule(rec, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rec.flushes.Load(); got != 3 {
+		t.Fatalf("flushes=%d want 3 (one per capsule)", got)
+	}
+}
+
+// TestAppendUDPPayloadAsDatagramCapsulesNoFlush (G54): append path must not flush mid-batch.
+func TestAppendUDPPayloadAsDatagramCapsulesNoFlush(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	payload := bytes.Repeat([]byte("u"), MaxUDPPayloadPerDatagramCapsule()*2+10)
+	if err := AppendUDPPayloadAsDatagramCapsules(rec, payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("append flushes=%d want 0", got)
+	}
+}
+
+// TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush (G54): batched write flushes once at end.
+func TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	payload := bytes.Repeat([]byte("u"), MaxUDPPayloadPerDatagramCapsule()*2+10)
+	if err := WriteUDPPayloadAsDatagramCapsules(rec, payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("flushes=%d want 1 terminal flush", got)
+	}
+}
 
 func TestMaxCapsulePayloadMTUParityWithH3(t *testing.T) {
 	ceilingMax := cip.DatagramCeilingMax()

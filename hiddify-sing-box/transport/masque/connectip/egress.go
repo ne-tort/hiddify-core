@@ -12,13 +12,20 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// DeliverOutboundPacket retries transient WritePacket failures on the same frame.
+const (
+	maxOutboundPersist      = 128
+	maxDirectOutboundPersist = 32
+)
+
+type outboundItem struct {
+	payload []byte
+	persist uint8
+}
+
+// DeliverOutboundPacket retries transient WritePacket failures without blocking the outbound writer.
 func (s *Netstack) DeliverOutboundPacket(payload []byte) error {
-	const maxPersist = 128
-	var icmp []byte
-	var err error
-	for attempt := 0; attempt < maxPersist; attempt++ {
-		icmp, err = s.writePacketWithRetry(payload)
+	for attempt := 0; attempt < maxDirectOutboundPersist; attempt++ {
+		icmp, err := s.writePacketWithRetry(payload)
 		if err == nil {
 			if len(icmp) > 0 {
 				s.injectPacket(icmp)
@@ -32,25 +39,63 @@ func (s *Netstack) DeliverOutboundPacket(payload []byte) error {
 		if !IsRetryablePacketWriteError(err) {
 			return err
 		}
-		backoff := attempt
-		if backoff > 15 {
-			backoff = 15
+		if attempt+1 >= maxDirectOutboundPersist {
+			obsWriteFailReason("retry_exhausted")
+			obsSessionReset("write_fail_retry_exhausted")
+			return err
 		}
-		time.Sleep(time.Duration(1+backoff) * time.Millisecond)
+		runtime.Gosched()
 	}
-	obsWriteFailReason("retry_exhausted")
-	obsSessionReset("write_fail_retry_exhausted")
-	return err
+	return nil
 }
 
 func (s *Netstack) ensureOutboundWriter() {
 	s.outboundOnce.Do(func() {
-		s.outboundCh = make(chan []byte, netstackOutboundQueueDepth)
+		s.outboundCh = make(chan outboundItem, netstackOutboundQueueDepth)
 		s.outboundPoke = make(chan struct{}, 1)
 		s.outboundWG.Add(2)
 		go s.runOutboundWriter()
 		go s.runOutboundPokeDrain()
 	})
+}
+
+func (s *Netstack) noteOutboundEnqueued() {
+	if s.outboundMetrics != nil {
+		s.outboundMetrics.noteEnqueued()
+	}
+}
+
+func (s *Netstack) noteOutboundDequeued() {
+	if s.outboundMetrics != nil {
+		s.outboundMetrics.noteDequeued()
+	}
+}
+
+func (s *Netstack) enqueueOutboundItem(item outboundItem) bool {
+	s.noteOutboundEnqueued()
+	select {
+	case s.outboundCh <- item:
+		return true
+	default:
+		s.noteOutboundDequeued()
+		return false
+	}
+}
+
+func (s *Netstack) enqueueOutboundPayload(payload []byte, persist uint8) bool {
+	return s.enqueueOutboundItem(outboundItem{payload: payload, persist: persist})
+}
+
+func (s *Netstack) scheduleOutboundDrainAfterWrite() {
+	if s == nil || s.closed.Load() {
+		return
+	}
+	s.ensureOutboundWriter()
+	select {
+	case s.outboundPoke <- struct{}{}:
+	default:
+		go s.runExclusiveOutboundDrain()
+	}
 }
 
 // ScheduleOutboundDrain pipelines gVisor egress while WritePacket is blocked.
@@ -116,7 +161,11 @@ func (s *Netstack) drainLinkEndpointOutboundLocked() {
 		case <-s.done:
 			returnOutboundBuf(payload)
 			return
-		case s.outboundCh <- payload:
+		case s.outboundCh <- outboundItem{payload: payload, persist: 0}:
+			s.noteOutboundEnqueued()
+			if s.onOutboundQueued != nil {
+				s.onOutboundQueued()
+			}
 		}
 		if !s.outboundDraining.CompareAndSwap(false, true) {
 			go s.ScheduleOutboundDrain()
@@ -132,7 +181,9 @@ func (s *Netstack) runOutboundWriter() {
 		case <-s.done:
 			s.drainOutboundQueueOnClose()
 			return
-		case payload := <-s.outboundCh:
+		case item := <-s.outboundCh:
+			s.noteOutboundDequeued()
+			payload := item.payload
 			if len(payload) == 0 {
 				continue
 			}
@@ -140,7 +191,11 @@ func (s *Netstack) runOutboundWriter() {
 				returnOutboundBuf(payload)
 				continue
 			}
-			if err := s.DeliverOutboundPacket(payload); err != nil {
+			requeued, err := s.deliverOutboundWriterItem(payload, item.persist)
+			if requeued {
+				continue
+			}
+			if err != nil {
 				if s.closed.Load() || errors.Is(err, net.ErrClosed) {
 					returnOutboundBuf(payload)
 					return
@@ -158,6 +213,42 @@ func (s *Netstack) runOutboundWriter() {
 			}
 			returnOutboundBuf(payload)
 		}
+	}
+}
+
+func (s *Netstack) deliverOutboundWriterItem(payload []byte, persist uint8) (requeued bool, err error) {
+	icmp, err := s.writePacketWithRetry(payload)
+	if err == nil {
+		if len(icmp) > 0 {
+			s.injectPacket(icmp)
+		}
+		// gVisor may enqueue follow-on ACKs while WritePacket runs; poke the drain loop
+		// without blocking the writer on outboundCh (full queue would deadlock here).
+		s.scheduleOutboundDrainAfterWrite()
+		return false, nil
+	}
+	if IsBenignEgressTeardownError(err) {
+		s.discardStaleOutboundAfterBenignTeardown()
+		return false, nil
+	}
+	if !IsRetryablePacketWriteError(err) {
+		return false, err
+	}
+	persist++
+	if persist >= maxOutboundPersist {
+		obsWriteFailReason("retry_exhausted")
+		obsSessionReset("write_fail_retry_exhausted")
+		return false, err
+	}
+	if s.enqueueOutboundPayload(payload, persist) {
+		return true, nil
+	}
+	select {
+	case <-s.done:
+		return false, net.ErrClosed
+	case s.outboundCh <- outboundItem{payload: payload, persist: persist}:
+		s.noteOutboundEnqueued()
+		return true, nil
 	}
 }
 
@@ -185,8 +276,9 @@ func (s *Netstack) drainOutboundChannel() {
 	}
 	for {
 		select {
-		case payload := <-s.outboundCh:
-			returnOutboundBuf(payload)
+		case item := <-s.outboundCh:
+			s.noteOutboundDequeued()
+			returnOutboundBuf(item.payload)
 		default:
 			return
 		}

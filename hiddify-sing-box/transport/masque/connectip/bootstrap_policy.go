@@ -72,6 +72,15 @@ func HasBootstrapProfileLocal(profileLocalIPv4 string, profileLocalIPv6 string) 
 	return v6.Is6() && !v6.Is4In6()
 }
 
+// LegacyH2BootstrapPolicy builds passive prefix/bootstrap waits for CONNECT-IP over HTTP/2
+// without RFC 9484 control capsules (no RequestAddresses / AdvertiseRoute on the wire).
+func LegacyH2BootstrapPolicy(requirePrefix bool, profileLocalIPv4 string, profileLocalIPv6 string) BootstrapWaitPolicy {
+	policy := NewBootstrapWaitPolicy(requirePrefix, profileLocalIPv4, profileLocalIPv6, LocalPrefixWait())
+	policy.SendRequestAddresses = false
+	policy.RequestAddressesTimeout = 0
+	return policy
+}
+
 // PrefixWaitLogValue formats a wait duration for bootstrap logs.
 func PrefixWaitLogValue(d time.Duration) string {
 	if d <= 0 {

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,8 +16,9 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
-	TM "github.com/sagernet/sing-box/transport/masque"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -27,6 +29,9 @@ import (
 // server IP parse boundary (non-fatal; read continues).
 var connectIPServerParseDropTotal atomic.Uint64
 
+// connectIPRouteActive counts live RouteConnectIPBlocked handlers for graceful shutdown drain.
+var connectIPRouteActive atomic.Int32
+
 // ConnectIPServerParseDropTotal exposes the parse-drop counter for tests/ops.
 func ConnectIPServerParseDropTotal() uint64 {
 	return connectIPServerParseDropTotal.Load()
@@ -34,6 +39,25 @@ func ConnectIPServerParseDropTotal() uint64 {
 
 // ConnectIPMaxICMPRelay is the PTB/control feedback relay cap per WritePacket.
 const ConnectIPMaxICMPRelay = 8
+
+// ConnectIPMaxParseDropPerRead caps consecutive IP parse drops in ReadPacket/ReadFrom
+// before fail-closed. Guards the UDP-bridge parse loop; TCP forwarder reads conn directly.
+const ConnectIPMaxParseDropPerRead = 64
+
+var errConnectIPParseDropCeiling = E.New("connect-ip: parse drop ceiling exceeded")
+
+const defaultConnectIPRouteSetupTimeout = 2 * time.Second
+
+// ConnectIPRouteSetupTimeout bounds AssignAddresses + AdvertiseRoute during CONNECT-IP bootstrap.
+// Override via MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT (e.g. "5s") for slow links or docker restart.
+func ConnectIPRouteSetupTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultConnectIPRouteSetupTimeout
+}
 
 // ConnectIPRequestErrorHTTPStatus maps connect-ip-go parse errors to HTTP status codes.
 func ConnectIPRequestErrorHTTPStatus(err error) int {
@@ -45,27 +69,49 @@ func ConnectIPRequestErrorHTTPStatus(err error) int {
 }
 
 // ConnectIPRequestErrorClass maps HTTP status to transport error class.
-func ConnectIPRequestErrorClass(status int) TM.ErrorClass {
+func ConnectIPRequestErrorClass(status int) session.ErrorClass {
 	switch status {
 	case 400, 501:
-		return TM.ErrorClassCapability
+		return session.ErrorClassCapability
 	default:
-		return TM.ErrorClassUnknown
+		return session.ErrorClassUnknown
+	}
+}
+
+// ConnectIPServerWriteErrorClass maps packet-plane WritePacket failures to lifecycle vs fatal classes.
+// Reason keys from connectip.ClassifyWriteError correlate with CONNECT_IP_OBS write_fail_reason totals.
+func ConnectIPServerWriteErrorClass(err error) session.ErrorClass {
+	if err == nil {
+		return session.ErrorClassUnknown
+	}
+	var closeErr *connectip.CloseError
+	if errors.As(err, &closeErr) && closeErr.Remote {
+		return session.ErrorClassLifecycle
+	}
+	switch cip.ClassifyWriteError(err) {
+	case "closed", "canceled":
+		return session.ErrorClassLifecycle
+	case "capability_flow_forwarding_unsupported":
+		return session.ErrorClassCapability
+	case "deadline_exceeded", "timeout", "mtu":
+		return session.ErrorClassTransport
+	default:
+		return session.ErrorClassUnknown
 	}
 }
 
 // ConnectIPRouteAdvertiseErrorClass maps route advertise failures to error class.
-func ConnectIPRouteAdvertiseErrorClass(err error) TM.ErrorClass {
+func ConnectIPRouteAdvertiseErrorClass(err error) session.ErrorClass {
 	if err == nil {
-		return TM.ErrorClassUnknown
+		return session.ErrorClassUnknown
 	}
 	if errors.Is(err, net.ErrClosed) {
-		return TM.ErrorClassLifecycle
+		return session.ErrorClassLifecycle
 	}
 	if errors.Is(err, connectip.ErrInvalidRouteAdvertisement) {
-		return TM.ErrorClassCapability
+		return session.ErrorClassCapability
 	}
-	return TM.ErrorClassTransport
+	return session.ErrorClassTransport
 }
 
 // DataplaneContext returns a context for CONNECT-IP packet-plane work that does not
@@ -88,18 +134,40 @@ func NewConnectIPNetPacketConn(conn fwd.PacketPlaneConn) *ConnectIPNetPacketConn
 	return &ConnectIPNetPacketConn{Conn: conn}
 }
 
+// ConnectIPRouteActiveCount reports in-flight RouteConnectIPBlocked handlers (for shutdown drain).
+func ConnectIPRouteActiveCount() int32 {
+	return connectIPRouteActive.Load()
+}
+
+func waitConnectIPRoutesDrained(timeout time.Duration) bool {
+	if timeout <= 0 {
+		return connectIPRouteActive.Load() == 0
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if connectIPRouteActive.Load() == 0 {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return connectIPRouteActive.Load() == 0
+}
+
 // RouteConnectIPBlocked keeps the HTTP handler alive until the CONNECT-IP packet-plane
 // relay ends. On HTTP/3 the stream is hijacked via http3.HTTPStreamer inside connect-ip Proxy,
 // so ending the handler does not close the QUIC stream. On HTTP/2 Extended CONNECT there is no
 // hijack; if the handler returned immediately, net/http would finalize the response and tear down
 // the CONNECT stream while RoutePacketConnectionEx goroutines were still running.
 func RouteConnectIPBlocked(router adapter.Router, reqCtx context.Context, packetConn *ConnectIPNetPacketConn, metadata adapter.InboundContext, logger log.ContextLogger, opts option.MasqueEndpointOptions, onwardDialer net.Dialer) {
+	connectIPRouteActive.Add(1)
+	defer connectIPRouteActive.Add(-1)
+
 	done := make(chan struct{})
 	var once sync.Once
 	notify := func() { once.Do(func() { close(done) }) }
 	onClose := func(err error) {
 		if err != nil && !errors.Is(err, context.Canceled) && logger != nil {
-			logger.DebugContext(reqCtx, fmt.Sprintf("masque connect-ip route closed err=%v", err))
+			logger.DebugContext(reqCtx, fmt.Sprintf("masque connect-ip route closed err=%v error_class=%s parse_drop_total=%d", err, ConnectIPServerWriteErrorClass(err), ConnectIPServerParseDropTotal()))
 		}
 		_ = packetConn.Close()
 		notify()
@@ -125,16 +193,22 @@ func RouteConnectIPBlocked(router adapter.Router, reqCtx context.Context, packet
 }
 
 func (c *ConnectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Socksaddr, err error) {
+	consecutiveDrops := 0
 	for {
 		n, err := c.Conn.ReadPacket(buffer.FreeBytes())
 		if err != nil {
-			TM.ObserveConnectIPServerReadError(err)
+			cip.TrackReadExit(err)
 			return M.Socksaddr{}, err
 		}
 		buffer.Truncate(n)
 		destination, payloadStart, payloadEnd, parseErr := ParseIPDestinationAndPayload(buffer.Bytes())
 		if parseErr != nil {
 			connectIPServerParseDropTotal.Add(1)
+			consecutiveDrops++
+			if consecutiveDrops >= ConnectIPMaxParseDropPerRead {
+				cip.TrackReadExit(errConnectIPParseDropCeiling)
+				return M.Socksaddr{}, errConnectIPParseDropCeiling
+			}
 			buffer.Reset()
 			if c.deadlines.readTimeoutExceeded() {
 				return M.Socksaddr{}, os.ErrDeadlineExceeded
@@ -145,7 +219,7 @@ func (c *ConnectIPNetPacketConn) ReadPacket(buffer *buf.Buffer) (destination M.S
 			buffer.Advance(payloadStart)
 			buffer.Truncate(payloadEnd - payloadStart)
 		}
-		TM.ObserveConnectIPServerReadSuccess(n)
+		cip.TrackPacketRx(n)
 		return destination, nil
 	}
 }
@@ -156,13 +230,13 @@ func (c *ConnectIPNetPacketConn) WritePacket(buffer *buf.Buffer, destination M.S
 
 func (c *ConnectIPNetPacketConn) writeOutgoingWithICMPRelay(packet []byte) error {
 	peerPrefixes := c.Conn.CurrentPeerPrefixes()
-		payload := fwd.RewriteOutgoingPeerDst(packet, peerPrefixes)
-		for i := 0; i < ConnectIPMaxICMPRelay; i++ {
-			if i > 0 {
-				payload = fwd.RewriteOutgoingPeerDst(payload, peerPrefixes)
+	payload := fwd.RewriteOutgoingPeerDst(packet, peerPrefixes)
+	for i := 0; i < ConnectIPMaxICMPRelay; i++ {
+		if i > 0 {
+			payload = fwd.RewriteOutgoingPeerDst(payload, peerPrefixes)
 		}
 		icmp, err := c.Conn.WritePacket(payload)
-		TM.ObserveConnectIPServerWriteIteration(len(payload), len(icmp), err)
+		cip.TrackServerWriteIteration(len(payload), len(icmp), err)
 		if err != nil {
 			return err
 		}
@@ -178,16 +252,22 @@ func (c *ConnectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 	if c.deadlines.readTimeoutExceeded() {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
+	consecutiveDrops := 0
 	for {
 		n, err = c.Conn.ReadPacket(p)
 		if err != nil {
-			TM.ObserveConnectIPServerReadError(err)
+			cip.TrackReadExit(err)
 			return 0, nil, err
 		}
 		rawN := n
 		destination, payloadStart, payloadEnd, parseErr := ParseIPDestinationAndPayload(p[:n])
 		if parseErr != nil {
 			connectIPServerParseDropTotal.Add(1)
+			consecutiveDrops++
+			if consecutiveDrops >= ConnectIPMaxParseDropPerRead {
+				cip.TrackReadExit(errConnectIPParseDropCeiling)
+				return 0, nil, errConnectIPParseDropCeiling
+			}
 			if c.deadlines.readTimeoutExceeded() {
 				return 0, nil, os.ErrDeadlineExceeded
 			}
@@ -198,7 +278,7 @@ func (c *ConnectIPNetPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err e
 			copy(p[:payloadLen], p[payloadStart:payloadEnd])
 			n = payloadLen
 		}
-		TM.ObserveConnectIPServerReadSuccess(rawN)
+		cip.TrackPacketRx(rawN)
 		return n, &net.IPAddr{IP: net.IP(destination.Addr.AsSlice())}, nil
 	}
 }

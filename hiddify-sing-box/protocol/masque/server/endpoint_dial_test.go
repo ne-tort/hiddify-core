@@ -1,13 +1,13 @@
 package server
 
 import (
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"context"
 	"errors"
 	"net"
 	"strings"
 	"testing"
 
-	TM "github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -30,10 +30,10 @@ func TestDialEndpointTCPRejectsInvalidDestinationAsCapability(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid destination to be rejected")
 	}
-	if !errors.Is(err, TM.ErrCapability) {
+	if !errors.Is(err, session.ErrCapability) {
 		t.Fatalf("expected ErrCapability for invalid destination, got: %v", err)
 	}
-	if got := TM.ClassifyError(err); got != TM.ErrorClassCapability {
+	if got := session.ClassifyError(err); got != session.ErrorClassCapability {
 		t.Fatalf("expected capability class for invalid destination, got: %s", got)
 	}
 }

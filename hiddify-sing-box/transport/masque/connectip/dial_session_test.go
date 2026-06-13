@@ -1,6 +1,7 @@
 package connectip
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"testing"
@@ -41,5 +42,21 @@ func TestFinishSessionDialBootstrapFailureClosesConn(t *testing.T) {
 	}
 	if !conn.closed {
 		t.Fatal("expected conn closed on bootstrap failure")
+	}
+}
+
+func TestFinishSessionDialWithContextSurvivesCanceledOpenCtx(t *testing.T) {
+	prefix := netip.MustParsePrefix("172.16.0.2/32")
+	conn := &fakeBootstrapConn{
+		controlCapsules: true,
+		current:         []netip.Prefix{prefix},
+	}
+	openCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := FinishSessionDialWithContext(DataplaneContext(openCtx), conn, SessionBootstrapParams{
+		Tag:                   "t1",
+		WarpConnectIPProtocol: "cf-connect-ip",
+	}); err != nil {
+		t.Fatalf("bootstrap must not inherit canceled open ctx: %v", err)
 	}
 }
