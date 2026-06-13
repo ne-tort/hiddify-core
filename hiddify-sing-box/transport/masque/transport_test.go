@@ -802,6 +802,22 @@ func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	if !tcpOverIPSession.Capabilities().ConnectTCP {
 		t.Fatal("expected connect_ip+transport connect_ip session to advertise ConnectTCP")
 	}
+
+	hybridSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
+		Server:        "example.com",
+		ServerPort:    443,
+		TransportMode: "connect_ip",
+		TCPTransport:  "connect_stream",
+	})
+	if err != nil {
+		t.Fatalf("new connect_ip+connect_stream hybrid session: %v", err)
+	}
+	if !hybridSession.Capabilities().ConnectTCP {
+		t.Fatal("expected connect_ip+connect_stream hybrid session to advertise ConnectTCP")
+	}
+	if !hybridSession.Capabilities().ConnectIP {
+		t.Fatal("expected connect_ip+connect_stream hybrid session to advertise ConnectIP")
+	}
 }
 
 func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {

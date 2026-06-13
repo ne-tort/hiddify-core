@@ -573,8 +573,8 @@ func TestMasqueConnectStreamH2LocalizeUpload(t *testing.T) {
 	if instant.mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("h2 upload instant slow: %.1f Mbit/s (want >= %.0f)", instant.mbps, connectStreamLocalizeFastMbps)
 	}
-	if windowed.mbps < connectStreamLocalizeCeilingMin || windowed.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("h2 upload windowed: %.1f Mbit/s (want %.0f–%.0f)", windowed.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if windowed.mbps < connectStreamLocalizeUploadWindowedMin || windowed.mbps > connectStreamLocalizeUploadWindowedMax {
+		t.Fatalf("h2 upload windowed: %.1f Mbit/s (want %.0f–%.0f)", windowed.mbps, connectStreamLocalizeUploadWindowedMin, connectStreamLocalizeUploadWindowedMax)
 	}
 }
 
@@ -610,8 +610,8 @@ func TestMasqueConnectStreamH2LocalizeBottleneck(t *testing.T) {
 	if l1.mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("h2 L1 upload slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectStreamLocalizeFastMbps)
 	}
-	if l3.mbps < connectStreamLocalizeCeilingMin || l3.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("h2 L3 upload windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if l3.mbps < connectStreamLocalizeUploadWindowedMin || l3.mbps > connectStreamLocalizeUploadWindowedMax {
+		t.Fatalf("h2 L3 upload windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectStreamLocalizeUploadWindowedMin, connectStreamLocalizeUploadWindowedMax)
 	}
 
 	v := verdictConnectStreamBottleneck(l0, l1, l2, l3)
@@ -650,13 +650,13 @@ func TestMasqueConnectStreamH2LocalizeDownloadWriteTo(t *testing.T) {
 	if instant.mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("h2 download instant WriteTo slow: %.1f Mbit/s (want >= %.0f)", instant.mbps, connectStreamLocalizeFastMbps)
 	}
-	if windowed.mbps < connectStreamLocalizeCeilingMin || windowed.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("h2 download windowed WriteTo: %.1f Mbit/s (want %.0f–%.0f)", windowed.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if windowed.mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("h2 download windowed WriteTo: %.1f Mbit/s (want > %.0f KPI)", windowed.mbps, connectStreamVPSKPITargetDownMbps)
 	}
 }
 
 // TestMasqueConnectStreamH2LocalizeDuplexWriteTo (S98) checks H2 WriteTo download under upload pulses
 // on windowed bidi (complements S70 instant duplex WriteTo).
 func TestMasqueConnectStreamH2LocalizeDuplexWriteTo(t *testing.T) {
-	runConnectStreamH2DuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeCeilingMin/2)
+	runConnectStreamH2DuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
 }

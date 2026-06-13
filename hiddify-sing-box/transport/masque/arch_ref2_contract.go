@@ -3,7 +3,7 @@ package masque
 import strm "github.com/sagernet/sing-box/transport/masque/stream"
 
 // ArchH2OConnectConfPath is the frozen h2o reference config for REF2-1 audit.
-const ArchH2OConnectConfPath = "docker/masque-vps-bench/h2o/connect.conf"
+const ArchH2OConnectConfPath = "transport/masque/testdata/h2o-connect.conf"
 
 // ArchH2OParityRow documents one h2o proxy.tunnel attribute vs sing-box RelayTCPTunnel (REF2-1).
 type ArchH2OParityRow struct {
@@ -65,11 +65,6 @@ var ArchEndpointRelayAudit = []ArchEndpointRelayRow{
 		Path: "server/connect_stream.go (template)", RelayFn: "relay.TCPForward",
 		Delegate: "relay.TCPTunnel → RelayTCPTunnel", Parity: true,
 		Note: "s-ui template tcp_relay=template; mux BuildMuxHandler tcpPath",
-	},
-	{
-		Path: "removed: connect_authority_relay.go", RelayFn: "relay.TCPTunnel",
-		Delegate: "strm.RelayTCPTunnel", Parity: true,
-		Note: "removed; prod connect_stream only — same RelayTCPTunnel entry",
 	},
 	{
 		Path: "protocol/masque/endpoint_server.go", RelayFn: "server.HandleTCPConnectRequest",

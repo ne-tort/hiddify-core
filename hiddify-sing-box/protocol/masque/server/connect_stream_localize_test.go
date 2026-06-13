@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -25,6 +26,48 @@ const (
 	serverLocalizeBenchRTT       = 35 * time.Millisecond
 	serverLocalizeWindowBytes    = 64 * 1024
 )
+
+var errServerBenchDuration = errors.New("masque: server bench duration elapsed")
+
+type serverBenchWriteToSink struct {
+	deadline time.Time
+	total    int64
+}
+
+func (s *serverBenchWriteToSink) Write(p []byte) (int, error) {
+	if time.Now().After(s.deadline) {
+		return 0, errServerBenchDuration
+	}
+	s.total += int64(len(p))
+	return len(p), nil
+}
+
+// serverConnWriterTo adapts Read-path TCP for WriteTo bench parity (prod route writer_to).
+type serverConnWriterTo struct{ net.Conn }
+
+func (c serverConnWriterTo) WriteTo(w io.Writer) (int64, error) { return io.Copy(w, c.Conn) }
+
+func measureServerHandlerDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+	wt, ok := conn.(io.WriterTo)
+	if !ok {
+		return 0, 0, errors.New("masque: conn lacks io.WriterTo (prod download path)")
+	}
+	deadline := time.Now().Add(duration)
+	_ = conn.SetReadDeadline(deadline)
+	defer conn.SetReadDeadline(time.Time{})
+	sink := &serverBenchWriteToSink{deadline: deadline}
+	_, err := wt.WriteTo(sink)
+	if err != nil && err != errServerBenchDuration && err != io.EOF {
+		if sink.total == 0 {
+			return 0, 0, err
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return sink.total, float64(sink.total*8) / secs / 1e6, nil
+}
 
 type serverHandlerLink interface {
 	wrap(net.Conn) net.Conn
@@ -260,7 +303,7 @@ func benchServerHandlerDuplexDownloadMbps(t *testing.T, link serverHandlerLink, 
 		err  error
 	}, 1)
 	go func() {
-		n, mbps, err := measureServerAuthorityDownloadWriteToMbps(client, serverLocalizeBenchDur)
+		n, mbps, err := measureServerHandlerDownloadWriteToMbps(client, serverLocalizeBenchDur)
 		downloadDone <- struct {
 			n    int64
 			mbps float64

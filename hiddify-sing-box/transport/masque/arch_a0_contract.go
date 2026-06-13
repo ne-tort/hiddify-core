@@ -86,7 +86,7 @@ var ArchOrchestrationBoundaries = []ArchOrchestrationBoundary{
 	{Concern: "bulk download WriteTo/ReadFrom branch", Owner: ArchLayerRoute, Pkg: "route"},
 	{Concern: "CONNECT-stream dial policy (pipe/dual/hop)", Owner: ArchLayerSession, Pkg: "transport/masque"},
 	{Concern: "CONNECT dial + prod dial shape wrapper", Owner: ArchLayerStream, Pkg: "transport/masque/stream"},
-	{Concern: "H3 tunnel byte path + duplex_coord", Owner: ArchLayerH3, Pkg: "transport/masque/h3"},
+	{Concern: "H3 tunnel byte path + direct h3 upload + eager WINDOW", Owner: ArchLayerH3, Pkg: "transport/masque/h3"},
 	{Concern: "server onward TCP relay (out of client K-S)", Owner: ArchLayerServer, Pkg: "transport/masque/stream"},
 }
 
@@ -143,8 +143,8 @@ const (
 type ArchConnectPath string
 
 const (
-	ArchPathP1ProdPipe     ArchConnectPath = "P1_prod_pipe"
-	ArchPathP1BidiRollback ArchConnectPath = "P1_bidi_rollback"
+	ArchPathP1ProdH3Stream ArchConnectPath = "P1_prod_h3_stream"
+	ArchPathP1LegacyPipe   ArchConnectPath = "P1_legacy_pipe"
 	ArchPathP2DualLeg      ArchConnectPath = "P2_dual_leg"
 	ArchPathP6ParallelLeg  ArchConnectPath = "P6_parallel_leg"
 )
@@ -160,13 +160,14 @@ type ArchGoroutineBlockerRow struct {
 
 // ArchGoroutineBlockerTable is the frozen A0-3b goroutine × direction × blocker map.
 var ArchGoroutineBlockerTable = []ArchGoroutineBlockerRow{
-	{Path: ArchPathP1ProdPipe, Role: ArchGoRouteDownload, Direction: ArchDirS2C, Blocker: "wire QUIC stream FC (windowed ~64 KiB/RTT); no duplex_coord", Anchor: "h3/tunnel_conn.go:WriteTo"},
-	{Path: ArchPathP1ProdPipe, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "reqBody pipe writer FC; upload half decoupled (UsesH3Stream=false)", Anchor: "h3/tunnel_from_response.go:ConnectTunnelUsesPipeUpload"},
-	{Path: ArchPathP1ProdPipe, Role: ArchGoTunnelWriteTo, Direction: ArchDirS2C, Blocker: "io.Copy reader half; upload goroutine independent", Anchor: "h3/tunnel_conn.go:WriteTo"},
-	{Path: ArchPathP1BidiRollback, Role: ArchGoTunnelWriteTo, Direction: ArchDirS2C, Blocker: "QUIC stream FC on windowed bidi", Anchor: "h3/tunnel_conn.go:writeH3DownloadTo"},
-	{Path: ArchPathP1BidiRollback, Role: ArchGoTunnelUpload, Direction: ArchDirC2S, Blocker: "4 KiB upload chunk + pending queue until flush", Anchor: "h3/duplex_coord.go:flushDuplexUploadLocked"},
+	{Path: ArchPathP1ProdH3Stream, Role: ArchGoRouteDownload, Direction: ArchDirS2C, Blocker: "eager WINDOW + WriteTo drain; MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW", Anchor: "h3/tunnel_conn.go:WriteTo"},
+	{Path: ArchPathP1ProdH3Stream, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "H3UploadFlushPolicy chunks + bidi_wake on downloadActive", Anchor: "h3/upload_body.go"},
+	{Path: ArchPathP1ProdH3Stream, Role: ArchGoTunnelWriteTo, Direction: ArchDirS2C, Blocker: "io.CopyBuffer 64 KiB drain on *http3.Stream", Anchor: "h3/tunnel_conn.go"},
+	{Path: ArchPathP1ProdH3Stream, Role: ArchGoTunnelUpload, Direction: ArchDirC2S, Blocker: "direct http3.Stream Write (nil Body prod default)", Anchor: "h3/tunnel_conn.go:Write"},
+	{Path: ArchPathP1LegacyPipe, Role: ArchGoRouteDownload, Direction: ArchDirS2C, Blocker: "wire QUIC stream FC (windowed ~64 KiB/RTT); legacy diagnostic", Anchor: "h3/tunnel_conn.go:WriteTo"},
+	{Path: ArchPathP1LegacyPipe, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "reqBody pipe writer FC; upload half decoupled (UsesH3Stream=false)", Anchor: "h3/tunnel_from_response.go:ConnectTunnelUsesPipeUpload"},
 	{Path: ArchPathP2DualLeg, Role: ArchGoRouteDownload, Direction: ArchDirS2C, Blocker: "download leg stream FC only (separate stream ID)", Anchor: "h3/dual_tunnel_conn.go:WriteTo"},
-	{Path: ArchPathP2DualLeg, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "upload leg pipe writer FC (no cross-leg duplex_coord)", Anchor: "h3/dual_tunnel_conn.go:ReadFrom"},
+	{Path: ArchPathP2DualLeg, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "upload leg pipe writer FC (no cross-leg contention)", Anchor: "h3/dual_tunnel_conn.go:ReadFrom"},
 	{Path: ArchPathP6ParallelLeg, Role: ArchGoRouteDownload, Direction: ArchDirS2C, Blocker: "per-stream FC; route sees N independent net.Conn", Anchor: "route/conn.go:connectionCopy"},
 	{Path: ArchPathP6ParallelLeg, Role: ArchGoRouteUpload, Direction: ArchDirC2S, Blocker: "per-stream upload; no route fan-in", Anchor: "route/conn.go:connectionCopy"},
 }

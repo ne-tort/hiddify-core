@@ -82,7 +82,7 @@ func benchServerHandlerDownloadWriteToMbps(t *testing.T, link serverHandlerLink,
 	}()
 
 	client := link.wrap(serverConnWriterTo{clientLeg})
-	n, mbps, err := measureServerAuthorityDownloadWriteToMbps(client, serverLocalizeBenchDur)
+	n, mbps, err := measureServerHandlerDownloadWriteToMbps(client, serverLocalizeBenchDur)
 	cancel()
 	_ = uploadW.Close()
 	_ = clientLeg.Close()

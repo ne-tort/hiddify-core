@@ -50,6 +50,7 @@ func TestMasqueDownloadEagerWindowDisabled(t *testing.T) {
 }
 
 func TestMasqueFastWindowUpdatesDisabled(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW", "0")
 	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
 	t.Setenv("MASQUE_QUIC_WINDOW_UPDATE_THRESHOLD", "")
 
@@ -72,6 +73,7 @@ func TestMasqueWindowUpdateThresholdEnv(t *testing.T) {
 }
 
 func TestMasqueWindowUpdateThresholdExplicitFastOff(t *testing.T) {
+	t.Setenv("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW", "0")
 	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
 	t.Setenv("MASQUE_QUIC_WINDOW_UPDATE_THRESHOLD", "")
 

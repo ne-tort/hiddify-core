@@ -213,6 +213,21 @@ func (s *benignOncePipeSession) Close() error {
 	return s.inner.Close()
 }
 
+// TestBenignOncePipeSessionTeardown0x100 locks harness injection of remote QUIC NO_ERROR (0x100).
+func TestBenignOncePipeSessionTeardown0x100(t *testing.T) {
+	t.Parallel()
+	_, serverInner := newMasquePacketPipePair()
+	sess := &benignOncePipeSession{inner: serverInner}
+	sess.ArmTeardown0x100()
+	_, err := sess.WritePacket([]byte{0})
+	if err == nil {
+		t.Fatal("expected 0x100 application error on first post-arm server WritePacket")
+	}
+	if !sess.fired.Load() {
+		t.Fatal("expected fired after injected 0x100")
+	}
+}
+
 func runMasquePipeIngressRelay(sess *masquePacketPipeSession, ns *cip.Netstack) func() {
 	var wg sync.WaitGroup
 	wg.Add(1)

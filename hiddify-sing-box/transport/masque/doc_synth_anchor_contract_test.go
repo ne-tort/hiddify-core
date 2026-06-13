@@ -26,7 +26,7 @@ func findHiddifyAppRoot(t *testing.T) string {
 	}
 	dir := wd
 	for range 12 {
-		if _, err := os.Stat(filepath.Join(dir, "docs", "masque", "download-hypotheses.md")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "docs", "masque", "ADR-bidi-download.md")); err == nil {
 			if _, err := os.Stat(filepath.Join(dir, "hiddify-core", "hiddify-sing-box", "go.mod")); err == nil {
 				return dir
 			}
@@ -68,26 +68,27 @@ func TestMasqueDocSynthAnchorPathsNoGhosts(t *testing.T) {
 	t.Parallel()
 	root := findHiddifyAppRoot(t)
 	docs := []string{
-		"docs/masque/download-hypotheses.md",
-		"docs/masque/P0-download-analysis.md",
+		"docs/masque/ADR-bidi-download.md",
 		"docs/masque/layers/30-connect-stream.md",
 		"docs/masque/SYNTH-TEST-PLAN.md",
 	}
+	var combined strings.Builder
 	for _, rel := range docs {
 		body := readMasqueDoc(t, root, rel)
+		combined.WriteString(body)
 		for _, ghost := range ghostSynthDocPaths {
 			if strings.Contains(body, ghost) {
 				t.Errorf("%s: ghost synth path %q must be removed or replaced", rel, ghost)
 			}
 		}
 	}
+	corpus := combined.String()
 	for _, name := range requiredSynthAnchorFiles {
-		body := readMasqueDoc(t, root, "docs/masque/download-hypotheses.md")
-		if !strings.Contains(body, name) {
-			t.Errorf("download-hypotheses.md missing anchor reference %q", name)
+		if !strings.Contains(corpus, name) {
+			t.Errorf("active MASQUE docs missing anchor reference %q (ADR or 30-connect-stream)", name)
 		}
 	}
-	if body := readMasqueDoc(t, root, "docs/masque/download-hypotheses.md"); !strings.Contains(body, "BypassMatrix") {
-		t.Error("download-hypotheses.md missing BypassMatrix synth anchor reference")
+	if !strings.Contains(corpus, "BypassMatrix") && !strings.Contains(corpus, "connect_stream_bypass_matrix_test.go") {
+		t.Error("active MASQUE docs missing BypassMatrix synth anchor reference")
 	}
 }

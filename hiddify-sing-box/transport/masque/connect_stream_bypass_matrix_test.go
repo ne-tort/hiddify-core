@@ -183,7 +183,7 @@ func TestMasqueConnectStreamDuplexWriteToDownload(t *testing.T) {
 		}
 		return
 	}
-	dl := runConnectStreamDuplexWriteToBench(t, link, connectStreamLocalizeCeilingMin)
+	dl := runConnectStreamDuplexWriteToBench(t, link, connectStreamLocalizeDownloadKPIMin)
 	assertConnectStreamWindowedCeilingBand(t, dl.mbps, "duplex WriteTo download (S5b)")
 }
 
@@ -207,7 +207,7 @@ func TestWindowedBidiBridgeDownloadBand(t *testing.T) {
 	}
 	mbps := float64(n*8) / duration.Seconds() / 1e6
 	t.Logf("windowed bidi bridge WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
-	if mbps < connectStreamLocalizeCeilingMin || mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("bridge download %.1f Mbit/s want %.0f–%.0f", mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("bridge download %.1f Mbit/s want > %.0f", mbps, connectStreamVPSKPITargetDownMbps)
 	}
 }

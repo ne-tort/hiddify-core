@@ -26,35 +26,6 @@ func (fakeListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
 func (fakeListener) Close() error              { return nil }
 func (fakeListener) Addr() net.Addr            { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4433} }
 
-func TestDualBindMasqueListenersH3OnlySkipsTCP(t *testing.T) {
-	t.Parallel()
-	var tcpCalls atomic.Int32
-	got, err := DualBindMasqueListeners(DualBindConfig{
-		ListenHost:      "127.0.0.1",
-		ListenPort:      4433,
-		AuthorityH3Only: true,
-		ListenUDP: func(network, address string) (net.PacketConn, error) {
-			return &fakePacketConn{addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4433}}, nil
-		},
-		ListenTCP: func(network, address string) (net.Listener, error) {
-			tcpCalls.Add(1)
-			return fakeListener{}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("dual bind: %v", err)
-	}
-	if got.PacketConn == nil {
-		t.Fatal("expected packet conn")
-	}
-	if got.TCPRaw != nil {
-		t.Fatal("H3-only must not bind TCP")
-	}
-	if tcpCalls.Load() != 0 {
-		t.Fatalf("expected no TCP listen attempts, got %d", tcpCalls.Load())
-	}
-}
-
 func TestDualBindMasqueListenersEphemeralRetriesTCPConflict(t *testing.T) {
 	t.Parallel()
 	var udpAttempts atomic.Int32

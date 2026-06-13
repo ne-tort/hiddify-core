@@ -92,14 +92,15 @@ func TestHandleConnectUDPRejectsWrongH2Protocol(t *testing.T) {
 
 func TestHandleConnectUDPRejectsInvalidTarget(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/bad/0", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.invalid/443", nil)
 	req.Header.Set(":protocol", "connect-udp")
-	parsed := &qmasque.Request{Host: "bad", Target: "not-a-udp-target"}
+	// Pass target policy; H2 ResolveUDPAddr fails with DNS → 502 + Proxy-Status.
+	parsed := &qmasque.Request{Host: "example.invalid", Target: "example.invalid:443"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{})
+	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{AllowPrivateTargets: true})
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadGateway)
 	}
 	if got := rec.Header().Get("Proxy-Status"); got == "" {
 		t.Fatal("expected Proxy-Status header on resolve failure")
@@ -177,9 +178,10 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 		close(done)
 	}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for rec.Code == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return")
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
@@ -188,15 +190,10 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 	if got := rec.Header().Get(http3.CapsuleProtocolHeader); got != want {
 		t.Fatalf("Capsule-Protocol: got %q want %q", got, want)
 	}
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not return")
-	}
 }
 
 func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
-	t.Parallel()
+	t.Setenv("MASQUE_SERVER_CONNECT_STREAM_ONLY", "0")
 	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
 	handler, err := BuildMuxHandler(MuxHost{
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
@@ -215,8 +212,9 @@ func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodConnect, "https://127.0.0.1:443/masque/udp/example.com/443", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/443", nil)
 	req.Host = "127.0.0.1:443"
+	req.URL.Scheme = "https"
 	req.Header.Set(":protocol", "connect-udp")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

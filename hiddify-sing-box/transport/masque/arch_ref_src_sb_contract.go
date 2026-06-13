@@ -116,7 +116,7 @@ var ArchREFSRCServerThinAudit = []ArchREFSRCServerThinRow{
 	},
 	{
 		Flag: "removed: authorityMinimal + std TLS", Relay: "removed; prod connect_stream",
-		Parity: true, Note: "removed; LaunchAuthorityThinHTTPServer deleted — prod connect_stream only",
+		Parity: true, Note: "prod connect_stream only",
 	},
 }
 

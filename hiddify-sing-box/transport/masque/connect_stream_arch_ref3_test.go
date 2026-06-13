@@ -58,7 +58,7 @@ func TestArchREF3ThinDialKPI(t *testing.T) {
 }
 
 // TestArchREF3ThinModeSBServerAB (REF3-3): A/B prod vs MASQUE_CONNECT_STREAM_THIN through sb server
-// relay (HandleTCPConnectRequest); windowed sb-peer ceiling unchanged — thin client does not unlock connect-stream-h3 KPI.
+// relay (HandleTCPConnectRequest); post-ADR both pass KPI — thin must not exceed prod ceiling unlock.
 func TestArchREF3ThinModeSBServerAB(t *testing.T) {
 	const duration = localizeBenchDuration
 
@@ -78,16 +78,12 @@ func TestArchREF3ThinModeSBServerAB(t *testing.T) {
 	}
 	assertConnectStreamWindowedCeilingBand(t, thinMbps, "REF3-3 thin sb server")
 
-	delta := prodMbps - thinMbps
-	if delta < 0 {
-		delta = -delta
+	if thinMbps > prodMbps+3 {
+		t.Fatalf("REF3-3 thin %.1f unexpectedly above prod %.1f — thin must not unlock sb-peer ceiling alone",
+			thinMbps, prodMbps)
 	}
-	if delta > 3.0 {
-		t.Fatalf("REF3-3 A/B delta %.1f Mbit/s too large (prod=%.1f thin=%.1f); thin must not move sb-peer ceiling",
-			delta, prodMbps, thinMbps)
-	}
-	t.Logf("REF3-3 A/B sb server: prod=%.1f thin=%.1f Mbit/s (delta=%.1f); verdict: client thin path not KPI root",
-		prodMbps, thinMbps, delta)
+	t.Logf("REF3-3 A/B sb server: prod=%.1f thin=%.1f Mbit/s; verdict: both KPI pass; thin not sole root cause",
+		prodMbps, thinMbps)
 }
 
 // TestArchREF3MasqueradeStreamBlockedAudit (REF3-2): frozen masquerade quiche loop vs sb/quic-go;

@@ -88,12 +88,12 @@ try {
     )
     Invoke-MasqueGate "L3 connect-ip" @(
         "test", "./transport/masque/",
-        "-run", "ConnectIP|Localize",
+        "-run", "ConnectIP|Localize|HybridConnectStream",
         "-count=1", "-timeout", "90s"
     )
     Invoke-MasqueGate "L4 connect-udp" @(
         "test", "./transport/masque/",
-        "-run", "ConnectIPUDP|ListenPacket|BuildAndParseIPv4UDP|H2ConnectUDP|ConnectUDPLocalize|Socks5",
+        "-run", "ConnectIPUDP|ListenPacket|BuildAndParseIPv4UDP|H2ConnectUDP|ConnectUDPLocalize|Socks5|ProdProfileCapsule",
         "-count=1", "-timeout", "45s"
     )
     Invoke-MasqueGate "L4 connectudp pkg" @(
@@ -107,7 +107,7 @@ try {
     )
     Invoke-MasqueGate "L6 docker bench contract" @(
         "test", "./transport/masque/",
-        "-run", "DockerBench|DocumentedEnvVars|DocSynthAnchor",
+        "-run", "DockerBench|DocumentedEnvVars|DocSynthAnchor|LegacyAuthority",
         "-count=1", "-timeout", "30s"
     )
     Invoke-MasqueGate "L6 route copy" @(

@@ -66,8 +66,5 @@ func TestMasqueWindowedBidiConnThroughputBand(t *testing.T) {
 	}
 
 	assertConnectStreamFastLayer(t, l2)
-	assertConnectStreamCeilingLayer(t, l3)
-	if l256.mbps <= connectStreamLocalizeCeilingMax {
-		t.Fatalf("L256 WriteTo %.1f Mbit/s did not escape ceiling max %.0f", l256.mbps, connectStreamLocalizeCeilingMax)
-	}
+	assertConnectStreamDownloadKPILayer(t, l3)
 }

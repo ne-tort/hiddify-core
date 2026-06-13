@@ -20,9 +20,7 @@ import (
 // TestArchA0CodeMapConnectStreamBytePath (A0-2): iperf -R download in prod uses
 // route connectionCopy writer_to → h3.TunnelConn.WriteTo → S2C DATA (reader or h3 stream).
 func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
-	t.Run("pipe_prod_write_to_drain", func(t *testing.T) {
+	t.Run("legacy_pipe_write_to_drain", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink(), connectStreamHarnessOpts{PipeUpload: true})
 		defer h.close()
 		if _, ok := h.conn.(io.WriterTo); !ok {
@@ -37,12 +35,12 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 		}
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || tc.UsesH3Stream() {
-			t.Fatal("A0-2 P1 prod path must drain via reader half (UsesH3Stream=false)")
+			t.Fatal("A0-2 legacy pipe path must drain via reader half (UsesH3Stream=false)")
 		}
 		t.Logf("A0-2 pipe WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
 	})
 
-	t.Run("bidi_write_to_sets_download_active", func(t *testing.T) {
+	t.Run("prod_h3_stream_write_to", func(t *testing.T) {
 		var hookActive atomic.Int32
 		h3.SetTestBidiDownloadActiveHook(func(active bool) {
 			if active {
@@ -58,11 +56,11 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 			t.Fatalf("A0-2 bidi WriteTo drain: %v", err)
 		}
 		if hookActive.Load() == 0 {
-			t.Fatal("A0-2 bidi WriteTo must toggle downloadActive (coordinated path)")
+			t.Fatal("A0-2 prod h3_stream WriteTo must toggle downloadActive (bidi_wake path)")
 		}
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || !tc.UsesH3Stream() {
-			t.Fatal("A0-2 bidi rollback must use coordinated h3 stream")
+			t.Fatal("A0-2 prod h3_stream must use coordinated *http3.Stream")
 		}
 		if tc.DownloadActive() {
 			t.Fatal("A0-2 downloadActive must clear after WriteTo completes")
@@ -70,12 +68,10 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 	})
 }
 
-// TestArchA0WireVsAppPipePath (A0-1a): P1 pipe = same RFC 9114 CONNECT, different app halves —
-// UsesH3Stream=false (io.Pipe upload) vs bidi UsesH3Stream=true on one *http3.Stream.
+// TestArchA0WireVsAppPipePath (A0-1a): P1 prod h3_stream vs legacy pipe — same RFC 9114 CONNECT,
+// UsesH3Stream=true (nil Body) vs UsesH3Stream=false (io.Pipe upload).
 func TestArchA0WireVsAppPipePath(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
-	t.Run("bidi_one_h3_stream", func(t *testing.T) {
+	t.Run("prod_h3_stream_one_http3_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
@@ -83,14 +79,14 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 			t.Fatal("expected *h3.TunnelConn")
 		}
 		if !tc.UsesH3Stream() {
-			t.Fatal("bidi rollback must share one http3.Stream (UsesH3Stream=true)")
+			t.Fatal("prod h3_stream must share one http3.Stream (UsesH3Stream=true)")
 		}
 		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("bidi dial must still satisfy prod route shape")
+			t.Fatal("prod h3_stream dial must satisfy prod route shape")
 		}
 	})
 
-	t.Run("pipe_same_connect_different_halves", func(t *testing.T) {
+	t.Run("legacy_pipe_same_connect_different_halves", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
@@ -98,23 +94,23 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 			t.Fatal("expected *h3.TunnelConn")
 		}
 		if tc.UsesH3Stream() {
-			t.Fatal("pipe upload must decouple upload half (UsesH3Stream=false)")
+			t.Fatal("legacy pipe upload must decouple upload half (UsesH3Stream=false)")
 		}
 		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("pipe dial must still satisfy prod route shape on one net.Conn")
+			t.Fatal("legacy pipe dial must still satisfy prod route shape on one net.Conn")
 		}
 	})
 }
 
 // TestArchA0ContentionPointsContract (A0-2a): documents known contention anchors —
-// duplex_coord 4 KiB upload chunk, 64 KiB WriteTo drain, 64 KiB bidi window model.
+// H3UploadFlushPolicy 4 KiB upload chunk, 64 KiB WriteTo drain, 64 KiB bidi window model.
 func TestArchA0ContentionPointsContract(t *testing.T) {
 	const wantUploadChunk = 4 * 1024
 	const wantWriteToBuf = 64 * 1024
 	const wantBidiWindow = 64 * 1024
 
 	if got := h3.H3UploadFlushPolicy().ChunkBytes; got != wantUploadChunk {
-		t.Fatalf("A0-2a duplex_coord upload chunk: %d want %d", got, wantUploadChunk)
+		t.Fatalf("A0-2a upload flush chunk: %d want %d", got, wantUploadChunk)
 	}
 	if h3.DefaultBidiWindowSizeBytes != wantBidiWindow {
 		t.Fatalf("A0-2a bidi window model: %d want %d", h3.DefaultBidiWindowSizeBytes, wantBidiWindow)
@@ -123,49 +119,46 @@ func TestArchA0ContentionPointsContract(t *testing.T) {
 		t.Fatalf("A0-2a WriteTo drain buf: %d want %d", h3.TunnelWriteToBufLen(), wantWriteToBuf)
 	}
 
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
 
 	h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 	defer h.close()
 	tc, ok := unwrapH3TunnelConn(h.conn)
 	if !ok || !tc.UsesH3Stream() {
-		t.Fatal("A0-2a bidi path must use coordinated duplex (UsesH3Stream=true)")
+		t.Fatal("A0-2a prod h3_stream path must use *http3.Stream (UsesH3Stream=true)")
 	}
-	t.Logf("A0-2a contention anchors: uploadChunk=%d writeToBuf=%d bidiWindow=%d duplex_coord=on",
+	t.Logf("A0-2a contention anchors: uploadChunk=%d writeToBuf=%d bidiWindow=%d prod_h3_stream=on",
 		wantUploadChunk, wantWriteToBuf, wantBidiWindow)
 }
 
 // TestArchA0ContentionMatrixC2SDuringS2C (A0-3): who writes C2S while S2C WriteTo drains.
 func TestArchA0ContentionMatrixC2SDuringS2C(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
-	t.Run("bidi_c2s_contends_on_same_stream", func(t *testing.T) {
+	t.Run("prod_h3_stream_c2s_contends_on_same_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || !tc.UsesH3Stream() {
-			t.Fatal("bidi matrix row requires UsesH3Stream=true")
+			t.Fatal("prod h3_stream matrix row requires UsesH3Stream=true")
 		}
 		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
-		t.Logf("A0-3 bidi C2S during S2C WriteTo (windowed): %.1f Mbit/s upload", upMbps)
+		t.Logf("A0-3 prod h3_stream C2S during S2C WriteTo (windowed): %.1f Mbit/s upload", upMbps)
 		// Same-stream C2S contends with S2C credit — upload stays in wire ceiling band.
 		if upMbps > connectStreamLocalizeCeilingMax+5 {
-			t.Fatalf("bidi upload %.1f unexpectedly high on windowed link — C2S should contend with S2C drain", upMbps)
+			t.Fatalf("prod h3_stream upload %.1f unexpectedly high on windowed link — C2S should contend with S2C drain", upMbps)
 		}
 	})
 
-	t.Run("pipe_c2s_off_coordinated_bidi", func(t *testing.T) {
+	t.Run("legacy_pipe_c2s_off_h3_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || tc.UsesH3Stream() {
-			t.Fatal("pipe matrix row requires UsesH3Stream=false")
+			t.Fatal("legacy pipe matrix row requires UsesH3Stream=false")
 		}
 		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
-		t.Logf("A0-3 pipe C2S during S2C WriteTo: %.1f Mbit/s upload", upMbps)
+		t.Logf("A0-3 legacy pipe C2S during S2C WriteTo: %.1f Mbit/s upload", upMbps)
 		if upMbps < connectStreamLocalizeCeilingMin {
-			t.Fatalf("pipe upload stalled under concurrent WriteTo: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeCeilingMin)
+			t.Fatalf("legacy pipe upload stalled under concurrent WriteTo: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeCeilingMin)
 		}
 	})
 }
@@ -302,8 +295,8 @@ func TestArchA0OrchestrationBoundary(t *testing.T) {
 		}
 	}
 
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-	h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
+	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
+	h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 	defer h.close()
 
 	// route layer consumes WriterTo markers implemented by stream/h3 dial result.
@@ -315,8 +308,8 @@ func TestArchA0OrchestrationBoundary(t *testing.T) {
 	if !ok {
 		t.Fatal("A0-2b h3.TunnelConn must sit under stream.TunnelConn wrapper")
 	}
-	if tc.UsesH3Stream() {
-		t.Fatal("A0-2b P1 prod path: upload scheduling owned by h3 pipe, not coordinated bidi")
+	if !tc.UsesH3Stream() {
+		t.Fatal("A0-2b P1 prod path: h3_stream bidi default (UsesH3Stream=true)")
 	}
 
 	// server relay buffer is separate from client WriteTo drain (64 KiB relay vs 64 KiB tunnel WriteTo).
@@ -328,13 +321,13 @@ func TestArchA0OrchestrationBoundary(t *testing.T) {
 }
 
 // TestArchA0GoroutineDirectionBlockerTable (A0-3b): frozen goroutine × direction × blocker rows
-// align with prod pipe vs bidi rollback dial shapes.
+// align with prod h3_stream vs legacy pipe dial shapes.
 func TestArchA0GoroutineDirectionBlockerTable(t *testing.T) {
 	if len(ArchGoroutineBlockerTable) < 10 {
 		t.Fatalf("A0-3b table: %d rows want >= 10", len(ArchGoroutineBlockerTable))
 	}
 	for _, path := range []ArchConnectPath{
-		ArchPathP1ProdPipe, ArchPathP1BidiRollback, ArchPathP2DualLeg, ArchPathP6ParallelLeg,
+		ArchPathP1ProdH3Stream, ArchPathP1LegacyPipe, ArchPathP2DualLeg, ArchPathP6ParallelLeg,
 	} {
 		rows := ArchGoroutineBlockersFor(path)
 		if len(rows) < 2 {
@@ -342,47 +335,53 @@ func TestArchA0GoroutineDirectionBlockerTable(t *testing.T) {
 		}
 	}
 
-	bidiRows := ArchGoroutineBlockersFor(ArchPathP1BidiRollback)
-	var hasDuplexGate bool
-	for _, row := range bidiRows {
+	prodRows := ArchGoroutineBlockersFor(ArchPathP1ProdH3Stream)
+	var hasEagerOrWake bool
+	for _, row := range prodRows {
+		if row.Role == ArchGoRouteDownload && row.Direction == ArchDirS2C {
+			if row.Blocker == "" || row.Anchor == "" {
+				t.Fatalf("A0-3b prod download row incomplete: %+v", row)
+			}
+			if strings.Contains(row.Blocker, "eager WINDOW") || strings.Contains(row.Blocker, "WriteTo drain") {
+				hasEagerOrWake = true
+			}
+		}
 		if row.Role == ArchGoRouteUpload && row.Direction == ArchDirC2S {
 			if row.Blocker == "" || row.Anchor == "" {
-				t.Fatalf("A0-3b bidi upload row incomplete: %+v", row)
+				t.Fatalf("A0-3b prod upload row incomplete: %+v", row)
 			}
-			if strings.Contains(row.Blocker, "downloadActive") {
-				hasDuplexGate = true
+			if strings.Contains(row.Blocker, "bidi_wake") || strings.Contains(row.Blocker, "H3UploadFlushPolicy") {
+				hasEagerOrWake = true
 			}
 		}
 	}
-	if !hasDuplexGate {
-		t.Fatal("A0-3b bidi rollback must document downloadActive gate on C2S upload")
+	if !hasEagerOrWake {
+		t.Fatal("A0-3b prod h3_stream must document eager WINDOW or bidi_wake on upload/download rows")
 	}
 
-	pipeRows := ArchGoroutineBlockersFor(ArchPathP1ProdPipe)
-	for _, row := range pipeRows {
-		if row.Role == ArchGoRouteUpload && strings.Contains(strings.ToLower(row.Blocker), "duplex") {
-			t.Fatalf("A0-3b prod pipe upload must not use duplex_coord gate: %+v", row)
+	legacyRows := ArchGoroutineBlockersFor(ArchPathP1LegacyPipe)
+	for _, row := range legacyRows {
+		if row.Role == ArchGoRouteUpload && strings.Contains(strings.ToLower(row.Blocker), "duplex_coord") {
+			t.Fatalf("A0-3b legacy pipe upload must not use duplex_coord gate: %+v", row)
 		}
 	}
 
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
-	t.Run("prod_pipe_no_duplex_gate", func(t *testing.T) {
+	t.Run("legacy_pipe_decoupled_upload", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || tc.UsesH3Stream() {
-			t.Fatal("A0-3b prod pipe row requires UsesH3Stream=false")
+			t.Fatal("A0-3b legacy pipe row requires UsesH3Stream=false")
 		}
 	})
 
-	t.Run("bidi_rollback_has_duplex_gate", func(t *testing.T) {
+	t.Run("prod_h3_stream_default", func(t *testing.T) {
 		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || !tc.UsesH3Stream() {
-			t.Fatal("A0-3b bidi row requires UsesH3Stream=true")
+			t.Fatal("A0-3b prod h3_stream row requires UsesH3Stream=true")
 		}
 	})
 
@@ -405,7 +404,7 @@ func TestArchA0PeerContract(t *testing.T) {
 		}
 	}
 	if !suiPipe {
-		t.Fatal("A0-4 s-ui must accept prod-default pipe upload on connect_stream")
+		t.Fatal("A0-4 s-ui must accept prod-default connect_stream relay on same authority")
 	}
 	p2Peers := ArchPeerConstraintsFor(ArchPatternP2DualConnect)
 	if len(p2Peers) == 0 {

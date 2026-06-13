@@ -166,10 +166,10 @@ func TestStreamDialHTTP2ConnectStreamResetsOverlayAfterRetryExhausted(t *testing
 	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
-	if got := attempts.Load(); got != 3 {
-		t.Fatalf("expected 3 RoundTrip attempts, got %d", got)
+	if got := attempts.Load(); got != 5 {
+		t.Fatalf("expected 5 RoundTrip attempts, got %d", got)
 	}
-	if got := host.resetN.Load(); got != 3 {
-		t.Fatalf("expected overlay reset on each retry plus final failure (resets=3), got %d", got)
+	if got := host.resetN.Load(); got != 5 {
+		t.Fatalf("expected overlay reset on each retry plus final failure (resets=5), got %d", got)
 	}
 }

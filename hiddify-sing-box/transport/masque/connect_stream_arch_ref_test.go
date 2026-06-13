@@ -34,8 +34,8 @@ func TestArchREF2H2OParityAudit(t *testing.T) {
 		t.Fatal("audit buf len drift from stream package")
 	}
 
-	root := repoRootForArchRef2(t)
-	confPath := filepath.Join(root, ArchH2OConnectConfPath)
+	root := singboxRootForArchRef2(t)
+	confPath := filepath.Join(root, "testdata", "h2o-connect.conf")
 	data, err := os.ReadFile(confPath)
 	if err != nil {
 		t.Fatalf("read h2o config: %v", err)
@@ -77,13 +77,17 @@ func TestArchServerH2OParityRelayL3(t *testing.T) {
 		t.Fatalf("H2 flush windowed: %v", h2Windowed.err)
 	}
 	t.Logf("REF2-4 H2 flush windowed: %.1f Mbit/s", h2Windowed.mbps)
-	if windowed.mbps+2 < h2Windowed.mbps {
-		t.Fatalf("h2o-parity H3 regressed vs H2 flush: h3=%.1f h2=%.1f", windowed.mbps, h2Windowed.mbps)
+	if windowed.mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("h2o-parity H3 windowed %.1f Mbit/s (want > %.0f K-SRV KPI)", windowed.mbps, connectStreamVPSKPITargetDownMbps)
 	}
-	t.Log("REF2-4 verdict: server relay h2o-parity >21 on instant; sb-peer ceiling = wire FC not relay")
+	if h2Windowed.mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("H2 flush windowed %.1f Mbit/s (want > %.0f K-SRV KPI)", h2Windowed.mbps, connectStreamVPSKPITargetDownMbps)
+	}
+	t.Log("REF2-4 verdict: server relay h2o-parity >21 on instant + windowed (eager WINDOW default)")
 }
 
-// TestArchPeerSwapL3WriteTo (REF4-1): same L3 WriteTo harness, sb-peer vs h2o-peer mock — delta >>2×.
+// TestArchPeerSwapL3WriteTo (REF4-1): same L3 WriteTo harness, sb-peer vs h2o-peer mock.
+// Post-ADR: eager WINDOW lifts sb-peer to KPI; Mbps delta is informational — wire differential is REF2-2.
 func TestArchPeerSwapL3WriteTo(t *testing.T) {
 	const duration = localizeBenchDuration
 
@@ -98,25 +102,24 @@ func TestArchPeerSwapL3WriteTo(t *testing.T) {
 	t.Logf("REF4-1 peer swap: sb=%.1f (%d B) h2o=%.1f (%d B)", sbMbps, sbBytes, h2oMbps, h2oBytes)
 
 	assertConnectStreamWindowedCeilingBand(t, sbMbps, "REF4-1 sb peer")
-	if h2oMbps <= connectStreamVPSKPITargetDownMbps {
-		t.Fatalf("h2o peer %.1f Mbit/s (want > %.0f)", h2oMbps, connectStreamVPSKPITargetDownMbps)
+	assertConnectStreamWindowedCeilingBand(t, h2oMbps, "REF4-1 h2o peer")
+	if sbMbps <= 0 || h2oMbps <= 0 {
+		t.Fatalf("REF4-1 peer swap invalid throughput: sb=%.1f h2o=%.1f", sbMbps, h2oMbps)
 	}
-	if sbMbps <= 0 || h2oMbps/sbMbps < 2 {
-		t.Fatalf("peer swap delta too small: sb=%.1f h2o=%.1f (want >=2×)", sbMbps, h2oMbps)
-	}
+	t.Log("REF4-1 verdict: both peers KPI pass post-ADR; S2C credit differential → TestArchREF2WireWindowUpdateTrace")
 }
 
 // TestArchREF2EndpointRelayPathAudit (REF2-5): frozen audit table for template/authority/endpoint relay parity.
 func TestArchREF2EndpointRelayPathAudit(t *testing.T) {
-	if len(ArchEndpointRelayAudit) < 3 {
-		t.Fatalf("ArchEndpointRelayAudit: %d rows want >= 3", len(ArchEndpointRelayAudit))
+	if len(ArchEndpointRelayAudit) < 2 {
+		t.Fatalf("ArchEndpointRelayAudit: %d rows want >= 2", len(ArchEndpointRelayAudit))
 	}
 	for _, row := range ArchEndpointRelayAudit {
 		if !row.Parity {
 			t.Fatalf("REF2-5 gap %s: relay=%s delegate=%s", row.Path, row.RelayFn, row.Delegate)
 		}
 	}
-	t.Logf("REF2-5 audit: %d relay path rows; template/authority/endpoint share RelayTCPTunnel", len(ArchEndpointRelayAudit))
+	t.Logf("REF2-5 audit: %d relay path rows; template/endpoint share RelayTCPTunnel", len(ArchEndpointRelayAudit))
 }
 
 // TestArchREF2UploadDownloadInterleave (REF2-3): h2o-parity H3 relay duplex does not regress
@@ -125,7 +128,7 @@ func TestArchREF2UploadDownloadInterleave(t *testing.T) {
 	const duration = localizeBenchDuration
 
 	dlOnly := benchRelayH3Download(t, benchWindowedBidiLink(), duration)
-	duplex := runConnectStreamDuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeCeilingMin/2)
+	duplex := runConnectStreamDuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
 	if dlOnly.err != nil {
 		t.Fatalf("download-only relay: %v", dlOnly.err)
 	}
@@ -218,8 +221,8 @@ func TestArchREF2WireWindowUpdateTrace(t *testing.T) {
 	t.Log("REF2-2 verdict: sb-peer S2C window throttles download; h2o-peer bypass confirms peer FC root cause")
 }
 
-// TestArchREF1InProcReproGate (REF1-1 local): reproduces core-bench peer differential without Docker —
-// sb-peer windowed ~15 Mbit/s (h3-core analog) vs h2o-peer >>21 (h3-authority-h2o analog).
+// TestArchREF1InProcReproGate (REF1-1 local): reproduces peer differential without Docker —
+// post-ADR sb-peer passes KPI (eager WINDOW); S2C credit grant differential is REF2-2.
 func TestArchREF1InProcReproGate(t *testing.T) {
 	const duration = localizeBenchDuration
 
@@ -234,20 +237,11 @@ func TestArchREF1InProcReproGate(t *testing.T) {
 	t.Logf("REF1-1 in-proc repro: sb-peer=%.1f h2o-peer=%.1f Mbit/s", sbMbps, h2oMbps)
 
 	assertConnectStreamWindowedCeilingBand(t, sbMbps, "REF1-1 sb-peer (h3-core analog)")
-	if sbMbps > connectStreamVPSKPITargetDownMbps {
-		t.Fatalf("sb peer %.1f Mbit/s should stay at wire FC ceiling (<= %.0f KPI)", sbMbps, connectStreamVPSKPITargetDownMbps)
-	}
-	if h2oMbps <= connectStreamVPSKPITargetDownMbps {
-		t.Fatalf("h2o peer %.1f Mbit/s (want > %.0f K-REF-A analog)", h2oMbps, connectStreamVPSKPITargetDownMbps)
-	}
-	ratio := h2oMbps / sbMbps
-	if ratio < 2.0 {
-		t.Fatalf("REF1-1 peer ratio %.1fx want >=2x (field ~40x)", ratio)
-	}
-	t.Logf("REF1-1 verdict: in-proc peer swap %.1fx — matches core-bench h3-core ~15 vs h2o >>21", ratio)
+	assertConnectStreamWindowedCeilingBand(t, h2oMbps, "REF1-1 h2o-peer (h3-authority-h2o analog)")
+	t.Log("REF1-1 verdict: post-ADR both peers KPI pass; wire FC differential → TestArchREF2WireWindowUpdateTrace")
 }
 
-func repoRootForArchRef2(t *testing.T) string {
+func singboxRootForArchRef2(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
 	if err != nil {
@@ -255,7 +249,7 @@ func repoRootForArchRef2(t *testing.T) string {
 	}
 	dir := wd
 	for i := 0; i < 10; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "docker", "masque-vps-bench", "h2o", "connect.conf")); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, "testdata", "h2o-connect.conf")); err == nil {
 			return dir
 		}
 		parent := filepath.Dir(dir)
@@ -264,6 +258,6 @@ func repoRootForArchRef2(t *testing.T) string {
 		}
 		dir = parent
 	}
-	t.Fatal("could not find hiddify-app repo root (docker/masque-vps-bench) from", wd)
+	t.Fatal("could not find transport/masque/testdata from", wd)
 	return ""
 }

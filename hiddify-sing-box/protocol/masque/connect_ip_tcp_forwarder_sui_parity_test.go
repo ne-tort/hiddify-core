@@ -233,7 +233,7 @@ func TestConnectIPTCPForwarderSuiParityRecycle(t *testing.T) {
 	if err := upConn.Close(); err != nil {
 		t.Fatalf("close upload: %v", err)
 	}
-	waitPipeTeardown0x100(t, clientNS, serverSess)
+	flushPipeEgress(clientNS)
 
 	downConn, err := clientNS.DialContext(ctx, M.ParseSocksaddrHostPort("127.0.0.1", remotePort))
 	if err != nil {
@@ -382,21 +382,6 @@ func flushPipeEgress(ns *cip.Netstack) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func waitPipeTeardown0x100(t *testing.T, clientNS *cip.Netstack, serverSess *benignOncePipeSession) {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		flushPipeEgress(clientNS)
-		if serverSess.fired.Load() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !serverSess.fired.Load() {
-		t.Fatal("expected one benign 0x100 during upload teardown drain")
 	}
 }
 

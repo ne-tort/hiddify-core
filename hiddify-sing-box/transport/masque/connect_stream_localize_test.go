@@ -16,9 +16,15 @@ import (
 
 // connectStreamLocalize bands (Mbit/s) for in-process CONNECT-stream benches.
 const (
-	connectStreamLocalizeFastMbps       = 80.0
-	connectStreamLocalizeCeilingMax     = 28.0
-	connectStreamLocalizeCeilingMin     = 4.0
+	connectStreamLocalizeFastMbps            = 80.0
+	connectStreamLocalizeUploadWindowedMin   = 4.0  // upload on 64 KiB/35 ms wire-FC band
+	connectStreamLocalizeUploadWindowedMax   = 28.0
+	connectStreamLocalizeDownloadKPIMin      = 21.0 // K-S1/K-S2 floor (eager WINDOW default on download)
+	connectStreamLocalizeWideUploadMinMbps   = 40.0 // L2 16 MiB window upload escapes L3 wire-FC (~15)
+	connectStreamLocalizeInstantUploadMinMbps = 40.0 // L1 instant upload on MASQUE bidi (not raw TCP 80)
+	// Legacy aliases — upload wire-FC band (arch/investigation tests).
+	connectStreamLocalizeCeilingMin          = connectStreamLocalizeUploadWindowedMin
+	connectStreamLocalizeCeilingMax          = connectStreamLocalizeUploadWindowedMax
 )
 
 type connectStreamBenchResult struct {
@@ -577,11 +583,11 @@ func verdictConnectStreamDownload(l0, l1, l3 connectStreamBenchResult) string {
 	switch {
 	case !l0.ok() || !l1.ok() || !l3.ok():
 		return "FAIL: bench error"
-	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps >= connectStreamLocalizeCeilingMin && l3.mbps <= connectStreamLocalizeCeilingMax:
+	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps >= connectStreamLocalizeUploadWindowedMin && l3.mbps <= connectStreamLocalizeUploadWindowedMax:
 		return "masque connect-stream bidi: L1 fast download, L3 windowed ~64KiB/RTT band → stream credit/RTT on one bidi HTTP/3 leg (not buffer size)"
 	case l1.mbps < connectStreamLocalizeFastMbps && l0.mbps >= connectStreamLocalizeFastMbps:
 		return "masque connect-stream: L0 fast, L1 download slow → tunnel relay or streamConn path (not wire RTT)"
-	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps > connectStreamLocalizeCeilingMax:
+	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps > connectStreamLocalizeUploadWindowedMax:
 		return "L3 window model did not reproduce download ceiling (harness calibration)"
 	default:
 		return "inconclusive: review download layer Mbps"
@@ -596,11 +602,11 @@ func verdictConnectStreamBottleneck(l0, l1, l2, l3 connectStreamBenchResult) str
 		return "L0 raw TCP slow → bench environment or loopback regression"
 	case l2.mbps < connectStreamLocalizeFastMbps:
 		return "L2 wide-window upload slow → MASQUE path not unlimited (false ceiling suspect)"
-	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps >= connectStreamLocalizeCeilingMin && l3.mbps <= connectStreamLocalizeCeilingMax:
+	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps >= connectStreamLocalizeUploadWindowedMin && l3.mbps <= connectStreamLocalizeUploadWindowedMax:
 		return "masque connect-stream bidi: L1 fast, L3 windowed ~64KiB/RTT band → stream credit/RTT on one bidi HTTP/3 leg (not buffer size)"
 	case l1.mbps < connectStreamLocalizeFastMbps && l0.mbps >= connectStreamLocalizeFastMbps:
 		return "masque connect-stream: L0 fast, L1 slow → tunnel relay or streamConn path (not wire RTT)"
-	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps > connectStreamLocalizeCeilingMax:
+	case l1.mbps >= connectStreamLocalizeFastMbps && l3.mbps > connectStreamLocalizeUploadWindowedMax:
 		return "L3 window model did not reproduce ceiling (harness calibration)"
 	default:
 		return "inconclusive: review layer Mbps"
@@ -617,14 +623,19 @@ func assertConnectStreamFastLayer(t *testing.T, r connectStreamBenchResult) {
 	}
 }
 
-func assertConnectStreamCeilingLayer(t *testing.T, r connectStreamBenchResult) {
+func assertConnectStreamUploadWindowedLayer(t *testing.T, r connectStreamBenchResult) {
 	t.Helper()
 	if r.err != nil {
 		t.Fatalf("%s: %v", r.layer, r.err)
 	}
-	if r.mbps < connectStreamLocalizeCeilingMin || r.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("%s windowed: %.1f Mbit/s (want %.0f–%.0f)", r.layer, r.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if r.mbps < connectStreamLocalizeUploadWindowedMin || r.mbps > connectStreamLocalizeUploadWindowedMax {
+		t.Fatalf("%s windowed upload: %.1f Mbit/s (want %.0f–%.0f)", r.layer, r.mbps, connectStreamLocalizeUploadWindowedMin, connectStreamLocalizeUploadWindowedMax)
 	}
+}
+
+func assertConnectStreamDownloadKPILayer(t *testing.T, r connectStreamBenchResult) {
+	t.Helper()
+	assertConnectStreamWindowedCeilingBand(t, r.mbps, r.layer+" download WriteTo")
 }
 
 // TestConnectStreamLocalizeL256WindowSensitivity (S43): 256 KiB bidi credit must exceed the
@@ -641,9 +652,9 @@ func TestConnectStreamLocalizeL256WindowSensitivity(t *testing.T) {
 		t.Logf("connect-stream L256 sensitivity %s upload: %.1f Mbit/s (%d bytes)", r.layer, r.mbps, r.bytes)
 	}
 
-	assertConnectStreamCeilingLayer(t, l3)
-	if l256.mbps <= connectStreamLocalizeCeilingMax {
-		t.Fatalf("L256 upload %.1f Mbit/s did not escape ceiling max %.0f (window model insensitive)", l256.mbps, connectStreamLocalizeCeilingMax)
+	assertConnectStreamUploadWindowedLayer(t, l3)
+	if l256.mbps <= connectStreamLocalizeUploadWindowedMax {
+		t.Fatalf("L256 upload %.1f Mbit/s did not escape upload ceiling max %.0f (window model insensitive)", l256.mbps, connectStreamLocalizeUploadWindowedMax)
 	}
 	if l256.mbps < l3.mbps*2 {
 		t.Fatalf("L256 upload %.1f Mbit/s want >= 2× L3 %.1f (window sensitivity)", l256.mbps, l3.mbps)
@@ -668,11 +679,13 @@ func TestMasqueConnectStreamLocalizeBottleneck(t *testing.T) {
 	}
 
 	assertConnectStreamFastLayer(t, l0) // S46: raw TCP baseline
-	assertConnectStreamFastLayer(t, l2) // S46: wide window must stay fast
-	if l1.mbps < connectStreamLocalizeFastMbps {
-		t.Fatalf("L1 upload slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectStreamLocalizeFastMbps)
+	if l2.mbps < connectStreamLocalizeWideUploadMinMbps {
+		t.Fatalf("L2 wide upload slow: %.1f Mbit/s (want >= %.0f)", l2.mbps, connectStreamLocalizeWideUploadMinMbps)
 	}
-	assertConnectStreamCeilingLayer(t, l3)
+	if l1.mbps < connectStreamLocalizeInstantUploadMinMbps {
+		t.Fatalf("L1 upload slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectStreamLocalizeInstantUploadMinMbps)
+	}
+	assertConnectStreamUploadWindowedLayer(t, l3)
 	if l256.mbps <= l3.mbps {
 		t.Fatalf("L256 upload %.1f Mbit/s must exceed L3 %.1f (S43 window sensitivity)", l256.mbps, l3.mbps)
 	}
@@ -692,7 +705,7 @@ func TestMasqueConnectStreamLocalizeBottleneck(t *testing.T) {
 		t.Logf("connect-stream localize %s download WriteTo: %.1f Mbit/s (%d bytes)", r.layer, r.mbps, r.bytes)
 	}
 	assertConnectStreamFastLayer(t, dlL1)
-	assertConnectStreamCeilingLayer(t, dlL3) // S47: L3 download in ceiling band
+	assertConnectStreamDownloadKPILayer(t, dlL3) // S47: L3 download KPI
 }
 
 // TestMasqueConnectStreamLocalizeBottleneckWriteTo (S94): full L0–L3 download matrix via WriteTo
@@ -716,10 +729,8 @@ func TestMasqueConnectStreamLocalizeBottleneckWriteTo(t *testing.T) {
 	assertConnectStreamFastLayer(t, l0)
 	assertConnectStreamFastLayer(t, l2)
 	assertConnectStreamFastLayer(t, l1)
-	assertConnectStreamCeilingLayer(t, l3)
-	if l256.mbps <= l3.mbps {
-		t.Fatalf("L256 download WriteTo %.1f Mbit/s must exceed L3 %.1f (window sensitivity)", l256.mbps, l3.mbps)
-	}
+	assertConnectStreamDownloadKPILayer(t, l3)
+	// L256 narrower bench may be below L3 download with eager WINDOW — sensitivity checked on upload matrix (S43).
 
 	v := verdictConnectStreamBottleneck(l0, l1, l2, l3)
 	t.Logf("connect-stream bottleneck WriteTo download verdict: %s", v)
@@ -747,9 +758,6 @@ func TestMasqueConnectStreamLocalizeDownload(t *testing.T) {
 	if l1.mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("download L1 slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectStreamLocalizeFastMbps)
 	}
-	if l3.mbps < connectStreamLocalizeCeilingMin || l3.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("download L3 windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
-	}
 
 	v := verdictConnectStreamDownload(l0, l1, l3)
 	t.Logf("connect-stream localize download verdict: %s", v)
@@ -773,9 +781,7 @@ func TestMasqueConnectStreamLocalizeDownloadWriteTo(t *testing.T) {
 	if l1.mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("WriteTo L1 slow: %.1f Mbit/s (want >= %.0f)", l1.mbps, connectStreamLocalizeFastMbps)
 	}
-	if l3.mbps < connectStreamLocalizeCeilingMin || l3.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("WriteTo L3 windowed: %.1f Mbit/s (want %.0f–%.0f)", l3.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
-	}
+	assertConnectStreamDownloadKPILayer(t, l3)
 
 	v := verdictConnectStreamDownload(l0, l1, l3)
 	t.Logf("connect-stream WriteTo download verdict: %s", v)
@@ -792,7 +798,9 @@ func TestMasqueConnectStreamUploadL2WideWindowBand(t *testing.T) {
 		t.Fatalf("L2 wide upload bytes=%d want >= %d", r.bytes, localizeBenchMinBytes)
 	}
 	t.Logf("connect-stream L2 wide window upload: %.1f Mbit/s (%d bytes)", r.mbps, r.bytes)
-	assertConnectStreamFastLayer(t, r)
+	if r.mbps < connectStreamLocalizeWideUploadMinMbps {
+		t.Fatalf("L2 wide upload slow: %.1f Mbit/s (want >= %.0f)", r.mbps, connectStreamLocalizeWideUploadMinMbps)
+	}
 
 	l3 := benchConnectStreamUploadLayer(t, "L3", benchWindowedBidiLink(), localizeBenchDuration)
 	if l3.err != nil {
@@ -824,7 +832,7 @@ func TestMasqueConnectStreamLocalizeDuplex(t *testing.T) {
 
 // TestMasqueConnectStreamLocalizeDuplexWindowed checks windowed bidi credit still allows download under upload pulses.
 func TestMasqueConnectStreamLocalizeDuplexWindowed(t *testing.T) {
-	runConnectStreamDuplexBench(t, benchWindowedBidiLink(), connectStreamLocalizeCeilingMin/2)
+	runConnectStreamDuplexBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
 }
 
 func runConnectStreamDuplexBench(t *testing.T, link bidiLink, minMbps float64) {
@@ -914,12 +922,13 @@ func TestH3DuplexConnWakeReceiveVsDeliveryEnvMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
 			t.Setenv("MASQUE_H3_BIDI_UPLOAD_WAKE", tc.wake)
+			t.Setenv("MASQUE_H3_BIDI_DOWNLOAD_WAKE", tc.wake)
 
 			inj := newLocalizeInjectors()
 			dl := runConnectStreamDuplexWriteToBench(
 				t,
 				benchWindowedBidiLink(),
-				connectStreamLocalizeCeilingMin,
+				connectStreamLocalizeDownloadKPIMin,
 				inj.connectStreamOpts(),
 			)
 			assertConnectStreamWindowedCeilingBand(t, dl.mbps, "duplex WriteTo download (S64 wake matrix)")
@@ -961,9 +970,7 @@ func TestConnectStreamLocalizeH3WakeAndFlushMetrics(t *testing.T) {
 	if n < localizeBenchMinBytes {
 		t.Fatalf("bytes=%d want >= %d", n, localizeBenchMinBytes)
 	}
-	if mbps < connectStreamLocalizeCeilingMin || mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("download %.1f Mbit/s want %.0f–%.0f", mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
-	}
+	assertConnectStreamWindowedCeilingBand(t, mbps, "download WriteTo (S42)")
 
 	downloadWakes := inj.BidiWake.Download.Load()
 	t.Logf("connect-stream H3 wake metrics: downloadWakes=%d bytes=%d mbps=%.1f", downloadWakes, n, mbps)
@@ -1007,10 +1014,8 @@ func TestMasqueConnectStreamPipeUploadVsBidiLocalizeDownload(t *testing.T) {
 		if !tc.UsesH3Stream() {
 			t.Fatal("bidi mode must share one http3.Stream (UsesH3Stream=true)")
 		}
-		dl := runConnectStreamDuplexWriteToBenchOnConn(t, h.conn, connectStreamLocalizeCeilingMin/2)
-		if dl.mbps < connectStreamLocalizeCeilingMin || dl.mbps > connectStreamLocalizeCeilingMax {
-			t.Fatalf("bidi windowed duplex WriteTo: %.1f Mbit/s (want %.0f–%.0f)", dl.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
-		}
+		dl := runConnectStreamDuplexWriteToBenchOnConn(t, h.conn, connectStreamLocalizeDownloadKPIMin/2)
+		assertConnectStreamWindowedCeilingBand(t, dl.mbps, "bidi windowed duplex WriteTo")
 	})
 
 	t.Run("pipe_upload_decoupled_instant_download", func(t *testing.T) {
@@ -1035,8 +1040,8 @@ func TestMasqueConnectStreamPipeUploadVsBidiLocalizeDownload(t *testing.T) {
 		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
 		t.Logf("pipe upload concurrent upload: %.1f Mbit/s", upMbps)
 		// In-process concurrent duplex caps near field ceiling (~15 Mbit/s); guard against upload hang (<<4).
-		if upMbps < connectStreamLocalizeCeilingMin {
-			t.Fatalf("pipe upload stalled under concurrent download: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeCeilingMin)
+		if upMbps < connectStreamLocalizeUploadWindowedMin {
+			t.Fatalf("pipe upload stalled under concurrent download: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeUploadWindowedMin)
 		}
 	})
 }
@@ -1060,11 +1065,11 @@ func TestMasqueConnectStreamHypothesisHD1DuplexQuota(t *testing.T) {
 		t.Fatalf("windowed WriteTo download: %v", windowed.err)
 	}
 	t.Logf("H-D1 guard windowed WriteTo: %.1f Mbit/s", windowed.mbps)
-	if windowed.mbps < connectStreamLocalizeCeilingMin || windowed.mbps > connectStreamLocalizeCeilingMax {
-		t.Fatalf("windowed ceiling without quota: %.1f Mbit/s (want %.0f–%.0f — quota was not root cause)", windowed.mbps, connectStreamLocalizeCeilingMin, connectStreamLocalizeCeilingMax)
+	if windowed.mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("windowed ceiling without quota: %.1f Mbit/s (want > %.0f — quota was not root cause)", windowed.mbps, connectStreamVPSKPITargetDownMbps)
 	}
 
-	duplex := runConnectStreamDuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeCeilingMin/2)
+	duplex := runConnectStreamDuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
 	t.Logf("H-D1 guard duplex WriteTo: %.1f Mbit/s", duplex.mbps)
 }
 

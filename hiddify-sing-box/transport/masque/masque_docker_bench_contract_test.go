@@ -176,7 +176,7 @@ func TestMasqueDockerBenchUDPProbeContract(t *testing.T) {
 		`UDP_REPRO_UP_TOLERANCE`, `"0.1"`,
 		`BENCH_UDP_REPRO_RUNS`,
 		`paced_up < UDP_MIN_UP_MBIT`,
-		`3× repro spread`,
+		`3x repro spread`,
 		`repro spread`,
 	)
 	matrixDoc := readRepoSource(t, filepath.Join("docs", "masque", "benchmark-matrix.md"))
@@ -323,7 +323,7 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
         "redeploy_sui_panel",
         "ref1_verify_remote_sui_masque",
         "connect-stream-h3",
-		`"h3,h3-h2o`,
+		`"h3,h2"`,
 		"MASQUE_SERVER=127.0.0.1",
 		"_SSH_RETRY_ATTEMPTS",
 		"ConnectTimeout",
@@ -370,7 +370,7 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
 		"BENCH_IPERF_DOWN_FIRST",
 		"bench_sui_dial_host",
 		`sui_dial`,
-		`p in ("h3", "h3-sb-stream")`,
+		`p == "h3"`,
 	)
 	requireSubstrings(t, vpsCommon, "vps common sui dial",
 		"bench_sui_dial_host",
@@ -379,7 +379,8 @@ func TestMasqueDockerBenchConnectStreamVPSKPIContract(t *testing.T) {
 		"hairpin",
 	)
 	requireSubstrings(t, vpsMatrix, "vps matrix sidecar loopback",
-		`"MASQUE_SERVER": "127.0.0.1"`,
+		`"MASQUE_SERVER": sui_dial`,
+		`bench_sui_dial_host`,
 	)
 	requireSubstrings(t, vpsReadme, "vps readme stream",
 		"MASQUE_TCP_USE_CONNECT_STREAM=1",
@@ -459,7 +460,6 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 	compose := readRepoSource(t, filepath.Join("docker", "masque-perf-lab", "docker-compose.yml"))
 	ceilingSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_stream_ceiling_test.go"))
 	endpointSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "protocol", "masque", "endpoint_connect_stream_download_test.go"))
-	history := readRepoSource(t, filepath.Join("docs", "masque", "bench-history", "2026-06-13-ref1-2-local-docker.md"))
 	matrixDoc := readRepoSource(t, filepath.Join("docs", "masque", "benchmark-matrix.md"))
 
 	requireSubstrings(t, runLocal, "connect-stream-h3 hard kpi",
@@ -484,15 +484,6 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		"MASQUE_H3_BIDI_DOWNLOAD_DRAIN",
 		"MASQUE_H3_BIDI_DOWNLOAD_WAKE",
 	)
-	runField := readDockerBenchSource(t, "run_field_h3_remote.py")
-	requireSubstrings(t, runField, "field remote bench",
-		"ref1_client_prod_env",
-		"masque-remote-client",
-		"print_connect_stream_kpi_verdict",
-		"field-h3",
-		"--snapshot-slug",
-		"ref1_write_bench_snapshot",
-	)
 	requireSubstrings(t, localProfiles, "connect-stream-h3 monitoring skip",
 		`profile.tcp_transport == "connect_stream"`,
 		`skip_monitoring`,
@@ -506,7 +497,6 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		`tcp_transport="connect_stream"`,
 		`gvisor`,
 		`172.30.99.0/24`,
-		`field/VPS parity`,
 	)
 	requireSubstrings(t, ceilingSrc, "in-proc docker h3 guard",
 		"TestConnectStreamDockerH3KPIInProcGuard",
@@ -519,12 +509,6 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		"endpointProdWindowedLink",
 		"connect-stream-h3 KPI",
 	)
-	requireSubstrings(t, history, "ref1-2 local docker",
-		"connect-stream-h3",
-		"**68.0**",
-		"KPI >21",
-		"local analog",
-	)
 	requireSubstrings(t, matrixDoc, "connect-stream h3 kpi",
 		"connect-stream-h3",
 		"TestMasqueDockerBenchConnectStreamH3KPIContract",
@@ -534,11 +518,11 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 	}
 }
 
-// TestMasqueFieldBenchReportDownFirstContract locks field remote iperf order (run_field_h3_remote.py).
+// TestMasqueFieldBenchReportDownFirstContract locks bench iperf download-first order.
 func TestMasqueFieldBenchReportDownFirstContract(t *testing.T) {
 	t.Parallel()
 	reportSh := readRepoSource(t, filepath.Join("docker", "masque-perf-lab", "bench", "run-bench-report.sh"))
-	runField := readDockerBenchSource(t, "run_field_h3_remote.py")
+	runLocal := readDockerBenchSource(t, "run_local.py")
 	requireSubstrings(t, reportSh, "field bench down-first order",
 		`BENCH_IPERF_DOWN_FIRST:-0}" = "1"`,
 		`run_one "-R"`,
@@ -556,9 +540,9 @@ func TestMasqueFieldBenchReportDownFirstContract(t *testing.T) {
 	if downIdx < 0 || upIdx < 0 || downIdx > upIdx {
 		t.Fatalf("down-first branch order: down@=%d up@=%d", downIdx, upIdx)
 	}
-	requireSubstrings(t, runField, "field remote down-first env",
-		"BENCH_IPERF_DOWN_FIRST=1",
-		"run-bench-report.sh",
+	requireSubstrings(t, runLocal, "local bench down-first",
+		"download-first",
+		"connect_stream_kpi_hard_profiles",
 	)
 }
 
@@ -793,6 +777,37 @@ func TestMasqueDockerBenchConnectUDPSoftKPIContract(t *testing.T) {
 	)
 }
 
+// TestMasqueDockerBenchConnectUDPH3H2CapsuleContract locks connect-udp-h3/h2 prod profiles and in-proc capsule smoke gate.
+func TestMasqueDockerBenchConnectUDPH3H2CapsuleContract(t *testing.T) {
+	t.Parallel()
+	local := readDockerBenchSource(t, "local_profiles.py")
+	smokeSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_udp_prod_profile_smoke_test.go"))
+	gates := readRepoSource(t, filepath.Join("hiddify-core", "scripts", "go-test-masque-gates.ps1"))
+
+	requireSubstrings(t, local, "connect-udp-h3 profile",
+		`name="connect-udp-h3"`,
+		`transport_mode="connect_udp"`,
+		`http_layer="h3"`,
+		`tcp_transport="connect_stream"`,
+	)
+	requireSubstrings(t, local, "connect-udp-h2 profile",
+		`name="connect-udp-h2"`,
+		`transport_mode="connect_udp"`,
+		`http_layer="h2"`,
+		`tcp_transport="connect_stream"`,
+	)
+	requireSubstrings(t, smokeSrc, "in-proc prod-profile capsule smoke",
+		"TestConnectUDPProdProfileH3CapsuleSmoke",
+		"TestConnectUDPProdProfileH2CapsuleSmoke",
+		`TransportMode:       option.MasqueTransportModeConnectUDP`,
+		"connect-udp-h3-smoke",
+		"connect-udp-h2-smoke",
+	)
+	requireSubstrings(t, gates, "L4 prod-profile capsule gate",
+		"ProdProfileCapsule",
+	)
+}
+
 // TestMasqueDockerBenchConnectIPH3TunKPIContract locks connect-ip-h3-tun docker thresholds and in-proc guard.
 func TestMasqueDockerBenchConnectIPH3TunKPIContract(t *testing.T) {
 	t.Parallel()
@@ -857,6 +872,31 @@ func TestMasqueDockerBenchConnectIPH2BaselineContract(t *testing.T) {
 		"TestLaunchMasqueStackH2ExtendedConnectIPSmoke",
 		"LaunchMasqueStack",
 		"HandleConnectIPRequest",
+	)
+}
+
+// TestMasqueDockerBenchConnectIPH3HybridContract locks connect-ip-h3 hybrid profile and in-proc smoke gate.
+func TestMasqueDockerBenchConnectIPH3HybridContract(t *testing.T) {
+	t.Parallel()
+	local := readDockerBenchSource(t, "local_profiles.py")
+	hybridSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_ip_hybrid_smoke_test.go"))
+	gates := readRepoSource(t, filepath.Join("hiddify-core", "scripts", "go-test-masque-gates.ps1"))
+
+	requireSubstrings(t, local, "connect-ip-h3 hybrid profile",
+		`name="connect-ip-h3"`,
+		`transport_mode="connect_ip"`,
+		`http_layer="h3"`,
+		`tcp_transport="connect_stream"`,
+		`via="socks"`,
+	)
+	requireSubstrings(t, hybridSrc, "in-proc hybrid smoke",
+		"TestConnectIPHybridConnectStreamH3Smoke",
+		`TransportMode:       "connect_ip"`,
+		`TCPTransport:        "connect_stream"`,
+		"connect-ip-h3 hybrid",
+	)
+	requireSubstrings(t, gates, "L3 hybrid gate pattern",
+		"HybridConnectStream",
 	)
 }
 
