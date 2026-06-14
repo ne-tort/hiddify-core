@@ -10,7 +10,7 @@ import (
 
 const (
 	envBidiSendBoost              = "MASQUE_QUIC_BIDI_SEND_BOOST"
-	defaultBidiSendBoostMaxFrames = 256
+	defaultBidiSendBoostMaxFrames = 384
 )
 
 // MasqueBidiSendBoostEnabled reports whether active-download bidi streams are queued at the
@@ -33,10 +33,9 @@ func masqueBidiSendBoostMaxFramesPerPacket() int {
 
 type masqueBidiBoostSetter interface {
 	masqueSetBidiSendBoost(protocol.StreamID, bool)
+	masqueRepromoteBidiSendBoost(protocol.StreamID)
 }
 
-// MasqueSetBidiDownloadActive marks a bidirectional stream as download-active so its send half
-// is prioritized in the QUIC framer (same stream-ID send boost during iperf -R).
 func masqueScheduleDownloadActiveWake(s *Stream) {
 	if s == nil || !masqueWakeSendOnReceiveRead() {
 		return
@@ -48,18 +47,44 @@ func masqueScheduleDownloadActiveWake(s *Stream) {
 	MasqueWakeStreamSend(s)
 }
 
+// MasqueSetBidiDownloadActive marks a bidirectional stream as download-active so its send half
+// is prioritized in the QUIC framer (same stream-ID send boost during iperf -R).
 func MasqueSetBidiDownloadActive(s *Stream, active bool) {
 	if s == nil {
 		return
 	}
 	s.setMasqueDownloadActive(active)
 	if active {
-		poked := masquePokeDownloadReceiveWindow(s)
-		// Eager window: always schedule send after activation so queued MAX_STREAM_DATA
-		// (or upload interleave) is not delayed until the next Read (windowed bidi download stall).
-		if masqueDownloadEagerWindow() || poked {
-			masqueScheduleDownloadActiveWake(s)
-		}
+		_ = masquePokeDownloadReceiveWindow(s)
+		masqueScheduleDownloadActiveWake(s)
+	}
+	if !MasqueBidiSendBoostEnabled() {
+		return
+	}
+	if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
+		setter.masqueSetBidiSendBoost(s.StreamID(), active)
+	}
+}
+
+// MasqueRepromoteBidiSendBoost re-queues a download-active boosted stream at the framer front
+// when concurrent upload traffic arrives on another goroutine (H3-L1c duplex aggregate ceiling).
+func MasqueRepromoteBidiSendBoost(s *Stream) {
+	if s == nil || !MasqueBidiSendBoostEnabled() || !s.masqueIsDownloadActive() {
+		return
+	}
+	if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
+		setter.masqueRepromoteBidiSendBoost(s.StreamID())
+	}
+}
+
+// MasqueSetBidiUploadActive prioritizes a bidi stream's send half during upload-only legs
+// (framer boost + scheduler poke). Does not mark download-active or poke S2C credit.
+func MasqueSetBidiUploadActive(s *Stream, active bool) {
+	if s == nil {
+		return
+	}
+	if active {
+		masqueScheduleDownloadActiveWake(s)
 	}
 	if !MasqueBidiSendBoostEnabled() {
 		return

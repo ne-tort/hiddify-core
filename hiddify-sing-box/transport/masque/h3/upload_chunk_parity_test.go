@@ -6,6 +6,25 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
+// TestH3UploadChunkBytesLeg (H3-T1b-01) — upload-primary uses 64 KiB; true duplex uses env/default.
+func TestH3UploadChunkBytesLeg(t *testing.T) {
+	if got := H3UploadChunkBytes(false, false, false); got != tunnelWriteToBufLen {
+		t.Fatalf("upload-primary chunk=%d want %d", got, tunnelWriteToBufLen)
+	}
+	if got := H3UploadChunkBytes(true, false, false); got != tunnelWriteToBufLen {
+		t.Fatalf("download-active idle chunk=%d want %d", got, tunnelWriteToBufLen)
+	}
+	if got := H3UploadChunkBytes(true, false, true); got != defaultDuplexUploadChunkBytes {
+		t.Fatalf("duplex bootstrap chunk=%d want %d", got, defaultDuplexUploadChunkBytes)
+	}
+	if got := H3UploadChunkBytes(true, true, false); got != defaultDuplexUploadChunkBytes {
+		t.Fatalf("download-delivered bootstrap chunk=%d want %d", got, defaultDuplexUploadChunkBytes)
+	}
+	if got := H3UploadChunkBytes(true, true, true); got != tunnelWriteToBufLen {
+		t.Fatalf("steady concurrent duplex chunk=%d want %d", got, tunnelWriteToBufLen)
+	}
+}
+
 // TestH3QuicConnectUploadChunkParity (S62): TunnelConn upload chunking must match
 // quic-go http3 CONNECT request-body copy size for the same env knobs.
 func TestH3QuicConnectUploadChunkParity(t *testing.T) {

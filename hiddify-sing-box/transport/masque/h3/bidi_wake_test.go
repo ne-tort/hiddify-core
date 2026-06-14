@@ -1,8 +1,13 @@
 package h3
 
 import (
+	"context"
+	"io"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 func TestBidiUploadWakeDuringDownloadEnv(t *testing.T) {
@@ -67,6 +72,81 @@ func TestBidiDownloadDeliveryWakeDuringWriteToEnv(t *testing.T) {
 				t.Fatalf("BidiDownloadDeliveryWakeDuringWriteTo() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestH3UploadChunkWakePokesCreditSender (H3-T1b-01) — upload chunks during downloadActive
+// must reach MasqueWakeBidiDuplex (conn-level), not only MasqueWakeStreamSend.
+func TestH3UploadChunkWakePokesCreditSender(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real QUIC upload wake parity")
+	}
+	t.Setenv(envH3BidiUploadWake, "1")
+
+	h3RealQuicTLS()
+	clientConn, serverConn, closeSimnet := newH3RealQuicSimnetLink(t)
+	defer closeSimnet()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	quicCfg := &quic.Config{DisablePathMTUDiscovery: true, MaxIdleTimeout: 2 * time.Minute}
+	ln, err := quic.Listen(serverConn, h3RealQuicServerTLS, quicCfg)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	streamReady := make(chan *quic.Stream, 1)
+	go func() {
+		conn, err := ln.Accept(ctx)
+		if err != nil {
+			return
+		}
+		str, err := conn.OpenStreamSync(ctx)
+		if err != nil {
+			return
+		}
+		streamReady <- str
+		_, _ = io.Copy(io.Discard, str)
+	}()
+
+	conn, err := quic.Dial(ctx, clientConn, serverConn.LocalAddr(), h3RealQuicClientTLS, quicCfg)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseWithError(0, "")
+
+	select {
+	case <-streamReady:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for server stream")
+	}
+
+	str, err := conn.AcceptStream(ctx)
+	if err != nil {
+		t.Fatalf("accept stream: %v", err)
+	}
+
+	var streamSend, connSend atomic.Int32
+	restoreStream := quic.SetMasqueWakeStreamSendHook(func() { streamSend.Add(1) })
+	restoreConn := quic.SetMasqueWakeConnSendHook(func() { connSend.Add(1) })
+	defer restoreStream()
+	defer restoreConn()
+
+	tc := NewTunnelConn(TunnelConnParams{H3Stream: &realQuicH3Stream{Stream: str}, Ctx: ctx})
+	atomic.StoreInt32(&tc.downloadActive, 1)
+	tc.setBidiDownloadActive(true)
+
+	chunk := make([]byte, 4096)
+	if _, err := tc.Write(chunk); err != nil {
+		t.Fatalf("upload chunk: %v", err)
+	}
+	if streamSend.Load() == 0 {
+		t.Fatal("expected stream send wake on upload chunk during downloadActive")
+	}
+	if connSend.Load() == 0 {
+		t.Fatal("upload during downloadActive must MasqueWakeBidiDuplex (conn-level wake), not only MasqueWakeStreamSend")
 	}
 }
 

@@ -100,7 +100,8 @@ func DialHTTP3ConnectStreamLeg(
 		}
 		TraceTCPf("masque tcp connect_stream request host=%s port=%d attempt=%d%s", targetHost, targetPort, attempt+1, dialH3LegLogSuffix(legLabel))
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
-		req, pr, pw, reqErr := hooks.BuildRequest(streamCtx, hooks.RequestURL(tcpURL), serverHost, usePipe)
+		legCtx := ContextWithConnectStreamLeg(streamCtx, legLabel)
+		req, pr, pw, reqErr := hooks.BuildRequest(legCtx, hooks.RequestURL(tcpURL), serverHost, usePipe)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, reqErr)
@@ -172,7 +173,7 @@ func DialHTTP3ConnectStreamLeg(
 		TraceTCPf("masque tcp connect_stream success host=%s port=%d status=%d pipe_upload=%t%s",
 			targetHost, targetPort, resp.StatusCode, usePipe, dialH3LegLogSuffix(legLabel))
 		stopReqCtxRelay(true)
-		conn, err := hooks.TunnelFromResponse(streamCtx, resp, pw, targetHost, targetPort)
+		conn, err := hooks.TunnelFromResponse(legCtx, resp, pw, targetHost, targetPort)
 		if err != nil {
 			if pw != nil {
 				_ = pw.Close()

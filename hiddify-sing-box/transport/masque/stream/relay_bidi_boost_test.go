@@ -34,8 +34,9 @@ func TestRelayTunnelBidiDownloadBoostWireLock(t *testing.T) {
 	for _, needle := range []string{
 		"relayTunnelSetBidiDownloadActive(bidi, true)",
 		"defer relayTunnelSetBidiDownloadActive(bidi, false)",
-		"relayTunnelCopyBufferBidiDownload(bidi, targetConn, bidi)",
+		"relayTunnelDownloadRelayH3Bidi(bidi, targetConn, bidi)",
 		"relayTunnelCopyBufferBidiUpload(targetConn, uploadSrc, bidi)",
+		"relayTunnelPrimeDownload(src)",
 	} {
 		if !strings.Contains(relayGoAuditSource, needle) {
 			t.Fatalf("relay.go missing REF-SRC-SB-5 anchor %q", needle)

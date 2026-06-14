@@ -83,3 +83,11 @@ func (w *chunkedUploadWriter) Close() error {
 	}
 	return w.inner.Close()
 }
+
+// PokeH2BidiDownload flushes the HTTP/2 request-body path during concurrent download WriteTo.
+func (w *chunkedUploadWriter) PokeH2BidiDownload() {
+	if w == nil || w.inner == nil {
+		return
+	}
+	FlushRequestBody(w.inner)
+}

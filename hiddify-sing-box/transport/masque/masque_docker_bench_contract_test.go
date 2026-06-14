@@ -20,6 +20,9 @@ const (
 	dockerBenchUDPReproUpTolerance = 0.1  // paced udp_up spread across 3× runs
 	dockerBenchConnectStreamSoftMin       = 4.0  // localize floor; soft WARN only (bidi asymmetry expected)
 	dockerBenchConnectStreamMinDownMbit   = 21.0 // run_local.py BENCH_CONNECT_STREAM_MIN_DOWN_MBIT (connect-stream-h3)
+	dockerBenchConnectStreamGateH3Down    = 100.0 // GATE-H3-D tcp_down floor @ netem 35 ms
+	dockerBenchConnectStreamGateH3MaxRatio = 4.0  // GATE-H3-D tcp_up / max(tcp_down, 21) ceiling
+	dockerBenchConnectStreamAsymmetryWarnRatio = 8.0 // Phase-1 WARN tcp_up/tcp_down (923/48 baseline ~19)
 	dockerBenchConnectStreamVPSKPITarget  = 21.0 // field invoke.py BENCH_KPI_DOWN_MBIT (Q7 wave 2)
 	dockerBenchConnectIPMinUpMbit        = 80.0  // run_local.py BENCH_CONNECT_IP_MIN_UP_MBIT
 	dockerBenchConnectIPMinDownMbit      = 350.0 // run_local.py BENCH_CONNECT_IP_MIN_DOWN_MBIT
@@ -515,6 +518,79 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 	)
 	if dockerBenchConnectStreamMinDownMbit != 21.0 {
 		t.Fatalf("dockerBenchConnectStreamMinDownMbit=%v want 21.0", dockerBenchConnectStreamMinDownMbit)
+	}
+}
+
+// TestH3ConnectStreamFidelityContract (H3-T6-01) documents synth/Docker fidelity gap: K-S1/K-S2
+// are not Docker predictors; Docker bench uses sequential download-first legs on one QUIC session.
+func TestH3ConnectStreamFidelityContract(t *testing.T) {
+	t.Parallel()
+	localizeSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_stream_localize_test.go"))
+	asymSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3_connect_stream_asymmetry_test.go"))
+	runLocal := readDockerBenchSource(t, "run_local.py")
+	h3Readme := readRepoSource(t, filepath.Join("docs", "masque", "layers", "h3", "README.md"))
+
+	requireSubstrings(t, localizeSrc, "K-S1 synth",
+		"connectStreamLocalizeDownloadKPIMin",
+		"TestMasqueConnectStreamLocalizeDownloadWriteTo",
+		"benchWindowedBidiLink()",
+	)
+	requireSubstrings(t, asymSrc, "H3 strict asymmetry gate",
+		"benchWindowedBidiLinkStrictH3L256",
+		"TestH3ConnectStreamBidiAsymmetryRatio",
+		"h3AsymmetryMinDownMbps",
+	)
+	requireSubstrings(t, runLocal, "sequential docker legs",
+		"connect-stream: download-first",
+		"iperf_via_socks(True)",
+		"iperf_via_socks(False)",
+	)
+	requireSubstrings(t, h3Readme, "H3-S symptoms",
+		"H3-S1",
+		"H3-S2",
+		"H3-S3",
+		"sequential",
+	)
+	if strings.Contains(localizeSrc, "NotDockerPredictor") {
+		t.Log("K-S1/K-S2 marked NotDockerPredictor in localize tests")
+	}
+}
+
+// TestMasqueDockerBenchConnectStreamH3AsymmetryContract (H3-T6-11) locks GATE-H3-D ratio KPI
+// in run_local.py: WARN ratio>8, LOCAL_STRICT FAIL, hard down>100 and ratio≤4.
+func TestMasqueDockerBenchConnectStreamH3AsymmetryContract(t *testing.T) {
+	t.Parallel()
+	runLocal := readDockerBenchSource(t, "run_local.py")
+	agents := readRepoSource(t, "AGENTS.md")
+
+	requireSubstrings(t, runLocal, "connect-stream h3 asymmetry warn",
+		`CONNECT_STREAM_ASYMMETRY_WARN_RATIO`,
+		`"8"`,
+		`def connect_stream_h3_asymmetry_warn`,
+		`WARN connect-stream-h3 asymmetry`,
+	)
+	requireSubstrings(t, runLocal, "GATE-H3-D hard",
+		`CONNECT_STREAM_GATE_H3_DOWN_MBIT`,
+		`"100"`,
+		`CONNECT_STREAM_GATE_H3_MAX_RATIO`,
+		`"4"`,
+		`def connect_stream_gate_h3_d_ok`,
+		`GATE-H3-D`,
+	)
+	requireSubstrings(t, agents, "GATE-H3-D baseline",
+		"GATE-H3-D",
+		"923",
+		"48",
+		"download-first",
+	)
+	if dockerBenchConnectStreamGateH3Down != 100.0 {
+		t.Fatalf("dockerBenchConnectStreamGateH3Down=%v want 100.0", dockerBenchConnectStreamGateH3Down)
+	}
+	if dockerBenchConnectStreamGateH3MaxRatio != 4.0 {
+		t.Fatalf("dockerBenchConnectStreamGateH3MaxRatio=%v want 4.0", dockerBenchConnectStreamGateH3MaxRatio)
+	}
+	if dockerBenchConnectStreamAsymmetryWarnRatio != 8.0 {
+		t.Fatalf("dockerBenchConnectStreamAsymmetryWarnRatio=%v want 8.0", dockerBenchConnectStreamAsymmetryWarnRatio)
 	}
 }
 

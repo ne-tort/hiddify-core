@@ -74,28 +74,40 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 	}
 	host := tcpStreamDialH3Host{s: s}
 	if h3.ConnectStreamUseDualConnect() {
-		// P2 download leg: pipe mode keeps S2C drain off coordinated bidi (no duplex_coord on download leg).
-		download, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, true, "download")
+		// P2: download leg now; upload leg lazy (or parallel-prep on WriteTo) — no second CONNECT on single-leg flows.
+		download, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, false, "download")
 		if err != nil {
 			return nil, err
 		}
-		upload, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, true, "upload")
-		if err != nil {
-			_ = download.Close()
-			return nil, err
-		}
+		dialCtx := ctx
 		var local, remote net.Addr
 		if download != nil {
 			local = download.LocalAddr()
 			remote = download.RemoteAddr()
 		}
-		return strm.NewTunnelConn(h3.NewDualTunnelConn(h3.DualTunnelConnParams{
+		dc := h3.NewDualTunnelConn(h3.DualTunnelConnParams{
 			Download: download,
-			Upload:   upload,
 			Ctx:      ctx,
 			Local:    local,
 			Remote:   remote,
-		})), nil
+		})
+		dc.SetUploadDial(func() (net.Conn, io.Closer, error) {
+			uploadHTTP := tcpHTTP
+			var uploadCloser io.Closer
+			if dc.UploadLegParallelQUIC() {
+				uploadHTTP = s.newEphemeralTCPHTTPTransport()
+				uploadCloser = uploadHTTP
+			}
+			upload, dialErr := strm.DialHTTP3ConnectStreamLeg(dialCtx, hooks, host, tcpURL, logIn, targetHost, targetPort, uploadHTTP, false, "upload")
+			if dialErr != nil {
+				if uploadCloser != nil {
+					_ = uploadCloser.Close()
+				}
+				return nil, nil, dialErr
+			}
+			return upload, uploadCloser, nil
+		})
+		return strm.NewTunnelConn(dc), nil
 	}
 	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP)
 }

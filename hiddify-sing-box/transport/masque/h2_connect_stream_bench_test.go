@@ -3,6 +3,7 @@ package masque
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -137,7 +138,12 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 
 	uploadDone := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(conn, io.LimitReader(&zeroReader{}, 512*1024))
+		rf, ok := conn.(io.ReaderFrom)
+		if !ok {
+			uploadDone <- fmt.Errorf("conn lacks io.ReaderFrom")
+			return
+		}
+		_, err := rf.ReadFrom(io.LimitReader(&zeroReader{}, 512*1024))
 		uploadDone <- err
 	}()
 
@@ -158,8 +164,8 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 	}
 }
 
-// TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead verifies bulk upload via Write (not
-// ReadFrom/io.Copy) when the onward TCP server sends an iperf banner without a concurrent client Read.
+// TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead verifies bulk upload via ReadFrom
+// (prod route reader_from path) when the onward server sends an iperf banner without client Read.
 func TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead(t *testing.T) {
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -213,26 +219,22 @@ func TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead(t *testing.T) {
 
 	uploadDone := make(chan error, 1)
 	go func() {
-		payload := make([]byte, 256*1024)
-		var total int
-		for total < 512*1024 {
-			n, err := conn.Write(payload)
-			total += n
-			if err != nil {
-				uploadDone <- err
-				return
-			}
+		rf, ok := conn.(io.ReaderFrom)
+		if !ok {
+			uploadDone <- fmt.Errorf("conn lacks io.ReaderFrom")
+			return
 		}
-		uploadDone <- nil
+		_, err := rf.ReadFrom(io.LimitReader(&zeroReader{}, 512*1024))
+		uploadDone <- err
 	}()
 
 	select {
 	case err := <-uploadDone:
 		if err != nil && err != io.EOF {
-			t.Fatalf("upload via Write without concurrent read: %v", err)
+			t.Fatalf("upload via ReadFrom without concurrent read: %v", err)
 		}
 	case <-time.After(8 * time.Second):
-		t.Fatal("upload Write blocked >8s without concurrent read while server sent banner (H2 drain expected)")
+		t.Fatal("upload ReadFrom blocked >8s without concurrent read while server sent banner (H2 drain expected)")
 	}
 }
 
@@ -292,7 +294,12 @@ func TestH2ConnectStreamTCPUploadServerBannerNoConcurrentRead(t *testing.T) {
 
 	uploadDone := make(chan error, 1)
 	go func() {
-		_, err := io.Copy(conn, io.LimitReader(&zeroReader{}, 512*1024))
+		rf, ok := conn.(io.ReaderFrom)
+		if !ok {
+			uploadDone <- fmt.Errorf("conn lacks io.ReaderFrom")
+			return
+		}
+		_, err := rf.ReadFrom(io.LimitReader(&zeroReader{}, 512*1024))
 		uploadDone <- err
 	}()
 
@@ -659,4 +666,77 @@ func TestMasqueConnectStreamH2LocalizeDownloadWriteTo(t *testing.T) {
 // on windowed bidi (complements S70 instant duplex WriteTo).
 func TestMasqueConnectStreamH2LocalizeDuplexWriteTo(t *testing.T) {
 	runConnectStreamH2DuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
+}
+
+// benchWindowedBidiLinkStrict models HTTP/2-style bidi FC without prod eager S2C WINDOW
+// (MASQUE_H2_DOWNLOAD_EAGER_WINDOW=0 — field RTT @ 64 KiB ≈ 15 Mbit/s until H2-B0 fix).
+func benchWindowedBidiLinkStrict() windowedBidiLink {
+	link := windowedBidiLink{
+		rtt:         localizeBenchRTT,
+		windowBytes: localizeBenchWindowBytes,
+	}
+	if mh2.DownloadEagerWindowEnabled() {
+		link.instantCreditS2C = true
+	}
+	return link
+}
+
+// benchWindowedBidiLinkH2Prod applies H2-specific eager download window for windowed KPI tests.
+func benchWindowedBidiLinkH2Prod() windowedBidiLink {
+	link := windowedBidiLink{
+		rtt:         localizeBenchRTT,
+		windowBytes: localizeBenchWindowBytes,
+	}
+	if mh2.DownloadEagerWindowEnabled() {
+		link.instantCreditS2C = true
+	}
+	return link
+}
+
+// TestH2B0WindowedDuplexWriteToNoUploadPulse (H2-B0) — field RTT model with P1c eager WINDOW_UPDATE (prod default).
+func TestH2B0WindowedDuplexWriteToNoUploadPulse(t *testing.T) {
+	runConnectStreamH2DuplexWriteToNoPulseBenchMbps(t, benchWindowedBidiLinkH2Prod(), connectStreamVPSKPITargetDownMbps, 0)
+}
+
+// TestH2StrictWindowCeilingBand documents RTT-bound S2C without eager window (harness only, not a release gate).
+func TestH2StrictWindowCeilingBand(t *testing.T) {
+	t.Setenv("MASQUE_H2_DOWNLOAD_EAGER_WINDOW", "0")
+	runConnectStreamH2DuplexWriteToNoPulseBenchMbps(t, benchWindowedBidiLinkStrict(), 10, 20)
+}
+
+// TestH2BidiFlushWakeAfterP1c (H-D) — flush-only upload poke sufficient after P1c (keepalive removed).
+func TestH2BidiFlushWakeAfterP1c(t *testing.T) {
+	runConnectStreamH2DuplexWriteToNoPulseBenchMbps(t, benchWindowedBidiLinkH2Prod(), connectStreamVPSKPITargetDownMbps, 0)
+}
+
+// TestH2WindowedDuplexWriteToNoUploadPulse regression: prod H2 eager window (default on) on windowed link.
+func TestH2WindowedDuplexWriteToNoUploadPulse(t *testing.T) {
+	runConnectStreamH2DuplexWriteToNoPulseBenchMbps(t, benchWindowedBidiLinkH2Prod(), connectStreamVPSKPITargetDownMbps, 0)
+}
+
+func runConnectStreamH2DuplexWriteToNoPulseBenchMbps(t *testing.T, link bidiLink, minMbps, maxMbps float64) {
+	t.Helper()
+	const duration = localizeBenchDuration
+
+	targetPort := startH2ConnectStreamDownloadTarget(t)
+	conn := dialH2ConnectStreamBench(t, targetPort)
+	if link != nil {
+		conn = link.wrap(conn)
+	}
+
+	n, mbps, err := measureTCPDownloadWriteToMbps(conn, duration)
+	if err != nil && n == 0 {
+		t.Fatalf("duplex WriteTo download without upload pulse: %v", err)
+	}
+	t.Logf("h2 connect-stream duplex WriteTo no-pulse: %.1f Mbit/s (%d bytes)", mbps, n)
+	if n < localizeBenchMinBytes {
+		t.Fatalf("h2 duplex WriteTo no-pulse stalled: %d bytes (want >= %d); mbps=%.1f",
+			n, localizeBenchMinBytes, mbps)
+	}
+	if maxMbps > 0 && mbps > maxMbps {
+		t.Fatalf("h2 duplex WriteTo no-pulse: %.1f Mbit/s (want <= %.1f)", mbps, maxMbps)
+	}
+	if mbps <= minMbps {
+		t.Fatalf("h2 duplex WriteTo no-pulse: %.1f Mbit/s (want > %.0f KPI)", mbps, minMbps)
+	}
 }

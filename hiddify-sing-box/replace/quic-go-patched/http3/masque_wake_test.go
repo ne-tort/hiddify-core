@@ -163,8 +163,8 @@ func TestMasqueWakeAfterDownloadWriteOnActiveStream(t *testing.T) {
 	n, err = str.Write([]byte("idle"))
 	require.NoError(t, err)
 	require.Equal(t, 4, n)
-	require.Equal(t, 0, streamWakes, "inactive stream must not wake on Write")
-	require.Equal(t, 0, connWakes, "inactive stream must not wake conn on Write")
+	require.Equal(t, 2, streamWakes, "upload-only Stream.Write must wake send per quic chunk (no eager poke)")
+	require.Equal(t, 2, connWakes, "upload-only Stream.Write must wake conn send per quic chunk")
 }
 
 func TestMasqueSetBidiDownloadActiveEagerActivationWake(t *testing.T) {

@@ -6,31 +6,45 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	C "github.com/sagernet/sing-box/constant"
 )
 
 // DualTunnelConn is a P2 composite net.Conn: download and upload use separate CONNECT-stream legs
-// (distinct QUIC stream IDs). Download leg uses pipe mode (S2C-only drain, no duplex_coord).
+// (distinct h3_stream tunnels; upload may use a parallel QUIC conn when P6 is enabled).
 type DualTunnelConn struct {
-	download net.Conn
-	upload   net.Conn
-	ctx      context.Context
-	cancel   context.CancelFunc
-	local    net.Addr
-	remote   net.Addr
-	closeMu  sync.Mutex
-	closed   bool
+	download     net.Conn
+	upload       net.Conn
+	uploadDial   UploadLegDial
+	uploadOnce   sync.Once
+	uploadDialErr error
+	uploadCloser io.Closer
+	ctx          context.Context
+	cancel       context.CancelFunc
+	local        net.Addr
+	remote       net.Addr
+	closeMu      sync.Mutex
+	closed       bool
+	duplexCopy   int32 // route marks concurrent upload+download copy
+	parallelQUIC int32 // P6: upload leg on separate QUIC conn when duplex escape needed
 }
+
+// UploadLegDial opens the upload CONNECT-stream leg (lazy on first Write/ReadFrom).
+type UploadLegDial func() (net.Conn, io.Closer, error)
 
 // DualTunnelConnParams configures a P2 dual-leg tunnel.
 type DualTunnelConnParams struct {
 	Download net.Conn
-	Upload   net.Conn
+	Upload   net.Conn // optional; when nil, UploadDial is used on first upload I/O
 	Ctx      context.Context
 	Local    net.Addr
 	Remote   net.Addr
+	// UploadCloser closes an ephemeral upload-leg QUIC transport (P6 parallel conn).
+	UploadCloser io.Closer
+	// UploadDial lazy upload leg (P2 prod default — single-leg flows skip second CONNECT).
+	UploadDial UploadLegDial
 }
 
 // NewDualTunnelConn builds a composite tunnel from separate download (read/WriteTo) and upload (write/ReadFrom) legs.
@@ -51,13 +65,79 @@ func NewDualTunnelConn(p DualTunnelConnParams) *DualTunnelConn {
 		remote = dl.RemoteAddr()
 	}
 	return &DualTunnelConn{
-		download: dl,
-		upload:   ul,
-		ctx:      ctx,
-		cancel:   cancel,
-		local:    local,
-		remote:   remote,
+		download:     dl,
+		upload:       ul,
+		uploadDial:   p.UploadDial,
+		uploadCloser: p.UploadCloser,
+		ctx:          ctx,
+		cancel:       cancel,
+		local:        local,
+		remote:       remote,
 	}
+}
+
+func (c *DualTunnelConn) prepUploadLegAsync() {
+	if c == nil || c.upload != nil || c.uploadDial == nil {
+		return
+	}
+	go func() { _ = c.ensureUploadLeg() }()
+}
+
+// SetUploadDial replaces the lazy upload-leg dialer (P6 may follow route duplex mark).
+func (c *DualTunnelConn) SetUploadDial(d UploadLegDial) {
+	if c != nil {
+		c.uploadDial = d
+	}
+}
+
+// PrepUploadLeg starts lazy upload-leg dial (route duplex hint — optional).
+func (c *DualTunnelConn) PrepUploadLeg() { c.prepUploadLegAsync() }
+
+// MarkConnectionCopyDuplex pre-dials the upload leg when route runs concurrent copy goroutines.
+func (c *DualTunnelConn) MarkConnectionCopyDuplex() {
+	if c == nil {
+		return
+	}
+	if atomic.SwapInt32(&c.duplexCopy, 1) == 1 {
+		return
+	}
+	atomic.StoreInt32(&c.parallelQUIC, 1)
+	c.prepUploadLegAsync()
+}
+
+// UploadLegParallelQUIC reports whether the upload leg should escape the download QUIC conn (P6).
+func (c *DualTunnelConn) UploadLegParallelQUIC() bool {
+	if c == nil {
+		return false
+	}
+	if atomic.LoadInt32(&c.parallelQUIC) > 0 {
+		return true
+	}
+	return ConnectStreamDualLegParallelQUIC()
+}
+
+func (c *DualTunnelConn) ensureUploadLeg() error {
+	if c == nil {
+		return io.ErrClosedPipe
+	}
+	if c.upload != nil {
+		return nil
+	}
+	if c.uploadDial == nil {
+		return io.ErrClosedPipe
+	}
+	c.uploadOnce.Do(func() {
+		ul, closer, err := c.uploadDial()
+		if err != nil {
+			c.uploadDialErr = err
+			return
+		}
+		c.upload = ul
+		if closer != nil {
+			c.uploadCloser = closer
+		}
+	})
+	return c.uploadDialErr
 }
 
 // UsesDualConnect reports P2 dual-leg mode (always true for this type).
@@ -94,8 +174,11 @@ func (c *DualTunnelConn) Read(p []byte) (int, error) {
 }
 
 func (c *DualTunnelConn) Write(p []byte) (int, error) {
-	if c == nil || c.upload == nil {
+	if c == nil {
 		return 0, io.ErrClosedPipe
+	}
+	if err := c.ensureUploadLeg(); err != nil {
+		return 0, err
 	}
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
@@ -108,8 +191,37 @@ func (c *DualTunnelConn) Write(p []byte) (int, error) {
 }
 
 func (c *DualTunnelConn) ReadFrom(r io.Reader) (int64, error) {
-	if c == nil || c.upload == nil {
+	if c == nil {
 		return 0, io.ErrClosedPipe
+	}
+	// Route always starts an upload goroutine; defer second CONNECT until the local side sends data.
+	if c.upload == nil && c.uploadDial != nil {
+		buf := make([]byte, 32*1024)
+		n, err := r.Read(buf)
+		if n == 0 {
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return 0, nil
+				}
+				return 0, err
+			}
+			return 0, nil
+		}
+		if dialErr := c.ensureUploadLeg(); dialErr != nil {
+			return 0, dialErr
+		}
+		wrote, werr := c.upload.Write(buf[:n])
+		if werr != nil {
+			return int64(wrote), errors.Join(ErrTunnelConnFailed, werr)
+		}
+		if wrote < n {
+			return int64(wrote), io.ErrShortWrite
+		}
+		rest, cerr := io.Copy(c.upload, r)
+		return int64(wrote) + rest, cerr
+	}
+	if err := c.ensureUploadLeg(); err != nil {
+		return 0, err
 	}
 	if rf, ok := c.upload.(io.ReaderFrom); ok {
 		n, err := rf.ReadFrom(r)
@@ -161,6 +273,10 @@ func (c *DualTunnelConn) Close() error {
 	if c.upload != nil {
 		err = errors.Join(err, c.upload.Close())
 	}
+	if c.uploadCloser != nil {
+		err = errors.Join(err, c.uploadCloser.Close())
+		c.uploadCloser = nil
+	}
 	return err
 }
 
@@ -192,8 +308,11 @@ func (c *DualTunnelConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *DualTunnelConn) SetWriteDeadline(t time.Time) error {
-	if c == nil || c.upload == nil {
+	if c == nil {
 		return ErrDeadlineUnsupported
+	}
+	if c.upload == nil {
+		return nil
 	}
 	return c.upload.SetWriteDeadline(t)
 }
@@ -209,6 +328,7 @@ var (
 	_ io.ReaderFrom                   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyWriterTo   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*DualTunnelConn)(nil)
+	_ C.RouteConnectionCopyDuplex     = (*DualTunnelConn)(nil)
 )
 
 // AsDualTunnelConn returns a direct *DualTunnelConn (callers walk outer wrappers first).

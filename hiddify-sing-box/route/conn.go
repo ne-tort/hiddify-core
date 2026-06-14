@@ -106,10 +106,23 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		m.connections.Remove(element)
 	})
 	var done atomic.Bool
+	markConnectionCopyDuplex(conn)
+	markConnectionCopyDuplex(remoteConn)
 	m.preConnectionCopy(ctx, conn, remoteConn, false, &done, onClose)
 	m.preConnectionCopy(ctx, remoteConn, conn, true, &done, onClose)
-	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+	// Download copy first so MASQUE CONNECT-stream WriteTo can deliver server banner
+	// before upload ReadFrom blocks on SOCKS clients waiting for that banner (iperf -R).
 	go m.connectionCopy(ctx, remoteConn, conn, true, &done, onClose)
+	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+}
+
+func markConnectionCopyDuplex(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	if d, ok := conn.(C.RouteConnectionCopyDuplex); ok {
+		d.MarkConnectionCopyDuplex()
+	}
 }
 
 func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {

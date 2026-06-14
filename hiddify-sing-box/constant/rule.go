@@ -57,3 +57,10 @@ type RouteConnectionCopyWriterTo interface {
 type RouteConnectionCopyReaderFrom interface {
 	RouteConnectionCopyReaderFrom()
 }
+
+// RouteConnectionCopyDuplex marks a TCP relay leg where ConnectionManager runs upload and download
+// copy goroutines concurrently. H2 bidiTunnelConn must not start download drain on ReadFrom when
+// WriteTo will consume the same response half (iperf -R / SOCKS relay shape).
+type RouteConnectionCopyDuplex interface {
+	MarkConnectionCopyDuplex()
+}

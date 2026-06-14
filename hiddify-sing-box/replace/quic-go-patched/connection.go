@@ -3014,6 +3014,12 @@ func (c *Conn) masqueSetBidiSendBoost(id protocol.StreamID, active bool) {
 	}
 }
 
+func (c *Conn) masqueRepromoteBidiSendBoost(id protocol.StreamID) {
+	if c.framer.repromoteBidiSendBoost(id) {
+		c.scheduleSending()
+	}
+}
+
 func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
 	if c.framer.AddActiveStream(id, str) {
 		// Belt-and-suspenders: re-promote must also nudge send half (parity poke-renotify).

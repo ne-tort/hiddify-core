@@ -313,3 +313,5 @@ replace github.com/quic-go/masque-go => ./hiddify-sing-box/third_party/masque-go
 replace github.com/quic-go/connect-ip-go => ./hiddify-sing-box/third_party/connect-ip-go
 
 replace github.com/quic-go/quic-go => ./hiddify-sing-box/replace/quic-go-patched
+
+replace golang.org/x/net => ./hiddify-sing-box/replace/x-net-patched

@@ -50,9 +50,23 @@ func connectEnvLegacyH3StreamOptOut(keys ...string) bool {
 }
 
 // ConnectStreamUseDualConnect selects P2 dual CONNECT-stream (separate download + upload tunnels).
-// Opt-in sketch: MASQUE_CONNECT_STREAM_DUAL_CONNECT=1. When enabled, pipe/bidi env is ignored for dial.
+// Prod default on (H3 duplex escape); opt-out MASQUE_CONNECT_STREAM_DUAL_CONNECT=0.
 func ConnectStreamUseDualConnect() bool {
-	return connectEnvPipeUpload("MASQUE_CONNECT_STREAM_DUAL_CONNECT")
+	on, explicit := connectEnvPipeUploadExplicit("MASQUE_CONNECT_STREAM_DUAL_CONNECT")
+	if explicit {
+		return on
+	}
+	return true
+}
+
+// ConnectStreamDualLegParallelQUIC dials upload leg on a separate QUIC connection (P6 escape
+// for connection-level duplex aggregate ceiling). Opt-in: MASQUE_CONNECT_STREAM_DUAL_CONNECT_PARALLEL=1.
+// Route duplex (MarkConnectionCopyDuplex) also enables P6 without env.
+func ConnectStreamDualLegParallelQUIC() bool {
+	if !ConnectStreamUseDualConnect() {
+		return false
+	}
+	return connectEnvPipeUpload("MASQUE_CONNECT_STREAM_DUAL_CONNECT_PARALLEL")
 }
 
 // ConnectStreamThinEnabled selects Invisv-shaped CONNECT-stream dial: nil Body, HTTPStreamer → *http3.Stream,

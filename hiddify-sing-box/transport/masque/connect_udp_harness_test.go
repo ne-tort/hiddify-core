@@ -84,7 +84,7 @@ func init() {
 	}
 }
 
-func runUDPEcho(t *testing.T, addr *net.UDPAddr) *net.UDPConn {
+func runUDPEcho(t testing.TB, addr *net.UDPAddr) *net.UDPConn {
 	t.Helper()
 	c, err := net.ListenUDP("udp", addr)
 	if err != nil {
@@ -106,7 +106,7 @@ func runUDPEcho(t *testing.T, addr *net.UDPAddr) *net.UDPConn {
 	return c
 }
 
-func runUDPSink(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, *atomic.Int64) {
+func runUDPSink(t testing.TB, addr *net.UDPAddr) (*net.UDPConn, *atomic.Int64) {
 	t.Helper()
 	c, err := net.ListenUDP("udp", addr)
 	if err != nil {
@@ -129,7 +129,7 @@ func runUDPSink(t *testing.T, addr *net.UDPAddr) (*net.UDPConn, *atomic.Int64) {
 
 // startInProcessMasqueUDPProxy serves HTTP/3 on an ephemeral UDP port. register must add handlers
 // (typically /masque/udp/{target_host}/{target_port}) and own proxy-side Close hooks via t.Cleanup.
-func startInProcessMasqueUDPProxy(t *testing.T, register func(mux *http.ServeMux, proxyPort int)) int {
+func startInProcessMasqueUDPProxy(t testing.TB, register func(mux *http.ServeMux, proxyPort int)) int {
 	t.Helper()
 	quicConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -152,7 +152,7 @@ func startInProcessMasqueUDPProxy(t *testing.T, register func(mux *http.ServeMux
 	return proxyPort
 }
 
-func registerMasqueUDPProxyHandler(t *testing.T, mux *http.ServeMux, proxyPort int) {
+func registerMasqueUDPProxyHandler(t testing.TB, mux *http.ServeMux, proxyPort int) {
 	t.Helper()
 	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
 	udpTemplate, err := uritemplate.New(templateRaw)

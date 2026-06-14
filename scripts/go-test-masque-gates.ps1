@@ -73,8 +73,48 @@ try {
     )
     Invoke-MasqueGate "L2 synth anchor" @(
         "test", "./transport/masque/",
-        "-run", "BenchCeiling|BypassMatrix|ConnectStreamLocalizeDownloadWriteTo|ConnectStreamDuplexWriteTo|ConnectStreamParallelStreams|WindowedBidiBridge|MeasureTCPDownloadWriteTo|MeasureTCPDownloadMbpsAntiPattern|ReadPathSkipsDownloadActive|MeasureTCPDownloadCopy|ConnectStreamLocalizeBottleneck|ConnectStreamH2Localize|H2InstantDownload|H2ConnectStreamTCPUploadServerBanner|InstantDownloadExceedsVPSKPI|H2LocalizeDuplex|L256Window|SharedWindowedBidiHarnessDedupe|ForwarderDownloadWindowed|HarnessDownloadCopy|SimnetWindowedHarnessParity|ConnectStreamDownloadLayer|ConnectStreamCPUBudget|WindowedBidiConnThroughput|UploadL2WideWindowBand|PprofSymbol|RelayTCPTunnelDownloadPaths|ConnectStreamH2EndToEndDownload|NightlyCpuprofileWriteTo|L2SynthGatePattern|PerfLocalizeGatePattern|TestArch|ArchP1ProdDefault|ArchA4P8|ArchA4Acceptance|PostA3PatternGuard",
+        "-run", "BenchCeiling|BypassMatrix|ConnectStreamLocalizeDownloadWriteTo|ConnectStreamDuplexWriteTo|ConnectStreamParallelStreams|WindowedBidiBridge|MeasureTCPDownloadWriteTo|MeasureTCPDownloadMbpsAntiPattern|ReadPathSkipsDownloadActive|MeasureTCPDownloadCopy|ConnectStreamLocalizeBottleneck|ConnectStreamH2Localize|ConnectStreamH3Localize|H3ConnectStreamH2Parity|H2InstantDownload|H2ConnectStreamTCPUploadServerBanner|InstantDownloadExceedsVPSKPI|H2LocalizeDuplex|L256Window|SharedWindowedBidiHarnessDedupe|ForwarderDownloadWindowed|HarnessDownloadCopy|SimnetWindowedHarnessParity|ConnectStreamDownloadLayer|ConnectStreamCPUBudget|WindowedBidiConnThroughput|UploadL2WideWindowBand|PprofSymbol|RelayTCPTunnelDownloadPaths|ConnectStreamH2EndToEndDownload|ConnectStreamH3EndToEndDownload|NightlyCpuprofileWriteTo|L2SynthGatePattern|PerfLocalizeGatePattern|TestArch|ArchP1ProdDefault|ArchA4P8|ArchA4Acceptance|PostA3PatternGuard",
         "-count=1", "-timeout", "120s"
+    )
+    Invoke-MasqueGate "GATE-H2-SYNTH prod stack anchor" @(
+        "test", "./transport/masque/",
+        "-run", "GATEH2SynthProdStackDownloadAnchor|GATEH2SynthProdStackUploadAnchor|GATEH2SynthBidiDuplexProdStack|LaunchMasqueStackH2ConnectStreamDownloadKPI",
+        "-count=1", "-timeout", "300s"
+    )
+    Invoke-MasqueGate "GATE-H3-SYNTH prod stack (expect FAIL until parity)" @(
+        "test", "./transport/masque/",
+        "-run", "GATEH3SynthProdStackDownload|GATEH3SynthProdStackUpload|GATEH3SynthPairedProdStackDownload|GATEH3SynthBidiDuplexProdStack|LaunchMasqueStackH3ConnectStreamDownloadKPI|ConnectIPHybridConnectStreamH3DownloadKPI",
+        "-count=1", "-timeout", "300s"
+    )
+    Invoke-MasqueGate "H2 prod stack functional" @(
+        "test", "./transport/masque/",
+        "-run", "LaunchMasqueStackH2ConnectStreamFakeIperfNoPulse|LaunchMasqueStackH2ConnectStreamDownloadKPINetem|H2WindowedDuplexWriteToNoUploadPulse",
+        "-count=1", "-timeout", "120s"
+    )
+    Invoke-MasqueGate "H3 wire-FC + diagnostic (T6-09)" @(
+        "test", "./transport/masque/", "./transport/masque/h3/",
+        "-run", "H3ConnectStreamWireFCL256DuplexBand|H3RealTransportWindowedDuplexIperfControl|LaunchMasqueStackH3ConcurrentControlDuringWriteTo|H3ConnectStreamH2ParityStrictL256Download|H3UploadChunkWakePokesCreditSender|H3ConnectStreamFidelityContract",
+        "-count=1", "-timeout", "300s"
+    )
+    Invoke-MasqueGate "H2 honest gates (T6-03/05)" @(
+        "test", "./transport/masque/",
+        "-run", "H2RealTransportWindowedDuplexIperfControl|LaunchMasqueStackH2ConcurrentControlDuringWriteTo|ServerHandleTCPConnectH2DuplexProdFlush",
+        "-count=1", "-timeout", "300s"
+    )
+    Invoke-MasqueGate "H2 prod upload poke (T1a-01)" @(
+        "test", "./transport/masque/h2/",
+        "-run", "ProdUploadPathPoke",
+        "-count=1", "-timeout", "30s"
+    )
+    Invoke-MasqueGate "H2-B0 strict window (P1c KPI)" @(
+        "test", "./transport/masque/",
+        "-run", "H2B0|DownloadKPIWindowedNoPulse",
+        "-count=1", "-timeout", "120s"
+    )
+    Invoke-MasqueGate "L1c x/net masque patch" @(
+        "test", "-C", "./replace/x-net-patched", "./http2/",
+        "-run", "MasqueInflowEager|MasqueWake",
+        "-count=1", "-timeout", "30s"
     )
     Invoke-MasqueGate "L2 stream pkg relay (S82)" @(
         "test", "./transport/masque/stream/",
@@ -86,15 +126,30 @@ try {
         "-run", "MasqueRelayEnvMatrix|RelayUploadFromStreamEnv|RelayUseHTTP3StreamHijackEnv|UseLegacyFlushRelay|RelayTCPForwardWireContract|TCPBidirectional",
         "-count=1", "-timeout", "30s"
     )
-    Invoke-MasqueGate "L3 connect-ip" @(
+    Invoke-MasqueGate "L3 connect-ip functional" @(
         "test", "./transport/masque/",
-        "-run", "ConnectIP|Localize|HybridConnectStream",
-        "-count=1", "-timeout", "90s"
+        "-run", "ConnectIP|Localize|HybridConnectStreamH[23]Smoke",
+        "-count=1", "-timeout", "120s"
+    )
+    Invoke-MasqueGate "L3 connect-ip-h2 KPI" @(
+        "test", "./transport/masque/",
+        "-run", "ConnectIPHybridConnectStreamH2DownloadKPI",
+        "-count=1", "-timeout", "120s"
     )
     Invoke-MasqueGate "L4 connect-udp" @(
         "test", "./transport/masque/",
         "-run", "ConnectIPUDP|ListenPacket|BuildAndParseIPv4UDP|H2ConnectUDP|ConnectUDPLocalize|Socks5|ProdProfileCapsule",
         "-count=1", "-timeout", "45s"
+    )
+    Invoke-MasqueGate "GATE-CONNECT-UDP-SYNTH prod profile" @(
+        "test", "./transport/masque/",
+        "-run", "GATEConnectUDP.*SynthProd|GATEConnectUDPPairedSynth",
+        "-count=1", "-timeout", "120s"
+    )
+    Invoke-MasqueGate "L4 connect-udp CPU budget" @(
+        "test", "./transport/masque/", "./transport/masque/connectudp/",
+        "-run", "MasqueConnectUDPCPUBudget|ConnectUDPCPUBudget|ConnectUDPUploadLayer",
+        "-count=1", "-timeout", "300s"
     )
     Invoke-MasqueGate "L4 connectudp pkg" @(
         "test", "./transport/masque/connectudp/",

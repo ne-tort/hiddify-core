@@ -69,9 +69,12 @@ func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context
 	}()
 	select {
 	case <-ctx.Done():
-		_ = w.r.Close()
-		got := <-ch
-		_ = got
+		// Deadline poll / stopDownloadDrain poke must not Close the CONNECT response body —
+		// WriteTo and later drain reads still own the same H2 download half (parity H3 poke).
+		go func() {
+			got := <-ch
+			_ = got
+		}()
 		if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
 			return 0, ce
 		}

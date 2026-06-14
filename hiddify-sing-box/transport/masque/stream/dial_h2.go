@@ -38,7 +38,7 @@ type DialH2Hooks struct {
 	NewConnectUploadBody func(pipe *io.PipeReader) io.Reader
 	SetAuthHeader       func(h http.Header)
 	RequestURL          func(u *url.URL) string
-	TunnelFromResponse  func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, targetHost string, targetPort uint16) (net.Conn, error)
+	TunnelFromResponse  func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error)
 	ClassifyError       func(err error) string
 	AuthFailed          error
 }
@@ -160,7 +160,7 @@ func DialHTTP2ConnectStream(
 		}
 		stopReqCtxRelay(true)
 		TraceTCPf("masque tcp connect_stream h2 success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
-		return hooks.TunnelFromResponse(streamCtx, resp, pw, targetHost, targetPort)
+		return hooks.TunnelFromResponse(streamCtx, resp, pw, uploadBody, targetHost, targetPort)
 	}
 	if lastRoundTripErr != nil {
 		if IsRetryableTCPStreamError(lastRoundTripErr) {

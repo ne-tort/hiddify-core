@@ -113,6 +113,33 @@ func benchWindowedBidiLinkL256() windowedBidiLink {
 	}
 }
 
+// benchWindowedBidiLinkStrictH3 models QUIC bidi FC without prod eager S2C instant credit
+// (H3-H4: no instantCreditS2C — honest asymmetry / down-ceiling gates @ 64 KiB).
+func benchWindowedBidiLinkStrictH3() windowedBidiLink {
+	return windowedBidiLink{
+		rtt:         localizeBenchRTT,
+		windowBytes: localizeBenchWindowBytes,
+	}
+}
+
+// benchWindowedBidiLinkStrictH3L256 is strict H3 bidi FC at 256 KiB window (~58 Mbit/s @ 35 ms)
+// without instantCreditS2C — concurrent upload can starve below KPI on HEAD.
+func benchWindowedBidiLinkStrictH3L256() windowedBidiLink {
+	return windowedBidiLink{
+		rtt:         localizeBenchRTT,
+		windowBytes: localizeBenchWindowL256Bytes,
+	}
+}
+
+// benchWindowedBidiLinkH3Prod applies prod eager S2C window on strict H3 bidi link (H2 P1c parity).
+func benchWindowedBidiLinkH3Prod() windowedBidiLink {
+	link := benchWindowedBidiLinkStrictH3()
+	if h3.DownloadEagerWindowEnabled() {
+		link.instantCreditS2C = true
+	}
+	return link
+}
+
 // TestLocalizeHarnessBenchContract keeps L2/L3 packet and bidi models on one bench profile.
 func TestLocalizeHarnessBenchContract(t *testing.T) {
 	t.Parallel()

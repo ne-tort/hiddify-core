@@ -64,15 +64,64 @@ func TestDualTunnelConnProdDialShape(t *testing.T) {
 }
 
 func TestConnectStreamUseDualConnectEnv(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "")
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	if ConnectStreamUseDualConnect() {
-		t.Fatal("dual connect must be opt-in")
+		t.Fatal("dual connect must be opt-out with =0")
 	}
 	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
 	if !ConnectStreamUseDualConnect() {
 		t.Fatal("expected dual connect when env=1")
 	}
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "")
+	if !ConnectStreamUseDualConnect() {
+		t.Fatal("expected dual connect prod default when env unset")
+	}
 	if ConnectStreamUsePipeUpload() {
 		t.Fatal("dual connect must disable pipe upload dial selection")
+	}
+}
+
+func TestConnectStreamDualLegParallelQUICEnv(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "")
+	if ConnectStreamDualLegParallelQUIC() {
+		t.Fatal("P6 must stay opt-in when env unset")
+	}
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT_PARALLEL", "1")
+	if !ConnectStreamDualLegParallelQUIC() {
+		t.Fatal("expected P6 when env=1")
+	}
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT_PARALLEL", "1")
+	if ConnectStreamDualLegParallelQUIC() {
+		t.Fatal("P6 must stay off when dual connect disabled")
+	}
+}
+
+func TestDualTunnelConnUploadLegParallelQUICOnDuplexMark(t *testing.T) {
+	dc := NewDualTunnelConn(DualTunnelConnParams{Download: &dualLegStub{}})
+	if dc.UploadLegParallelQUIC() {
+		t.Fatal("P6 off before route duplex mark")
+	}
+	dc.MarkConnectionCopyDuplex()
+	if !dc.UploadLegParallelQUIC() {
+		t.Fatal("P6 on after route duplex mark")
+	}
+}
+
+func TestDualTunnelConnMarkConnectionCopyDuplexPrepUpload(t *testing.T) {
+	uploadReady := make(chan struct{})
+	dl := &dualLegStub{readLeft: []byte("x")}
+	dc := NewDualTunnelConn(DualTunnelConnParams{
+		Download: dl,
+		UploadDial: func() (net.Conn, io.Closer, error) {
+			close(uploadReady)
+			return &dualLegStub{}, nil, nil
+		},
+	})
+	dc.MarkConnectionCopyDuplex()
+	select {
+	case <-uploadReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload leg not pre-dialed on route duplex mark")
 	}
 }

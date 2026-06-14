@@ -49,9 +49,13 @@ type TunnelConn struct {
 	writeDL time.Time
 
 	downloadActive int32 // WriteTo in progress — upload wake for iperf -R duplex
+	downloadDelivered int32 // WriteTo delivered ≥1 response byte — true duplex interleave
+	duplexUploadStarted int32 // concurrent upload Write while WriteTo active
+	uploadBoostActive int32 // one-shot framer boost for upload-only legs (H3-L1c-3)
 	drainOnce        sync.Once
 	drainStopped     int32 // background download discard during upload-only (H3 bidi drain)
 	routeBidiDuplex  bool  // route pairs upload Write with concurrent download WriteTo — no auto drain
+	bootstrapUploadDone int32 // one-shot upload DATA before download drain (H2 parity)
 
 	bidiWakeSink BidiWakeSink
 }
@@ -96,6 +100,40 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 // UsesH3Stream reports whether upload/download share one *http3.Stream.
 func (c *TunnelConn) UsesH3Stream() bool {
 	return c != nil && c.h3 != nil
+}
+
+func (c *TunnelConn) h3UploadChunkBytes() int {
+	return H3UploadChunkBytes(
+		c.DownloadActive(),
+		atomic.LoadInt32(&c.downloadDelivered) > 0,
+		atomic.LoadInt32(&c.duplexUploadStarted) > 0,
+	)
+}
+
+func (c *TunnelConn) ensureBidiUploadActive() {
+	if c == nil || c.h3 == nil {
+		return
+	}
+	if !atomic.CompareAndSwapInt32(&c.uploadBoostActive, 0, 1) {
+		return
+	}
+	qs := c.h3.QUICStream()
+	if qs != nil {
+		quic.MasqueSetBidiUploadActive(qs, true)
+	}
+}
+
+func (c *TunnelConn) clearBidiUploadActive() {
+	if c == nil || c.h3 == nil {
+		return
+	}
+	if !atomic.CompareAndSwapInt32(&c.uploadBoostActive, 1, 0) {
+		return
+	}
+	qs := c.h3.QUICStream()
+	if qs != nil {
+		quic.MasqueSetBidiUploadActive(qs, false)
+	}
 }
 
 func (c *TunnelConn) stopDownloadDrain() {
@@ -228,6 +266,8 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 	}
 	if c.h3 != nil {
 		c.maybeStartDownloadDrainOnUpload()
+		c.ensureBidiUploadActive()
+		c.noteDuplexUploadTraffic()
 		c.writeMu.Lock()
 		dl := c.writeDL
 		c.writeMu.Unlock()
@@ -237,11 +277,8 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 		if err := c.ctx.Err(); err != nil {
 			return 0, err
 		}
-		policy := H3UploadFlushPolicy()
-		n, err := writeChunked(c.h3, p, policy.ChunkBytes)
-		if n > 0 {
-			c.wakeBidiSendAfterUpload()
-		}
+		chunk := c.h3UploadChunkBytes()
+		n, err := writeChunkedWake(c.h3, p, chunk, c.duplexUploadWakeHook())
 		if err != nil {
 			err = errors.Join(ErrTunnelConnFailed, err)
 		}
@@ -263,8 +300,7 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	policy := H3UploadFlushPolicy()
-	n, err := writeChunked(c.writer, p, policy.ChunkBytes)
+	n, err := writeChunked(c.writer, p, H3UploadFlushPolicy().ChunkBytes)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
@@ -272,10 +308,10 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 }
 
 func (c *TunnelConn) ReadFrom(r io.Reader) (int64, error) {
-	policy := H3UploadFlushPolicy()
 	if c.h3 != nil {
 		c.maybeStartDownloadDrainOnUpload()
-		n, err := c.readFromChunked(c.h3, r, policy.ChunkBytes)
+		c.ensureBidiUploadActive()
+		n, err := c.readFromChunked(c.h3, r, c.h3UploadChunkBytes())
 		if err != nil {
 			err = errors.Join(ErrTunnelConnFailed, err)
 		}
@@ -284,7 +320,7 @@ func (c *TunnelConn) ReadFrom(r io.Reader) (int64, error) {
 	if c.writer == nil {
 		return 0, io.ErrClosedPipe
 	}
-	n, err := copyChunked(c.writer, r, policy.ChunkBytes)
+	n, err := copyChunked(c.writer, r, H3UploadFlushPolicy().ChunkBytes)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
@@ -310,39 +346,54 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 	c.stopDownloadDrain()
 	c.beginDuplexDownload()
 	defer c.endDuplexDownload()
+	// Parity H2 bidiTunnelConn.WriteTo: bootstrap upload DATA + poke before first response read.
+	c.bootstrapH3UploadForDownloadOnce()
+	c.wakeBidiSendAfterUpload()
 
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
 	buf := *bp
-
-	var total int64
-	for {
+	readFn := func(p []byte) (int, error) {
+		readBuf := p
+		// Bootstrap only: upload Write started before first response byte (iperf -R interleave).
+		// Steady concurrent duplex and download-only legs keep 64 KiB drain.
+		if atomic.LoadInt32(&c.duplexUploadStarted) > 0 && atomic.LoadInt32(&c.downloadDelivered) == 0 {
+			chunk := duplexUploadChunkBytesFromEnv()
+			if chunk > 0 && chunk < len(p) {
+				readBuf = p[:chunk]
+			}
+		}
+		c.wakeH3BidiUploadDuringDownload()
 		c.readMu.Lock()
 		c.applyH3ReadDeadlineLocked()
 		if err := c.ctx.Err(); err != nil {
 			c.readMu.Unlock()
-			return total, err
+			return 0, err
 		}
-		n, err := c.h3.Read(buf)
+		n, err := c.h3.Read(readBuf)
 		c.readMu.Unlock()
 		if n > 0 {
-			wrote, werr := w.Write(buf[:n])
-			total += int64(wrote)
-			if werr != nil {
-				return total, werr
-			}
-			if wrote < n {
-				return total, io.ErrShortWrite
-			}
+			c.noteDownloadDelivered()
+			c.wakeH3BidiUploadDuringDownload()
+		}
+		return n, err
+	}
+	return interleaveDuplexTransfer(w, readFn, func() error {
+		c.wakeH3BidiUploadDuringDownload()
+		return nil
+	}, buf, func(wrote int) {
+		if wrote > 0 {
+			c.noteDownloadDelivered()
 			c.wakeBidiSendAfterDownloadDelivery()
 		}
-		if err != nil {
-			if err == io.EOF {
-				return total, nil
-			}
-			return total, err
-		}
+	})
+}
+
+func (c *TunnelConn) duplexUploadWakeHook() func(int) {
+	if c == nil || !c.DownloadActive() {
+		return nil
 	}
+	return func(int) { c.wakeBidiSendAfterUpload() }
 }
 
 func (c *TunnelConn) readFromChunked(w io.Writer, r io.Reader, chunk int) (int64, error) {
@@ -350,15 +401,13 @@ func (c *TunnelConn) readFromChunked(w io.Writer, r io.Reader, chunk int) (int64
 		return io.Copy(w, r)
 	}
 	buf := make([]byte, chunk)
+	wake := c.duplexUploadWakeHook()
 	var total int64
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			wrote, werr := writeChunked(w, buf[:n], chunk)
+			wrote, werr := writeChunkedWake(w, buf[:n], chunk, wake)
 			total += int64(wrote)
-			if wrote > 0 {
-				c.wakeBidiSendAfterUpload()
-			}
 			if werr != nil {
 				return total, werr
 			}
@@ -377,6 +426,7 @@ func (c *TunnelConn) readFromChunked(w io.Writer, r io.Reader, chunk int) (int64
 
 func (c *TunnelConn) Close() error {
 	c.stopDownloadDrain()
+	c.clearBidiUploadActive()
 	c.cancel()
 	var err error
 	if c.h3 != nil {

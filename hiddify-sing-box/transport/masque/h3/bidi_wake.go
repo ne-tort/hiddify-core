@@ -47,7 +47,15 @@ func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if qs == nil {
 		return
 	}
-	quic.MasqueWakeStreamSend(qs)
+	// Symmetry with wakeBidiSendAfterDownloadDelivery: poke S2C credit + bidi duplex wake
+	// (H3-T1b-02 — upload 4 KiB chunks must not starve WriteTo download on one bidi stream).
+	if quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(qs)
+	}
+	quic.MasqueWakeBidiDuplex(qs)
+	// H3-L1c-2: re-queue download-active stream at framer front when upload chunks arrive
+	// on another goroutine (duplex aggregate ceiling on one bidi stream).
+	quic.MasqueRepromoteBidiSendBoost(qs)
 }
 
 // wakeBidiSendAfterDownloadDelivery pokes conn-level send after download bytes reach the consumer

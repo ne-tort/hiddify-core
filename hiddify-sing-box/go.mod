@@ -284,3 +284,5 @@ replace github.com/quic-go/masque-go => ./third_party/masque-go
 replace github.com/quic-go/connect-ip-go => ./third_party/connect-ip-go
 
 replace github.com/quic-go/quic-go => ./replace/quic-go-patched
+
+replace golang.org/x/net => ./replace/x-net-patched

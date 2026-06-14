@@ -61,6 +61,16 @@ func (a *downloadPathAdapter) Close() error {
 	return a.inner.Close()
 }
 
+func (a *downloadPathAdapter) SetReadDeadline(t time.Time) error {
+	if a == nil || a.inner == nil {
+		return ErrDeadlineUnsupported
+	}
+	if d, ok := a.inner.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return d.SetReadDeadline(t)
+	}
+	return ErrDeadlineUnsupported
+}
+
 type uploadPathAdapter struct {
 	inner io.WriteCloser
 }
@@ -72,6 +82,15 @@ func (a *uploadPathAdapter) Close() error {
 		return nil
 	}
 	return a.inner.Close()
+}
+
+func (a *uploadPathAdapter) PokeH2BidiDownload() {
+	if a == nil || a.inner == nil {
+		return
+	}
+	if p, ok := a.inner.(interface{ PokeH2BidiDownload() }); ok {
+		p.PokeH2BidiDownload()
+	}
 }
 
 // NewH2DownloadPath wraps the H2 CONNECT response body for deadline-aware download I/O.
@@ -101,14 +120,12 @@ func NewTunnelPaths(body io.ReadCloser, upload io.WriteCloser) TunnelPaths {
 
 // ConnFromTunnelPaths assembles net.Conn from explicit upload/download halves.
 func ConnFromTunnelPaths(ctx context.Context, paths TunnelPaths, local, remote net.Addr) net.Conn {
-	c := &bidiTunnelConn{
+	return &bidiTunnelConn{
 		ctx:    ctx,
 		paths:  paths,
 		local:  local,
 		remote: remote,
 	}
-	c.maybeStartDownloadDrain()
-	return c
 }
 
 // bidiTunnelConn implements net.Conn over explicit TunnelPaths (H2 thin tunnel today).
@@ -123,7 +140,17 @@ type bidiTunnelConn struct {
 	downloadMu     sync.Mutex
 	drainOnce      sync.Once
 	drainStopped   int32
+	duplexCopy     int32 // ConnectionManager runs ReadFrom+WriteTo concurrently
 	downloadActive int32 // WriteTo in progress — H2 bidi upload scheduling (parity h3.TunnelConn)
+	bootstrapUploadDone int32 // one-shot upload DATA before first download read (iperf -R)
+}
+
+// MarkConnectionCopyDuplex opts out of upload-only download drain; prod SOCKS/TUN relay uses WriteTo.
+func (c *bidiTunnelConn) MarkConnectionCopyDuplex() {
+	if c == nil {
+		return
+	}
+	atomic.StoreInt32(&c.duplexCopy, 1)
 }
 
 func readDownloadPath(dl DownloadPath, p []byte) (int, error) {
@@ -137,16 +164,37 @@ func readDownloadPath(dl DownloadPath, p []byte) (int, error) {
 	return n, err
 }
 
-func (c *bidiTunnelConn) readDownloadLocked(p []byte) (int, error) {
-	return readDownloadPath(c.paths.Download, p)
+func (c *bidiTunnelConn) setDownloadReadDeadline(t time.Time) error {
+	if c == nil || c.paths.Download == nil {
+		return ErrDeadlineUnsupported
+	}
+	if d, ok := c.paths.Download.(interface{ SetReadDeadline(time.Time) error }); ok {
+		return d.SetReadDeadline(t)
+	}
+	return ErrDeadlineUnsupported
 }
 
 func (c *bidiTunnelConn) stopDownloadDrain() {
-	atomic.StoreInt32(&c.drainStopped, 1)
+	if atomic.SwapInt32(&c.drainStopped, 1) == 1 {
+		return
+	}
+	_ = c.setDownloadReadDeadline(time.Now())
+}
+
+func (c *bidiTunnelConn) maybeStartDownloadDrainOnUpload() {
+	if c == nil || atomic.LoadInt32(&c.duplexCopy) > 0 {
+		return
+	}
+	c.maybeStartDownloadDrain()
 }
 
 func (c *bidiTunnelConn) maybeStartDownloadDrain() {
 	if !H2BidiDownloadDrainEnabled() || c.paths.Download == nil {
+		return
+	}
+	if atomic.LoadInt32(&c.duplexCopy) > 0 ||
+		atomic.LoadInt32(&c.downloadActive) > 0 ||
+		atomic.LoadInt32(&c.drainStopped) > 0 {
 		return
 	}
 	c.drainOnce.Do(func() {
@@ -155,6 +203,7 @@ func (c *bidiTunnelConn) maybeStartDownloadDrain() {
 }
 
 func (c *bidiTunnelConn) runDownloadDrain() {
+	const drainPollInterval = 50 * time.Millisecond
 	buf := make([]byte, 32*1024)
 	for {
 		if c.ctx != nil {
@@ -168,14 +217,28 @@ func (c *bidiTunnelConn) runDownloadDrain() {
 		if c.paths.Download == nil {
 			return
 		}
+		c.downloadMu.Lock()
+		if atomic.LoadInt32(&c.drainStopped) > 0 || atomic.LoadInt32(&c.downloadActive) > 0 {
+			c.downloadMu.Unlock()
+			return
+		}
+		_ = c.setDownloadReadDeadline(time.Now().Add(drainPollInterval))
 		n, err := readDownloadPath(c.paths.Download, buf)
+		_ = c.setDownloadReadDeadline(time.Time{})
+		c.downloadMu.Unlock()
 		if n > 0 {
 			continue
 		}
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
 			return
 		}
-		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -188,11 +251,11 @@ func (c *bidiTunnelConn) Read(p []byte) (int, error) {
 	c.stopDownloadDrain()
 	c.downloadMu.Lock()
 	defer c.downloadMu.Unlock()
-	return c.readDownloadLocked(p)
+	_ = c.setDownloadReadDeadline(time.Time{})
+	return readDownloadPath(c.paths.Download, p)
 }
 
 func (c *bidiTunnelConn) Write(p []byte) (int, error) {
-	c.maybeStartDownloadDrain()
 	c.uploadMu.Lock()
 	defer c.uploadMu.Unlock()
 	if c.uploadDL.writeTimeoutExceeded() {
@@ -212,26 +275,55 @@ func (c *bidiTunnelConn) Write(p []byte) (int, error) {
 }
 
 func (c *bidiTunnelConn) ReadFrom(r io.Reader) (int64, error) {
-	c.maybeStartDownloadDrain()
-	c.uploadMu.Lock()
-	defer c.uploadMu.Unlock()
+	c.maybeStartDownloadDrainOnUpload()
 	if c.paths.Upload == nil {
 		return 0, io.ErrClosedPipe
 	}
-	n, err := io.Copy(c.paths.Upload, r)
-	if err != nil {
-		return n, errors.Join(Errs.TCPConnectStreamFailed, err)
+	chunk := h2ConnectUploadChunkBytes()
+	if chunk <= 0 {
+		c.uploadMu.Lock()
+		defer c.uploadMu.Unlock()
+		n, err := io.Copy(c.paths.Upload, r)
+		if err != nil {
+			return n, errors.Join(Errs.TCPConnectStreamFailed, err)
+		}
+		return n, nil
 	}
-	return n, nil
+	buf := make([]byte, chunk)
+	var total int64
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			c.uploadMu.Lock()
+			wrote, werr := c.paths.Upload.Write(buf[:n])
+			c.uploadMu.Unlock()
+			if werr != nil {
+				return total, errors.Join(Errs.TCPConnectStreamFailed, werr)
+			}
+			total += int64(wrote)
+			if wrote < n {
+				return total, errors.Join(Errs.TCPConnectStreamFailed, io.ErrShortWrite)
+			}
+			pokeUploadPathForH2BidiDownload(c.paths.Upload)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, errors.Join(Errs.TCPConnectStreamFailed, err)
+		}
+	}
 }
 
 func (c *bidiTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	if c.paths.Download == nil {
 		return 0, io.EOF
 	}
-	c.stopDownloadDrain()
 	atomic.AddInt32(&c.downloadActive, 1)
 	defer atomic.AddInt32(&c.downloadActive, -1)
+	c.stopDownloadDrain()
+	// H2 bidi FC: poke upload before first response read (iperf -R banner / docker download leg).
+	c.wakeH2BidiUploadDuringDownload()
 	bp := bidiTunnelWriteToBufPool.Get().(*[]byte)
 	defer bidiTunnelWriteToBufPool.Put(bp)
 	reader := &bidiTunnelDownloadReader{c: c}
@@ -255,9 +347,15 @@ func (r *bidiTunnelDownloadReader) Read(p []byte) (int, error) {
 	if r == nil || r.c == nil {
 		return 0, io.EOF
 	}
+	r.c.wakeH2BidiUploadDuringDownload()
 	r.c.downloadMu.Lock()
 	defer r.c.downloadMu.Unlock()
-	return r.c.readDownloadLocked(p)
+	_ = r.c.setDownloadReadDeadline(time.Time{})
+	n, err := readDownloadPath(r.c.paths.Download, p)
+	if n > 0 {
+		r.c.wakeH2BidiUploadDuringDownload()
+	}
+	return n, err
 }
 
 func (c *bidiTunnelConn) Close() error {
@@ -312,4 +410,5 @@ var (
 	_ io.WriterTo                     = (*bidiTunnelConn)(nil)
 	_ C.RouteConnectionCopyWriterTo   = (*bidiTunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*bidiTunnelConn)(nil)
+	_ C.RouteConnectionCopyDuplex     = (*bidiTunnelConn)(nil)
 )

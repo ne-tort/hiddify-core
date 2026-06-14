@@ -11,12 +11,21 @@ import (
 )
 
 // ConnectTunnelFromResponse builds a thin RFC 8441 tunnel after Extended CONNECT succeeds.
-func ConnectTunnelFromResponse(streamCtx context.Context, resp *http.Response, upload *io.PipeWriter, targetHost string, targetPort uint16) (net.Conn, error) {
+// uploadBody is the request-body reader wired into http2.Transport (wire-barrier tracking).
+func ConnectTunnelFromResponse(streamCtx context.Context, resp *http.Response, upload *io.PipeWriter, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error) {
 	if resp == nil || resp.Body == nil || upload == nil {
 		return nil, strm.Errs.TCPConnectStreamFailed
 	}
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
 	paths := NewTunnelPaths(resp.Body, upload)
 	inner := strm.ConnFromTunnelPaths(streamCtx, paths, &net.TCPAddr{}, remoteAddr)
+	var barrier strm.UploadWireBarrier
+	if b, ok := uploadBody.(*ExtendedConnectUploadBody); ok {
+		barrier = b
+	}
+	if err := strm.PrimeH2UploadBootstrapOnConn(inner, barrier); err != nil {
+		_ = inner.Close()
+		return nil, err
+	}
 	return strm.NewTunnelConn(inner), nil
 }

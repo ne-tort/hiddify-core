@@ -66,14 +66,18 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 	masqueScheduleDownloadActiveWake(s)
 }
 
-// masqueWakeAfterDownloadWrite schedules receive-window credit + send after download-side
-// writes on a download-active bidi stream (server hijack relay / raw quic.Stream.Write).
-// Symmetric to masqueWakeAfterDownloadRead; http3.Stream.Write delegates via embedded quic.Stream.
+// masqueWakeAfterDownloadWrite schedules send after a stream Write.
+// Download-active legs poke S2C credit + duplex wake; upload-only legs still need send
+// scheduler poke (H3-L1c-3 — sustained C2S @ ~80 Mbit/s without downloadActive gate).
 func masqueWakeAfterDownloadWrite(s *Stream, n int) {
-	if n <= 0 || s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
+	if n <= 0 || s == nil || !masqueWakeSendOnReceiveRead() {
 		return
 	}
-	masqueWakeAfterDownloadDelivery(s)
+	if s.masqueIsDownloadActive() {
+		masqueWakeAfterDownloadDelivery(s)
+		return
+	}
+	masqueScheduleDownloadActiveWake(s)
 }
 
 // masqueWakeAfterDownloadDelivery pokes WINDOW_UPDATE and schedules send after download bytes

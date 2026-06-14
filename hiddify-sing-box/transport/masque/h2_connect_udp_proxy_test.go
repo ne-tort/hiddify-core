@@ -17,7 +17,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func startInProcessH2UDPConnectProxy(t *testing.T) int {
+func startInProcessH2UDPConnectProxy(t testing.TB) int {
 	t.Helper()
 	serverTLS := connectUDPTestTLS.Clone()
 	serverTLS.NextProtos = []string{http2.NextProtoTLS, "http/1.1"}

@@ -91,7 +91,18 @@ func (c *TunnelConn) RouteConnectionCopyWriterTo() {}
 // RouteConnectionCopyReaderFrom opts into route io.ReaderFrom bulk upload when the inner conn supports it.
 func (c *TunnelConn) RouteConnectionCopyReaderFrom() {}
 
+// MarkConnectionCopyDuplex forwards duplex relay marking to the inner H2 bidi tunnel.
+func (c *TunnelConn) MarkConnectionCopyDuplex() {
+	if c == nil || c.Inner == nil {
+		return
+	}
+	if d, ok := c.Inner.(C.RouteConnectionCopyDuplex); ok {
+		d.MarkConnectionCopyDuplex()
+	}
+}
+
 var (
 	_ C.RouteConnectionCopyWriterTo   = (*TunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*TunnelConn)(nil)
+	_ C.RouteConnectionCopyDuplex     = (*TunnelConn)(nil)
 )

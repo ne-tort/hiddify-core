@@ -137,17 +137,21 @@ func TestArchP1DuplexWriteToKS2(t *testing.T) {
 	})
 }
 
-// TestArchREFSRCProdDefaultH3Stream (REF-SRC-SB-C2): prod dial uses h3_stream unless explicit pipe opt-in.
+// TestArchREFSRCProdDefaultH3Stream (REF-SRC-SB-C2): prod dial uses P2 dual h3_stream unless opt-out.
 func TestArchREFSRCProdDefaultH3Stream(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "")
 	t.Setenv("MASQUE_CONNECT_STREAM_H3_STREAM", "")
 	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "")
+	if !h3.ConnectStreamUseDualConnect() {
+		t.Fatal("expected P2 dual CONNECT prod default")
+	}
 	if h3.ConnectStreamUsePipeUpload() {
 		t.Fatal("expected h3_stream prod default (pipe off)")
 	}
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	if !h3.ConnectStreamUsePipeUpload() {
-		t.Fatal("expected legacy pipe with MASQUE_CONNECT_STREAM_PIPE_UPLOAD=1")
+		t.Fatal("expected legacy pipe with MASQUE_CONNECT_STREAM_PIPE_UPLOAD=1 when dual connect off")
 	}
 }
 

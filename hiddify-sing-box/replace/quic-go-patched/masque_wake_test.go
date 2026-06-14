@@ -120,12 +120,34 @@ func TestMasqueWakeAfterDownloadWriteEnvAndActive(t *testing.T) {
 	active.setMasqueDownloadActive(true)
 
 	t.Setenv(envWakeSendOnReceiveRead, "1")
+	t.Setenv(envBidiConnWake, "1")
+	var streamWakes, connWakes int
+	restoreStream := quic.SetMasqueWakeStreamSendHook(func() { streamWakes++ })
+	defer restoreStream()
+	restoreConn := quic.SetMasqueWakeConnSendHook(func() { connWakes++ })
+	defer restoreConn()
+
 	masqueWakeAfterDownloadWrite(nil, 64)
+	masqueWakeAfterDownloadWrite(inactive, 0)
+	streamWakes, connWakes = 0, 0
 	masqueWakeAfterDownloadWrite(inactive, 64)
-	masqueWakeAfterDownloadWrite(active, 0)
+	if streamWakes != 1 || connWakes != 1 {
+		t.Fatalf("upload-only Write wake: stream=%d conn=%d want 1/1", streamWakes, connWakes)
+	}
+
+	streamWakes, connWakes = 0, 0
+	masqueWakeAfterDownloadWrite(active, 64)
+	if streamWakes < 1 || connWakes < 1 {
+		t.Fatalf("download-active Write wake: stream=%d conn=%d want >=1", streamWakes, connWakes)
+	}
 
 	t.Setenv(envWakeSendOnReceiveRead, "0")
+	streamWakes, connWakes = 0, 0
+	masqueWakeAfterDownloadWrite(inactive, 64)
 	masqueWakeAfterDownloadWrite(active, 64)
+	if streamWakes != 0 || connWakes != 0 {
+		t.Fatalf("wake disabled: stream=%d conn=%d want 0/0", streamWakes, connWakes)
+	}
 }
 
 func TestMasqueDownloadEagerWindowEnabledExport(t *testing.T) {

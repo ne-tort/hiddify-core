@@ -88,7 +88,7 @@ func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadClo
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	go func() {
-		_, err := relayTunnelCopyBuffer(targetConn, reqBody)
+		_, err := relayTunnelCopyBufferH2BidiUpload(targetConn, StripH2ClientBootstrapUpload(reqBody), responseWriter)
 		_ = reqBody.Close()
 		if cw, ok := targetConn.(closeWriter); ok {
 			_ = cw.CloseWrite()
@@ -97,7 +97,7 @@ func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadClo
 	}()
 	go func() {
 		out := relayTunnelDownloadWriter(responseWriter)
-		_, err := relayTunnelDownloadRelay(out, responseWriter, targetConn)
+		_, err := relayTunnelDownloadRelayH2(out, responseWriter, targetConn)
 		downloadErrCh <- err
 	}()
 	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
@@ -146,6 +146,28 @@ func relayTunnelDownloadRelay(out io.Writer, responseWriter http.ResponseWriter,
 		relayTunnelFlushFinal(out, responseWriter)
 	}
 	n, err := io.CopyBuffer(out, src, buf)
+	written += n
+	if err != nil && !errors.Is(err, io.EOF) {
+		return written, err
+	}
+	relayTunnelFlushFinal(out, responseWriter)
+	return written, nil
+}
+
+// relayTunnelDownloadRelayH2 copies onward TCP → CONNECT response with per-chunk H2 flush so
+// client download reads and upload FC stay interleaved during iperf -R duplex.
+func relayTunnelDownloadRelayH2(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
+	var written int64
+	if prime, err := relayTunnelPrimeDownload(src); err != nil {
+		return 0, err
+	} else if len(prime) > 0 {
+		if _, err := out.Write(prime); err != nil {
+			return int64(len(prime)), err
+		}
+		written += int64(len(prime))
+		relayTunnelFlushFinal(out, responseWriter)
+	}
+	n, err := relayTunnelCopyBufferH2BidiDownload(out, src, responseWriter)
 	written += n
 	if err != nil && !errors.Is(err, io.EOF) {
 		return written, err
@@ -224,6 +246,9 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		CloseWrite() error
 	}
 	uploadSrc := relayTunnelUploadSource(reqBody, bidi)
+	if RelayUploadFromStream() && bidi != nil {
+		uploadSrc = StripH3ClientBootstrapUpload(uploadSrc)
+	}
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	// Mark download-active before both relay goroutines so upload reads get framer
@@ -246,10 +271,31 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		uploadErrCh <- err
 	}()
 	go func() {
-		_, err := relayTunnelCopyBufferBidiDownload(bidi, targetConn, bidi)
+		_, err := relayTunnelDownloadRelayH3Bidi(bidi, targetConn, bidi)
 		downloadErrCh <- err
 	}()
 	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+}
+
+// relayTunnelDownloadRelayH3Bidi copies onward TCP → hijacked H3 stream with iperf banner prime
+// (parity relayTunnelDownloadRelayH2) then per-chunk bidi wake during bulk download.
+func relayTunnelDownloadRelayH3Bidi(dst io.Writer, src net.Conn, bidi any) (int64, error) {
+	var written int64
+	if prime, err := relayTunnelPrimeDownload(src); err != nil {
+		return 0, err
+	} else if len(prime) > 0 {
+		if _, err := dst.Write(prime); err != nil {
+			return int64(len(prime)), err
+		}
+		written += int64(len(prime))
+		relayTunnelWakeBidiAfterDownloadWrite(bidi)
+	}
+	n, err := relayTunnelCopyBufferBidiDownload(dst, src, bidi)
+	written += n
+	if err != nil && !errors.Is(err, io.EOF) {
+		return written, err
+	}
+	return written, nil
 }
 
 func releaseConnectRelayRequestBody(reqBody io.ReadCloser) {

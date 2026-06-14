@@ -32,6 +32,35 @@ func masqueWakeSendAfterDownloadWrite(str *Stream, n int) {
 	masqueWakeSendAfterBidiProgress(str, n, quic.MasqueIsBidiDownloadActive)
 }
 
+// masqueWakeSendAfterUploadWrite schedules QUIC send after CONNECT upload bytes are queued.
+// S2C MAX_STREAM_DATA poke only when download-active (duplex WriteTo); upload-only legs still
+// need stream/conn send wake (H3-T1b-01 — client 4 KiB chunks @ ~90 Mbit/s without scheduler poke).
+func masqueWakeSendAfterUploadWrite(str *Stream, n int) {
+	masqueWakeSendAfterUploadChunk(str, n)
+}
+
+func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
+	if n <= 0 || !masqueWakeSendOnReceiveRead() || str == nil {
+		return
+	}
+	ds := str.datagramStream
+	if ds == nil {
+		return
+	}
+	qs := ds.QUICStream()
+	if qs == nil {
+		return
+	}
+	if quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(qs)
+	}
+	if masqueWakeBidiConnOnReceiveRead() {
+		quic.MasqueWakeBidiDuplex(qs)
+		return
+	}
+	quic.MasqueWakeStreamSend(qs)
+}
+
 func masqueWakeSendAfterBidiProgress(str *Stream, n int, active ...func(*quic.Stream) bool) {
 	if n <= 0 || !masqueWakeSendOnReceiveRead() || str == nil {
 		return

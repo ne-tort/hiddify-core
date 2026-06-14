@@ -134,11 +134,18 @@ func (s *Stream) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	n, err := s.datagramStream.Write(b)
+	if n > 0 {
+		masqueWakeSendAfterUploadWrite(s, n)
+	}
 	return n, err
 }
 
 func (s *Stream) writeUnframed(b []byte) (int, error) {
-	return s.datagramStream.Write(b)
+	n, err := s.datagramStream.Write(b)
+	if n > 0 {
+		masqueWakeSendAfterUploadWrite(s, n)
+	}
+	return n, err
 }
 
 func (s *Stream) StreamID() quic.StreamID {

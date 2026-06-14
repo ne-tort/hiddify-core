@@ -30,3 +30,9 @@ func (s *coreSession) resetIPH3TransportLockedAssumeMu() {
 func (s *coreSession) resetTCPHTTPTransport() {
 	session.ResetTCPHTTPTransport(&s.CoreSession, s.tcpHTTPTransportHost())
 }
+
+func (s *coreSession) newEphemeralTCPHTTPTransport() *http3.Transport {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	return session.NewTCPConnectStreamHTTP3Transport(&s.CoreSession)
+}

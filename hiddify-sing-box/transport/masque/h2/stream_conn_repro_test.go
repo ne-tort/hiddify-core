@@ -38,7 +38,7 @@ func TestH2ConnectStreamUploadRepro(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	conn, err := ConnectTunnelFromResponse(ctx, &http.Response{Body: respR}, uploadW, "127.0.0.1", 9)
+	conn, err := ConnectTunnelFromResponse(ctx, &http.Response{Body: respR}, uploadW, nil, "127.0.0.1", 9)
 	if err != nil {
 		t.Fatalf("tunnel: %v", err)
 	}

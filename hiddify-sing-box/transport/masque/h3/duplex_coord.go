@@ -35,13 +35,28 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 }
 
 func (c *TunnelConn) beginDuplexDownload() {
+	atomic.StoreInt32(&c.downloadDelivered, 0)
+	atomic.StoreInt32(&c.duplexUploadStarted, 0)
 	atomic.AddInt32(&c.downloadActive, 1)
 	c.setBidiDownloadActive(true)
+}
+
+func (c *TunnelConn) noteDuplexUploadTraffic() {
+	if c != nil && c.DownloadActive() {
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	}
 }
 
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
+}
+
+func (c *TunnelConn) noteDownloadDelivered() {
+	if c == nil || !c.DownloadActive() {
+		return
+	}
+	atomic.StoreInt32(&c.downloadDelivered, 1)
 }
 
 // interleaveDuplexTransfer drains pending upload between download reads on one goroutine.
