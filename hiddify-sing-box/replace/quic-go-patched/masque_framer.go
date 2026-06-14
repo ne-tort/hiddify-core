@@ -92,7 +92,11 @@ func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
 	s.setMasqueDownloadReceiveOnly(active)
 	s.setMasqueDownloadActive(active)
 	if active {
-		_ = masquePokeDownloadReceiveWindow(s)
+		s.setMasquePeerDuplexLazyFC(true)
+		// Receive-only legs batch FC on AddBytesRead — skip eager activation poke (H3-L1c-7e).
+		if !MasqueIsBidiDownloadReceiveOnly(s) {
+			_ = masquePokeDownloadReceiveWindow(s)
+		}
 		masqueScheduleDownloadActiveWake(s)
 	} else if MasqueBidiSendBoostEnabled() {
 		if setter, ok := s.sender.(masqueBidiBoostSetter); ok {

@@ -16,14 +16,45 @@ const (
 	connectStreamSynthProdBenchDuration = 2 * time.Second
 )
 
-// GATE-CONNECT-UDP-SYNTH — prod profile in-proc (transport_mode=connect_udp); UDP KPI ≠ TCP connect_stream.
+// GATE-CONNECT-UDP-SYNTH — prod profile in-proc (transport_mode=connect_udp); same throughput mission as TCP.
 const (
-	connectUDPSynthProdBurstMinMbps     = 40.0 // unlimited sender on instant link (localize burst floor)
-	connectUDPSynthParityMinRatio       = 0.85 // H3/H2 burst paired gate
-	connectUDPSynthInProcPacedMinMbps   = 3.5  // in-proc band @ 8 Mbit/s target (not docker WAN ~6.75)
-	connectUDPSynthInProcPacedMaxMbps   = 5.5
-	connectUDPSynthProdBenchDuration    = 2 * time.Second
+	connectUDPSynthProdMinMbps         = 200.0 // DoD min each leg (up/down); Docker final floor
+	connectUDPSynthInstantMinMbps      = 500.0 // synth instant-link GATE (in-proc ceiling target)
+	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
+	connectUDPSynthParityMinRatio      = 0.85  // H3/H2 paired gate
+	connectUDPSynthProdBenchDuration   = 2 * time.Second
 )
+
+// Legacy docker paced probe band (BENCH_UDP_TARGET_MBIT=8) — localize/regression only, not GATE DoD.
+const (
+	connectUDPLegacyPacedMinMbps = 3.5
+	connectUDPLegacyPacedMaxMbps = 5.5
+)
+
+// CPU budget gates (ns/byte on fixed 4 MiB bench via testing.Benchmark). Update AGENTS.md after each run.
+// Implied CPU-only ceiling ≈ 8000/nsPerB Mbit/s when no FC/scheduling stall.
+const (
+	masqueCPUBenchBytes = 4 * 1024 * 1024
+
+	connectStreamL0DownloadMaxNsPerB  = 80.0   // loopback TCP WriteTo; measured ~33 ns/B order varies
+	connectStreamL1DownloadMaxNsPerB  = 80.0   // prod CONNECT-stream H3 instant WriteTo
+
+	connectUDPL0UploadMaxNsPerB       = 25.0   // loopback UDP; measured ~6.5
+	connectUDPL1H3UploadMaxNsPerB     = 40.0   // CONNECT-UDP H3 WriteTo; measured ~11–33 (variance)
+	connectUDPL1H3DownloadMaxNsPerB   = 45.0   // CONNECT-UDP H3 ReadFrom+echo feed; calibrate on CI
+	connectUDPL1H2UploadMaxNsPerB     = 150.0  // CONNECT-UDP H2 capsule WriteTo; measured ~61
+	connectUDPL1H2DownloadMaxNsPerB   = 250.0  // CONNECT-UDP H2 ReadFrom+echo feed; calibrate on CI
+
+	serverRelayTwoGoroutineMaxNsPerB = 150.0 // stream/relay instant bidi; see relay_cpu_bench_test.go
+)
+
+// synthCPUMbpsCeiling returns rough CPU-only Mbps ceiling from ns/byte (8 bits/ns formula).
+func synthCPUMbpsCeiling(nsPerByte float64) float64 {
+	if nsPerByte <= 0 {
+		return 0
+	}
+	return 8000.0 / nsPerByte
+}
 
 // synthKPIDiagnostic formats a FAIL message naming layer, leg, got/want Mbps, optional hint.
 func synthKPIDiagnostic(layer, leg string, gotMbps, wantMbps float64, hint string) string {

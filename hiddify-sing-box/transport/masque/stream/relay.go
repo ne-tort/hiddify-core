@@ -260,8 +260,10 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 			relayTunnelSetBidiUploadActive(bidi, true)
 			defer relayTunnelSetBidiUploadActive(bidi, false)
 		} else if legRole == ConnectStreamLegDownload {
-			relayTunnelSetBidiDownloadReceiveActive(bidi, true)
-			defer relayTunnelSetBidiDownloadReceiveActive(bidi, false)
+			// P2 download leg pumps S2C — full send boost + write wake (H3-L1c-9). Receive-only
+			// suppressed masqueWakeAfterDownloadWrite on server hijack (H3-L1c-7f no-op wake).
+			relayTunnelSetBidiDownloadActive(bidi, true)
+			defer relayTunnelSetBidiDownloadActive(bidi, false)
 		} else {
 			relayTunnelSetBidiDownloadActive(bidi, true)
 			defer relayTunnelSetBidiDownloadActive(bidi, false)
@@ -298,12 +300,13 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 
 // relayTunnelDownloadRelayH3Bidi copies onward TCP → hijacked H3 stream with iperf banner prime
 // (parity relayTunnelDownloadRelayH2) then per-chunk bidi wake during bulk download.
-// s2cSenderLeg: P2 download CONNECT — server pumps S2C without receive-window poke (H3-L1c-7).
 func relayTunnelDownloadRelayH3Bidi(dst io.Writer, src net.Conn, bidi any, s2cSenderLeg bool) (int64, error) {
 	var written int64
 	wakeAfterDownload := relayTunnelWakeBidiAfterDownloadWrite
 	if s2cSenderLeg {
-		wakeAfterDownload = relayTunnelWakeBidiAfterDownloadWriteS2C
+		// P2 download CONNECT: per-chunk conn wake after S2C Write (H3-L1c-9); full duplex wake
+		// starves sibling upload C2S when both legs share QUIC conn (H3-L1c-7f).
+		wakeAfterDownload = relayTunnelWakeBidiSendOnly
 	}
 	if prime, err := relayTunnelPrimeDownload(src); err != nil {
 		return 0, err

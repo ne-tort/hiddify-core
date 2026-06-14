@@ -141,6 +141,18 @@ func (c *streamFlowController) ShouldQueueWindowUpdate() bool {
 	return c.shouldQueueWindowUpdate()
 }
 
+// SetMasquePeerDuplexLazyFC enables batched MAX_STREAM_DATA on P2 download CONNECT legs
+// (stock 0.05 threshold) so sibling upload STREAM frames keep QUIC packet budget.
+func SetMasquePeerDuplexLazyFC(fc StreamFlowController, lazy bool) {
+	sfc, ok := fc.(*streamFlowController)
+	if !ok {
+		return
+	}
+	sfc.mutex.Lock()
+	sfc.setMasquePeerDuplexLazyFC(lazy)
+	sfc.mutex.Unlock()
+}
+
 func (c *streamFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteCount {
 	// If we already received the final offset for this stream, the peer won't need any additional flow control credit.
 	if c.receivedFinalOffset {

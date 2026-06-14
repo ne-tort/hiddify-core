@@ -50,6 +50,9 @@ func masquePokeDownloadReceiveWindow(s *Stream) bool {
 	if s == nil || s.receiveStr == nil || !masqueDownloadEagerWindow() {
 		return false
 	}
+	if MasqueIsBidiDownloadReceiveOnly(s) {
+		return s.receiveStr.masquePokeDownloadReceiveWindowNoRenotify()
+	}
 	return s.receiveStr.masquePokeDownloadReceiveWindow()
 }
 
@@ -58,6 +61,13 @@ func masquePokeDownloadReceiveWindow(s *Stream) bool {
 // (Stream.WriteTo / simnet S97) that bypass HTTP/3 framing.
 func masqueWakeAfterDownloadRead(s *Stream, n int) {
 	if n <= 0 || s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
+		return
+	}
+	if MasqueIsBidiDownloadReceiveOnly(s) {
+		// NoRenotify when already queued; lazy FC on AddBytesRead batches vs eager threshold 0.
+		if masqueDownloadEagerWindow() {
+			masquePokeDownloadReceiveWindow(s)
+		}
 		return
 	}
 	if masqueDownloadEagerWindow() {
@@ -84,6 +94,10 @@ func masqueWakeAfterDownloadWrite(s *Stream, n int) {
 // reach the consumer (WriteTo delivery parity h3.TunnelConn wakeBidiSendAfterDownloadDelivery).
 func masqueWakeAfterDownloadDelivery(s *Stream) {
 	if s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
+		return
+	}
+	if MasqueIsBidiDownloadReceiveOnly(s) {
+		// Delivery wake for P2 download legs is tunnel_conn peerDuplexUploadWake (H3-L1c-7d).
 		return
 	}
 	if masqueDownloadEagerWindow() {
@@ -160,6 +174,10 @@ func MasqueWakeStreamSend(s *Stream) {
 // wake even when MASQUE_QUIC_BIDI_SEND_BOOST=0 so eager WINDOW poke is not stalled on scheduleSending alone.
 func masqueWakeOnControlFrameRenotify(st *Stream, boosted bool) {
 	if st == nil {
+		return
+	}
+	if MasqueIsBidiDownloadReceiveOnly(st) {
+		// onHasStreamControlFrame already scheduleSending; duplex wake starves sibling upload C2S.
 		return
 	}
 	if MasqueIsBidiDownloadActive(st) || (MasqueBidiSendBoostEnabled() && boosted) {

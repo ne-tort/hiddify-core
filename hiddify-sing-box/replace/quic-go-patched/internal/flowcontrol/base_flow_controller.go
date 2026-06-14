@@ -31,6 +31,10 @@ type baseFlowController struct {
 	rttStats         *utils.RTTStats
 
 	logger utils.Logger
+
+	// masquePeerDuplexLazyFC: P2 download CONNECT leg on shared QUIC conn — batch
+	// MAX_STREAM_DATA so sibling upload C2S keeps packet budget (H3-L1c-7e).
+	masquePeerDuplexLazyFC bool
 }
 
 // IsNewlyBlocked says if it is newly blocked by flow control.
@@ -70,10 +74,21 @@ func (c *baseFlowController) addBytesRead(n protocol.ByteCount) {
 	c.bytesRead += n
 }
 
+func (c *baseFlowController) effectiveWindowUpdateThreshold() float64 {
+	if c.masquePeerDuplexLazyFC {
+		return 0.005
+	}
+	return windowUpdateThreshold()
+}
+
+func (c *baseFlowController) setMasquePeerDuplexLazyFC(lazy bool) {
+	c.masquePeerDuplexLazyFC = lazy
+}
+
 func (c *baseFlowController) hasWindowUpdate() bool {
 	bytesRemaining := c.receiveWindow - c.bytesRead
 	// update the window when more than the threshold was consumed
-	return bytesRemaining <= protocol.ByteCount(float64(c.receiveWindowSize)*(1-windowUpdateThreshold()))
+	return bytesRemaining <= protocol.ByteCount(float64(c.receiveWindowSize)*(1-c.effectiveWindowUpdateThreshold()))
 }
 
 // getWindowUpdate updates the receive window, if necessary

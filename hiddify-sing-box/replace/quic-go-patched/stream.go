@@ -139,7 +139,7 @@ func (s *Stream) setMasqueDownloadActive(active bool) {
 	}
 	s.masqueDownloadActive.Store(active)
 	if !active {
-		s.masqueDownloadReceiveOnly.Store(false)
+		s.setMasqueDownloadReceiveOnly(false)
 	}
 }
 
@@ -148,6 +148,24 @@ func (s *Stream) setMasqueDownloadReceiveOnly(active bool) {
 		return
 	}
 	s.masqueDownloadReceiveOnly.Store(active)
+	if !active {
+		s.setMasquePeerDuplexLazyFC(false)
+	}
+}
+
+func (s *Stream) setMasquePeerDuplexLazyFC(lazy bool) {
+	if s == nil || s.receiveStr == nil || s.receiveStr.flowController == nil {
+		return
+	}
+	flowcontrol.SetMasquePeerDuplexLazyFC(s.receiveStr.flowController, lazy)
+}
+
+// MasqueSetPeerDuplexLazyFC toggles batched MAX_STREAM_DATA on P2 download receive legs.
+// Enable only when sibling upload shares the QUIC conn (H3-L1c-7e); download-only legs use eager FC.
+func MasqueSetPeerDuplexLazyFC(s *Stream, lazy bool) {
+	if s != nil {
+		s.setMasquePeerDuplexLazyFC(lazy)
+	}
 }
 
 func (s *Stream) masqueIsDownloadActive() bool {

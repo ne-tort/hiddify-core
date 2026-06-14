@@ -119,6 +119,11 @@ func (c *TunnelConn) SetPeerDuplexUploadWake(fn func()) {
 	}
 }
 
+// PeerDuplexUploadStarted reports P2 upload-leg bulk traffic while sibling download WriteTo runs.
+func (c *TunnelConn) PeerDuplexUploadStarted() bool {
+	return c != nil && atomic.LoadInt32(&c.peerDuplexUploadStarted) > 0
+}
+
 // WakePeerDuplexUpload pokes upload-leg QUIC send while download WriteTo runs on sibling stream.
 func (c *TunnelConn) WakePeerDuplexUpload() {
 	if c != nil {
@@ -133,12 +138,9 @@ func (c *TunnelConn) UsesH3Stream() bool {
 
 func (c *TunnelConn) h3UploadChunkBytes() int {
 	if c.peerDuplexDownloadActive != nil && c.peerDuplexDownloadActive() {
-		// P2 upload leg during sibling download WriteTo: 16 KiB bootstrap for wake cadence,
-		// then 64 KiB steady (parity same-stream duplex ramp — micro-chunks cap ~130–165 Mbit/s synth).
-		if atomic.LoadInt32(&c.peerDuplexUploadStarted) > 0 {
-			return tunnelWriteToBufLen
-		}
-		return duplexUploadChunkBytesFromEnv()
+		// P2 upload leg during sibling download WriteTo: 64 KiB steady — micro-chunk bootstrap
+		// caps duplex upload ~140 Mbit/s while download monopolizes conn scheduler (H3-L1c-7d).
+		return tunnelWriteToBufLen
 	}
 	return H3UploadChunkBytes(
 		c.DownloadActive(),
@@ -397,8 +399,6 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 	buf := *bp
 	readFn := func(p []byte) (int, error) {
 		readBuf := p
-		// Bootstrap only: upload Write started before first response byte (iperf -R interleave).
-		// Steady concurrent duplex and download-only legs keep 64 KiB drain.
 		if atomic.LoadInt32(&c.duplexUploadStarted) > 0 && atomic.LoadInt32(&c.downloadDelivered) == 0 {
 			chunk := duplexUploadChunkBytesFromEnv()
 			if chunk > 0 && chunk < len(p) {
@@ -418,14 +418,23 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 		c.readMu.Unlock()
 		if n > 0 {
 			c.noteDownloadDelivered()
-			if c.sameStreamDuplexUploadWake() {
+			if c.peerDuplexDownloadLeg() {
+				if c.peerDuplexUploadWake != nil {
+					c.peerDuplexUploadWake()
+				}
+			} else if c.sameStreamDuplexUploadWake() {
 				c.wakeH3BidiUploadDuringDownload()
 			}
 		}
 		return n, err
 	}
 	flushUpload := func() error { return nil }
-	if c.sameStreamDuplexUploadWake() {
+	if c.peerDuplexDownloadLeg() && c.peerDuplexUploadWake != nil {
+		flushUpload = func() error {
+			c.peerDuplexUploadWake()
+			return nil
+		}
+	} else if c.sameStreamDuplexUploadWake() {
 		flushUpload = func() error {
 			c.wakeH3BidiUploadDuringDownload()
 			return nil

@@ -137,11 +137,9 @@ func relayTunnelWakeBidiAfterDownloadWrite(bidi any) {
 	relayTunnelWakeBidiDuplex(bidi)
 }
 
-// relayTunnelWakeBidiAfterDownloadWriteS2C schedules send after P2 download-leg S2C writes without
-// receive-window poke (client owns S2C credit on download stream; poke starves sibling upload C2S).
-func relayTunnelWakeBidiAfterDownloadWriteS2C(bidi any) {
-	relayTunnelWakeBidiSendOnly(bidi)
-}
+// relayTunnelWakeBidiAfterDownloadWriteS2C is a no-op: P2 download-leg S2C is paced by HTTP/3 Write
+// scheduling; per-chunk conn wake starves sibling upload C2S on same QUIC conn (H3-L1c-7f).
+func relayTunnelWakeBidiAfterDownloadWriteS2C(bidi any) {}
 
 // relayTunnelWakeBidiAfterUploadRead schedules download/interleave work after server consumes
 // client upload bytes from the hijacked QUIC stream (symmetric to download write wake).

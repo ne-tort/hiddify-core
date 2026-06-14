@@ -253,10 +253,7 @@ func (c *DualTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	if c == nil || c.download == nil {
 		return 0, io.EOF
 	}
-	// P2 duplex: start upload-leg dial before download bulk so peer wake is wired early.
-	if c.uploadDial != nil {
-		c.prepUploadLegAsync()
-	}
+	// Upload leg stays lazy until ReadFrom/Write (single-leg download skips 2nd CONNECT).
 	atomic.StoreInt32(&c.downloadActive, 1)
 	defer atomic.StoreInt32(&c.downloadActive, 0)
 	if wt, ok := c.download.(io.WriterTo); ok {

@@ -95,16 +95,10 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	if c.bidiWakeSink != nil {
 		c.bidiWakeSink.NoteDownloadWake()
 	}
-	// P2 download leg: poke sibling upload C2S instead of local S2C poke/stream wake (H3-L1c-7b).
-	if c.peerDuplexDownloadLeg() {
-		if c.peerDuplexUploadWake != nil {
-			c.peerDuplexUploadWake()
-			return
-		}
-		// Upload leg not wired yet (lazy dial) — conn-only wake so download bootstrap does not stall.
-		if qs := c.h3.QUICStream(); qs != nil {
-			quic.MasqueWakeConnFromStream(qs)
-		}
+	// P2 download leg with sibling upload wired: poke upload C2S only (H3-L1c-7b/7f).
+	// Download-only P2 leg (no second CONNECT): fall through to full duplex wake (H3-L1c-8).
+	if c.peerDuplexDownloadLeg() && c.peerDuplexSiblingUploadWired() {
+		c.peerDuplexUploadWake()
 		return
 	}
 	qs := c.h3.QUICStream()

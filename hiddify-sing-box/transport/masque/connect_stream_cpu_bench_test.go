@@ -10,9 +10,7 @@ import (
 )
 
 const (
-	connectStreamDownloadBenchBytes   = 4 * 1024 * 1024
-	connectStreamDownloadL1MaxNsPerB  = 12000.0 // full HTTP/3 CONNECT-stream stack (S19)
-	connectStreamDownloadL0MaxNsPerB  = 500.0   // loopback TCP WriteTo baseline
+	connectStreamDownloadBenchBytes = masqueCPUBenchBytes
 )
 
 var errBenchFixedBytesDone = errors.New("masque: bench fixed bytes done")
@@ -197,12 +195,13 @@ func TestMasqueConnectStreamCPUBudget(t *testing.T) {
 		t.Fatal("benchmark produced zero iterations")
 	}
 	nsPerByte := float64(result.NsPerOp()) / float64(connectStreamDownloadBenchBytes)
-	if nsPerByte > connectStreamDownloadL1MaxNsPerB {
-		t.Fatalf("connect-stream L1 CPU budget: %.1f ns/B > %.0f ns/B", nsPerByte, connectStreamDownloadL1MaxNsPerB)
+	if nsPerByte > connectStreamL1DownloadMaxNsPerB {
+		t.Fatalf("connect-stream L1 CPU budget: %.1f ns/B > %.0f ns/B", nsPerByte, connectStreamL1DownloadMaxNsPerB)
 	}
 
 	mbps := benchConnectStreamDownloadLayerInstantMbps(t)
-	t.Logf("connect-stream L1 download: %.1f Mbit/s (CPU %.1f ns/B)", mbps, nsPerByte)
+	t.Logf("connect-stream L1 download: %.1f Mbit/s (CPU %.1f ns/B; implied ceiling %.0f Mbit/s)",
+		mbps, nsPerByte, synthCPUMbpsCeiling(nsPerByte))
 	if mbps < connectStreamLocalizeFastMbps {
 		t.Fatalf("connect-stream L1 instant download slow: %.1f Mbit/s (want >= %.0f)", mbps, connectStreamLocalizeFastMbps)
 	}

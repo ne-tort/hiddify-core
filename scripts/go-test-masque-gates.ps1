@@ -143,12 +143,12 @@ try {
     )
     Invoke-MasqueGate "GATE-CONNECT-UDP-SYNTH prod profile" @(
         "test", "./transport/masque/",
-        "-run", "GATEConnectUDP.*SynthProd|GATEConnectUDPPairedSynth",
-        "-count=1", "-timeout", "120s"
+        "-run", "GATEConnectUDP.*SynthProd|GATEConnectUDPPairedSynth|GATEConnectUDPSynthProdAsymmetry",
+        "-count=1", "-timeout", "180s"
     )
     Invoke-MasqueGate "L4 connect-udp CPU budget" @(
-        "test", "./transport/masque/", "./transport/masque/connectudp/",
-        "-run", "MasqueConnectUDPCPUBudget|ConnectUDPCPUBudget|ConnectUDPUploadLayer",
+        "test", "./transport/masque/",
+        "-run", "MasqueConnectUDPCPUBudget|ConnectUDPCPUBudget|ConnectUDPUploadLayer|MasqueConnectStreamCPUBudget",
         "-count=1", "-timeout", "300s"
     )
     Invoke-MasqueGate "L4 connectudp pkg" @(

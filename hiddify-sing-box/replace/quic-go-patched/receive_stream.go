@@ -500,6 +500,31 @@ func (s *ReceiveStream) masquePokeDownloadReceiveWindow() bool {
 	return true
 }
 
+// masquePokeDownloadReceiveWindowNoRenotify queues MAX_STREAM_DATA when FC requires it but
+// skips per-chunk renotify while a frame is already queued. P2 download CONNECT legs share
+// a QUIC conn with sibling upload C2S — eager re-poke starves upload STREAM frames (H3-L1c-7c).
+func (s *ReceiveStream) masquePokeDownloadReceiveWindowNoRenotify() bool {
+	s.mutex.Lock()
+	if s.isRemoteCancellationEffective() {
+		s.mutex.Unlock()
+		return false
+	}
+	if s.queuedMaxStreamData {
+		s.mutex.Unlock()
+		return false
+	}
+	if !s.flowController.ShouldQueueWindowUpdate() {
+		s.mutex.Unlock()
+		return false
+	}
+	s.queuedMaxStreamData = true
+	streamID := s.streamID
+	s.mutex.Unlock()
+	s.sender.onHasStreamControlFrame(streamID, s)
+	s.sender.onHasConnectionData()
+	return true
+}
+
 func (s *ReceiveStream) getControlFrame(now monotime.Time) (_ ackhandler.Frame, ok, hasMore bool) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

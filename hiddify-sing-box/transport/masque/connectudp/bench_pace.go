@@ -8,7 +8,8 @@ const DefaultBenchUDPPayloadLen = 512
 // DefaultBenchNetemDelayMS matches docker/masque-perf-lab BENCH_NETEM_DELAY_MS default.
 const DefaultBenchNetemDelayMS = 35
 
-// DefaultBenchUDPTargetMbit matches docker/masque-perf-lab BENCH_UDP_TARGET_MBIT default.
+// DefaultBenchUDPTargetMbit matches docker/masque-perf-lab BENCH_UDP_TARGET_MBIT default (legacy paced probe).
+// GATE-CONNECT-UDP-SYNTH DoD: unlimited up/down >= 200 Mbit/s (Docker final), synth instant link >= 500 Mbit/s.
 const DefaultBenchUDPTargetMbit = 8.0
 
 // ObservedPacedGoodputEfficiency is measured goodput / target at netem 35 ms (bench-history 2026-05-19: ~6.75/8).

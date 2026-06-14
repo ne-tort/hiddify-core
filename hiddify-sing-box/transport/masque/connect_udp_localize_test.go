@@ -21,9 +21,9 @@ const (
 	connectUDPLocalizeFastMbps   = 80.0
 	connectUDPLocalizeBurstMinMbps = 40.0 // one-way upload on instant in-proc link
 	connectUDPLocalizeCeilingMin = 4.0
-	// In-proc MASQUE WriteTo latency + post-send sleep caps paced upload below docker WAN KPI (~6.75).
-	connectUDPLocalizePacedMinMbps = 3.5
-	connectUDPLocalizePacedMaxMbps = 5.5
+	// Legacy paced probe @ docker target 8 Mbit/s — not GATE DoD (see connectUDPLegacyPaced*).
+	connectUDPLocalizePacedMinMbps = connectUDPLegacyPacedMinMbps
+	connectUDPLocalizePacedMaxMbps = connectUDPLegacyPacedMaxMbps
 	// Roundtrip bench counts write+read bytes; windowed QUIC uses independent C2S/S2C credit (~2× one-way ~15 Mbit/s).
 	connectUDPLocalizeCeilingMax = 32.0
 )

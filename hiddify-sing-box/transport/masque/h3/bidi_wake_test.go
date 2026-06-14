@@ -203,6 +203,21 @@ func TestTunnelConnWakeBidiSendAfterDownloadDeliveryPeerDuplexLeg(t *testing.T) 
 	}
 }
 
+func TestTunnelConnWakeBidiSendAfterDownloadDeliveryP2DownloadOnlyLeg(t *testing.T) {
+	t.Setenv(envH3BidiDownloadWake, "1")
+	sink := &bidiWakeRecorder{}
+	download := NewTunnelConn(TunnelConnParams{
+		H3Stream:         &testH3ConnectStream{},
+		ConnectStreamLeg: "download",
+		BidiWakeSink:     sink,
+	})
+	atomic.StoreInt32(&download.downloadActive, 1)
+	download.wakeBidiSendAfterDownloadDelivery()
+	if sink.download.Load() != 1 {
+		t.Fatalf("download-only P2 leg expected full delivery wake, got %d", sink.download.Load())
+	}
+}
+
 func TestTunnelConnWakeBidiSendAfterDownloadDeliveryGating(t *testing.T) {
 	t.Setenv(envH3BidiDownloadWake, "1")
 	t.Setenv(envH3BidiUploadWake, "0")

@@ -132,6 +132,7 @@ func wireH3PeerDuplexWake(dc *h3.DualTunnelConn, download, upload net.Conn) {
 	dlTC := findH3TunnelConn(download)
 	if dlTC != nil && ulTC != nil {
 		dlTC.SetPeerDuplexUploadWake(ulTC.WakePeerDuplexUpload)
+		dlTC.RefreshPeerDuplexLazyFC()
 	}
 }
 

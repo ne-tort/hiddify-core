@@ -4,12 +4,12 @@
 
 | Файл | Назначение |
 |------|------------|
-| `masque_wake.go` | `MasqueWakeStreamSend`, `MasqueWakeBidiDuplex`, `MasqueWakeConnSend`, `MasqueSetBidiDownloadActive`, `MasquePokeDownloadReceiveWindow`, `masqueWakeAfterDownloadRead`, `masqueWakeAfterDownloadWrite` |
-| `receive_stream.go` | `masquePokeDownloadReceiveWindow` — queue MAX_STREAM_DATA + `onHasStreamControlFrame` when download leg starts (before/between Reads; avoids 64 KiB/RTT stall) |
-| `masque_framer.go` | bidi download-active queue front (`MASQUE_QUIC_BIDI_SEND_BOOST`); `MasqueSetBidiDownloadReceiveActive` for P2 download leg (poke/wake без send boost); eager activation always schedules send after poke |
-| `framer.go` | duplicate `AddActiveStream` re-promotes bidi-boost streams; `controlFrameStreamIDs` prioritizes boost MAX_STREAM_DATA |
-| `stream.go` | `Read`/`Write`/`WriteTo` poke+wake when download-active (parity `http3/stream.go`); `WriteTo` auto `MasqueSetBidiDownloadActive` when unset |
-| `http3/masque_wake.go` | receive-read wake; `MASQUE_QUIC_BIDI_CONN_WAKE=0` disables conn-level bidi wake |
+| `masque_wake.go` | `MasqueWakeStreamSend`, `MasqueWakeBidiDuplex`, `MasqueWakeConnSend`, `MasqueSetBidiDownloadActive`, `MasquePokeDownloadReceiveWindow`, `masqueWakeAfterDownloadRead`, `masqueWakeAfterDownloadWrite`; receive-only skip conn wake (H3-L1c-7d) |
+| `internal/flowcontrol/` | `SetMasquePeerDuplexLazyFC` / `MasqueSetPeerDuplexLazyFC` — batched MAX_STREAM_DATA on P2 download leg when sibling upload wired (H3-L1c-7e/8) |
+| `receive_stream.go` | `masquePokeDownloadReceiveWindow`; `masquePokeDownloadReceiveWindowNoRenotify` for P2 download leg (H3-L1c-7c) |
+| `stream.go` | `MasqueIsBidiDownloadReceiveOnly`; `MasqueSetPeerDuplexLazyFC` decoupled from receive-only flag |
+| `masque_framer.go` | bidi download-active queue front (`MASQUE_QUIC_BIDI_SEND_BOOST`); `MasqueSetBidiDownloadReceiveActive` for P2 download leg (poke/wake без send boost; skip eager activation poke — H3-L1c-7e) |
+| `stream.go` | `masqueDownloadReceiveOnly` flag; `MasqueIsBidiDownloadReceiveOnly` |
 | `http3/stream.go` | single `MasqueWakeStreamSend` after payload read |
 | `http3/client.go` | `ClientConn.MasqueWakeSend()` → `MasqueWakeConnSend`; CONNECT upload chunk env |
 | `internal/flowcontrol/masque_threshold.go` | `MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW` (default on): threshold 0 → MAX_STREAM_DATA per read (B7 parity) |

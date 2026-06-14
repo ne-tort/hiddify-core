@@ -17,6 +17,12 @@ func (c *TunnelConn) peerDuplexDownloadLeg() bool {
 	return c != nil && c.connectStreamLeg == strm.ConnectStreamLegDownload
 }
 
+// peerDuplexSiblingUploadWired reports whether the lazy upload CONNECT leg was dialed and
+// peer wake wired (duplex on same QUIC conn). Download-only P2 flows keep this false.
+func (c *TunnelConn) peerDuplexSiblingUploadWired() bool {
+	return c != nil && c.peerDuplexUploadWake != nil
+}
+
 // sameStreamDuplexUploadWake reports whether WriteTo should poke upload on this stream
 // (false on P2 download leg — sibling upload CONNECT owns C2S wake).
 func (c *TunnelConn) sameStreamDuplexUploadWake() bool {
@@ -50,6 +56,10 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 	}
 	if c.connectStreamLeg == strm.ConnectStreamLegDownload {
 		quic.MasqueSetBidiDownloadReceiveActive(qs, active)
+		if active {
+			// Lazy FC only when sibling upload shares QUIC conn (duplex); download-only uses eager FC (H3-L1c-8).
+			quic.MasqueSetPeerDuplexLazyFC(qs, c.peerDuplexSiblingUploadWired())
+		}
 		return
 	}
 	quic.MasqueSetBidiDownloadActive(qs, active)
@@ -71,6 +81,18 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
+}
+
+// RefreshPeerDuplexLazyFC re-applies lazy FC when the upload CONNECT leg is wired mid-WriteTo.
+func (c *TunnelConn) RefreshPeerDuplexLazyFC() {
+	if c == nil || !c.DownloadActive() || !c.peerDuplexDownloadLeg() || c.h3 == nil {
+		return
+	}
+	qs := c.h3.QUICStream()
+	if qs == nil {
+		return
+	}
+	quic.MasqueSetPeerDuplexLazyFC(qs, c.peerDuplexSiblingUploadWired())
 }
 
 func (c *TunnelConn) noteDownloadDelivered() {
