@@ -61,7 +61,6 @@ func ConnectStreamUseDualConnect() bool {
 
 // ConnectStreamDualLegParallelQUIC dials upload leg on a separate QUIC connection (P6 escape
 // for connection-level duplex aggregate ceiling). Opt-in: MASQUE_CONNECT_STREAM_DUAL_CONNECT_PARALLEL=1.
-// Route duplex (MarkConnectionCopyDuplex) also enables P6 without env.
 func ConnectStreamDualLegParallelQUIC() bool {
 	if !ConnectStreamUseDualConnect() {
 		return false
@@ -135,6 +134,7 @@ func ConnectRequest(ctx context.Context, url string, serverHost string, usePipe 
 		if setAuth != nil {
 			setAuth(req.Header)
 		}
+		setConnectStreamLegHeader(req.Header, ctx)
 		return req, pr, pw, nil
 	}
 	// nil Body, not http.NoBody: quic-go doRequest treats NoBody as a real body, reads EOF,
@@ -150,5 +150,15 @@ func ConnectRequest(ctx context.Context, url string, serverHost string, usePipe 
 	if setAuth != nil {
 		setAuth(req.Header)
 	}
+	setConnectStreamLegHeader(req.Header, ctx)
 	return req, nil, nil, nil
+}
+
+func setConnectStreamLegHeader(h http.Header, ctx context.Context) {
+	if h == nil {
+		return
+	}
+	if leg := strm.ConnectStreamLegFromContext(ctx); leg != "" {
+		h.Set(strm.ConnectStreamLegHeader, leg)
+	}
 }

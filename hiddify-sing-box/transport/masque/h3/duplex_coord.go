@@ -5,11 +5,23 @@ import (
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 const envH3BidiDuplexCoord = "MASQUE_H3_BIDI_DUPLEX_COORD" // retained for test env hygiene only
 
 var testBidiDownloadActiveHook func(active bool)
+
+// peerDuplexDownloadLeg reports P2 download CONNECT (upload runs on sibling stream).
+func (c *TunnelConn) peerDuplexDownloadLeg() bool {
+	return c != nil && c.connectStreamLeg == strm.ConnectStreamLegDownload
+}
+
+// sameStreamDuplexUploadWake reports whether WriteTo should poke upload on this stream
+// (false on P2 download leg — sibling upload CONNECT owns C2S wake).
+func (c *TunnelConn) sameStreamDuplexUploadWake() bool {
+	return c != nil && !c.peerDuplexDownloadLeg()
+}
 
 // BidiDuplexCoordEnabled reports whether legacy coordinated upload queue is active.
 // Always false: prod upload during download WriteTo writes directly to h3.
@@ -18,6 +30,11 @@ func BidiDuplexCoordEnabled() bool { return false }
 // DownloadActive reports whether WriteTo is draining the response half (iperf -R duplex).
 func (c *TunnelConn) DownloadActive() bool {
 	return c != nil && atomic.LoadInt32(&c.downloadActive) > 0
+}
+
+// DownloadDelivered reports whether WriteTo delivered at least one response byte (true duplex interleave).
+func (c *TunnelConn) DownloadDelivered() bool {
+	return c != nil && atomic.LoadInt32(&c.downloadDelivered) > 0
 }
 
 func (c *TunnelConn) setBidiDownloadActive(active bool) {
@@ -29,6 +46,10 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 	}
 	qs := c.h3.QUICStream()
 	if qs == nil {
+		return
+	}
+	if c.connectStreamLeg == strm.ConnectStreamLegDownload {
+		quic.MasqueSetBidiDownloadReceiveActive(qs, active)
 		return
 	}
 	quic.MasqueSetBidiDownloadActive(qs, active)

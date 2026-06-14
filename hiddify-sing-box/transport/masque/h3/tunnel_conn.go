@@ -58,6 +58,11 @@ type TunnelConn struct {
 	bootstrapUploadDone int32 // one-shot upload DATA before download drain (H2 parity)
 
 	bidiWakeSink BidiWakeSink
+
+	peerDuplexDownloadActive func() bool // P2 upload leg: download WriteTo on sibling CONNECT stream
+	peerDuplexUploadWake     func()      // P2 download leg: wake sibling upload C2S on delivery (H3-L1c-7b)
+	peerDuplexUploadStarted  int32       // P2 upload leg: bulk upload while sibling drains download
+	connectStreamLeg         string      // P2 leg role: download / upload / ""
 }
 
 // TunnelConnParams configures a TunnelConn over HTTP/3 CONNECT.
@@ -73,6 +78,8 @@ type TunnelConnParams struct {
 	// WriteTo on the same CONNECT stream. Auto drain on upload would consume response bytes
 	// (e.g. iperf banner) before WriteTo starts — set true for prod CONNECT dial paths.
 	RouteBidiDuplex bool
+	// ConnectStreamLeg is P2 leg role ("download" / "upload") or "" for single bidi CONNECT.
+	ConnectStreamLeg string
 }
 
 // NewTunnelConn builds a tunneled net.Conn over one HTTP/3 CONNECT stream.
@@ -94,6 +101,28 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 		remote:          p.Remote,
 		bidiWakeSink:    p.BidiWakeSink,
 		routeBidiDuplex: p.RouteBidiDuplex,
+		connectStreamLeg: p.ConnectStreamLeg,
+	}
+}
+
+// SetPeerDuplexDownloadActive wires upload-leg wake while download drains on sibling CONNECT leg.
+func (c *TunnelConn) SetPeerDuplexDownloadActive(fn func() bool) {
+	if c != nil {
+		c.peerDuplexDownloadActive = fn
+	}
+}
+
+// SetPeerDuplexUploadWake wires download-leg delivery wake to the sibling upload CONNECT leg.
+func (c *TunnelConn) SetPeerDuplexUploadWake(fn func()) {
+	if c != nil {
+		c.peerDuplexUploadWake = fn
+	}
+}
+
+// WakePeerDuplexUpload pokes upload-leg QUIC send while download WriteTo runs on sibling stream.
+func (c *TunnelConn) WakePeerDuplexUpload() {
+	if c != nil {
+		c.wakeBidiSendDuringPeerDuplexDownload()
 	}
 }
 
@@ -103,6 +132,14 @@ func (c *TunnelConn) UsesH3Stream() bool {
 }
 
 func (c *TunnelConn) h3UploadChunkBytes() int {
+	if c.peerDuplexDownloadActive != nil && c.peerDuplexDownloadActive() {
+		// P2 upload leg during sibling download WriteTo: 16 KiB bootstrap for wake cadence,
+		// then 64 KiB steady (parity same-stream duplex ramp — micro-chunks cap ~130–165 Mbit/s synth).
+		if atomic.LoadInt32(&c.peerDuplexUploadStarted) > 0 {
+			return tunnelWriteToBufLen
+		}
+		return duplexUploadChunkBytesFromEnv()
+	}
 	return H3UploadChunkBytes(
 		c.DownloadActive(),
 		atomic.LoadInt32(&c.downloadDelivered) > 0,
@@ -267,6 +304,9 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 	if c.h3 != nil {
 		c.maybeStartDownloadDrainOnUpload()
 		c.ensureBidiUploadActive()
+		if c.peerDuplexDownloadActive != nil && c.peerDuplexDownloadActive() {
+			atomic.StoreInt32(&c.peerDuplexUploadStarted, 1)
+		}
 		c.noteDuplexUploadTraffic()
 		c.writeMu.Lock()
 		dl := c.writeDL
@@ -347,8 +387,10 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 	c.beginDuplexDownload()
 	defer c.endDuplexDownload()
 	// Parity H2 bidiTunnelConn.WriteTo: bootstrap upload DATA + poke before first response read.
-	c.bootstrapH3UploadForDownloadOnce()
-	c.wakeBidiSendAfterUpload()
+	if c.sameStreamDuplexUploadWake() {
+		c.bootstrapH3UploadForDownloadOnce()
+		c.wakeBidiSendAfterUpload()
+	}
 
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
@@ -363,7 +405,9 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 				readBuf = p[:chunk]
 			}
 		}
-		c.wakeH3BidiUploadDuringDownload()
+		if c.sameStreamDuplexUploadWake() {
+			c.wakeH3BidiUploadDuringDownload()
+		}
 		c.readMu.Lock()
 		c.applyH3ReadDeadlineLocked()
 		if err := c.ctx.Err(); err != nil {
@@ -374,14 +418,20 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 		c.readMu.Unlock()
 		if n > 0 {
 			c.noteDownloadDelivered()
-			c.wakeH3BidiUploadDuringDownload()
+			if c.sameStreamDuplexUploadWake() {
+				c.wakeH3BidiUploadDuringDownload()
+			}
 		}
 		return n, err
 	}
-	return interleaveDuplexTransfer(w, readFn, func() error {
-		c.wakeH3BidiUploadDuringDownload()
-		return nil
-	}, buf, func(wrote int) {
+	flushUpload := func() error { return nil }
+	if c.sameStreamDuplexUploadWake() {
+		flushUpload = func() error {
+			c.wakeH3BidiUploadDuringDownload()
+			return nil
+		}
+	}
+	return interleaveDuplexTransfer(w, readFn, flushUpload, buf, func(wrote int) {
 		if wrote > 0 {
 			c.noteDownloadDelivered()
 			c.wakeBidiSendAfterDownloadDelivery()
@@ -390,10 +440,16 @@ func (c *TunnelConn) writeH3DownloadTo(w io.Writer) (int64, error) {
 }
 
 func (c *TunnelConn) duplexUploadWakeHook() func(int) {
-	if c == nil || !c.DownloadActive() {
+	if c == nil {
 		return nil
 	}
-	return func(int) { c.wakeBidiSendAfterUpload() }
+	if c.DownloadActive() {
+		return func(int) { c.wakeBidiSendAfterUpload() }
+	}
+	if c.peerDuplexDownloadActive != nil && c.peerDuplexDownloadActive() {
+		return func(int) { c.wakeBidiSendDuringPeerDuplexDownload() }
+	}
+	return nil
 }
 
 func (c *TunnelConn) readFromChunked(w io.Writer, r io.Reader, chunk int) (int64, error) {

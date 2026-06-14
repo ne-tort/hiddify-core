@@ -167,6 +167,23 @@ func masqueWakeOnControlFrameRenotify(st *Stream, boosted bool) {
 	}
 }
 
+// MasqueWakeConnFromStream schedules connection-level send without enqueueing the stream send
+// half. P2 download CONNECT legs are receive-active without send boost — stream send wake
+// only adds framer churn vs sibling upload C2S (H3-L1c-7b).
+func MasqueWakeConnFromStream(s *Stream) {
+	masqueWakeConnFromStream(s)
+}
+
+func masqueWakeConnFromStream(s *Stream) {
+	if s == nil || s.sendStr == nil || s.sendStr.sender == nil {
+		return
+	}
+	s.sendStr.sender.onHasConnectionData()
+	if masqueWakeConnSendHook != nil {
+		masqueWakeConnSendHook()
+	}
+}
+
 // MasqueWakeBidiDuplex schedules stream send work and connection-level send after a bidi
 // download read. Default on; disable conn-level half with MASQUE_QUIC_BIDI_CONN_WAKE=0.
 func MasqueWakeBidiDuplex(s *Stream) {

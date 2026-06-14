@@ -40,6 +40,77 @@ func relayTunnelSetBidiDownloadActive(bidi any, active bool) {
 	quic.MasqueSetBidiDownloadActive(q, active)
 }
 
+// relayTunnelSetBidiDownloadReceiveActive marks P2 download CONNECT legs receive-active without
+// framer send boost (parity h3 P2 download leg during sibling upload on same QUIC conn).
+func relayTunnelSetBidiDownloadReceiveActive(bidi any, active bool) {
+	if bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	quic.MasqueSetBidiDownloadReceiveActive(q, active)
+}
+
+// relayTunnelSetBidiUploadActive marks P6 upload CONNECT relay legs upload-boosted on the server.
+func relayTunnelSetBidiUploadActive(bidi any, active bool) {
+	if bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	quic.MasqueSetBidiUploadActive(q, active)
+}
+
+// relayTunnelWakeBidiUploadLeg pokes MAX_STREAM_DATA + scheduler for P6 upload CONNECT relay legs.
+func relayTunnelWakeBidiUploadLeg(bidi any) {
+	if !RelayBidiDownloadWriteWakeEnabled() || bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	if quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(q)
+	}
+	quic.MasqueWakeBidiDuplex(q)
+	quic.MasqueRepromoteBidiSendBoost(q)
+}
+
+// relayTunnelWakeBidiSendOnly schedules stream send without MAX_STREAM_DATA poke. P2 download-leg
+// S2C pump must not queue spurious receive-window control frames — sibling upload C2S on the same
+// QUIC conn needs packet budget (H3-L1c-7 server S2C fairness).
+func relayTunnelWakeBidiSendOnly(bidi any) {
+	if !RelayBidiDownloadWriteWakeEnabled() || bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	quic.MasqueWakeConnFromStream(q)
+}
+
 // relayTunnelWakeBidiDuplex schedules send after a hijacked H3 relay half advances (download write
 // or upload read). Guarded by MASQUE_RELAY_BIDI_DOWNLOAD_WRITE_WAKE (default on).
 func relayTunnelWakeBidiDuplex(bidi any) {
@@ -66,10 +137,47 @@ func relayTunnelWakeBidiAfterDownloadWrite(bidi any) {
 	relayTunnelWakeBidiDuplex(bidi)
 }
 
+// relayTunnelWakeBidiAfterDownloadWriteS2C schedules send after P2 download-leg S2C writes without
+// receive-window poke (client owns S2C credit on download stream; poke starves sibling upload C2S).
+func relayTunnelWakeBidiAfterDownloadWriteS2C(bidi any) {
+	relayTunnelWakeBidiSendOnly(bidi)
+}
+
 // relayTunnelWakeBidiAfterUploadRead schedules download/interleave work after server consumes
 // client upload bytes from the hijacked QUIC stream (symmetric to download write wake).
 func relayTunnelWakeBidiAfterUploadRead(bidi any) {
 	relayTunnelWakeBidiDuplex(bidi)
+}
+
+// relayTunnelCopyBufferBidiUploadLeg copies client upload → onward TCP on P6 upload CONNECT legs
+// with upload-boost wake (parity client wakeBidiSendDuringPeerDuplexDownload).
+func relayTunnelCopyBufferBidiUploadLeg(dst io.Writer, src io.Reader, bidi any) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+				relayTunnelWakeBidiUploadLeg(bidi)
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
 }
 
 // relayTunnelWakeH2AfterUploadRead flushes the H2 CONNECT response after server consumes client

@@ -34,6 +34,7 @@ func masqueBidiSendBoostMaxFramesPerPacket() int {
 type masqueBidiBoostSetter interface {
 	masqueSetBidiSendBoost(protocol.StreamID, bool)
 	masqueRepromoteBidiSendBoost(protocol.StreamID)
+	masqueIsBidiSendBoosted(protocol.StreamID) bool
 }
 
 func masqueScheduleDownloadActiveWake(s *Stream) {
@@ -41,10 +42,24 @@ func masqueScheduleDownloadActiveWake(s *Stream) {
 		return
 	}
 	if masqueWakeBidiConnOnReceiveRead() {
-		MasqueWakeBidiDuplex(s)
+		if masqueStreamHasBidiSendBoost(s) {
+			MasqueWakeBidiDuplex(s)
+			return
+		}
+		masqueWakeConnFromStream(s)
 		return
 	}
 	MasqueWakeStreamSend(s)
+}
+
+func masqueStreamHasBidiSendBoost(s *Stream) bool {
+	if s == nil || !MasqueBidiSendBoostEnabled() {
+		return false
+	}
+	if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
+		return setter.masqueIsBidiSendBoosted(s.StreamID())
+	}
+	return false
 }
 
 // MasqueSetBidiDownloadActive marks a bidirectional stream as download-active so its send half
@@ -53,6 +68,7 @@ func MasqueSetBidiDownloadActive(s *Stream, active bool) {
 	if s == nil {
 		return
 	}
+	s.setMasqueDownloadReceiveOnly(false)
 	s.setMasqueDownloadActive(active)
 	if active {
 		_ = masquePokeDownloadReceiveWindow(s)
@@ -66,13 +82,40 @@ func MasqueSetBidiDownloadActive(s *Stream, active bool) {
 	}
 }
 
-// MasqueRepromoteBidiSendBoost re-queues a download-active boosted stream at the framer front
-// when concurrent upload traffic arrives on another goroutine (H3-L1c duplex aggregate ceiling).
-func MasqueRepromoteBidiSendBoost(s *Stream) {
-	if s == nil || !MasqueBidiSendBoostEnabled() || !s.masqueIsDownloadActive() {
+// MasqueSetBidiDownloadReceiveActive marks download-active for receive-side poke and wake
+// without framer send boost. P2 download CONNECT leg during sibling upload on same QUIC conn —
+// send boost would starve upload STREAM frames under conn FC (H3-L1c-7).
+func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
+	if s == nil {
 		return
 	}
+	s.setMasqueDownloadReceiveOnly(active)
+	s.setMasqueDownloadActive(active)
+	if active {
+		_ = masquePokeDownloadReceiveWindow(s)
+		masqueScheduleDownloadActiveWake(s)
+	} else if MasqueBidiSendBoostEnabled() {
+		if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
+			setter.masqueSetBidiSendBoost(s.StreamID(), false)
+		}
+	}
+}
+
+// MasqueRepromoteBidiSendBoost re-queues a download-active boosted stream at the framer front
+// when concurrent upload traffic arrives on another goroutine (H3-L1c duplex aggregate ceiling).
+// Also applies to upload-boosted legs (MasqueSetBidiUploadActive / P6 upload CONNECT).
+func MasqueRepromoteBidiSendBoost(s *Stream) {
+	if s == nil || !MasqueBidiSendBoostEnabled() {
+		return
+	}
+	boosted := s.masqueIsDownloadActive()
 	if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
+		if !boosted {
+			boosted = setter.masqueIsBidiSendBoosted(s.StreamID())
+		}
+		if !boosted {
+			return
+		}
 		setter.masqueRepromoteBidiSendBoost(s.StreamID())
 	}
 }

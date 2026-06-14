@@ -33,6 +33,7 @@ type CoreSession struct {
 	IPHTTPH2Upload           io.Writer
 	IPHTTP                   *http3.Transport
 	TCPHTTP                  *http3.Transport
+	p6UploadWarm             p6UploadWarmPool
 	TemplateUDP              *uritemplate.Template
 	TemplateIP               *uritemplate.Template
 	TemplateTCP              *uritemplate.Template

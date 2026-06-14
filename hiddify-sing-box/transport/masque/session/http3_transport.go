@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log"
 
 	"github.com/quic-go/quic-go"
@@ -61,6 +62,26 @@ func ResetIPH3TransportLockedAssumeMu(s *CoreSession) {
 		s.IPHTTP = nil
 	}
 	s.IPHTTPConn = nil
+}
+
+// WarmTCPConnectStreamHTTP3Transport completes the QUIC handshake on an ephemeral CONNECT-stream transport (P6 warm dial).
+func WarmTCPConnectStreamHTTP3Transport(ctx context.Context, s *CoreSession, tr *http3.Transport) error {
+	if tr == nil {
+		return errors.New("nil CONNECT-stream HTTP/3 transport")
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return context.Cause(ctx)
+	}
+	port := int(s.Options.ServerPort)
+	if port <= 0 {
+		port = 443
+	}
+	target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
+	tlsConf := ClientTLSConfig(s.Options)
+	quicCfg := ApplyQUICExperimentalOptions(TCPConnectStreamQUICConfig(s.Options), s.Options.QUICExperimental)
+	h3t.FinalizeConnectStreamQUICConfig(quicCfg)
+	_, err := tr.Dial(ctx, target, tlsConf, quicCfg)
+	return err
 }
 
 // NewTCPConnectStreamHTTP3Transport builds the CONNECT-stream HTTP/3 overlay transport.

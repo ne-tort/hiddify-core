@@ -18,14 +18,14 @@ func UseLegacyFlushRelay() bool {
 }
 
 // TCPForward is the server TCP relay entry: tunnel (default) or legacy flush relay.
-func TCPForward(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter) error {
+func TCPForward(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter, legRole string) error {
 	if UseLegacyFlushRelay() {
 		return TCPBidirectional(ctx, targetConn, reqBody, responseWriter)
 	}
-	return TCPTunnel(ctx, targetConn, reqBody, responseWriter)
+	return TCPTunnel(ctx, targetConn, reqBody, responseWriter, legRole)
 }
 
 // TCPTunnel relays CONNECT tunneled TCP via transport/masque stream (h2o-style).
-func TCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter) error {
-	return strm.RelayTCPTunnel(ctx, targetConn, reqBody, responseWriter)
+func TCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter, legRole string) error {
+	return strm.RelayTCPTunnel(ctx, targetConn, reqBody, responseWriter, legRole)
 }

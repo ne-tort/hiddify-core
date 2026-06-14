@@ -60,7 +60,8 @@ type Stream struct {
 	sender                 streamSender
 	receiveStreamCompleted bool
 	sendStreamCompleted    bool
-	masqueDownloadActive   atomic.Bool
+	masqueDownloadActive      atomic.Bool
+	masqueDownloadReceiveOnly atomic.Bool // P2 download leg: poke at activation only (H3-L1c-7c)
 }
 
 var (
@@ -137,6 +138,16 @@ func (s *Stream) setMasqueDownloadActive(active bool) {
 		return
 	}
 	s.masqueDownloadActive.Store(active)
+	if !active {
+		s.masqueDownloadReceiveOnly.Store(false)
+	}
+}
+
+func (s *Stream) setMasqueDownloadReceiveOnly(active bool) {
+	if s == nil {
+		return
+	}
+	s.masqueDownloadReceiveOnly.Store(active)
 }
 
 func (s *Stream) masqueIsDownloadActive() bool {
@@ -154,6 +165,13 @@ func (s *Stream) wakeBlockedSendHalf() {
 // download-active (server hijack relay / client WriteTo download leg).
 func MasqueIsBidiDownloadActive(s *Stream) bool {
 	return s != nil && s.masqueIsDownloadActive()
+}
+
+// MasqueIsBidiDownloadReceiveOnly reports P2 download CONNECT legs (receive-active without
+// framer send boost). Per-chunk progress must not re-poke MAX_STREAM_DATA — sibling upload C2S
+// on the same QUIC conn needs packet budget (H3-L1c-7c).
+func MasqueIsBidiDownloadReceiveOnly(s *Stream) bool {
+	return s != nil && s.masqueDownloadReceiveOnly.Load()
 }
 
 // Peek fills b with stream data, without consuming the stream data.

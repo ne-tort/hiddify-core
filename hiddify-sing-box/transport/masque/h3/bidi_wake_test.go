@@ -56,6 +56,38 @@ func TestTunnelConnWakeBidiSendAfterUploadGating(t *testing.T) {
 	}
 }
 
+func TestTunnelConnWakeBidiSendDuringPeerDuplexDownload(t *testing.T) {
+	t.Setenv(envH3BidiUploadWake, "1")
+	sink := &bidiWakeRecorder{}
+	active := true
+	c := NewTunnelConn(TunnelConnParams{
+		H3Stream:     &testH3ConnectStream{},
+		BidiWakeSink: sink,
+	})
+	c.SetPeerDuplexDownloadActive(func() bool { return active })
+
+	c.wakeBidiSendDuringPeerDuplexDownload()
+	if sink.upload.Load() != 1 {
+		t.Fatalf("expected peer duplex wake, got %d", sink.upload.Load())
+	}
+
+	active = false
+	c.wakeBidiSendDuringPeerDuplexDownload()
+	if sink.upload.Load() != 1 {
+		t.Fatalf("expected no extra wake when peer inactive, got %d", sink.upload.Load())
+	}
+
+	active = true
+	hook := c.duplexUploadWakeHook()
+	if hook == nil {
+		t.Fatal("expected peer duplex upload wake hook")
+	}
+	hook(1)
+	if sink.upload.Load() != 2 {
+		t.Fatalf("expected hook wake, got %d", sink.upload.Load())
+	}
+}
+
 func TestBidiDownloadDeliveryWakeDuringWriteToEnv(t *testing.T) {
 	cases := []struct {
 		env  string
@@ -147,6 +179,27 @@ func TestH3UploadChunkWakePokesCreditSender(t *testing.T) {
 	}
 	if connSend.Load() == 0 {
 		t.Fatal("upload during downloadActive must MasqueWakeBidiDuplex (conn-level wake), not only MasqueWakeStreamSend")
+	}
+}
+
+func TestTunnelConnWakeBidiSendAfterDownloadDeliveryPeerDuplexLeg(t *testing.T) {
+	t.Setenv(envH3BidiDownloadWake, "1")
+	uploadSink := &bidiWakeRecorder{}
+	download := NewTunnelConn(TunnelConnParams{
+		H3Stream:         &testH3ConnectStream{},
+		ConnectStreamLeg: "download",
+	})
+	upload := NewTunnelConn(TunnelConnParams{
+		H3Stream:     &testH3ConnectStream{},
+		BidiWakeSink: uploadSink,
+	})
+	upload.SetPeerDuplexDownloadActive(func() bool { return true })
+	download.SetPeerDuplexUploadWake(upload.WakePeerDuplexUpload)
+
+	atomic.StoreInt32(&download.downloadActive, 1)
+	download.wakeBidiSendAfterDownloadDelivery()
+	if uploadSink.upload.Load() != 1 {
+		t.Fatalf("expected sibling upload wake on P2 download delivery, got %d", uploadSink.upload.Load())
 	}
 }
 

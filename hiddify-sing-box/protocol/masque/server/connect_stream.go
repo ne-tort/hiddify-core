@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	"io"
 	"net"
@@ -101,7 +102,7 @@ func HandleTCPConnectRequest(host TCPConnectHost, w http.ResponseWriter, r *http
 		flusher.Flush()
 	}
 	debugf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort)
-	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w)
+	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w, strm.ConnectStreamLegFromRequest(r))
 	if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
 		debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr)
 		return

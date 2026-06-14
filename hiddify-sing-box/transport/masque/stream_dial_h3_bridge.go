@@ -95,8 +95,19 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 			uploadHTTP := tcpHTTP
 			var uploadCloser io.Closer
 			if dc.UploadLegParallelQUIC() {
-				uploadHTTP = s.newEphemeralTCPHTTPTransport()
-				uploadCloser = uploadHTTP
+				tr, acquireErr := session.AcquireP6UploadTransport(dialCtx, &s.CoreSession)
+				if acquireErr != nil {
+					return nil, nil, acquireErr
+				}
+				uploadHTTP = tr
+				sess := &s.CoreSession
+				warmCtx := dialCtx
+				uploadCloser = p6UploadLegCloser{
+					closer: tr,
+					release: func() {
+						session.KickP6UploadWarmPoolIdle(warmCtx, sess)
+					},
+				}
 			}
 			upload, dialErr := strm.DialHTTP3ConnectStreamLeg(dialCtx, hooks, host, tcpURL, logIn, targetHost, targetPort, uploadHTTP, false, "upload")
 			if dialErr != nil {
@@ -105,11 +116,37 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 				}
 				return nil, nil, dialErr
 			}
+			wireH3PeerDuplexWake(dc, download, upload)
 			return upload, uploadCloser, nil
 		})
 		return strm.NewTunnelConn(dc), nil
 	}
 	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP)
+}
+
+func wireH3PeerDuplexWake(dc *h3.DualTunnelConn, download, upload net.Conn) {
+	ulTC := findH3TunnelConn(upload)
+	if ulTC != nil {
+		ulTC.SetPeerDuplexDownloadActive(dc.CompositeDownloadActive)
+	}
+	dlTC := findH3TunnelConn(download)
+	if dlTC != nil && ulTC != nil {
+		dlTC.SetPeerDuplexUploadWake(ulTC.WakePeerDuplexUpload)
+	}
+}
+
+func findH3TunnelConn(conn net.Conn) *h3.TunnelConn {
+	for conn != nil {
+		if tc, ok := h3.AsTunnelConn(conn); ok {
+			return tc
+		}
+		if w, ok := conn.(*strm.TunnelConn); ok && w.Inner != nil {
+			conn = w.Inner
+			continue
+		}
+		break
+	}
+	return nil
 }
 
 func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritemplate.Template, options ClientOptions, destination M.Socksaddr, httpLayer string, tcpHTTP *http3.Transport, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error) {

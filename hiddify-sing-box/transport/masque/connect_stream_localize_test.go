@@ -471,7 +471,7 @@ func connectStreamRelayHandler(targetHost, targetPort string, r *http.Request, w
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w)
+	_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w, "")
 }
 
 func benchConnectStreamUploadLayer(t *testing.T, layer string, link bidiLink, duration time.Duration) connectStreamBenchResult {

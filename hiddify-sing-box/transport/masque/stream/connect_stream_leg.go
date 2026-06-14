@@ -1,6 +1,18 @@
 package stream
 
-import "context"
+import (
+	"context"
+	"net/http"
+	"strings"
+)
+
+// ConnectStreamLegHeader tags P2/P6 CONNECT-stream leg role for server relay mode selection.
+const ConnectStreamLegHeader = "Masque-Connect-Stream-Leg"
+
+const (
+	ConnectStreamLegDownload = "download"
+	ConnectStreamLegUpload   = "upload"
+)
 
 type connectStreamLegKey struct{}
 
@@ -26,4 +38,12 @@ func ConnectStreamLegFromContext(ctx context.Context) string {
 // for concurrent route upload+download (false for P2 download/upload legs).
 func ConnectStreamRouteBidiDuplex(ctx context.Context) bool {
 	return ConnectStreamLegFromContext(ctx) == ""
+}
+
+// ConnectStreamLegFromRequest returns the P2/P6 leg label from a CONNECT request, or "".
+func ConnectStreamLegFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get(ConnectStreamLegHeader))
 }

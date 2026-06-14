@@ -33,6 +33,31 @@ type BidiWakeSink interface {
 	NoteDownloadWake()
 }
 
+// wakeBidiSendDuringPeerDuplexDownload pokes upload-leg QUIC send while download WriteTo runs on
+// the sibling P2 CONNECT leg (separate stream, same or parallel QUIC conn).
+func (c *TunnelConn) wakeBidiSendDuringPeerDuplexDownload() {
+	if c == nil || c.h3 == nil {
+		return
+	}
+	if c.peerDuplexDownloadActive == nil || !c.peerDuplexDownloadActive() {
+		return
+	}
+	c.ensureBidiUploadActive()
+	if !BidiUploadWakeDuringDownload() {
+		return
+	}
+	if c.bidiWakeSink != nil {
+		c.bidiWakeSink.NoteUploadWake()
+	}
+	qs := c.h3.QUICStream()
+	if qs == nil {
+		return
+	}
+	quic.MasqueSetBidiUploadActive(qs, true)
+	quic.MasqueWakeBidiDuplex(qs)
+	quic.MasqueRepromoteBidiSendBoost(qs)
+}
+
 func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if c == nil || c.h3 == nil || atomic.LoadInt32(&c.downloadActive) == 0 {
 		return
@@ -69,6 +94,18 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	}
 	if c.bidiWakeSink != nil {
 		c.bidiWakeSink.NoteDownloadWake()
+	}
+	// P2 download leg: poke sibling upload C2S instead of local S2C poke/stream wake (H3-L1c-7b).
+	if c.peerDuplexDownloadLeg() {
+		if c.peerDuplexUploadWake != nil {
+			c.peerDuplexUploadWake()
+			return
+		}
+		// Upload leg not wired yet (lazy dial) — conn-only wake so download bootstrap does not stall.
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueWakeConnFromStream(qs)
+		}
+		return
 	}
 	qs := c.h3.QUICStream()
 	if qs == nil {

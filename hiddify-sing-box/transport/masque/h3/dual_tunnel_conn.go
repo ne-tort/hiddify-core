@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	C "github.com/sagernet/sing-box/constant"
@@ -26,6 +27,9 @@ type DualTunnelConn struct {
 	remote       net.Addr
 	closeMu      sync.Mutex
 	closed       bool
+
+	duplexCopy     int32 // route marks concurrent upload+download copy
+	downloadActive int32 // WriteTo in progress on composite download leg
 }
 
 // UploadLegDial opens the upload CONNECT-stream leg (lazy on first Write/ReadFrom).
@@ -89,6 +93,35 @@ func (c *DualTunnelConn) SetUploadDial(d UploadLegDial) {
 
 // PrepUploadLeg starts lazy upload-leg dial (route duplex hint — optional).
 func (c *DualTunnelConn) PrepUploadLeg() { c.prepUploadLegAsync() }
+
+// CompositeDownloadActive reports route WriteTo or download-leg bulk drain in progress.
+func (c *DualTunnelConn) CompositeDownloadActive() bool {
+	if c == nil {
+		return false
+	}
+	if atomic.LoadInt32(&c.downloadActive) > 0 {
+		return true
+	}
+	if c.download == nil {
+		return false
+	}
+	if da, ok := c.download.(interface{ DownloadActive() bool }); ok {
+		return da.DownloadActive()
+	}
+	return false
+}
+
+// MarkConnectionCopyDuplex records route concurrent copy (both CM goroutines).
+func (c *DualTunnelConn) MarkConnectionCopyDuplex() {
+	if c != nil {
+		atomic.StoreInt32(&c.duplexCopy, 1)
+	}
+}
+
+// DuplexCopyActive reports whether ConnectionManager marked concurrent upload+download copy.
+func (c *DualTunnelConn) DuplexCopyActive() bool {
+	return c != nil && atomic.LoadInt32(&c.duplexCopy) > 0
+}
 
 // UploadLegParallelQUIC reports whether the upload leg should use a separate QUIC conn (P6 env).
 func (c *DualTunnelConn) UploadLegParallelQUIC() bool {
@@ -220,6 +253,12 @@ func (c *DualTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	if c == nil || c.download == nil {
 		return 0, io.EOF
 	}
+	// P2 duplex: start upload-leg dial before download bulk so peer wake is wired early.
+	if c.uploadDial != nil {
+		c.prepUploadLegAsync()
+	}
+	atomic.StoreInt32(&c.downloadActive, 1)
+	defer atomic.StoreInt32(&c.downloadActive, 0)
 	if wt, ok := c.download.(io.WriterTo); ok {
 		n, err := wt.WriteTo(w)
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -307,10 +346,17 @@ var (
 	_ io.ReaderFrom                   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyWriterTo   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*DualTunnelConn)(nil)
+	_ C.RouteConnectionCopyDuplex     = (*DualTunnelConn)(nil)
 )
 
 // AsDualTunnelConn returns a direct *DualTunnelConn (callers walk outer wrappers first).
 func AsDualTunnelConn(conn net.Conn) (*DualTunnelConn, bool) {
 	dc, ok := conn.(*DualTunnelConn)
 	return dc, ok
+}
+
+// AsTunnelConn returns a direct *TunnelConn (walk outer stream.TunnelConn wrappers first).
+func AsTunnelConn(conn net.Conn) (*TunnelConn, bool) {
+	tc, ok := conn.(*TunnelConn)
+	return tc, ok
 }

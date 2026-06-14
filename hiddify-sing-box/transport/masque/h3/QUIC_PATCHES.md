@@ -6,7 +6,7 @@
 |------|------------|
 | `masque_wake.go` | `MasqueWakeStreamSend`, `MasqueWakeBidiDuplex`, `MasqueWakeConnSend`, `MasqueSetBidiDownloadActive`, `MasquePokeDownloadReceiveWindow`, `masqueWakeAfterDownloadRead`, `masqueWakeAfterDownloadWrite` |
 | `receive_stream.go` | `masquePokeDownloadReceiveWindow` — queue MAX_STREAM_DATA + `onHasStreamControlFrame` when download leg starts (before/between Reads; avoids 64 KiB/RTT stall) |
-| `masque_framer.go` | bidi download-active queue front (`MASQUE_QUIC_BIDI_SEND_BOOST`); eager activation always schedules send after poke |
+| `masque_framer.go` | bidi download-active queue front (`MASQUE_QUIC_BIDI_SEND_BOOST`); `MasqueSetBidiDownloadReceiveActive` for P2 download leg (poke/wake без send boost); eager activation always schedules send after poke |
 | `framer.go` | duplicate `AddActiveStream` re-promotes bidi-boost streams; `controlFrameStreamIDs` prioritizes boost MAX_STREAM_DATA |
 | `stream.go` | `Read`/`Write`/`WriteTo` poke+wake when download-active (parity `http3/stream.go`); `WriteTo` auto `MasqueSetBidiDownloadActive` when unset |
 | `http3/masque_wake.go` | receive-read wake; `MASQUE_QUIC_BIDI_CONN_WAKE=0` disables conn-level bidi wake |

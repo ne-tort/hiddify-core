@@ -55,6 +55,10 @@ func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
 	if masqueWakeBidiConnOnReceiveRead() {
+		if quic.MasqueIsBidiDownloadReceiveOnly(qs) {
+			quic.MasqueWakeConnFromStream(qs)
+			return
+		}
 		quic.MasqueWakeBidiDuplex(qs)
 		return
 	}
@@ -80,6 +84,10 @@ func masqueWakeSendAfterBidiProgress(str *Stream, n int, active ...func(*quic.St
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
 	if masqueWakeBidiConnOnReceiveRead() {
+		if quic.MasqueIsBidiDownloadReceiveOnly(qs) {
+			quic.MasqueWakeConnFromStream(qs)
+			return
+		}
 		quic.MasqueWakeBidiDuplex(qs)
 		return
 	}

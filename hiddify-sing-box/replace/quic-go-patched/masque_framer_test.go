@@ -37,6 +37,11 @@ func TestMasqueSetBidiDownloadActiveNilSafe(t *testing.T) {
 	MasqueSetBidiDownloadActive(nil, false)
 }
 
+func TestMasqueSetBidiDownloadReceiveActiveNilSafe(t *testing.T) {
+	MasqueSetBidiDownloadReceiveActive(nil, true)
+	MasqueSetBidiDownloadReceiveActive(nil, false)
+}
+
 func TestMasquePokeDownloadReceiveWindowNilSafe(t *testing.T) {
 	if masquePokeDownloadReceiveWindow(nil) {
 		t.Fatal("nil stream must not poke")
