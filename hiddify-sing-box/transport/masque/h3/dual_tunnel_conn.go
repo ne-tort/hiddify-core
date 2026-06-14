@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	C "github.com/sagernet/sing-box/constant"
@@ -27,8 +26,6 @@ type DualTunnelConn struct {
 	remote       net.Addr
 	closeMu      sync.Mutex
 	closed       bool
-	duplexCopy   int32 // route marks concurrent upload+download copy
-	parallelQUIC int32 // P6: upload leg on separate QUIC conn when duplex escape needed
 }
 
 // UploadLegDial opens the upload CONNECT-stream leg (lazy on first Write/ReadFrom).
@@ -83,7 +80,7 @@ func (c *DualTunnelConn) prepUploadLegAsync() {
 	go func() { _ = c.ensureUploadLeg() }()
 }
 
-// SetUploadDial replaces the lazy upload-leg dialer (P6 may follow route duplex mark).
+// SetUploadDial replaces the lazy upload-leg dialer (P6 follows UploadLegParallelQUIC).
 func (c *DualTunnelConn) SetUploadDial(d UploadLegDial) {
 	if c != nil {
 		c.uploadDial = d
@@ -93,26 +90,8 @@ func (c *DualTunnelConn) SetUploadDial(d UploadLegDial) {
 // PrepUploadLeg starts lazy upload-leg dial (route duplex hint — optional).
 func (c *DualTunnelConn) PrepUploadLeg() { c.prepUploadLegAsync() }
 
-// MarkConnectionCopyDuplex pre-dials the upload leg when route runs concurrent copy goroutines.
-func (c *DualTunnelConn) MarkConnectionCopyDuplex() {
-	if c == nil {
-		return
-	}
-	if atomic.SwapInt32(&c.duplexCopy, 1) == 1 {
-		return
-	}
-	atomic.StoreInt32(&c.parallelQUIC, 1)
-	c.prepUploadLegAsync()
-}
-
-// UploadLegParallelQUIC reports whether the upload leg should escape the download QUIC conn (P6).
+// UploadLegParallelQUIC reports whether the upload leg should use a separate QUIC conn (P6 env).
 func (c *DualTunnelConn) UploadLegParallelQUIC() bool {
-	if c == nil {
-		return false
-	}
-	if atomic.LoadInt32(&c.parallelQUIC) > 0 {
-		return true
-	}
 	return ConnectStreamDualLegParallelQUIC()
 }
 
@@ -328,7 +307,6 @@ var (
 	_ io.ReaderFrom                   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyWriterTo   = (*DualTunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*DualTunnelConn)(nil)
-	_ C.RouteConnectionCopyDuplex     = (*DualTunnelConn)(nil)
 )
 
 // AsDualTunnelConn returns a direct *DualTunnelConn (callers walk outer wrappers first).
