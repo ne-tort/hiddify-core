@@ -118,59 +118,9 @@ type connectStreamHarness struct {
 // connectStreamHarnessOpts configures in-process CONNECT-stream harness probes (S41, S89).
 type connectStreamHarnessOpts struct {
 	BidiWakeSink h3.BidiWakeSink
-	PipeUpload   bool // MASQUE_CONNECT_STREAM_PIPE_UPLOAD=1 (legacy pipe upload body)
-	DualConnect  bool // MASQUE_CONNECT_STREAM_DUAL_CONNECT=1 (P2 dual-leg sketch)
-	Thin         bool // MASQUE_CONNECT_STREAM_THIN=1 (Invisv HTTPStreamer path, REF3-4)
-}
-
-func applyConnectStreamHarnessEnv(tb testing.TB, o connectStreamHarnessOpts) {
-	tb.Helper()
-	if o.Thin {
-		tb.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
-		tb.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
-		tb.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
-		tb.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "0")
-		return
-	}
-	if o.DualConnect {
-		tb.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
-		return
-	}
-	tb.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
-	if o.PipeUpload {
-		tb.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
-	} else {
-		tb.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
-	}
-}
-
-// unwrapDualTunnelConn walks masque wrappers to *h3.DualTunnelConn.
-func unwrapDualTunnelConn(conn net.Conn) (*h3.DualTunnelConn, bool) {
-	for conn != nil {
-		if dc, ok := conn.(*h3.DualTunnelConn); ok {
-			return dc, true
-		}
-		switch c := conn.(type) {
-		case *strm.TunnelConn:
-			conn = c.Inner
-		default:
-			if inner, ok := h3.BidiWindowInner(conn); ok {
-				conn = inner
-			} else {
-				return nil, false
-			}
-		}
-	}
-	return nil, false
 }
 
 func wrapConnectStreamHarnessConn(link bidiLink, conn net.Conn) net.Conn {
-	if dc, ok := unwrapDualTunnelConn(conn); ok {
-		return strm.NewTunnelConn(h3.NewDualTunnelConn(h3.DualTunnelConnParams{
-			Download: link.wrap(dc.DownloadLeg()),
-			Upload:   link.wrap(dc.UploadLeg()),
-		}))
-	}
 	return link.wrap(conn)
 }
 
@@ -202,7 +152,6 @@ func startConnectStreamUploadHarness(tb testing.TB, link bidiLink, opts ...conne
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	applyConnectStreamHarnessEnv(tb, o)
 	cleanupHook := applyConnectStreamTunnelHook(o)
 	tb.Cleanup(cleanupHook)
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -262,7 +211,6 @@ func startConnectStreamDownloadHarness(tb testing.TB, link bidiLink, opts ...con
 	if len(opts) > 0 {
 		o = opts[0]
 	}
-	applyConnectStreamHarnessEnv(tb, o)
 	cleanupHook := applyConnectStreamTunnelHook(o)
 	tb.Cleanup(cleanupHook)
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -999,11 +947,8 @@ func unwrapH3TunnelConn(conn net.Conn) (*h3.TunnelConn, bool) {
 	return nil, false
 }
 
-// TestMasqueConnectStreamPipeUploadVsBidiLocalizeDownload (S89) compares bidi stream upload
-// vs legacy pipe upload on concurrent WriteTo download under the windowed bidi credit model.
-func TestMasqueConnectStreamPipeUploadVsBidiLocalizeDownload(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
+// TestMasqueConnectStreamBidiLocalizeDownload (S89) guards bidi stream upload under windowed credit.
+func TestMasqueConnectStreamBidiLocalizeDownload(t *testing.T) {
 	t.Run("bidi_uses_h3_stream_windowed_ceiling", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 		defer h.close()
@@ -1016,33 +961,6 @@ func TestMasqueConnectStreamPipeUploadVsBidiLocalizeDownload(t *testing.T) {
 		}
 		dl := runConnectStreamDuplexWriteToBenchOnConn(t, h.conn, connectStreamLocalizeDownloadKPIMin/2)
 		assertConnectStreamWindowedCeilingBand(t, dl.mbps, "bidi windowed duplex WriteTo")
-	})
-
-	t.Run("pipe_upload_decoupled_instant_download", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
-		defer h.close()
-		tc, ok := unwrapH3TunnelConn(h.conn)
-		if !ok {
-			t.Fatal("expected *h3.TunnelConn under harness conn")
-		}
-		if tc.UsesH3Stream() {
-			t.Fatal("pipe upload must not share http3.Stream for upload (UsesH3Stream=false)")
-		}
-		dl := runConnectStreamDuplexWriteToBenchOnConn(t, h.conn, connectStreamVPSKPITargetDownMbps)
-		if dl.mbps <= connectStreamVPSKPITargetDownMbps {
-			t.Fatalf("pipe upload concurrent WriteTo download: %.1f Mbit/s (want > %.0f VPS KPI)", dl.mbps, connectStreamVPSKPITargetDownMbps)
-		}
-	})
-
-	t.Run("pipe_upload_not_stalled_under_WriteTo_download", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
-		defer h.close()
-		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
-		t.Logf("pipe upload concurrent upload: %.1f Mbit/s", upMbps)
-		// In-process concurrent duplex caps near field ceiling (~15 Mbit/s); guard against upload hang (<<4).
-		if upMbps < connectStreamLocalizeUploadWindowedMin {
-			t.Fatalf("pipe upload stalled under concurrent download: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeUploadWindowedMin)
-		}
 	})
 }
 
@@ -1133,4 +1051,35 @@ func runConnectStreamConcurrentUploadMbps(t *testing.T, conn net.Conn, duration 
 		secs = 1
 	}
 	return float64(total*8) / secs / 1e6
+}
+
+// TestConnectStreamLegsVsSaturatedDuplexDiagnostic logs uni-directional legs vs saturated duplex
+// on the in-proc harness (same shape as GATE duplex: WriteTo + continuous 256 KiB upload).
+func TestConnectStreamLegsVsSaturatedDuplexDiagnostic(t *testing.T) {
+	const dur = localizeBenchDuration
+	link := benchWindowedBidiLink()
+
+	downH := startConnectStreamDownloadHarness(t, link)
+	defer downH.close()
+	_, downLeg, err := measureTCPDownloadWriteToMbps(downH.conn, dur)
+	if err != nil {
+		t.Fatalf("download leg: %v", err)
+	}
+
+	upH := startConnectStreamDownloadHarness(t, link)
+	defer upH.close()
+	_, upLeg, err := measureTCPUploadMbps(upH.conn, dur)
+	if err != nil {
+		t.Fatalf("upload leg: %v", err)
+	}
+
+	dupH := startConnectStreamDownloadHarness(t, link)
+	defer dupH.close()
+	dupDown, dupUp, dupMin, err := measureSegmentDuplexMbps(dupH.conn, dur)
+	if err != nil {
+		t.Fatalf("saturated duplex: %v", err)
+	}
+
+	t.Logf("legs vs saturated duplex (windowed, %s): down_leg=%.1f up_leg=%.1f | duplex down=%.1f up=%.1f min=%.1f | duplex/leg down=%.2f up=%.2f",
+		dur, downLeg, upLeg, dupDown, dupUp, dupMin, dupDown/downLeg, dupUp/upLeg)
 }

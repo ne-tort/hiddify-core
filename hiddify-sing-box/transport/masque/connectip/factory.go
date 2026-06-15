@@ -110,11 +110,12 @@ func (f tcpNetstackFactory) newWithBootstrap(ctx context.Context, session Packet
 			localV4, localV6, mtu, prefixV4.IsValid(), prefixV6.IsValid(), profileV4.IsValid(), profileV6.IsValid())
 	}
 	ns, err := NewNetstack(ctx, session, NetstackOptions{
-		LocalIPv4:        localV4,
-		LocalIPv6:        localV6,
-		MTU:              mtu,
-		OnOutboundQueued: extra.OnOutboundQueued,
-		OutboundQueueMetrics: extra.OutboundQueueMetrics,
+		LocalIPv4:             localV4,
+		LocalIPv6:             localV6,
+		MTU:                   mtu,
+		OnOutboundQueued:      extra.OnOutboundQueued,
+		OnEgressBatchComplete: extra.OnEgressBatchComplete,
+		OutboundQueueMetrics:  extra.OutboundQueueMetrics,
 	})
 	if err != nil {
 		return nil, err

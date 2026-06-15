@@ -9,9 +9,8 @@ import (
 const (
 	envWakeSendOnReceiveRead = "MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ"
 	envBidiConnWake          = "MASQUE_QUIC_BIDI_CONN_WAKE"
-	envDownloadEagerWindow   = "MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW"
-	// masqueStreamWriteToBufLen matches transport/masque h3 tunnelWriteToBufLen (64 KiB).
-	masqueStreamWriteToBufLen = 64 * 1024
+	// masqueStreamWriteToBufLen matches transport/masque h3 tunnelWriteToBufLen (256 KiB).
+	masqueStreamWriteToBufLen = 256 * 1024
 )
 
 var (
@@ -28,13 +27,9 @@ func masqueWakeBidiConnOnReceiveRead() bool {
 	return strings.TrimSpace(os.Getenv(envBidiConnWake)) != "0"
 }
 
-func masqueDownloadEagerWindow() bool {
-	return strings.TrimSpace(os.Getenv(envDownloadEagerWindow)) != "0"
-}
-
-// MasqueDownloadEagerWindowEnabled reports whether eager MAX_STREAM_DATA poke is on (default on).
+// MasqueDownloadEagerWindowEnabled reports whether eager MAX_STREAM_DATA poke is on (always on).
 func MasqueDownloadEagerWindowEnabled() bool {
-	return masqueDownloadEagerWindow()
+	return true
 }
 
 // MasquePokeDownloadReceiveWindow queues MAX_STREAM_DATA on a download-active bidi stream.
@@ -47,7 +42,7 @@ func MasquePokeDownloadReceiveWindow(s *Stream) bool {
 // becomes active (CONNECT-stream WriteTo / server hijack relay). Avoids one RTT stall while
 // the peer fills the initial 64 KiB transport window (windowed bidi download stall without eager poke).
 func masquePokeDownloadReceiveWindow(s *Stream) bool {
-	if s == nil || s.receiveStr == nil || !masqueDownloadEagerWindow() {
+	if s == nil || s.receiveStr == nil {
 		return false
 	}
 	if MasqueIsBidiDownloadReceiveOnly(s) {
@@ -64,15 +59,10 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 		return
 	}
 	if MasqueIsBidiDownloadReceiveOnly(s) {
-		// NoRenotify when already queued; lazy FC on AddBytesRead batches vs eager threshold 0.
-		if masqueDownloadEagerWindow() {
-			masquePokeDownloadReceiveWindow(s)
-		}
+		masquePokeDownloadReceiveWindow(s)
 		return
 	}
-	if masqueDownloadEagerWindow() {
-		masquePokeDownloadReceiveWindow(s)
-	}
+	masquePokeDownloadReceiveWindow(s)
 	masqueScheduleDownloadActiveWake(s)
 }
 
@@ -97,12 +87,9 @@ func masqueWakeAfterDownloadDelivery(s *Stream) {
 		return
 	}
 	if MasqueIsBidiDownloadReceiveOnly(s) {
-		// Delivery wake for P2 download legs is tunnel_conn peerDuplexUploadWake (H3-L1c-7d).
 		return
 	}
-	if masqueDownloadEagerWindow() {
-		masquePokeDownloadReceiveWindow(s)
-	}
+	masquePokeDownloadReceiveWindow(s)
 	masqueScheduleDownloadActiveWake(s)
 }
 
@@ -111,15 +98,30 @@ type masqueStreamWriteToPoke func()
 func masqueStreamWriteTo(w io.Writer, readFn func([]byte) (int, error), afterDelivery masqueStreamWriteToPoke) (int64, error) {
 	buf := make([]byte, masqueStreamWriteToBufLen)
 	var total int64
+	var deliveryPending int
+	flushDeliveryWake := func(delivered int) {
+		if delivered <= 0 || afterDelivery == nil {
+			return
+		}
+		deliveryPending += delivered
+		if deliveryPending >= masqueStreamWriteToBufLen {
+			deliveryPending = 0
+			afterDelivery()
+		}
+	}
 	for {
 		n, err := readFn(buf)
 		if n > 0 {
 			wn, werr := w.Write(buf[:n])
 			total += int64(wn)
-			if wn > 0 && afterDelivery != nil {
-				afterDelivery()
+			if wn > 0 {
+				flushDeliveryWake(wn)
 			}
 			if werr != nil {
+				if deliveryPending > 0 && afterDelivery != nil {
+					deliveryPending = 0
+					afterDelivery()
+				}
 				return total, werr
 			}
 			if wn < n {
@@ -128,6 +130,10 @@ func masqueStreamWriteTo(w io.Writer, readFn func([]byte) (int, error), afterDel
 		}
 		if err != nil {
 			if err == io.EOF {
+				if deliveryPending > 0 && afterDelivery != nil {
+					deliveryPending = 0
+					afterDelivery()
+				}
 				return total, nil
 			}
 			return total, err

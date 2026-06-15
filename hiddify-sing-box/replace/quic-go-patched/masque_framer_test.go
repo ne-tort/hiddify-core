@@ -18,7 +18,7 @@ func TestMasqueBidiSendBoostEnabledEnv(t *testing.T) {
 		env  string
 		want bool
 	}{
-		{"", true},
+		{"", false},
 		{"1", true},
 		{"0", false},
 	}

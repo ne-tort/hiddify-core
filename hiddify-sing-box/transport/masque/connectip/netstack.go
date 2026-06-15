@@ -1,6 +1,7 @@
 package connectip
 
 import (
+	_ "embed"
 	"context"
 	"errors"
 	"log"
@@ -27,10 +28,16 @@ import (
 )
 
 const (
-	netstackOutboundQueueDepth = 2048
-	linkOutboundQueueSlots     = 65536
+	netstackOutboundQueueDepth             = 2048
+	linkOutboundQueueSlots                 = 65536
 	tcpNetstackNIC             tcpip.NICID = 1
 )
+
+//go:embed netstack.go
+var netstackAuditSource string
+
+// NetstackAuditSource returns netstack.go source for frozen REF-SRC usque audits.
+func NetstackAuditSource() string { return netstackAuditSource }
 
 var netstackOutboundBufPool = sync.Pool{
 	New: func() any {
@@ -88,31 +95,34 @@ type NetstackOptions struct {
 	LocalIPv6            netip.Addr
 	MTU                  int
 	OutboundQueueMetrics *OutboundQueueMetrics
-	// OnOutboundQueued runs when gVisor egress is queued for WritePacket (download ACK wake).
+	// OnOutboundQueued runs when gVisor egress is queued for WritePacket (schedule ACK wake).
 	OnOutboundQueued func()
+	// OnEgressBatchComplete runs after one exclusive outbound drain cycle (batched MasqueWakeSend).
+	OnEgressBatchComplete func()
 }
 
 // Netstack is the CONNECT-IP client userspace TCP stack backed by WritePacket egress.
 type Netstack struct {
-	session            PacketSession
-	gStack             *stack.Stack
-	endpoint           *channel.Endpoint
-	notifyHandle       *channel.NotificationHandle
-	outboundDraining     atomic.Bool
-	reconcileMu          sync.Mutex
-	installedV4          netip.Addr
-	installedV6          netip.Addr
-	closeOnce            sync.Once
-	failOnce             sync.Once
-	closed               atomic.Bool
-	terminalErr          atomic.Value
-	done                 chan struct{}
-	outboundOnce         sync.Once
-	outboundCh           chan outboundItem
-	outboundMetrics      *OutboundQueueMetrics
-	outboundPoke         chan struct{}
-	outboundWG           sync.WaitGroup
-	onOutboundQueued     func()
+	session               PacketSession
+	gStack                *stack.Stack
+	endpoint              *channel.Endpoint
+	notifyHandle          *channel.NotificationHandle
+	outboundDraining      atomic.Bool
+	reconcileMu           sync.Mutex
+	installedV4           netip.Addr
+	installedV6           netip.Addr
+	closeOnce             sync.Once
+	failOnce              sync.Once
+	closed                atomic.Bool
+	terminalErr           atomic.Value
+	done                  chan struct{}
+	outboundOnce          sync.Once
+	outboundCh            chan outboundItem
+	outboundMetrics       *OutboundQueueMetrics
+	outboundPoke          chan struct{}
+	outboundWG            sync.WaitGroup
+	onOutboundQueued      func()
+	onEgressBatchComplete func()
 }
 
 // NewNetstack constructs a CONNECT-IP TCP netstack with explicit local addresses.
@@ -195,14 +205,15 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 	}
 
 	s := &Netstack{
-		session:          session,
-		gStack:           gStack,
-		endpoint:         endpoint,
-		done:             make(chan struct{}),
-		installedV4:      opts.LocalIPv4,
-		installedV6:      opts.LocalIPv6,
-		outboundMetrics:  opts.OutboundQueueMetrics,
-		onOutboundQueued: opts.OnOutboundQueued,
+		session:               session,
+		gStack:                gStack,
+		endpoint:              endpoint,
+		done:                  make(chan struct{}),
+		installedV4:           opts.LocalIPv4,
+		installedV6:           opts.LocalIPv6,
+		outboundMetrics:       opts.OutboundQueueMetrics,
+		onOutboundQueued:      opts.OnOutboundQueued,
+		onEgressBatchComplete: opts.OnEgressBatchComplete,
 	}
 	s.notifyHandle = endpoint.AddNotify(s)
 	return s, nil

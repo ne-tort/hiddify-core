@@ -14,9 +14,15 @@ const (
 )
 
 // MasqueBidiSendBoostEnabled reports whether active-download bidi streams are queued at the
-// front of the framer stream queue. Disable with MASQUE_QUIC_BIDI_SEND_BOOST=0.
+// front of the framer stream queue. Default off — always-on starves duplex upload on single bidi.
 func MasqueBidiSendBoostEnabled() bool {
-	return strings.TrimSpace(os.Getenv(envBidiSendBoost)) != "0"
+	v := strings.TrimSpace(os.Getenv(envBidiSendBoost))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func masqueBidiSendBoostMaxFramesPerPacket() int {

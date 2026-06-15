@@ -56,7 +56,8 @@ func (h connectIPTCPDialHost) MaybeStartConnectIPIngressLocked() {
 
 func (h connectIPTCPDialHost) NewTCPNetstack(ctx context.Context, session mcip.PacketSession) (mcip.TCPNetstack, error) {
 	return mcip.NewProductionTCPNetstack(ctx, session, sessionBootstrapFrom(session), mcip.NetstackOptions{
-		OnOutboundQueued: h.s.scheduleConnectIPDatagramSendWake,
+		OnOutboundQueued:      h.s.scheduleConnectIPDatagramSendWake,
+		OnEgressBatchComplete: h.s.flushConnectIPIngressAckWakeOnEgress,
 	})
 }
 

@@ -59,8 +59,10 @@ func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
 			quic.MasqueWakeConnFromStream(qs)
 			return
 		}
-		quic.MasqueWakeBidiDuplex(qs)
-		return
+		if quic.MasqueIsBidiDownloadActive(qs) || quic.MasqueIsBidiDuplexUploadStarted(qs) {
+			quic.MasqueWakeBidiDuplex(qs)
+			return
+		}
 	}
 	quic.MasqueWakeStreamSend(qs)
 }

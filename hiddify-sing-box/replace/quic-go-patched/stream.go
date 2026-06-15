@@ -62,6 +62,7 @@ type Stream struct {
 	sendStreamCompleted    bool
 	masqueDownloadActive      atomic.Bool
 	masqueDownloadReceiveOnly atomic.Bool // P2 download leg: poke at activation only (H3-L1c-7c)
+	masqueDuplexUploadStarted atomic.Bool // concurrent upload on same bidi stream during WriteTo drain
 }
 
 var (
@@ -118,9 +119,7 @@ func (s *Stream) StreamID() protocol.StreamID {
 // Read can be made to time out using [Stream.SetReadDeadline] and [Stream.SetDeadline].
 // If the stream was canceled, the error is a [StreamError].
 func (s *Stream) Read(p []byte) (int, error) {
-	n, err := s.receiveStr.Read(p)
-	masqueWakeAfterDownloadRead(s, n)
-	return n, err
+	return s.receiveStr.Read(p)
 }
 
 // WriteTo implements [io.WriterTo] for prod route writer_to download drains.
@@ -190,6 +189,18 @@ func MasqueIsBidiDownloadActive(s *Stream) bool {
 // on the same QUIC conn needs packet budget (H3-L1c-7c).
 func MasqueIsBidiDownloadReceiveOnly(s *Stream) bool {
 	return s != nil && s.masqueDownloadReceiveOnly.Load()
+}
+
+// MasqueSetBidiDuplexUploadStarted marks concurrent upload on a download-active bidi stream (duplex GATE).
+func MasqueSetBidiDuplexUploadStarted(s *Stream, started bool) {
+	if s != nil {
+		s.masqueDuplexUploadStarted.Store(started)
+	}
+}
+
+// MasqueIsBidiDuplexUploadStarted reports saturated duplex upload on the same CONNECT stream.
+func MasqueIsBidiDuplexUploadStarted(s *Stream) bool {
+	return s != nil && s.masqueDuplexUploadStarted.Load()
 }
 
 // Peek fills b with stream data, without consuming the stream data.

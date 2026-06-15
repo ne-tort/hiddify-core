@@ -54,7 +54,7 @@ func (m *mockH3RelayResponse) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 func (m *mockH3RelayResponse) WriteHeader(int) {}
-func (m *mockH3RelayResponse) Flush()         {}
+func (m *mockH3RelayResponse) Flush()          {}
 
 type relayDuplexFlushWriter struct {
 	conn io.WriteCloser
@@ -90,10 +90,10 @@ func (c *relayBannerTarget) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (c *relayBannerTarget) Write(p []byte) (int, error) { return len(p), nil }
-func (c *relayBannerTarget) Close() error                { return nil }
-func (c *relayBannerTarget) LocalAddr() net.Addr         { return nil }
-func (c *relayBannerTarget) RemoteAddr() net.Addr        { return nil }
+func (c *relayBannerTarget) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *relayBannerTarget) Close() error                     { return nil }
+func (c *relayBannerTarget) LocalAddr() net.Addr              { return nil }
+func (c *relayBannerTarget) RemoteAddr() net.Addr             { return nil }
 func (c *relayBannerTarget) SetDeadline(time.Time) error      { return nil }
 func (c *relayBannerTarget) SetReadDeadline(time.Time) error  { return nil }
 func (c *relayBannerTarget) SetWriteDeadline(time.Time) error { return nil }
@@ -317,4 +317,19 @@ func TestRelayEnvMatrixDownload(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRelayTCPPolicySnapshot(t *testing.T) {
+	t.Run("split_download_uses_hijack", func(t *testing.T) {
+		p := strm.CurrentRelayTCPPolicy(strm.ConnectStreamLegDownload)
+		if !p.IsSplitDownloadLeg() || !p.UseHijackRelay() || p.Mode != strm.RelayTCPModeH3StreamHijack {
+			t.Fatalf("prod always uses hijack relay: %+v", p)
+		}
+	})
+	t.Run("single_bidi_uses_hijack", func(t *testing.T) {
+		p := strm.CurrentRelayTCPPolicy("")
+		if !p.UseHijackRelay() || p.Mode != strm.RelayTCPModeH3StreamHijack {
+			t.Fatalf("single bidi should use hijack: %+v", p)
+		}
+	})
 }

@@ -384,10 +384,8 @@ func (r *cancelingReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// connectRequestBodyCopySizeDefault is the io.CopyBuffer chunk for tunneled CONNECT upload on a bidi stream.
-// Small chunks interleave with response DATA (TCP ACK clock on iperf -R); 64 KiB batches capped ~64 KiB/RTT.
-// Override via MASQUE_H3_CONNECT_UPLOAD_CHUNK or MASQUE_H2_CONNECT_UPLOAD_CHUNK (KiB), same as sing-box h3.UploadFlushPolicy.
-const connectRequestBodyCopySizeDefault = 4 * 1024
+// connectRequestBodyCopySizeDefault is the io.CopyBuffer chunk for tunneled CONNECT upload (Invisv/h2o 64 KiB).
+const connectRequestBodyCopySizeDefault = 64 * 1024
 
 const (
 	envH3ConnectUploadChunkKB = "MASQUE_H3_CONNECT_UPLOAD_CHUNK"

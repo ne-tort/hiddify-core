@@ -1,13 +1,13 @@
 package masque
 
+// Exported for masque_test prod-stack integration (LaunchMasqueStack + SOCKS + CM).
+
 import (
 	"io"
 	"net"
 	"testing"
 	"time"
 )
-
-// Exported for masque_test prod-stack integration (LaunchMasqueStack + SOCKS + CM).
 
 var (
 	ExportStartH2ConnectStreamSocksRouter           = startH2ConnectStreamSocksRouter
@@ -76,4 +76,16 @@ func ExportWrapBenchWindowedBidiLinkStrict(conn net.Conn) net.Conn {
 func ExportStartH2ProdStackBulkDownloadTarget(t *testing.T) uint16 {
 	t.Helper()
 	return startH2ConnectStreamDownloadTarget(t)
+}
+
+func ExportMeasureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, minLeg float64, err error) {
+	return measureSegmentDuplexMbps(conn, duration)
+}
+
+func ExportBenchRefUsqueNetstackDownloadMbps(t *testing.T, duration time.Duration) float64 {
+	return benchRefUsqueNetstackDownloadMbps(t, duration)
+}
+
+func ExportBenchMasqueradeDuplexMinMbps(duration time.Duration) float64 {
+	return benchMasqueradeDuplexMinMbpsOnly(duration)
 }

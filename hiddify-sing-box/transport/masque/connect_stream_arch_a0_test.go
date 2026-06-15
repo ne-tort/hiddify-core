@@ -20,8 +20,8 @@ import (
 // TestArchA0CodeMapConnectStreamBytePath (A0-2): iperf -R download in prod uses
 // route connectionCopy writer_to → h3.TunnelConn.WriteTo → S2C DATA (reader or h3 stream).
 func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
-	t.Run("legacy_pipe_write_to_drain", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink(), connectStreamHarnessOpts{PipeUpload: true})
+	t.Run("prod_h3_stream_write_to_drain", func(t *testing.T) {
+		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 		defer h.close()
 		if _, ok := h.conn.(io.WriterTo); !ok {
 			t.Fatal("A0-2 prod download path requires io.WriterTo on dial result")
@@ -34,10 +34,10 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 			t.Fatalf("A0-2 bytes=%d want >= %d", n, localizeBenchMinBytes)
 		}
 		tc, ok := unwrapH3TunnelConn(h.conn)
-		if !ok || tc.UsesH3Stream() {
-			t.Fatal("A0-2 legacy pipe path must drain via reader half (UsesH3Stream=false)")
+		if !ok || !tc.UsesH3Stream() {
+			t.Fatal("A0-2 prod path must drain via *http3.Stream (UsesH3Stream=true)")
 		}
-		t.Logf("A0-2 pipe WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
+		t.Logf("A0-2 prod WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
 	})
 
 	t.Run("prod_h3_stream_write_to", func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 	})
 
 	t.Run("legacy_pipe_same_connect_different_halves", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok {
@@ -149,7 +149,7 @@ func TestArchA0ContentionMatrixC2SDuringS2C(t *testing.T) {
 	})
 
 	t.Run("legacy_pipe_c2s_off_h3_stream", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
 		if !ok || tc.UsesH3Stream() {
@@ -209,30 +209,19 @@ func TestArchA0OneTCPVsNTCPMatrix(t *testing.T) {
 	}
 
 	t.Run("P1_one_connect_one_conn", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
-		if _, ok := unwrapDualTunnelConn(h.conn); ok {
-			t.Fatal("P1 must not use DualTunnelConn")
-		}
 		if !strm.ProdDialShapeOf(h.conn).OK() {
 			t.Fatal("P1 dial must expose single composite net.Conn to route")
 		}
+		tc, ok := unwrapH3TunnelConn(h.conn)
+		if !ok || !tc.UsesH3Stream() {
+			t.Fatal("prod single-bidi must use one http3.Stream")
+		}
 	})
 
-	t.Run("P2_two_connects_one_composite", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{DualConnect: true})
-		defer h.close()
-		dc, ok := unwrapDualTunnelConn(h.conn)
-		if !ok {
-			t.Fatal("P2 must dial DualTunnelConn composite")
-		}
-		if dc.DownloadLeg() == nil || dc.UploadLeg() == nil {
-			t.Fatal("P2 composite must have download + upload legs")
-		}
-		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("P2 composite must still satisfy prod dial shape")
-		}
+	t.Run("P2_removed_dual_connect", func(t *testing.T) {
+		t.Skip("P2 dual CONNECT removed — prod is single-bidi Invisv path")
 	})
 
 	t.Run("P6_parallel_n_conns", func(t *testing.T) {
@@ -245,9 +234,6 @@ func TestArchA0OneTCPVsNTCPMatrix(t *testing.T) {
 			conn, err := pool.dial(ctx)
 			if err != nil {
 				t.Fatalf("P6 dial %d: %v", i, err)
-			}
-			if _, ok := unwrapDualTunnelConn(conn); ok {
-				t.Fatalf("P6 stream %d must not be DualTunnelConn", i)
 			}
 			if !strm.ProdDialShapeOf(conn).OK() {
 				t.Fatalf("P6 stream %d lacks prod dial shape", i)
@@ -366,17 +352,7 @@ func TestArchA0GoroutineDirectionBlockerTable(t *testing.T) {
 		}
 	}
 
-	t.Run("legacy_pipe_decoupled_upload", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
-		defer h.close()
-		tc, ok := unwrapH3TunnelConn(h.conn)
-		if !ok || tc.UsesH3Stream() {
-			t.Fatal("A0-3b legacy pipe row requires UsesH3Stream=false")
-		}
-	})
-
 	t.Run("prod_h3_stream_default", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		tc, ok := unwrapH3TunnelConn(h.conn)
@@ -460,20 +436,15 @@ func TestArchA0RouteScopeOutOfPattern(t *testing.T) {
 	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
 
 	t.Run("P1_route_markers_unchanged", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{PipeUpload: true})
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		if !strm.ProdDialShapeOf(h.conn).OK() {
 			t.Fatal("A0-5 P1 must keep prod route dial shape without route changes")
 		}
 	})
 
-	t.Run("P2_composite_route_markers", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{DualConnect: true})
-		defer h.close()
-		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("A0-5 P2 composite must expose same route markers")
-		}
+	t.Run("P2_removed_dual_connect", func(t *testing.T) {
+		t.Skip("P2 dual CONNECT removed — prod is single-bidi Invisv path")
 	})
 
 	t.Logf("A0-5 route ADR: dial policy session/stream/h3; route/conn.go connectionCopy unchanged")

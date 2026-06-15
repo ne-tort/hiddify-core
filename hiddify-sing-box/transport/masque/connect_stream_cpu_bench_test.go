@@ -206,3 +206,49 @@ func TestMasqueConnectStreamCPUBudget(t *testing.T) {
 		t.Fatalf("connect-stream L1 instant download slow: %.1f Mbit/s (want >= %.0f)", mbps, connectStreamLocalizeFastMbps)
 	}
 }
+
+// BenchmarkMasqueConnectStreamH3Duplex (C2) — concurrent upload Write + WriteTo download ns/B on thin H3 harness.
+func BenchmarkMasqueConnectStreamH3Duplex(b *testing.B) {
+	const chunk = 64 * 1024
+	h := startConnectStreamDownloadHarness(b, instantBidiLink{})
+	defer h.close()
+
+	b.SetBytes(connectStreamDownloadBenchBytes)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		downDone := make(chan int64, 1)
+		go func() {
+			n, err := drainWriteToFixedBytes(h.conn, connectStreamDownloadBenchBytes)
+			if err != nil && n == 0 {
+				downDone <- 0
+				return
+			}
+			downDone <- n
+		}()
+		uploaded := int64(0)
+		buf := make([]byte, chunk)
+		for uploaded < connectStreamDownloadBenchBytes {
+			n, err := h.conn.Write(buf)
+			if n > 0 {
+				uploaded += int64(n)
+			}
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		if n := <-downDone; n < connectStreamDownloadBenchBytes {
+			b.Fatalf("short duplex download: %d", n)
+		}
+	}
+}
+
+// TestMasqueConnectStreamH3DuplexCPUSnapshot logs duplex ns/B split (upload+download per iteration).
+func TestMasqueConnectStreamH3DuplexCPUSnapshot(t *testing.T) {
+	result := testing.Benchmark(BenchmarkMasqueConnectStreamH3Duplex)
+	if result.N == 0 {
+		t.Fatal("duplex benchmark produced zero iterations")
+	}
+	nsPerByte := float64(result.NsPerOp()) / float64(connectStreamDownloadBenchBytes*2)
+	t.Logf("connect-stream H3 duplex: %.1f ns/B aggregate (implied %.0f Mbit/s per direction if CPU-bound)",
+		nsPerByte, synthCPUMbpsCeiling(nsPerByte))
+}

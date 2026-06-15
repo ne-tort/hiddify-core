@@ -112,7 +112,7 @@ func runRelayTwoGoroutineDownloadOnce(data []byte) (int64, error) {
 	ctx := context.Background()
 	done := make(chan error, 1)
 	go func() {
-		done <- relayTCPTunnelBidiStream(ctx, target, io.NopCloser(nil), serverLeg, "")
+		done <- relayTCPTunnelBidiStream(ctx, target, io.NopCloser(nil), serverLeg, "", CurrentRelayTCPPolicy(""))
 	}()
 	n, err := io.CopyN(io.Discard, clientLeg, int64(len(data)))
 	_ = clientLeg.Close()

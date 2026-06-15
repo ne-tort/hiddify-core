@@ -2,7 +2,10 @@ package h3
 
 import (
 	"context"
+	"io"
+	"net"
 	"testing"
+	"time"
 
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
@@ -31,67 +34,63 @@ func TestH3ConnectRequestSetsLegHeader(t *testing.T) {
 	}
 }
 
-func TestH3ConnectRequestPipeUsesPipeReader(t *testing.T) {
-	req, pr, pw, err := ConnectRequest(context.Background(), "https://example.com/masque/tcp/h/p", "example.com", true, nil)
-	if err != nil {
-		t.Fatal(err)
+func TestConnectUsePipeUploadAlwaysFalse(t *testing.T) {
+	if ConnectUsePipeUpload() {
+		t.Fatal("prod always uses nil Body (Invisv)")
 	}
-	if pr == nil || pw == nil {
-		t.Fatal("expected pipe for legacy upload")
-	}
-	if req.Body != pr {
-		t.Fatalf("expected pipe reader as body, got %v", req.Body)
-	}
-	_ = pw.Close()
-	_ = pr.Close()
 }
 
-func TestConnectUsePipeUploadEnv(t *testing.T) {
+func TestCurrentConnectStreamMode(t *testing.T) {
+	if got := CurrentConnectStreamMode(); got != ConnectStreamModeSingleBidi {
+		t.Fatalf("CurrentConnectStreamMode() = %q, want %q", got, ConnectStreamModeSingleBidi)
+	}
+}
+
+func TestConnectStreamRoleNormalization(t *testing.T) {
 	tests := []struct {
-		env  string
-		want bool
+		name string
+		raw  string
+		want ConnectStreamRole
 	}{
-		{"", false},
-		{"1", true},
-		{"true", true},
-		{"pipe", true},
-		{"0", false},
-		{"off", false},
-		{"bidi", false},
+		{name: "single", raw: "", want: ConnectStreamRoleSingle},
+		{name: "download", raw: strm.ConnectStreamLegDownload, want: ConnectStreamRoleDownload},
+		{name: "upload", raw: strm.ConnectStreamLegUpload, want: ConnectStreamRoleUpload},
+		{name: "unknown_is_single", raw: "legacy", want: ConnectStreamRoleSingle},
 	}
 	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", tc.env)
-			if got := ConnectStreamUsePipeUpload(); got != tc.want {
-				t.Fatalf("ConnectStreamUsePipeUpload() = %v, want %v", got, tc.want)
-			}
-			if got := ConnectUsePipeUpload(); got != tc.want {
-				t.Fatalf("ConnectUsePipeUpload() = %v, want %v", got, tc.want)
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeConnectStreamRole(tc.raw); got != tc.want {
+				t.Fatalf("normalizeConnectStreamRole(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}
-	t.Run("legacy_h3_stream_0", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "")
-		t.Setenv("MASQUE_CONNECT_STREAM_H3_STREAM", "0")
-		if !ConnectStreamUsePipeUpload() {
-			t.Fatal("expected pipe when H3_STREAM=0")
-		}
-	})
-	t.Run("explicit_h3_stream_1", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "")
-		t.Setenv("MASQUE_CONNECT_STREAM_H3_STREAM", "1")
-		if ConnectStreamUsePipeUpload() {
-			t.Fatal("expected bidi stream when H3_STREAM=1")
-		}
-	})
-	t.Run("thin_overrides_pipe_default", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
-		t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
-		if ConnectStreamUsePipeUpload() {
-			t.Fatal("thin must force bidi stream even when PIPE_UPLOAD=1")
-		}
-		if BidiDuplexCoordEnabled() {
-			t.Fatal("thin must disable duplex_coord")
-		}
-	})
 }
+
+func TestTunnelPolicySnapshot(t *testing.T) {
+	c := NewTunnelConn(TunnelConnParams{
+		H3Stream:        &testH3ConnectStream{},
+		RouteBidiDuplex: true,
+	})
+	s := c.TunnelPolicySnapshot()
+	if s.Mode != ConnectStreamModeSingleBidi {
+		t.Fatalf("mode=%q want %q", s.Mode, ConnectStreamModeSingleBidi)
+	}
+	if !s.Role.IsSingleBidi() || !s.RouteBidiDuplex || !s.UsesH3Stream {
+		t.Fatalf("unexpected single snapshot: %+v", s)
+	}
+}
+
+type emptyReader struct{}
+
+func (*emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+type noopConn struct{}
+
+func (*noopConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (*noopConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (*noopConn) Close() error                     { return nil }
+func (*noopConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*noopConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*noopConn) SetDeadline(time.Time) error      { return nil }
+func (*noopConn) SetReadDeadline(time.Time) error  { return nil }
+func (*noopConn) SetWriteDeadline(time.Time) error { return nil }

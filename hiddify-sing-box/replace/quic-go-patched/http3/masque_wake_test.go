@@ -17,7 +17,7 @@ func TestMasqueWakeSendOnReceiveReadEnv(t *testing.T) {
 		env  string
 		want bool
 	}{
-		{"", true},
+		{"", false},
 		{"0", false},
 		{"1", true},
 	}
@@ -36,7 +36,7 @@ func TestMasqueWakeBidiConnOnReceiveReadEnv(t *testing.T) {
 		env  string
 		want bool
 	}{
-		{"", true},
+		{"", false},
 		{"0", false},
 		{"1", true},
 	}
@@ -78,7 +78,7 @@ func TestMasqueWakeOncePerStreamRead(t *testing.T) {
 	n, err := str.Read(b)
 	require.NoError(t, err)
 	require.Equal(t, 6, n)
-	require.Equal(t, 1, wakes, "Stream.Read must MasqueWakeStreamSend once per payload read")
+	require.Equal(t, 0, wakes, "Stream.Read must not wake on download-only — WriteTo batches delivery wake")
 
 	wakes = 0
 	_, err = serverStr.Write(getDataFrame([]byte("quux")))
@@ -87,7 +87,7 @@ func TestMasqueWakeOncePerStreamRead(t *testing.T) {
 	n, err = rb.Read(b[:4])
 	require.NoError(t, err)
 	require.Equal(t, 4, n)
-	require.Equal(t, 1, wakes, "hijackableBody.Read must not double MasqueWakeStreamSend")
+	require.Equal(t, 0, wakes, "hijackableBody.Read must not wake on small download-only reads")
 }
 
 func TestMasqueWakeBidiConnWakeUsesDuplex(t *testing.T) {
@@ -121,8 +121,8 @@ func TestMasqueWakeBidiConnWakeUsesDuplex(t *testing.T) {
 	n, err := str.Read(b)
 	require.NoError(t, err)
 	require.Equal(t, 6, n)
-	require.Equal(t, 1, streamWakes, "bidi conn wake must still MasqueWakeStreamSend once")
-	require.Equal(t, 1, connWakes, "bidi conn wake must invoke conn hook once")
+	require.Equal(t, 0, streamWakes, "download-only Read must not wake before duplex upload starts")
+	require.Equal(t, 0, connWakes, "download-only Read must not conn-wake before duplex upload starts")
 }
 
 func TestMasqueWakeAfterDownloadWriteOnActiveStream(t *testing.T) {

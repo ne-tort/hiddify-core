@@ -47,6 +47,8 @@ type Stream struct {
 
 	parseTrailer  func(io.Reader, *headersFrame) error
 	parsedTrailer bool
+
+	masqueCoalesceBuf []byte // batched CONNECT DATA frames (h2o/Invisv bulk coalesce)
 }
 
 func newStream(
@@ -109,15 +111,80 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
-	masqueWakeSendAfterReceiveRead(s, n)
+	if n > 0 && masqueStreamDuplexUploadWake(s) {
+		masqueWakeSendAfterReceiveRead(s, n)
+	}
 	return n, err
+}
+
+func masqueStreamDuplexUploadWake(s *Stream) bool {
+	if s == nil || s.datagramStream == nil {
+		return false
+	}
+	qs := s.datagramStream.QUICStream()
+	return qs != nil && quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueIsBidiDuplexUploadStarted(qs)
+}
+
+const masqueHTTP3WriteToBufLen = 256 * 1024
+
+// WriteTo drains tunneled CONNECT payload. Batched wake every 64 KiB (WINDOW_UPDATE);
+// per-read wake only during saturated duplex (masqueStreamDuplexUploadWake in Read).
+func (s *Stream) WriteTo(w io.Writer) (int64, error) {
+	buf := make([]byte, masqueHTTP3WriteToBufLen)
+	var total int64
+	var deliveryPending int
+	flushDeliveryWake := func(delivered int) {
+		if delivered <= 0 || masqueStreamDuplexUploadWake(s) {
+			return
+		}
+		deliveryPending += delivered
+		if deliveryPending >= masqueHTTP3WriteToBufLen {
+			deliveryPending = 0
+			masqueWakeSendAfterReceiveRead(s, delivered)
+		}
+	}
+	for {
+		nr, err := s.Read(buf)
+		if nr > 0 {
+			nw, werr := w.Write(buf[:nr])
+			total += int64(nw)
+			if nw > 0 {
+				flushDeliveryWake(nw)
+			}
+			if werr != nil {
+				if deliveryPending > 0 {
+					pending := deliveryPending
+					deliveryPending = 0
+					masqueWakeSendAfterReceiveRead(s, pending)
+				}
+				return total, werr
+			}
+			if nw < nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				if deliveryPending > 0 {
+					pending := deliveryPending
+					deliveryPending = 0
+					masqueWakeSendAfterReceiveRead(s, pending)
+				}
+				return total, nil
+			}
+			return total, err
+		}
+	}
 }
 
 func (s *Stream) hasMoreData() bool {
 	return s.bytesRemainingInFrame > 0
 }
 
-func (s *Stream) Write(b []byte) (int, error) {
+func (s *Stream) writeDataFramePayload(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
 	s.buf = s.buf[:0]
 	s.buf = (&dataFrame{Length: uint64(len(b))}).Append(s.buf)
 	if s.qlogger != nil {
@@ -138,6 +205,54 @@ func (s *Stream) Write(b []byte) (int, error) {
 		masqueWakeSendAfterUploadWrite(s, n)
 	}
 	return n, err
+}
+
+func (s *Stream) flushMasqueWriteCoalesce() error {
+	if s == nil || len(s.masqueCoalesceBuf) == 0 {
+		return nil
+	}
+	payload := s.masqueCoalesceBuf
+	s.masqueCoalesceBuf = s.masqueCoalesceBuf[:0]
+	_, err := s.writeDataFramePayload(payload)
+	return err
+}
+
+// Write queues tunneled CONNECT payload. Bulk uploads coalesce into 256 KiB DATA frames
+// (io.CopyBuffer 64 KiB chunks → one wire frame; h2o/Invisv relay parity, fewer QUIC syscalls).
+func (s *Stream) Write(b []byte) (int, error) {
+	total := len(b)
+	for len(b) > 0 {
+		if cap(s.masqueCoalesceBuf) == 0 {
+			s.masqueCoalesceBuf = make([]byte, 0, masqueHTTP3WriteToBufLen)
+		}
+		space := masqueHTTP3WriteToBufLen - len(s.masqueCoalesceBuf)
+		if space == 0 {
+			if err := s.flushMasqueWriteCoalesce(); err != nil {
+				return total - len(b), err
+			}
+			space = masqueHTTP3WriteToBufLen
+		}
+		n := len(b)
+		if n > space {
+			n = space
+		}
+		s.masqueCoalesceBuf = append(s.masqueCoalesceBuf, b[:n]...)
+		b = b[n:]
+		if len(s.masqueCoalesceBuf) >= masqueHTTP3WriteToBufLen {
+			if err := s.flushMasqueWriteCoalesce(); err != nil {
+				return total - len(b), err
+			}
+		}
+	}
+	return total, nil
+}
+
+// Close flushes pending coalesced DATA before closing the send half.
+func (s *Stream) Close() error {
+	if err := s.flushMasqueWriteCoalesce(); err != nil {
+		return err
+	}
+	return s.datagramStream.Close()
 }
 
 func (s *Stream) writeUnframed(b []byte) (int, error) {

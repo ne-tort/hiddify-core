@@ -336,6 +336,9 @@ func (s *coreSession) newConnectIPPacketSession(conn *connectip.Conn, overlayH2 
 
 func (s *coreSession) scheduleConnectIPDatagramSendWake() {
 	s.ConnectIPIngressAckWake.Schedule()
+}
+
+func (s *coreSession) flushConnectIPIngressAckWakeOnEgress() {
 	s.flushConnectIPIngressAckWake()
 }
 

@@ -1,15 +1,14 @@
 package stream
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +21,7 @@ var relayGoAuditSource string
 // RelayGoAuditSource returns relay.go source for frozen delegate audits (REF-SRC-THIN-2).
 func RelayGoAuditSource() string { return relayGoAuditSource }
 
-const RelayTunnelBufLen = 64 * 1024
+const RelayTunnelBufLen = 256 * 1024
 
 // RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
 const RelayTunnelFlushBytes = RelayTunnelBufLen
@@ -34,35 +33,11 @@ var relayTunnelBufPool = sync.Pool{
 	},
 }
 
-// RelayUseHTTP3StreamHijack enables hijacked *http3.Stream relay (default on).
-// Set MASQUE_RELAY_TCP_STREAM_HIJACK=0 to disable.
-func RelayUseHTTP3StreamHijack() bool {
-	return strings.TrimSpace(os.Getenv("MASQUE_RELAY_TCP_STREAM_HIJACK")) != "0"
-}
+// RelayUseHTTP3StreamHijack enables hijacked *http3.Stream relay (prod always on).
+func RelayUseHTTP3StreamHijack() bool { return true }
 
-// RelayUploadFromStream reads client upload from the hijacked HTTP/3 stream instead of req.Body.
-// Env: MASQUE_THIN_RELAY_UPLOAD (str/stream default) or MASQUE_RELAY_TCP_UPLOAD_BODY=1 for req.Body.
-func RelayUploadFromStream() bool {
-	if body := strings.TrimSpace(os.Getenv("MASQUE_RELAY_TCP_UPLOAD_BODY")); body != "" {
-		switch body {
-		case "1", "reqbody", "body", "true", "yes":
-			return false
-		default:
-			return true
-		}
-	}
-	switch strings.TrimSpace(os.Getenv("MASQUE_THIN_RELAY_UPLOAD")) {
-	case "str", "stream":
-		return true
-	case "reqbody", "body", "0":
-		return false
-	default:
-		if thin := strings.TrimSpace(os.Getenv("MASQUE_THIN_RELAY_UPLOAD")); thin != "" {
-			return thin != "0" && thin != "reqbody"
-		}
-		return true
-	}
-}
+// RelayUploadFromStream reads client upload from the hijacked HTTP/3 stream (prod always on).
+func RelayUploadFromStream() bool { return true }
 
 // RelayCONNECTH3Leg injects an HTTP/3 bidi relay leg for in-process tests (S37) without a live QUIC stack.
 type RelayCONNECTH3Leg interface {
@@ -72,12 +47,13 @@ type RelayCONNECTH3Leg interface {
 // RelayTCPTunnel relays CONNECT tunneled TCP like h2o proxy.tunnel (64 KiB io.CopyBuffer, full duplex).
 // legRole is optional P2/P6 leg (ConnectStreamLegUpload / ConnectStreamLegDownload); "" = single bidi.
 func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter, legRole string) error {
-	if RelayUseHTTP3StreamHijack() {
+	policy := CurrentRelayTCPPolicy(legRole)
+	if policy.UseHijackRelay() {
 		if leg := h3StreamFromCONNECTRelay(reqBody, responseWriter); leg != nil {
 			// Parity h3.TunnelConn: release CONNECT req.Body after hijack so http3 request
 			// bookkeeping does not stall bidi relay (responseWriter or reqBody path).
 			releaseConnectRelayRequestBody(reqBody)
-			return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg, legRole)
+			return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg, legRole, policy)
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -229,7 +205,7 @@ func (f *relayTunnelFlushWriter) flushNow() {
 // RelayTCPTunnelBidiStream runs the HTTP/3 hijack relay path (io.CopyBuffer both halves, no H2 per-read flush).
 // Used by RelayTCPTunnel when HTTPStreamer hijacks *http3.Stream; also for in-proc localize benches.
 func RelayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
-	return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, bidi, "")
+	return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, bidi, "", CurrentRelayTCPPolicy(""))
 }
 
 // RelayTunnelDownloadH2Style copies onward TCP → CONNECT response with batched 64 KiB flush (H2 EnableFullDuplex path).
@@ -241,7 +217,7 @@ func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWrite
 // Per-read HTTP flush (relayTunnelDownloadRelay) is intentionally omitted — QUIC stream framing delivers
 // download data without H2 ResponseWriter batching; docker ~130 down on connect-stream-h3 is client bidi credit.
 // P6 upload leg (legRole=upload): discard target download at server — do not pump bulk S2C on upload QUIC conn.
-func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser, legRole string) error {
+func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser, legRole string, policy RelayTCPPolicy) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type closeWriter interface {
@@ -254,16 +230,10 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 	}
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
-	// Mark bidi scheduler role before both relay goroutines (parity h3.TunnelConn WriteTo / P6 upload leg).
-	if bidi != nil {
+	if bidi != nil && policy.UseSchedulerBoost() {
 		if uploadLegOnly {
 			relayTunnelSetBidiUploadActive(bidi, true)
 			defer relayTunnelSetBidiUploadActive(bidi, false)
-		} else if legRole == ConnectStreamLegDownload {
-			// P2 download leg pumps S2C — full send boost + write wake (H3-L1c-9). Receive-only
-			// suppressed masqueWakeAfterDownloadWrite on server hijack (H3-L1c-7f no-op wake).
-			relayTunnelSetBidiDownloadActive(bidi, true)
-			defer relayTunnelSetBidiDownloadActive(bidi, false)
 		} else {
 			relayTunnelSetBidiDownloadActive(bidi, true)
 			defer relayTunnelSetBidiDownloadActive(bidi, false)
@@ -272,10 +242,12 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 	go func() {
 		var err error
 		switch {
-		case uploadLegOnly && bidi != nil:
+		case uploadLegOnly && bidi != nil && policy.UsePerChunkWake():
 			_, err = relayTunnelCopyBufferBidiUploadLeg(targetConn, uploadSrc, bidi)
-		case RelayBidiDownloadWriteWakeEnabled() && bidi != nil:
+		case policy.UsePerChunkWake() && bidi != nil:
 			_, err = relayTunnelCopyBufferBidiUpload(targetConn, uploadSrc, bidi)
+		case policy.UseBatchedDuplexWake() && bidi != nil:
+			_, err = relayTunnelCopyBufferBatched(targetConn, uploadSrc, func() { relayTunnelWakeBatchedDuplexUpload(bidi) })
 		default:
 			_, err = relayTunnelCopyBuffer(targetConn, uploadSrc)
 		}
@@ -290,12 +262,94 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		if uploadLegOnly {
 			// Drain target bulk on upload CONNECT so upload relay is not QUIC-flooded; discard locally.
 			_, err = relayTunnelCopyBuffer(io.Discard, targetConn)
-		} else {
+		} else if policy.UsePerChunkWake() {
 			_, err = relayTunnelDownloadRelayH3Bidi(bidi, targetConn, bidi, legRole == ConnectStreamLegDownload)
+		} else if policy.UseBatchedDuplexWake() {
+			_, err = relayTunnelDownloadRelayH3Batched(bidi, targetConn, bidi)
+		} else {
+			_, err = relayTunnelDownloadRelayH3Plain(bidi, targetConn)
 		}
 		downloadErrCh <- err
 	}()
 	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+}
+
+// relayTunnelDownloadRelayH3Batched copies onward TCP → hijacked H3 stream with iperf prime
+// then plain copy with 64 KiB batched bidi wake (thin single-bidi duplex).
+func relayTunnelDownloadRelayH3Batched(dst io.Writer, src net.Conn, bidi any) (int64, error) {
+	var written int64
+	if prime, err := relayTunnelPrimeDownload(src); err != nil {
+		return 0, err
+	} else if len(prime) > 0 {
+		if _, err := dst.Write(prime); err != nil {
+			return int64(len(prime)), err
+		}
+		written += int64(len(prime))
+		relayTunnelWakeBatchedDuplex(bidi)
+	}
+	n, err := relayTunnelCopyBufferBatched(dst, src, func() { relayTunnelWakeBatchedDuplex(bidi) })
+	written += n
+	if err != nil && !errors.Is(err, io.EOF) {
+		return written, err
+	}
+	return written, nil
+}
+
+// relayTunnelCopyBufferBatched copies with optional wake every RelayTunnelFlushBytes.
+func relayTunnelCopyBufferBatched(dst io.Writer, src io.Reader, wake func()) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	buf := *bp
+	var written int64
+	var pending int64
+	for {
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+				if wake != nil {
+					pending += int64(nw)
+					if pending >= RelayTunnelFlushBytes {
+						pending = 0
+						wake()
+					}
+				}
+			}
+			if ew != nil {
+				return written, ew
+			}
+			if nr != nw {
+				return written, io.ErrShortWrite
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return written, nil
+			}
+			return written, er
+		}
+	}
+}
+
+// relayTunnelDownloadRelayH3Plain copies onward TCP → hijacked H3 stream with iperf banner prime
+// then plain io.CopyBuffer (thin prod path, no per-chunk wake).
+func relayTunnelDownloadRelayH3Plain(dst io.Writer, src net.Conn) (int64, error) {
+	var written int64
+	if prime, err := relayTunnelPrimeDownload(src); err != nil {
+		return 0, err
+	} else if len(prime) > 0 {
+		if _, err := dst.Write(prime); err != nil {
+			return int64(len(prime)), err
+		}
+		written += int64(len(prime))
+	}
+	n, err := relayTunnelCopyBuffer(dst, src)
+	written += n
+	if err != nil && !errors.Is(err, io.EOF) {
+		return written, err
+	}
+	return written, nil
 }
 
 // relayTunnelDownloadRelayH3Bidi copies onward TCP → hijacked H3 stream with iperf banner prime

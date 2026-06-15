@@ -17,8 +17,8 @@ var ArchREFSRCSBClientAudit = []ArchREFSRCSBClientRow{
 	},
 	{
 		Attr: "Download WriteTo", Invisv: "io.Copy on stream",
-		SB: "writeH3DownloadTo + per-chunk wake; eager MAX_STREAM_DATA (default on)",
-		Parity: true, PatchRef: "MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW + MASQUE_H3_BIDI_UPLOAD_WAKE",
+		SB: "writeH3DownloadToThin + 64 KiB batched wake; eager MAX_STREAM_DATA (always on)",
+		Parity: true, PatchRef: "prod hardcoded WriteTo wake + quic eager WINDOW",
 	},
 	{
 		Attr: "Upload ReadFrom", Invisv: "io.Copy to stream",
@@ -27,12 +27,12 @@ var ArchREFSRCSBClientAudit = []ArchREFSRCSBClientRow{
 	},
 	{
 		Attr: "feeder / pipe", Invisv: "none",
-		SB: "h3_stream prod default; legacy MASQUE_CONNECT_STREAM_PIPE_UPLOAD=1", Parity: true,
+		SB: "single-bidi Invisv nil Body (pipe removed)", Parity: true,
 	},
 	{
 		Attr: "duplex_coord", Invisv: "none",
 		SB: "MASQUE_H3_BIDI_DUPLEX_COORD default on; off with MASQUE_CONNECT_STREAM_THIN=1",
-		Parity: false, PatchRef: "thin dial for Invisv parity; prod eager window unlocks KPI without thin",
+		Parity: false, PatchRef: "duplex_coord removed; direct h3 write",
 	},
 }
 

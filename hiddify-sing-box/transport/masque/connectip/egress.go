@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	maxOutboundPersist      = 128
+	maxOutboundPersist       = 128
 	maxDirectOutboundPersist = 32
 )
 
@@ -129,6 +129,15 @@ func (s *Netstack) runExclusiveOutboundDrain() {
 	}
 	s.drainLinkEndpointOutboundLocked()
 	s.outboundDraining.Store(false)
+	if s.onEgressBatchComplete != nil {
+		s.onEgressBatchComplete()
+	}
+}
+
+func (s *Netstack) flushEgressWake() {
+	if s.onEgressBatchComplete != nil {
+		s.onEgressBatchComplete()
+	}
 }
 
 func (s *Netstack) drainLinkEndpointOutboundLocked() {
@@ -225,6 +234,7 @@ func (s *Netstack) deliverOutboundWriterItem(payload []byte, persist uint8) (req
 		// gVisor may enqueue follow-on ACKs while WritePacket runs; poke the drain loop
 		// without blocking the writer on outboundCh (full queue would deadlock here).
 		s.scheduleOutboundDrainAfterWrite()
+		s.flushEgressWake()
 		return false, nil
 	}
 	if IsBenignEgressTeardownError(err) {

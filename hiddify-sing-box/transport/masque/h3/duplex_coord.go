@@ -5,29 +5,9 @@ import (
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
-const envH3BidiDuplexCoord = "MASQUE_H3_BIDI_DUPLEX_COORD" // retained for test env hygiene only
-
 var testBidiDownloadActiveHook func(active bool)
-
-// peerDuplexDownloadLeg reports P2 download CONNECT (upload runs on sibling stream).
-func (c *TunnelConn) peerDuplexDownloadLeg() bool {
-	return c != nil && c.connectStreamLeg == strm.ConnectStreamLegDownload
-}
-
-// peerDuplexSiblingUploadWired reports whether the lazy upload CONNECT leg was dialed and
-// peer wake wired (duplex on same QUIC conn). Download-only P2 flows keep this false.
-func (c *TunnelConn) peerDuplexSiblingUploadWired() bool {
-	return c != nil && c.peerDuplexUploadWake != nil
-}
-
-// sameStreamDuplexUploadWake reports whether WriteTo should poke upload on this stream
-// (false on P2 download leg — sibling upload CONNECT owns C2S wake).
-func (c *TunnelConn) sameStreamDuplexUploadWake() bool {
-	return c != nil && !c.peerDuplexDownloadLeg()
-}
 
 // BidiDuplexCoordEnabled reports whether legacy coordinated upload queue is active.
 // Always false: prod upload during download WriteTo writes directly to h3.
@@ -54,15 +34,13 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 	if qs == nil {
 		return
 	}
-	if c.connectStreamLeg == strm.ConnectStreamLegDownload {
-		quic.MasqueSetBidiDownloadReceiveActive(qs, active)
-		if active {
-			// Lazy FC only when sibling upload shares QUIC conn (duplex); download-only uses eager FC (H3-L1c-8).
-			quic.MasqueSetPeerDuplexLazyFC(qs, c.peerDuplexSiblingUploadWired())
-		}
+	if active {
+		quic.MasqueSetBidiDownloadActive(qs, true)
 		return
 	}
-	quic.MasqueSetBidiDownloadActive(qs, active)
+	quic.MasqueSetBidiDuplexUploadStarted(qs, false)
+	quic.MasqueSetBidiDownloadReceiveActive(qs, false)
+	quic.MasqueSetBidiDownloadActive(qs, false)
 }
 
 func (c *TunnelConn) beginDuplexDownload() {
@@ -73,26 +51,24 @@ func (c *TunnelConn) beginDuplexDownload() {
 }
 
 func (c *TunnelConn) noteDuplexUploadTraffic() {
-	if c != nil && c.DownloadActive() {
-		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	if c == nil || !c.DownloadActive() {
+		return
 	}
+	atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	if c.h3 != nil {
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+		}
+	}
+}
+
+func (c *TunnelConn) duplexDownloadDeliveryWakeThreshold() int {
+	return tunnelWriteToBufLen
 }
 
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
-}
-
-// RefreshPeerDuplexLazyFC re-applies lazy FC when the upload CONNECT leg is wired mid-WriteTo.
-func (c *TunnelConn) RefreshPeerDuplexLazyFC() {
-	if c == nil || !c.DownloadActive() || !c.peerDuplexDownloadLeg() || c.h3 == nil {
-		return
-	}
-	qs := c.h3.QUICStream()
-	if qs == nil {
-		return
-	}
-	quic.MasqueSetPeerDuplexLazyFC(qs, c.peerDuplexSiblingUploadWired())
 }
 
 func (c *TunnelConn) noteDownloadDelivered() {

@@ -16,9 +16,8 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 			t.Fatalf("REF3-1 gap %s: invisv=%s thin=%s", row.Attr, row.Invisv, row.Thin)
 		}
 	}
-	t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
-	if h3.ConnectStreamUsePipeUpload() {
-		t.Fatal("thin mode must disable pipe upload")
+	if h3.ConnectUsePipeUpload() {
+		t.Fatal("prod must not use pipe upload")
 	}
 	if h3.BidiDuplexCoordEnabled() {
 		t.Fatal("thin mode must disable duplex_coord")
@@ -33,9 +32,7 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 // windowed sb-peer stays in FC band (client thin path does not unlock connect-stream-h3 KPI alone).
 func TestArchREF3ThinDialKPI(t *testing.T) {
 	const duration = localizeBenchDuration
-	t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
-
-	instantH := startConnectStreamDownloadHarness(t, instantBidiLink{}, connectStreamHarnessOpts{Thin: true})
+	instantH := startConnectStreamDownloadHarness(t, instantBidiLink{})
 	defer instantH.close()
 	n, instantMbps, err := measureTCPDownloadWriteToMbps(instantH.conn, duration)
 	if err != nil {
@@ -46,7 +43,7 @@ func TestArchREF3ThinDialKPI(t *testing.T) {
 		t.Fatalf("thin instant %.1f Mbit/s (want > %.0f)", instantMbps, connectStreamVPSKPITargetDownMbps)
 	}
 
-	windowedH := startConnectStreamDownloadHarness(t, benchWindowedBidiLink(), connectStreamHarnessOpts{Thin: true})
+	windowedH := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 	defer windowedH.close()
 	_, windowedMbps, err := measureTCPDownloadWriteToMbps(windowedH.conn, duration)
 	if err != nil {
@@ -70,7 +67,7 @@ func TestArchREF3ThinModeSBServerAB(t *testing.T) {
 	}
 	assertConnectStreamWindowedCeilingBand(t, prodMbps, "REF3-3 prod sb server")
 
-	thinH := startConnectStreamDownloadHarness(t, benchWindowedBidiLink(), connectStreamHarnessOpts{Thin: true})
+	thinH := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 	defer thinH.close()
 	_, thinMbps, err := measureTCPDownloadWriteToMbps(thinH.conn, duration)
 	if err != nil {
@@ -101,9 +98,8 @@ func TestArchREF3MasqueradeStreamBlockedAudit(t *testing.T) {
 	if parityCount < 3 {
 		t.Fatalf("REF3-2 parity rows %d want >= 3 (StreamBlocked + CONNECT upload + download)", parityCount)
 	}
-	t.Setenv("MASQUE_CONNECT_STREAM_THIN", "1")
-	if h3.ConnectStreamUsePipeUpload() {
-		t.Fatal("thin path must disable pipe upload (masquerade minimal depth)")
+	if h3.ConnectUsePipeUpload() {
+		t.Fatal("prod path must not use pipe upload")
 	}
 	if h3.BidiDuplexCoordEnabled() {
 		t.Fatal("thin path must disable duplex_coord (masquerade direct stream copy)")

@@ -11,11 +11,16 @@ import (
 
 const envRelayBidiDownloadWriteWake = "MASQUE_RELAY_BIDI_DOWNLOAD_WRITE_WAKE"
 
-// RelayBidiDownloadWriteWakeEnabled reports whether the H3 hijack download relay should
-// MasqueWakeBidiDuplex after each copy chunk (server parity h3.TunnelConn download delivery wake).
-// Disable with MASQUE_RELAY_BIDI_DOWNLOAD_WRITE_WAKE=0.
+// RelayBidiDownloadWriteWakeEnabled reports whether per-chunk relay wake runs.
+// Default off — batched wake handles prod; per-chunk regresses uni-directional legs.
 func RelayBidiDownloadWriteWakeEnabled() bool {
-	return strings.TrimSpace(os.Getenv(envRelayBidiDownloadWriteWake)) != "0"
+	v := strings.TrimSpace(os.Getenv(envRelayBidiDownloadWriteWake))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // relayTunnelQUICStream is implemented by *http3.Stream on prod CONNECT hijack legs.
@@ -109,6 +114,44 @@ func relayTunnelWakeBidiSendOnly(bidi any) {
 		return
 	}
 	quic.MasqueWakeConnFromStream(q)
+}
+
+// relayTunnelWakeBatchedDuplexUpload schedules upload-fair wake after server reads client C2S.
+func relayTunnelWakeBatchedDuplexUpload(bidi any) {
+	if bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	if quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(q)
+	}
+	quic.MasqueWakeBidiDuplex(q)
+}
+
+// relayTunnelWakeBatchedDuplex schedules duplex wake for thin batched relay (not gated by per-chunk env).
+func relayTunnelWakeBatchedDuplex(bidi any) {
+	if bidi == nil {
+		return
+	}
+	qs, ok := bidi.(relayTunnelQUICStream)
+	if !ok {
+		return
+	}
+	q := qs.QUICStream()
+	if q == nil {
+		return
+	}
+	if quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(q)
+	}
+	quic.MasqueWakeBidiDuplex(q)
 }
 
 // relayTunnelWakeBidiDuplex schedules send after a hijacked H3 relay half advances (download write
