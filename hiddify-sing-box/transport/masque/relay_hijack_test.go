@@ -320,16 +320,8 @@ func TestRelayEnvMatrixDownload(t *testing.T) {
 }
 
 func TestRelayTCPPolicySnapshot(t *testing.T) {
-	t.Run("split_download_uses_hijack", func(t *testing.T) {
-		p := strm.CurrentRelayTCPPolicy(strm.ConnectStreamLegDownload)
-		if !p.IsSplitDownloadLeg() || !p.UseHijackRelay() || p.Mode != strm.RelayTCPModeH3StreamHijack {
-			t.Fatalf("prod always uses hijack relay: %+v", p)
-		}
-	})
-	t.Run("single_bidi_uses_hijack", func(t *testing.T) {
-		p := strm.CurrentRelayTCPPolicy("")
-		if !p.UseHijackRelay() || p.Mode != strm.RelayTCPModeH3StreamHijack {
-			t.Fatalf("single bidi should use hijack: %+v", p)
-		}
-	})
+	p := strm.CurrentRelayTCPPolicy("")
+	if p != (strm.RelayTCPPolicy{}) {
+		t.Fatalf("prod relay policy should be empty struct, got %+v", p)
+	}
 }

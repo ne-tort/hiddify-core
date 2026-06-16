@@ -336,6 +336,9 @@ func (s *coreSession) newConnectIPPacketSession(conn *connectip.Conn, overlayH2 
 
 func (s *coreSession) scheduleConnectIPDatagramSendWake() {
 	s.ConnectIPIngressAckWake.Schedule()
+	// Flush per outbound datagram (not only egress batch end) so iperf -R duplex on
+	// connect-ip TUN keeps QUIC ingress draining while gVisor emits TCP ACKs/upload.
+	s.flushConnectIPIngressAckWake()
 }
 
 func (s *coreSession) flushConnectIPIngressAckWakeOnEgress() {

@@ -58,11 +58,12 @@ type TunnelConn struct {
 	downloadActive      int32 // WriteTo in progress — upload wake for iperf -R duplex
 	downloadDelivered   int32 // WriteTo delivered ≥1 response byte — true duplex interleave
 	duplexUploadStarted int32 // concurrent upload Write while WriteTo active
-	uploadBoostActive   int32 // one-shot framer boost for upload-only legs (H3-L1c-3)
 	drainOnce           sync.Once
 	drainStopped        int32 // background download discard during upload-only (H3 bidi drain)
-	routeBidiDuplex     bool  // route pairs upload Write with concurrent download WriteTo — no auto drain
-	bootstrapUploadDone int32 // one-shot upload DATA before download drain (H2 parity)
+	downloadReceiveOnce sync.Once
+	routeBidiDuplex       bool  // route pairs upload Write with concurrent download WriteTo — no auto drain
+	bootstrapUploadDone   int32 // one-shot upload DATA before download drain (H2 parity)
+	uploadTrafficStarted  int32 // client upload bytes hit the wire before WriteTo bootstrap (real iperf3 cookie)
 
 	bidiWakeSink BidiWakeSink
 
@@ -95,7 +96,7 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 	} else {
 		ctx, cancel = context.WithCancel(ctx)
 	}
-	return &TunnelConn{
+	conn := &TunnelConn{
 		h3:                p.H3Stream,
 		reader:            p.Reader,
 		writer:            p.Writer,
@@ -107,45 +108,12 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 		routeBidiDuplex:   p.RouteBidiDuplex,
 		connectStreamRole: normalizeConnectStreamRole(p.ConnectStreamLeg),
 	}
+	return conn
 }
 
 // UsesH3Stream reports whether upload/download share one *http3.Stream.
 func (c *TunnelConn) UsesH3Stream() bool {
 	return c != nil && c.h3 != nil
-}
-
-func (c *TunnelConn) h3UploadChunkBytes() int {
-	return H3UploadChunkBytes(
-		c.DownloadActive(),
-		atomic.LoadInt32(&c.downloadDelivered) > 0,
-		atomic.LoadInt32(&c.duplexUploadStarted) > 0,
-	)
-}
-
-func (c *TunnelConn) ensureBidiUploadActive() {
-	if c == nil || c.h3 == nil {
-		return
-	}
-	if !atomic.CompareAndSwapInt32(&c.uploadBoostActive, 0, 1) {
-		return
-	}
-	qs := c.h3.QUICStream()
-	if qs != nil {
-		quic.MasqueSetBidiUploadActive(qs, true)
-	}
-}
-
-func (c *TunnelConn) clearBidiUploadActive() {
-	if c == nil || c.h3 == nil {
-		return
-	}
-	if !atomic.CompareAndSwapInt32(&c.uploadBoostActive, 1, 0) {
-		return
-	}
-	qs := c.h3.QUICStream()
-	if qs != nil {
-		quic.MasqueSetBidiUploadActive(qs, false)
-	}
 }
 
 func (c *TunnelConn) stopDownloadDrain() {
@@ -236,6 +204,7 @@ func (c *TunnelConn) Read(p []byte) (int, error) {
 	}
 	if c.h3 != nil {
 		c.stopDownloadDrain()
+		c.activateDownloadReceiveOnRead()
 		c.readMu.Lock()
 		defer c.readMu.Unlock()
 		c.applyH3ReadDeadlineLocked()
@@ -344,6 +313,10 @@ func (c *TunnelConn) WriteTo(w io.Writer) (int64, error) {
 func (c *TunnelConn) writeH3Thin(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	return c.writeH3UploadLocked(p)
+}
+
+func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 	dl := c.writeDL
 	if !dl.IsZero() {
 		_ = c.h3.SetWriteDeadline(dl)
@@ -351,30 +324,40 @@ func (c *TunnelConn) writeH3Thin(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
+	if c.routeBidiDuplex && !c.DownloadActive() {
+		c.ensureH3BootstrapBeforeUploadLocked()
+	}
 	if c.DownloadActive() {
-		chunk := c.h3UploadChunkBytes()
-		var pending int
-		n, err := writeChunkedWake(c.h3, p, chunk, func(wrote int) {
-			if wrote <= 0 {
-				return
-			}
-			c.noteDuplexUploadTraffic()
-			pending += wrote
-			if pending >= tunnelWriteToBufLen {
-				pending = 0
-				c.wakeBidiSendAfterUpload()
-			}
-		})
-		return n, err
+		c.noteDuplexUploadTraffic()
 	}
 	n, err := c.h3.Write(p)
+	if n > 0 {
+		c.noteUploadTrafficStarted()
+	}
+	if n > 0 && c.routeBidiDuplex && c.h3 != nil {
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+		}
+	}
+	if err == nil {
+		if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok && len(p) < tunnelWriteToBufLen {
+			_ = f.FlushMasqueCoalesce()
+		}
+		if c.DownloadActive() {
+			c.wakeBidiSendAfterUpload()
+		}
+	}
 	return n, err
 }
 
-// readFromH3Thin copies upload bytes to the CONNECT stream (Invisv io.CopyBuffer 64 KiB).
+const h3HandshakeUploadFlushBytes = 64 * 1024
+
+// readFromH3Thin copies upload bytes to the CONNECT stream (route ReaderFrom / iperf params).
 func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
+	buf := *bp
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	if err := c.ctx.Err(); err != nil {
@@ -384,11 +367,46 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 	if !dl.IsZero() {
 		_ = c.h3.SetWriteDeadline(dl)
 	}
-	n, err := io.CopyBuffer(c.h3, r, *bp)
-	if n > 0 && c.DownloadActive() {
-		c.noteDuplexUploadTraffic()
+	var total int64
+	for {
+		nr, er := r.Read(buf)
+		if nr > 0 {
+			nw, ew := c.h3.Write(buf[:nr])
+			if nw > 0 {
+				c.noteUploadTrafficStarted()
+				total += int64(nw)
+				if c.routeBidiDuplex && c.h3 != nil {
+					atomic.StoreInt32(&c.duplexUploadStarted, 1)
+					if qs := c.h3.QUICStream(); qs != nil {
+						quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+					}
+				}
+				if ew == nil {
+					if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok && nr < h3HandshakeUploadFlushBytes {
+						_ = f.FlushMasqueCoalesce()
+					}
+					if c.DownloadActive() && nr < h3HandshakeUploadFlushBytes {
+						c.wakeBidiSendAfterUpload()
+					}
+				}
+			}
+			if ew != nil {
+				return total, ew
+			}
+			if nr != nw {
+				return total, io.ErrShortWrite
+			}
+			if c.DownloadActive() {
+				c.noteDuplexUploadTraffic()
+			}
+		}
+		if er != nil {
+			if er == io.EOF {
+				return total, nil
+			}
+			return total, er
+		}
 	}
-	return n, err
 }
 
 func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
@@ -413,22 +431,44 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
-	return io.CopyBuffer(w, &tunnelH3Reader{c: c}, *bp)
+	c.readMu.Lock()
+	c.applyH3ReadDeadlineLocked()
+	err := c.ctx.Err()
+	c.readMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	n, werr := io.CopyBuffer(w, &tunnelH3Reader{c: c}, *bp)
+	if n > 0 {
+		c.noteDownloadDelivered()
+	}
+	return n, werr
 }
 
 // tunnelH3Reader adapts h3.Read for io.CopyBuffer (Invisv stream parity).
 type tunnelH3Reader struct{ c *TunnelConn }
 
 func (r *tunnelH3Reader) Read(p []byte) (int, error) {
-	return r.c.h3.Read(p)
+	r.c.activateDownloadReceiveOnRead()
+	if len(p) >= h3HandshakeUploadFlushBytes {
+		r.c.wakeH3BidiUploadDuringDownload()
+	}
+	n, err := r.c.h3.Read(p)
+	if n > 0 && n < h3HandshakeUploadFlushBytes {
+		r.c.wakeH3BidiUploadDuringDownload()
+	}
+	return n, err
 }
 
 func (c *TunnelConn) Close() error {
 	c.stopDownloadDrain()
-	c.clearBidiUploadActive()
 	c.cancel()
 	var err error
 	if c.h3 != nil {
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetBidiDownloadReceiveActive(qs, false)
+			quic.MasqueSetBidiDuplexUploadStarted(qs, false)
+		}
 		c.h3.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
 		if closeErr := c.h3.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)

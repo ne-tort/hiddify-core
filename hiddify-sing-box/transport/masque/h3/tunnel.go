@@ -52,15 +52,5 @@ func ConnectRequest(ctx context.Context, url string, serverHost string, usePipe 
 	if setAuth != nil {
 		setAuth(req.Header)
 	}
-	setConnectStreamLegHeader(req.Header, ctx)
 	return req, nil, nil, nil
-}
-
-func setConnectStreamLegHeader(h http.Header, ctx context.Context) {
-	if h == nil {
-		return
-	}
-	if leg := strm.ConnectStreamLegFromContext(ctx); leg != "" {
-		h.Set(strm.ConnectStreamLegHeader, leg)
-	}
 }

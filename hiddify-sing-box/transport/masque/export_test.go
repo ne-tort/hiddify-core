@@ -16,6 +16,9 @@ var (
 	ExportNewConnectStreamH2ProdSessionWithTCPDial  = newConnectStreamH2ProdSessionWithTCPDial
 	ExportStartH2FakeIperfDownloadTarget            = startH2FakeIperfDownloadTarget
 	ExportStartH2FakeIperfConcurrentControlTarget   = startH2FakeIperfConcurrentControlTarget
+	ExportStartRealIperf3UploadFirstTarget          = startRealIperf3UploadFirstTarget
+	ExportTestIperf3ClientCookie                    = testIperf3ClientCookie
+	ExportTestIperf3ClientParamsJSON                = testIperf3ClientParamsJSON
 	ExportStartH3ConnectStreamSocksRouter           = startH3ConnectStreamSocksRouter
 	ExportStartH3ConnectStreamSocksRouterWithSession = startH3ConnectStreamSocksRouterWithSession
 	ExportNewConnectStreamH3ProdSession             = newConnectStreamH3ProdSession
@@ -38,6 +41,10 @@ var (
 
 func ExportMeasureTCPDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
 	return measureTCPDownloadWriteToMbps(conn, duration)
+}
+
+func ExportMeasureTCPDownloadCopyMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+	return measureTCPDownloadCopyMbps(conn, duration)
 }
 
 func ExportMeasureTCPUploadMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {

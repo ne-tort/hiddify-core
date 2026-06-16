@@ -298,6 +298,71 @@ func startH2FakeIperfDownloadTarget(t *testing.T) uint16 {
 	return port
 }
 
+const iperf3CookieSize = 37
+
+// testIperf3ClientCookie is a fixed 37-byte iperf3 control cookie (COOKIE_SIZE).
+func testIperf3ClientCookie() []byte {
+	return []byte("837af6e7010446d4bbf42b4b2e4e8ffd\x00\x00\x00\x00\x00")
+}
+
+// testIperf3ClientParamsJSON is a minimal reverse TCP params blob (real iperf3 upload-first shape).
+func testIperf3ClientParamsJSON(cookie []byte) []byte {
+	// Cookie in JSON is the printable prefix without trailing NUL padding.
+	cookieStr := string(bytesTrimRight(cookie, 0))
+	return []byte(`{"cookie":"` + cookieStr + `","tcp":true,"omit":0,"time":2,"parallel":1,"reverse":1,"bidir":0,"winband":0,"pacing_timer":0}`)
+}
+
+func bytesTrimRight(b []byte, cut byte) []byte {
+	for len(b) > 0 && b[len(b)-1] == cut {
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+// startRealIperf3UploadFirstTarget serves real iperf3 TCP control: read 37-byte cookie, consume params, bulk download.
+func startRealIperf3UploadFirstTarget(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen real iperf3: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				cookie := make([]byte, iperf3CookieSize)
+				if _, err := io.ReadFull(conn, cookie); err != nil {
+					return
+				}
+				go func() {
+					buf := make([]byte, 8*1024)
+					for {
+						if _, err := conn.Read(buf); err != nil {
+							return
+						}
+					}
+				}()
+				payload := make([]byte, 64*1024)
+				for i := range payload {
+					payload[i] = 'B'
+				}
+				for i := 0; i < 4; i++ {
+					if _, err := conn.Write(payload); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return port
+}
+
 // startH2FakeIperfConcurrentControlTarget serves iperf3 banner + bulk download while consuming
 // periodic non-zero client upload (real iperf -R control path, not idle after params).
 func startH2FakeIperfConcurrentControlTarget(t *testing.T) uint16 {

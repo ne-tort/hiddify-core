@@ -52,8 +52,14 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 		mbps float64
 		err  error
 	}
+	type upRes struct {
+		bytes int64
+	}
 	downDone := make(chan downRes, 1)
+	upDone := make(chan upRes, 1)
+	start := make(chan struct{})
 	go func() {
+		<-start
 		n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, duration)
 		if err != nil && n == 0 {
 			downDone <- downRes{err: err}
@@ -61,28 +67,34 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 		}
 		downDone <- downRes{mbps: mbps}
 	}()
+	go func() {
+		<-start
+		chunk := make([]byte, 256*1024)
+		var upTotal int64
+		stop := time.Now().Add(duration)
+		for time.Now().Before(stop) {
+			n, err := conn.Write(chunk)
+			if n > 0 {
+				upTotal += int64(n)
+			}
+			if err != nil {
+				break
+			}
+		}
+		upDone <- upRes{bytes: upTotal}
+	}()
+	close(start)
 
-	chunk := make([]byte, 256*1024)
-	var upTotal int64
-	stop := time.Now().Add(duration)
-	for time.Now().Before(stop) {
-		n, err := conn.Write(chunk)
-		if n > 0 {
-			upTotal += int64(n)
-		}
-		if err != nil {
-			break
-		}
-	}
 	dr := <-downDone
 	if dr.err != nil {
 		t.Fatalf("concurrent WriteTo download: %v", dr.err)
 	}
+	ur := <-upDone
 	secs := duration.Seconds()
 	if secs <= 0 {
 		secs = 1
 	}
-	upMbps = float64(upTotal*8) / secs / 1e6
+	upMbps = float64(ur.bytes*8) / secs / 1e6
 	return dr.mbps, upMbps
 }
 

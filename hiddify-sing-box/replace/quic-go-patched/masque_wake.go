@@ -17,14 +17,22 @@ var (
 	masqueWakeStreamSendHook   func()
 	masqueWakeConnSendHook     func()
 	masqueScheduleSendingHook  func()
+	masqueWakeSendOnReceiveReadEnabled = true
+	masqueWakeBidiConnOnReceiveReadEnabled = false // prod: stream send only, no conn-level wake
 )
 
+func init() {
+	if strings.TrimSpace(os.Getenv(envWakeSendOnReceiveRead)) == "0" {
+		masqueWakeSendOnReceiveReadEnabled = false
+	}
+}
+
 func masqueWakeSendOnReceiveRead() bool {
-	return strings.TrimSpace(os.Getenv(envWakeSendOnReceiveRead)) != "0"
+	return masqueWakeSendOnReceiveReadEnabled
 }
 
 func masqueWakeBidiConnOnReceiveRead() bool {
-	return strings.TrimSpace(os.Getenv(envBidiConnWake)) != "0"
+	return masqueWakeBidiConnOnReceiveReadEnabled
 }
 
 // MasqueDownloadEagerWindowEnabled reports whether eager MAX_STREAM_DATA poke is on (always on).
@@ -58,11 +66,9 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 	if n <= 0 || s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
 		return
 	}
-	if MasqueIsBidiDownloadReceiveOnly(s) {
+	if !MasqueIsBidiDuplexUploadStarted(s) {
 		masquePokeDownloadReceiveWindow(s)
-		return
 	}
-	masquePokeDownloadReceiveWindow(s)
 	masqueScheduleDownloadActiveWake(s)
 }
 
@@ -71,6 +77,10 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 // scheduler poke (H3-L1c-3 — sustained C2S @ ~80 Mbit/s without downloadActive gate).
 func masqueWakeAfterDownloadWrite(s *Stream, n int) {
 	if n <= 0 || s == nil || !masqueWakeSendOnReceiveRead() {
+		return
+	}
+	if s.masqueIsDownloadActive() && (MasqueIsBidiDuplexUploadStarted(s) || MasqueIsBidiDownloadReceiveOnly(s)) {
+		MasqueWakeStreamSend(s)
 		return
 	}
 	if s.masqueIsDownloadActive() {
@@ -86,10 +96,9 @@ func masqueWakeAfterDownloadDelivery(s *Stream) {
 	if s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
 		return
 	}
-	if MasqueIsBidiDownloadReceiveOnly(s) {
-		return
+	if !MasqueIsBidiDuplexUploadStarted(s) {
+		masquePokeDownloadReceiveWindow(s)
 	}
-	masquePokeDownloadReceiveWindow(s)
 	masqueScheduleDownloadActiveWake(s)
 }
 
@@ -187,7 +196,7 @@ func masqueWakeOnControlFrameRenotify(st *Stream, boosted bool) {
 		return
 	}
 	if MasqueIsBidiDownloadActive(st) || (MasqueBidiSendBoostEnabled() && boosted) {
-		MasqueWakeBidiDuplex(st)
+		MasqueWakeStreamSend(st)
 	}
 }
 

@@ -1,7 +1,6 @@
 package h3
 
 import (
-	"io"
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
@@ -9,8 +8,7 @@ import (
 
 var testBidiDownloadActiveHook func(active bool)
 
-// BidiDuplexCoordEnabled reports whether legacy coordinated upload queue is active.
-// Always false: prod upload during download WriteTo writes directly to h3.
+// BidiDuplexCoordEnabled reports whether legacy env-gated duplex_coord queue is active.
 func BidiDuplexCoordEnabled() bool { return false }
 
 // DownloadActive reports whether WriteTo is draining the response half (iperf -R duplex).
@@ -35,19 +33,40 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 		return
 	}
 	if active {
-		quic.MasqueSetBidiDownloadActive(qs, true)
-		return
+		quic.MasqueSetBidiDownloadReceiveActive(qs, true)
+	} else {
+		quic.MasqueSetBidiDuplexUploadStarted(qs, false)
+		quic.MasqueSetBidiDownloadReceiveActive(qs, false)
 	}
-	quic.MasqueSetBidiDuplexUploadStarted(qs, false)
-	quic.MasqueSetBidiDownloadReceiveActive(qs, false)
-	quic.MasqueSetBidiDownloadActive(qs, false)
 }
 
 func (c *TunnelConn) beginDuplexDownload() {
 	atomic.StoreInt32(&c.downloadDelivered, 0)
 	atomic.StoreInt32(&c.duplexUploadStarted, 0)
+	c.maybeSendH3BootstrapBeforeDuplexDownload()
 	atomic.AddInt32(&c.downloadActive, 1)
 	c.setBidiDownloadActive(true)
+}
+
+func (c *TunnelConn) maybeSendH3BootstrapBeforeDuplexDownload() {
+	if c == nil || c.h3 == nil || c.routeBidiDuplex {
+		// Prod SOCKS/CM always pairs ReaderFrom upload with WriteTo download on one CONNECT
+		// stream. Bootstrap zeros before real iperf3 cookie (upload-first) poison docker -R;
+		// S2C receive credit is armed at dial via PrimeH3UploadBootstrapOnConn.
+		return
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if atomic.LoadInt32(&c.uploadTrafficStarted) == 0 {
+		_ = c.sendH3BootstrapUploadUnlocked()
+	}
+}
+
+func (c *TunnelConn) noteUploadTrafficStarted() {
+	if c == nil {
+		return
+	}
+	atomic.StoreInt32(&c.uploadTrafficStarted, 1)
 }
 
 func (c *TunnelConn) noteDuplexUploadTraffic() {
@@ -62,13 +81,25 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 	}
 }
 
-func (c *TunnelConn) duplexDownloadDeliveryWakeThreshold() int {
-	return tunnelWriteToBufLen
-}
-
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
+}
+
+// activateDownloadReceiveOnRead pokes S2C credit on first Read (iperf -R / route Read) without downloadActive wake routing.
+func (c *TunnelConn) activateDownloadReceiveOnRead() {
+	if c == nil || c.h3 == nil {
+		return
+	}
+	c.downloadReceiveOnce.Do(func() {
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetBidiDownloadReceiveActive(qs, true)
+			if quic.MasqueDownloadEagerWindowEnabled() {
+				quic.MasquePokeDownloadReceiveWindow(qs)
+			}
+			quic.MasqueWakeStreamSend(qs)
+		}
+	})
 }
 
 func (c *TunnelConn) noteDownloadDelivered() {
@@ -76,41 +107,4 @@ func (c *TunnelConn) noteDownloadDelivered() {
 		return
 	}
 	atomic.StoreInt32(&c.downloadDelivered, 1)
-}
-
-// interleaveDuplexTransfer drains pending upload between download reads on one goroutine.
-func interleaveDuplexTransfer(
-	w io.Writer,
-	readFn func([]byte) (int, error),
-	flushUpload func() error,
-	buf []byte,
-	afterDownload func(wrote int),
-) (int64, error) {
-	var total int64
-	for {
-		if err := flushUpload(); err != nil {
-			return total, err
-		}
-		n, err := readFn(buf)
-		if n > 0 {
-			wrote, werr := w.Write(buf[:n])
-			total += int64(wrote)
-			if werr != nil {
-				return total, werr
-			}
-			if wrote < n {
-				return total, io.ErrShortWrite
-			}
-			if afterDownload != nil && wrote > 0 {
-				afterDownload(wrote)
-			}
-		}
-		if err != nil {
-			if err == io.EOF {
-				_ = flushUpload()
-				return total, nil
-			}
-			return total, err
-		}
-	}
 }

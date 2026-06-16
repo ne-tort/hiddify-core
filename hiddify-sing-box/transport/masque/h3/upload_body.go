@@ -19,14 +19,11 @@ func H3UploadFlushPolicy() UploadFlushPolicy {
 	return UploadFlushPolicy{ChunkBytes: defaultUploadChunkBytes}
 }
 
-// H3UploadChunkBytes returns CONNECT upload chunk size for the leg.
+// H3UploadChunkBytes returns CONNECT upload chunk size (single prod profile: 256 KiB).
 func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploadStarted bool) int {
-	if downloadActive && downloadDelivered && duplexUploadStarted {
-		return tunnelWriteToBufLen
-	}
-	if downloadActive && (downloadDelivered || duplexUploadStarted) {
-		return defaultDuplexUploadChunkBytes
-	}
+	_ = downloadActive
+	_ = downloadDelivered
+	_ = duplexUploadStarted
 	return tunnelWriteToBufLen
 }
 

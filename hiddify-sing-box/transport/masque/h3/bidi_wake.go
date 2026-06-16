@@ -12,7 +12,7 @@ type BidiWakeSink interface {
 	NoteDownloadWake()
 }
 
-func (c *TunnelConn) bidiUploadWakeEnabled() bool      { return true }
+func (c *TunnelConn) bidiUploadWakeEnabled() bool           { return true }
 func (c *TunnelConn) bidiDownloadDeliveryWakeEnabled() bool { return true }
 
 func (c *TunnelConn) wakeBidiSendAfterUpload() {
@@ -26,13 +26,10 @@ func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if qs == nil {
 		return
 	}
-	if atomic.LoadInt32(&c.duplexUploadStarted) > 0 {
-		quic.MasqueWakeStreamSend(qs)
-		quic.MasqueWakeBidiDuplex(qs)
-		return
+	if quic.MasqueDownloadEagerWindowEnabled() && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
-	quic.MasquePokeDownloadReceiveWindow(qs)
-	quic.MasqueWakeBidiDuplex(qs)
+	quic.MasqueWakeStreamSend(qs)
 }
 
 func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
@@ -46,6 +43,8 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	if qs == nil {
 		return
 	}
-	quic.MasquePokeDownloadReceiveWindow(qs)
-	quic.MasqueWakeBidiDuplex(qs)
+	if quic.MasqueDownloadEagerWindowEnabled() && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		quic.MasquePokeDownloadReceiveWindow(qs)
+	}
+	quic.MasqueWakeStreamSend(qs)
 }

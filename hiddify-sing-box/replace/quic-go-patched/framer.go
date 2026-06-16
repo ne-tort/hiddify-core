@@ -330,6 +330,13 @@ func (f *framer) isBidiSendBoostLocked(id protocol.StreamID) bool {
 	return ok
 }
 
+// repromoteActiveStream moves an already-active stream to the queue front.
+func (f *framer) repromoteActiveStream(id protocol.StreamID) bool {
+	f.mutex.Lock()
+	defer f.mutex.Unlock()
+	return f.promoteActiveStreamLocked(id)
+}
+
 // repromoteBidiSendBoost moves an already-boosted active stream to the queue front.
 // Returns true when the stream is boosted (schedule send even if not yet active).
 func (f *framer) repromoteBidiSendBoost(id protocol.StreamID) bool {

@@ -3020,6 +3020,14 @@ func (c *Conn) masqueRepromoteBidiSendBoost(id protocol.StreamID) {
 	}
 }
 
+func (c *Conn) masqueRepromoteActiveStream(id protocol.StreamID) bool {
+	if c.framer.repromoteActiveStream(id) {
+		c.scheduleSending()
+		return true
+	}
+	return false
+}
+
 func (c *Conn) masqueIsBidiSendBoosted(id protocol.StreamID) bool {
 	return c.framer.isBidiSendBoost(id)
 }

@@ -23,14 +23,14 @@ func TestH3ConnectRequestStreamUsesNilBody(t *testing.T) {
 	}
 }
 
-func TestH3ConnectRequestSetsLegHeader(t *testing.T) {
+func TestH3ConnectRequestOmitsLegHeader(t *testing.T) {
 	ctx := strm.ContextWithConnectStreamLeg(context.Background(), strm.ConnectStreamLegUpload)
 	req, _, _, err := ConnectRequest(ctx, "https://example.com/masque/tcp/h/p", "example.com", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != strm.ConnectStreamLegUpload {
-		t.Fatalf("leg header=%q want %q", got, strm.ConnectStreamLegUpload)
+	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != "" {
+		t.Fatalf("leg header=%q want empty (single bidi prod)", got)
 	}
 }
 

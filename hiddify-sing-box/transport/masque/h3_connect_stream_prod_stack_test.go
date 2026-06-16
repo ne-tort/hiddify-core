@@ -3,7 +3,9 @@ package masque_test
 // Prod-stack synth: LaunchMasqueStack (docker server) + CoreClientFactory H3 + SOCKS/CM.
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -15,6 +17,12 @@ import (
 	"github.com/sagernet/sing-box/transport/masque"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/yosida95/uritemplate/v3"
+)
+
+const (
+	h3ProdStackFakeIperfMinBytes   = 32 * 1024
+	h3DockerSynthStallWatchdog     = 10 * time.Second
+	h3DockerSynthDownloadBench     = 2 * time.Second
 )
 
 func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
@@ -81,6 +89,181 @@ func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
 	}
 	time.Sleep(30 * time.Millisecond)
 	return port
+}
+
+func runH3ProdStackSocksFakeIperfNoPulse(t *testing.T, proxyPort int, targetPort uint16, minBytes int64) int64 {
+	t.Helper()
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(h3DockerSynthStallWatchdog + 2*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read fake iperf banner: %v", err)
+	}
+	if string(banner) != "iperf3\r\n" {
+		t.Fatalf("banner: got %q", string(banner))
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+
+	var dst bytes.Buffer
+	n, err := io.Copy(&dst, conn)
+	if err != nil && n == 0 {
+		t.Fatalf("fake iperf download: %v", err)
+	}
+	if n < minBytes {
+		t.Fatalf("fake iperf download short: %d want >= %d (docker iperf -R stall)", n, minBytes)
+	}
+	return n
+}
+
+func runH3ProdStackFakeIperfDownloadMbps(t *testing.T, proxyPort int, targetPort uint16, duration time.Duration) (int64, float64, error) {
+	t.Helper()
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(duration + h3DockerSynthStallWatchdog)); err != nil {
+		return 0, 0, err
+	}
+
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		return 0, 0, err
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		return 0, 0, err
+	}
+	return masque.ExportMeasureTCPDownloadCopyMbps(conn, duration)
+}
+
+// TestLaunchMasqueStackH3ConnectStreamFakeIperfNoPulse (H3-Docker) — prod LaunchMasqueStack + SOCKS/CM
+// with docker iperf -R handshake (Read banner, Write params, io.Copy bulk) and no synthetic upload pulse.
+func TestLaunchMasqueStackH3ConnectStreamFakeIperfNoPulse(t *testing.T) {
+	targetPort := masque.ExportStartH2FakeIperfDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	n := runH3ProdStackSocksFakeIperfNoPulse(t, proxyPort, targetPort, h3ProdStackFakeIperfMinBytes)
+	t.Logf("LaunchMasqueStack H3 fake iperf no-pulse: %d bytes", n)
+}
+
+// TestLaunchMasqueStackH3WriteToOnlyIperfBanner (H3-Docker) — iperf -R may start WriteTo download
+// before reading banner; must not block >9s waiting for server bulk (docker hang shape).
+func TestLaunchMasqueStackH3WriteToOnlyIperfBanner(t *testing.T) {
+	targetPort := masque.ExportStartH2FakeIperfDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(h3DockerSynthStallWatchdog)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	type result struct {
+		n   int64
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, _, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, h3DockerSynthDownloadBench)
+		done <- result{n: n, err: err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil && r.n < 8 {
+			t.Fatalf("WriteTo-only iperf banner: %v (n=%d)", r.err, r.n)
+		}
+		if r.n < 8 {
+			t.Fatalf("WriteTo-only got %d bytes want >= 8 (iperf3\\r\\n banner)", r.n)
+		}
+		t.Logf("WriteTo-only iperf banner path: %d bytes", r.n)
+	case <-time.After(h3DockerSynthStallWatchdog - time.Second):
+		t.Fatal("WriteTo-only download blocked >9s waiting for iperf banner (docker hang shape)")
+	}
+}
+
+// TestGATEDockerH3SynthRealIperf3UploadFirst (GATE-DOCKER-H3-REAL) — real iperf3 upload-first cookie
+// through prod LaunchMasqueStack + SOCKS/CM (not fake iperf3\\r\\n banner).
+func TestGATEDockerH3SynthRealIperf3UploadFirst(t *testing.T) {
+	targetPort := masque.ExportStartRealIperf3UploadFirstTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	n := runH3ProdStackRealIperf3UploadFirst(t, proxyPort, targetPort, h3ProdStackFakeIperfMinBytes)
+	t.Logf("GATE-DOCKER-H3 real iperf3 upload-first: %d bytes", n)
+	if n < h3ProdStackFakeIperfMinBytes {
+		t.Fatalf("GATE-DOCKER-H3-REAL short read: %d want >= %d", n, h3ProdStackFakeIperfMinBytes)
+	}
+}
+
+func runH3ProdStackRealIperf3UploadFirst(t *testing.T, proxyPort int, targetPort uint16, minBytes int64) int64 {
+	t.Helper()
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(h3DockerSynthStallWatchdog + 2*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	cookie := masque.ExportTestIperf3ClientCookie()
+	params := masque.ExportTestIperf3ClientParamsJSON(cookie)
+
+	if _, err := conn.Write(cookie); err != nil {
+		t.Fatalf("write iperf3 cookie: %v", err)
+	}
+	if _, err := conn.Write(params); err != nil {
+		t.Fatalf("write iperf3 params: %v", err)
+	}
+
+	var dst bytes.Buffer
+	n, err := io.Copy(&dst, conn)
+	if err != nil && n == 0 {
+		t.Fatalf("real iperf3 prod stack: %v", err)
+	}
+	if n < minBytes {
+		t.Fatalf("real iperf3 prod stack short: %d want >= %d", n, minBytes)
+	}
+	return n
+}
+
+// TestGATEDockerH3SynthFakeIperfNoPulse (GATE-DOCKER-H3-SYNTH) — docker download-first iperf -R
+// through full prod stack (LaunchMasqueStack + SOCKS/CM). WriteTo-only GATE-H3-SYNTH does not cover this.
+func TestGATEDockerH3SynthFakeIperfNoPulse(t *testing.T) {
+	targetPort := masque.ExportStartH2FakeIperfDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	n := runH3ProdStackSocksFakeIperfNoPulse(t, proxyPort, targetPort, h3ProdStackFakeIperfMinBytes)
+	t.Logf("GATE-DOCKER-H3 fake iperf: %d bytes (handshake+bulk, no stall)", n)
+	if n < h3ProdStackFakeIperfMinBytes {
+		t.Fatalf("GATE-DOCKER-H3 short read: %d want >= %d", n, h3ProdStackFakeIperfMinBytes)
+	}
+}
+
+// TestGATEDockerH3SynthFakeIperfH2Parity — H2 negative control on same docker-shaped gate.
+func TestGATEDockerH3SynthFakeIperfH2Parity(t *testing.T) {
+	targetPort := masque.ExportStartH2FakeIperfConcurrentControlTarget(t)
+	proxyPort := startLaunchMasqueStackH2ConnectStreamServer(t)
+	socksPort := masque.ExportStartH2ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(h3DockerSynthStallWatchdog)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("H2 read banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("H2 write params: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPDownloadCopyMbps(conn, h3DockerSynthDownloadBench)
+	if err != nil && n == 0 {
+		t.Fatalf("H2 docker gate: %v", err)
+	}
+	t.Logf("GATE-DOCKER-H2 parity: %.1f Mbit/s (%d bytes)", mbps, n)
+	if n < h3ProdStackFakeIperfMinBytes {
+		t.Fatalf("H2 parity bytes=%d want >= %d", n, h3ProdStackFakeIperfMinBytes)
+	}
+	if mbps <= masque.ExportConnectStreamVPSKPITargetDown {
+		t.Fatalf("H2 parity %.1f Mbit/s (want > %.0f)", mbps, masque.ExportConnectStreamVPSKPITargetDown)
+	}
 }
 
 // TestLaunchMasqueStackH3ConcurrentControlDuringWriteTo (H3-T6-05) — prod stack + CM WriteTo download

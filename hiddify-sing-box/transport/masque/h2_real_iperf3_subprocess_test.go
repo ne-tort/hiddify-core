@@ -1,6 +1,6 @@
 package masque_test
 
-// Real iperf3 subprocess gate (H2-L2 / H2-R3): LaunchMasqueStack + SOCKS relay + iperf3 -R.
+// Real iperf3 subprocess gate: LaunchMasqueStack + SOCKS relay + iperf3 -R (docker bench shape).
 
 import (
 	"context"
@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,23 @@ import (
 )
 
 const h2DockerSoftKPIMbps = 4.0
+
+func dockerCLIAvailable() bool {
+	_, err := exec.LookPath("docker")
+	return err == nil
+}
+
+func requireIperf3OrDocker(t *testing.T) (useDocker bool) {
+	t.Helper()
+	if _, err := exec.LookPath("iperf3"); err == nil {
+		return false
+	}
+	if dockerCLIAvailable() {
+		return true
+	}
+	t.Skip("iperf3 not on PATH and docker CLI unavailable")
+	return false
+}
 
 func requireIperf3(t *testing.T) {
 	t.Helper()
@@ -53,6 +72,29 @@ func startIperf3ServerOnce(t *testing.T, port uint16) {
 		_ = cmd.Wait()
 	})
 	time.Sleep(150 * time.Millisecond)
+}
+
+func startDockerIperf3ServerOnce(t *testing.T, port uint16) {
+	t.Helper()
+	cmd := exec.Command("docker", "run", "--rm", "-d", "-p", fmt.Sprintf("%d:5201", port),
+		"masque-perf-lab:local", "iperf3", "-s", "-p", "5201")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker iperf3 server: %v\n%s", err, out)
+	}
+	containerID := strings.TrimSpace(string(out))
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+	// Do not TCP-dial the server: iperf3 -s -1 would consume the one allowed session.
+	time.Sleep(400 * time.Millisecond)
+}
+
+func startIperf3ServerForBench(t *testing.T, port uint16, useDocker bool) {
+	t.Helper()
+	if useDocker {
+		startDockerIperf3ServerOnce(t, port)
+		return
+	}
+	startIperf3ServerOnce(t, port)
 }
 
 func startSocksTCPRelay(t *testing.T, socksPort, targetPort uint16) uint16 {
@@ -132,6 +174,41 @@ func runIperf3ClientReverse(t *testing.T, relayPort uint16, seconds int) float64
 	return mbps
 }
 
+func runDockerIperf3ClientReverse(t *testing.T, relayHost string, relayPort uint16, seconds int) float64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+40)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "masque-perf-lab:local",
+		"iperf3",
+		"-c", relayHost,
+		"-p", fmt.Sprint(relayPort),
+		"-t", fmt.Sprint(seconds),
+		"-R",
+		"-J",
+		"--connect-timeout", "5000",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker iperf3 client -R: %v\n%s", err, out)
+	}
+	mbps, err := parseIperf3ReverseMbps(out)
+	if err != nil {
+		t.Fatalf("parse docker iperf3 json: %v\n%s", err, out)
+	}
+	return mbps
+}
+
+func runIperf3ClientReverseForBench(t *testing.T, relayHost string, relayPort uint16, seconds int, useDocker bool) float64 {
+	t.Helper()
+	if useDocker {
+		return runDockerIperf3ClientReverse(t, relayHost, relayPort, seconds)
+	}
+	if relayHost != "127.0.0.1" {
+		t.Fatalf("host iperf3 client requires relay 127.0.0.1, got %s", relayHost)
+	}
+	return runIperf3ClientReverse(t, relayPort, seconds)
+}
+
 // TestLaunchMasqueStackH2RealIperf3Subprocess (H2-L2 / H2-R3) — real iperf3 -R through SOCKS
 // relay (docker bench shape). Soft Docker KPI: >4 Mbit/s download.
 func TestLaunchMasqueStackH2RealIperf3Subprocess(t *testing.T) {
@@ -154,4 +231,32 @@ func TestLaunchMasqueStackH2RealIperf3Subprocess(t *testing.T) {
 // TestConnectStreamH2RealIperf3Optional kept as alias skip gate for tier-3 manual runs.
 func TestConnectStreamH2RealIperf3Optional(t *testing.T) {
 	TestLaunchMasqueStackH2RealIperf3Subprocess(t)
+}
+
+// TestGATEDockerH3SynthRealIperf3UploadFirst in-proc cookie gate lives in h3_connect_stream_prod_stack_test.go.
+
+// TestLaunchMasqueStackH3RealIperf3Subprocess (GATE-DOCKER-H3-EXEC) — real iperf3 -R through SOCKS
+// relay (docker run-bench.sh shape). Uses host iperf3 when on PATH, else docker iperf3 binary.
+func TestLaunchMasqueStackH3RealIperf3Subprocess(t *testing.T) {
+	useDocker := requireIperf3OrDocker(t)
+	if os.Getenv("GATE_DOCKER_H3_EXEC") == "0" {
+		t.Skip("GATE_DOCKER_H3_EXEC=0")
+	}
+
+	serverPort := pickFreeTCPPort(t)
+	startIperf3ServerForBench(t, serverPort, useDocker)
+
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	relayPort := startSocksTCPRelay(t, socksPort, serverPort)
+
+	relayHost := "127.0.0.1"
+	if useDocker {
+		relayHost = "host.docker.internal"
+	}
+	mbps := runIperf3ClientReverseForBench(t, relayHost, relayPort, 4, useDocker)
+	t.Logf("LaunchMasqueStack H3 real iperf3 -R: %.1f Mbit/s (docker=%v)", mbps, useDocker)
+	if mbps <= h2DockerSoftKPIMbps {
+		t.Fatalf("real iperf3 -R: %.1f Mbit/s (want > %.0f docker soft KPI)", mbps, h2DockerSoftKPIMbps)
+	}
 }

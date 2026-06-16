@@ -81,8 +81,14 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 		mbps float64
 		err  error
 	}
+	type upRes struct {
+		bytes int64
+	}
 	downDone := make(chan downRes, 1)
+	upDone := make(chan upRes, 1)
+	start := make(chan struct{})
 	go func() {
+		<-start
 		n, mbps, e := measureTCPDownloadWriteToMbps(conn, duration)
 		if e != nil && n == 0 {
 			downDone <- downRes{err: e}
@@ -90,28 +96,34 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 		}
 		downDone <- downRes{mbps: mbps}
 	}()
+	go func() {
+		<-start
+		chunk := make([]byte, 256*1024)
+		var upTotal int64
+		stop := time.Now().Add(duration)
+		for time.Now().Before(stop) {
+			n, e := conn.Write(chunk)
+			if n > 0 {
+				upTotal += int64(n)
+			}
+			if e != nil {
+				break
+			}
+		}
+		upDone <- upRes{bytes: upTotal}
+	}()
+	close(start)
 
-	chunk := make([]byte, 256*1024)
-	var upTotal int64
-	stop := time.Now().Add(duration)
-	for time.Now().Before(stop) {
-		n, e := conn.Write(chunk)
-		if n > 0 {
-			upTotal += int64(n)
-		}
-		if e != nil {
-			break
-		}
-	}
 	dr := <-downDone
 	if dr.err != nil {
 		return 0, 0, 0, dr.err
 	}
+	ur := <-upDone
 	secs := duration.Seconds()
 	if secs <= 0 {
 		secs = 1
 	}
-	up = float64(upTotal*8) / secs / 1e6
+	up = float64(ur.bytes*8) / secs / 1e6
 	down = dr.mbps
 	minLeg = down
 	if up < minLeg {

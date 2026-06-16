@@ -13,22 +13,9 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-func TestMasqueBidiSendBoostEnabledEnv(t *testing.T) {
-	cases := []struct {
-		env  string
-		want bool
-	}{
-		{"", false},
-		{"1", true},
-		{"0", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv(envBidiSendBoost, tc.env)
-			if got := MasqueBidiSendBoostEnabled(); got != tc.want {
-				t.Fatalf("MasqueBidiSendBoostEnabled() = %v, want %v", got, tc.want)
-			}
-		})
+func TestMasqueBidiSendBoostEnabledHardcodedOff(t *testing.T) {
+	if MasqueBidiSendBoostEnabled() {
+		t.Fatal("MasqueBidiSendBoostEnabled() must stay off on prod ref-stack hot path")
 	}
 }
 

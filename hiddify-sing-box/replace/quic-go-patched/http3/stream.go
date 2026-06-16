@@ -49,6 +49,8 @@ type Stream struct {
 	parsedTrailer bool
 
 	masqueCoalesceBuf []byte // batched CONNECT DATA frames (h2o/Invisv bulk coalesce)
+
+	masqueTunnelData bool // CONNECT tunnel bulk DATA phase (fast frame parse)
 }
 
 func newStream(
@@ -76,7 +78,13 @@ func (s *Stream) Read(b []byte) (int, error) {
 	if s.bytesRemainingInFrame == 0 {
 	parseLoop:
 		for {
-			frame, err := s.frameParser.ParseNext(s.qlogger)
+			var frame frame
+			var err error
+			if s.masqueTunnelData && !s.parsedTrailer {
+				frame, err = s.frameParser.parseTunnelDataFrame(s.qlogger)
+			} else {
+				frame, err = s.frameParser.ParseNext(s.qlogger)
+			}
 			if err != nil {
 				return 0, err
 			}
@@ -111,9 +119,6 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
-	if n > 0 && masqueStreamDuplexUploadWake(s) {
-		masqueWakeSendAfterReceiveRead(s, n)
-	}
 	return n, err
 }
 
@@ -122,19 +127,18 @@ func masqueStreamDuplexUploadWake(s *Stream) bool {
 		return false
 	}
 	qs := s.datagramStream.QUICStream()
-	return qs != nil && quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueIsBidiDuplexUploadStarted(qs)
+	return qs != nil && quic.MasqueIsBidiDuplexUploadStarted(qs)
 }
 
 const masqueHTTP3WriteToBufLen = 256 * 1024
 
-// WriteTo drains tunneled CONNECT payload. Batched wake every 64 KiB (WINDOW_UPDATE);
-// per-read wake only during saturated duplex (masqueStreamDuplexUploadWake in Read).
+// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered.
 func (s *Stream) WriteTo(w io.Writer) (int64, error) {
 	buf := make([]byte, masqueHTTP3WriteToBufLen)
 	var total int64
 	var deliveryPending int
 	flushDeliveryWake := func(delivered int) {
-		if delivered <= 0 || masqueStreamDuplexUploadWake(s) {
+		if delivered <= 0 {
 			return
 		}
 		deliveryPending += delivered
@@ -217,8 +221,7 @@ func (s *Stream) flushMasqueWriteCoalesce() error {
 	return err
 }
 
-// Write queues tunneled CONNECT payload. Bulk uploads coalesce into 256 KiB DATA frames
-// (io.CopyBuffer 64 KiB chunks → one wire frame; h2o/Invisv relay parity, fewer QUIC syscalls).
+// Write queues tunneled CONNECT payload. Bulk uploads coalesce into 256 KiB DATA frames (h2o/Invisv).
 func (s *Stream) Write(b []byte) (int, error) {
 	total := len(b)
 	for len(b) > 0 {

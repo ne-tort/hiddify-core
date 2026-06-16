@@ -1,40 +1,18 @@
 package quic
 
 import (
-	"os"
-	"strconv"
-	"strings"
-
 	"github.com/quic-go/quic-go/internal/protocol"
 )
 
-const (
-	envBidiSendBoost              = "MASQUE_QUIC_BIDI_SEND_BOOST"
-	defaultBidiSendBoostMaxFrames = 384
-)
+const defaultBidiSendBoostMaxFrames = 384
 
-// MasqueBidiSendBoostEnabled reports whether active-download bidi streams are queued at the
-// front of the framer stream queue. Default off — always-on starves duplex upload on single bidi.
+// MasqueBidiSendBoostEnabled is hardcoded off for prod (boost caused duplex winner-takes-all).
 func MasqueBidiSendBoostEnabled() bool {
-	v := strings.TrimSpace(os.Getenv(envBidiSendBoost))
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func masqueBidiSendBoostMaxFramesPerPacket() int {
-	raw := strings.TrimSpace(os.Getenv("MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES"))
-	if raw == "" {
-		return defaultBidiSendBoostMaxFrames
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
-		return defaultBidiSendBoostMaxFrames
-	}
-	return n
+	return defaultBidiSendBoostMaxFrames
 }
 
 type masqueBidiBoostSetter interface {
@@ -45,14 +23,6 @@ type masqueBidiBoostSetter interface {
 
 func masqueScheduleDownloadActiveWake(s *Stream) {
 	if s == nil || !masqueWakeSendOnReceiveRead() {
-		return
-	}
-	if masqueWakeBidiConnOnReceiveRead() {
-		if masqueStreamHasBidiSendBoost(s) {
-			MasqueWakeBidiDuplex(s)
-			return
-		}
-		masqueWakeConnFromStream(s)
 		return
 	}
 	MasqueWakeStreamSend(s)
@@ -99,10 +69,9 @@ func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
 	s.setMasqueDownloadActive(active)
 	if active {
 		s.setMasquePeerDuplexLazyFC(true)
-		// Receive-only legs batch FC on AddBytesRead — skip eager activation poke (H3-L1c-7e).
-		if !MasqueIsBidiDownloadReceiveOnly(s) {
-			_ = masquePokeDownloadReceiveWindow(s)
-		}
+		// One-shot activation poke even on receive-only legs (NoRenotify inside poke).
+		// Skipping here stalled docker iperf download-first before first Read/WriteTo byte.
+		_ = masquePokeDownloadReceiveWindow(s)
 		masqueScheduleDownloadActiveWake(s)
 	} else if MasqueBidiSendBoostEnabled() {
 		if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
@@ -110,6 +79,9 @@ func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
 		}
 	}
 }
+
+// MasqueRepromoteDuplexUploadSend is a no-op without framer boost.
+func MasqueRepromoteDuplexUploadSend(s *Stream) {}
 
 // MasqueRepromoteBidiSendBoost re-queues a download-active boosted stream at the framer front
 // when concurrent upload traffic arrives on another goroutine (H3-L1c duplex aggregate ceiling).

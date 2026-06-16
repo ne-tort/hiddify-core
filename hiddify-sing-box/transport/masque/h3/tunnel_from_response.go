@@ -39,13 +39,13 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, req
 		if rel, ok := resp.Body.(http3.ResponseStreamReleaser); ok {
 			rel.ReleaseHTTPStream()
 		}
+		http3.EnableMasqueConnectStream(str)
 		params := TunnelConnParams{
-			H3Stream:         str,
-			Ctx:              streamCtx,
-			Local:            &net.TCPAddr{},
-			Remote:           remoteAddr,
-			RouteBidiDuplex:  strm.ConnectStreamRouteBidiDuplex(ctx),
-			ConnectStreamLeg: strm.ConnectStreamLegFromContext(ctx),
+			H3Stream:        str,
+			Ctx:             streamCtx,
+			Local:           &net.TCPAddr{},
+			Remote:          remoteAddr,
+			RouteBidiDuplex: strm.ConnectStreamRouteBidiDuplex(ctx),
 		}
 		if ConnectTunnelUsesPipeUpload(reqBody) {
 			params.H3Stream = nil
@@ -53,7 +53,9 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, req
 			params.Writer = reqBody
 		}
 		applyTunnelConnParamsHook(&params)
-		return NewTunnelConn(params), nil
+		conn := NewTunnelConn(params)
+		_ = PrimeH3UploadBootstrapOnConn(conn)
+		return conn, nil
 	}
 	return nil, errHTTPStreamerMissing
 }
