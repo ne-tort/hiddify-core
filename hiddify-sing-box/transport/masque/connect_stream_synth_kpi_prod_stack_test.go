@@ -339,6 +339,56 @@ func TestLocalizeConnectStreamH3DuplexFairness(t *testing.T) {
 		minOfMin, sumRatio/float64(samples))
 }
 
+// TestLocalizeH3DuplexPolarization buckets bimodal duplex poles (localization only, no FAIL).
+func TestLocalizeH3DuplexPolarization(t *testing.T) {
+	const samples = 20
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	threshold := masque.ExportConnectStreamSynthProdMinMbps
+	maxRatio := masque.ExportConnectStreamSynthDuplexMaxRatio
+	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	var poleLow, poleMid, poleHigh, pass int
+	var bestMin float64
+	for i := 0; i < samples; i++ {
+		conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+		_ = conn.SetDeadline(time.Now().Add(dur + 8*time.Second))
+		down, up := measureProdStackDuplexMbps(t, conn, dur)
+		minLeg := down
+		if up < minLeg {
+			minLeg = up
+		}
+		maxLeg := down
+		if up > maxLeg {
+			maxLeg = up
+		}
+		ratio := 1.0
+		if minLeg > 0 {
+			ratio = maxLeg / minLeg
+		}
+		t.Logf("polarization %d/%d: down=%.1f up=%.1f min=%.1f ratio=%.2f",
+			i+1, samples, down, up, minLeg, ratio)
+		switch {
+		case minLeg < 150:
+			poleLow++
+		case minLeg < 700:
+			poleMid++
+		default:
+			poleHigh++
+		}
+		if down >= threshold && up >= threshold && minLeg > 0 && ratio <= maxRatio {
+			pass++
+		}
+		if minLeg > bestMin {
+			bestMin = minLeg
+		}
+		_ = conn.Close()
+	}
+	t.Logf("polarization summary: low<150=%d mid=[150,700)=%d high>=700=%d pass=%d/%d best_min=%.1f",
+		poleLow, poleMid, poleHigh, pass, samples, bestMin)
+}
+
 func TestGATEH2SynthBidiDuplexProdStack(t *testing.T) {
 	dur := masque.ExportConnectStreamSynthProdBenchDuration
 	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)

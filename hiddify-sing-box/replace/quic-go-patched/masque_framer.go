@@ -62,7 +62,7 @@ func masqueSyncDuplexUploadStarvedMode(s *Stream) {
 	starved := false
 	if MasqueIsBidiDuplexUploadStarted(s) && s.masqueIsDownloadActive() {
 		if s.masqueDuplexFairDeferRelay.Load() {
-			starved = true
+			starved = MasquePeerUploadCreditDue(s)
 		} else {
 			starved = masqueDuplexWithholdPeerDownloadCredit(s) || MasqueUploadSendStarved(s)
 		}

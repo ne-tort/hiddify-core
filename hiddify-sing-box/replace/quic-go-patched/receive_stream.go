@@ -33,8 +33,10 @@ type ReceiveStream struct {
 
 	queuedStopSending   bool
 	queuedMaxStreamData bool
-	masquePeerUploadCreditShipped atomic.Bool
-	masqueLastPeerUploadCreditOffset atomic.Uint64
+	masquePeerUploadCreditShipped        atomic.Bool
+	masquePeerUploadConnCreditShipped    atomic.Bool
+	masqueLastPeerUploadCreditOffset     atomic.Uint64
+	masqueLastPeerUploadConnCreditOffset atomic.Uint64
 
 	// Set once we read the io.EOF or the cancellation error.
 	// Note that for local cancellations, this doesn't necessarily mean that we know the final offset yet.
@@ -489,7 +491,31 @@ func (s *ReceiveStream) masqueClearQueuedMaxStreamData() {
 	s.queuedMaxStreamData = false
 	s.mutex.Unlock()
 	s.masquePeerUploadCreditShipped.Store(false)
+	s.masquePeerUploadConnCreditShipped.Store(false)
 	s.masqueLastPeerUploadCreditOffset.Store(0)
+	s.masqueLastPeerUploadConnCreditOffset.Store(0)
+}
+
+func (s *ReceiveStream) masqueForceQueueMaxStreamData() bool {
+	s.mutex.Lock()
+	if s.isRemoteCancellationEffective() {
+		s.mutex.Unlock()
+		return false
+	}
+	if s.queuedMaxStreamData {
+		s.mutex.Unlock()
+		return true
+	}
+	flowcontrol.SetMasqueDuplexForceUpdate(s.flowController)
+	if !s.flowController.ShouldQueueWindowUpdate() && !flowcontrol.MasqueDuplexForceUpdatePending(s.flowController) {
+		s.mutex.Unlock()
+		return false
+	}
+	s.queuedMaxStreamData = true
+	streamID := s.streamID
+	s.mutex.Unlock()
+	s.sender.onHasStreamControlFrame(streamID, s)
+	return true
 }
 
 func (s *ReceiveStream) masqueAckQueuedMaxStreamData() {

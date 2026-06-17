@@ -104,6 +104,7 @@ func ArmMasqueBidiDuplexFair(s *Stream) {
 	}
 	// Drop hijack-era 64 KiB queue slot so the first post-arm MAX_STREAM_DATA uses boosted FC.
 	quic.MasqueClearPeerUploadCreditQueue(qs)
+	quic.MasqueClearConnMaxDataQueue(qs)
 	// Boost + fair-defer before any stream markers poke FC — avoids a 64 KiB MAX_STREAM_DATA
 	// queued at hijack (EnableMasqueConnectStream lazy FC) winning the first control slot.
 	quic.MasqueBoostDuplexReceiveFC(qs)

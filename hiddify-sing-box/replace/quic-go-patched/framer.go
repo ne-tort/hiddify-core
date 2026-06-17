@@ -45,8 +45,8 @@ type framer struct {
 	streamQueue              ringbuffer.RingBuffer[protocol.StreamID]
 	bidiSendBoost            map[protocol.StreamID]struct{}
 	masqueDuplexFairStreams  map[protocol.StreamID]struct{}
-	masqueDuplexFairRelayStreams map[protocol.StreamID]struct{} // server relay: inline MAX_STREAM_DATA after STREAM
-	masqueDuplexFairClientStreams map[protocol.StreamID]struct{} // client: inline MAX_STREAM_DATA after C2S STREAM
+	masqueDuplexFairRelayStreams     map[protocol.StreamID]struct{} // server relay: inline MAX_STREAM_DATA after STREAM
+	masqueDuplexFairClientStreams    map[protocol.StreamID]struct{} // client: inline MAX_STREAM_DATA after C2S STREAM
 	masqueDuplexLimitStreams map[protocol.StreamID]struct{} // saturated duplex: cap STREAM rounds + prioritize FC
 	masqueDuplexUploadStarvedStreams map[protocol.StreamID]struct{}
 	streamsWithControlFrames map[protocol.StreamID]streamControlFrameGetter
@@ -117,10 +117,13 @@ func (f *framer) Append(
 	f.mutex.Lock()
 	numActiveStreams := f.streamQueue.Len()
 	streamRounds := numActiveStreams
-	duplexMode := f.hasMasqueDuplexLimitLocked() || f.hasMasqueDuplexFairLocked()
+	duplexMode := f.hasMasqueDuplexLimitLocked() || f.hasMasqueDuplexFairLocked() || f.hasMasqueDuplexFairRelayLocked()
 	duplexReserve := protocol.ByteCount(0)
 	if duplexMode {
 		duplexReserve = maxStreamControlFrameSize + 1
+		if f.hasMasqueDuplexFairRelayLocked() || f.hasMasqueDuplexFairClientLocked() {
+			duplexReserve = 2*maxStreamControlFrameSize + 1
+		}
 	}
 	if streamRounds > 1 && duplexMode {
 		streamRounds = 1
@@ -235,10 +238,86 @@ func (f *framer) appendOneStreamControlFrameLocked(
 	l := fr.Frame.Length(v)
 	frames = append(frames, fr)
 	if hasMore {
-		// Send-side control may remain; receive MAX_STREAM_DATA often has hasMore=false.
 		_ = hasMore
 	}
-	return frames, l, true
+	totalLen := l
+	if f.isMasqueDuplexFairRelayLocked(id) {
+		var connLen protocol.ByteCount
+		frames, connLen, _ = f.appendMasqueConnMaxDataInlineLocked(frames, maxLen-totalLen, now, v, id)
+		totalLen += connLen
+	}
+	return frames, totalLen, true
+}
+
+func (f *framer) masqueClearQueuedConnMaxData() {
+	f.controlFrameMutex.Lock()
+	defer f.controlFrameMutex.Unlock()
+	var kept []wire.Frame
+	for _, frame := range f.controlFrames {
+		if _, ok := frame.(*wire.MaxDataFrame); ok {
+			continue
+		}
+		kept = append(kept, frame)
+	}
+	f.controlFrames = kept
+}
+
+func (f *framer) appendMasqueConnMaxDataInlineLocked(
+	frames []ackhandler.Frame,
+	maxLen protocol.ByteCount,
+	now monotime.Time,
+	v protocol.Version,
+	streamID protocol.StreamID,
+) ([]ackhandler.Frame, protocol.ByteCount, bool) {
+	if f.connFlowController == nil || maxLen <= maxStreamControlFrameSize {
+		return frames, 0, false
+	}
+	noteConnCredit := func(offset protocol.ByteCount) {
+		if offset == 0 {
+			return
+		}
+		str, ok := f.streamsWithControlFrames[streamID]
+		if !ok {
+			return
+		}
+		switch s := str.(type) {
+		case *Stream:
+			if s.receiveStr != nil {
+				s.receiveStr.masqueLastPeerUploadConnCreditOffset.Store(uint64(offset))
+				s.receiveStr.masquePeerUploadConnCreditShipped.Store(true)
+			}
+		case *ReceiveStream:
+			s.masqueLastPeerUploadConnCreditOffset.Store(uint64(offset))
+			s.masquePeerUploadConnCreditShipped.Store(true)
+		}
+	}
+	for i := len(f.controlFrames) - 1; i >= 0; i-- {
+		if md, ok := f.controlFrames[i].(*wire.MaxDataFrame); ok {
+			frameLen := md.Length(v)
+			if frameLen <= maxLen {
+				frames = append(frames, ackhandler.Frame{Frame: md})
+				f.controlFrames = slices.Delete(f.controlFrames, i, i+1)
+				noteConnCredit(md.MaximumData)
+				return frames, frameLen, true
+			}
+			return frames, 0, false
+		}
+	}
+	flowcontrol.SetMasqueDuplexBoostConnFC(f.connFlowController)
+	flowcontrol.SetMasqueDuplexForceConnUpdate(f.connFlowController)
+	offset := f.connFlowController.GetWindowUpdate(now)
+	if offset == 0 {
+		return frames, 0, false
+	}
+	md := &wire.MaxDataFrame{MaximumData: offset}
+	frameLen := md.Length(v)
+	if frameLen > maxLen {
+		f.controlFrames = append(f.controlFrames, md)
+		return frames, 0, false
+	}
+	frames = append(frames, ackhandler.Frame{Frame: md})
+	noteConnCredit(offset)
+	return frames, frameLen, true
 }
 
 func (f *framer) appendControlFrames(
@@ -293,6 +372,16 @@ func (f *framer) appendControlFrames(
 		}
 		frames = append(frames, fr)
 		length += fr.Frame.Length(v)
+		if filter == masqueControlFrameSkipDuplexFair {
+			f.mutex.Lock()
+			relay := f.isMasqueDuplexFairRelayLocked(id)
+			f.mutex.Unlock()
+			if relay {
+				var connLen protocol.ByteCount
+				frames, connLen, _ = f.appendMasqueConnMaxDataInlineLocked(frames, maxLen-length, now, v, id)
+				length += connLen
+			}
+		}
 		if hasMore {
 			// It is rare that a stream has more than one control frame to queue.
 			// We don't want to spawn another loop for just to cover that case.
@@ -470,6 +559,14 @@ func (f *framer) isMasqueDuplexFairRelayLocked(id protocol.StreamID) bool {
 	}
 	_, ok := f.masqueDuplexFairRelayStreams[id]
 	return ok
+}
+
+func (f *framer) hasMasqueDuplexFairRelayLocked() bool {
+	return len(f.masqueDuplexFairRelayStreams) > 0
+}
+
+func (f *framer) hasMasqueDuplexFairClientLocked() bool {
+	return len(f.masqueDuplexFairClientStreams) > 0
 }
 
 func (f *framer) setMasqueDuplexFairClient(id protocol.StreamID, client bool) {

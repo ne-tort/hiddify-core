@@ -178,7 +178,7 @@ func (c *streamFlowController) ShouldQueueWindowUpdate() bool {
 	return c.shouldQueueWindowUpdate()
 }
 
-const masqueDuplexMinStreamWindow = 2 * 1024 * 1024 // ~1 Gbit/s @ ~16 ms stream RTT
+const masqueDuplexMinStreamWindow = 5 * 1024 * 1024
 
 // SetMasqueDuplexBoostFC enlarges stream receive window during saturated bidi duplex so
 // MAX_STREAM_DATA grants ≥2 MiB per update (avoids ~64 KiB/window ≈70 Mbit/s starvation).

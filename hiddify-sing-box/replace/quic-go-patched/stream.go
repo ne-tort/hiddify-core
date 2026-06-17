@@ -56,15 +56,15 @@ type Stream struct {
 	receiveStr *ReceiveStream
 	sendStr    *SendStream
 
-	completedMutex         sync.Mutex
-	sender                 streamSender
-	receiveStreamCompleted bool
-	sendStreamCompleted    bool
-	masqueDownloadActive      atomic.Bool
-	masqueDownloadReceiveOnly atomic.Bool // P2 download leg: poke at activation only (H3-L1c-7c)
-	masqueDuplexUploadStarted atomic.Bool // concurrent upload on same bidi stream during WriteTo drain
-	masqueDuplexFairDeferClient atomic.Bool // client-only: defer MAX_STREAM_DATA behind C2S STREAM (not server relay)
-	masqueDuplexFairDeferRelay  atomic.Bool // server relay: defer MAX_STREAM_DATA behind S2C STREAM during duplex
+	completedMutex                sync.Mutex
+	sender                        streamSender
+	receiveStreamCompleted        bool
+	sendStreamCompleted           bool
+	masqueDownloadActive          atomic.Bool
+	masqueDownloadReceiveOnly     atomic.Bool // P2 download leg: poke at activation only (H3-L1c-7c)
+	masqueDuplexUploadStarted     atomic.Bool // concurrent upload on same bidi stream during WriteTo drain
+	masqueDuplexFairDeferClient   atomic.Bool // client-only: defer MAX_STREAM_DATA behind C2S STREAM (not server relay)
+	masqueDuplexFairDeferRelay    atomic.Bool // server relay: defer MAX_STREAM_DATA behind S2C STREAM during duplex
 	masqueConcurrentUploadPending atomic.Bool // client: upload Write announced before duplex QUIC arm
 }
 

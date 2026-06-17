@@ -26,6 +26,9 @@ const RelayTunnelBufLen = 256 * 1024
 // RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
 const RelayTunnelFlushBytes = RelayTunnelBufLen
 
+// RelayTunnelUploadWakeBytes batches upload-relay credit wakes (2× cadence vs download flush).
+const RelayTunnelUploadWakeBytes = 128 * 1024
+
 var relayTunnelBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, RelayTunnelBufLen)
@@ -271,23 +274,32 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 	bp := relayTunnelBufPool.Get().(*[]byte)
 	defer relayTunnelBufPool.Put(bp)
 	buf := *bp
-	readLen := len(buf)
-	if str, ok := dst.(*http3.Stream); ok && http3.IsMasqueBidiDuplexUploadStarted(str) {
-		readLen = 64 * 1024
-	}
 	var written int64
+	var pendingWake int
+	flushWake := func(str *http3.Stream) {
+		if str == nil || pendingWake < RelayTunnelFlushBytes {
+			return
+		}
+		pendingWake = 0
+		http3.WakeMasqueRelayAfterDownloadWrite(str)
+	}
 	for {
-		nr, er := src.Read(buf[:readLen])
+		nr, er := src.Read(buf)
 		if nr > 0 {
 			nw, ew := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
 				if str, ok := dst.(*http3.Stream); ok {
 					_ = str.FlushMasqueCoalesce()
-					http3.WakeMasqueRelayAfterDownloadWrite(str)
+					pendingWake += nw
+					flushWake(str)
 				}
 			}
 			if ew != nil {
+				if str, ok := dst.(*http3.Stream); ok && pendingWake > 0 {
+					pendingWake = 0
+					http3.WakeMasqueRelayAfterDownloadWrite(str)
+				}
 				return written, ew
 			}
 			if nr != nw {
@@ -295,6 +307,10 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 			}
 		}
 		if er != nil {
+			if str, ok := dst.(*http3.Stream); ok && pendingWake > 0 {
+				pendingWake = 0
+				http3.WakeMasqueRelayAfterDownloadWrite(str)
+			}
 			if er == io.EOF {
 				return written, nil
 			}
@@ -303,24 +319,39 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 	}
 }
 
-// relayTunnelCopyBufferH3BidiUpload copies client upload → onward TCP with per-chunk duplex mark + wake.
+// relayTunnelCopyBufferH3BidiUpload copies client upload → onward TCP with batched duplex wake.
 func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.ReadWriteCloser) (int64, error) {
 	bp := relayTunnelBufPool.Get().(*[]byte)
 	defer relayTunnelBufPool.Put(bp)
 	buf := *bp
 	var written int64
+	var pendingWake int
+	flushWake := func(str *http3.Stream) {
+		if str == nil || pendingWake < RelayTunnelUploadWakeBytes {
+			return
+		}
+		pendingWake = 0
+		http3.WakeMasqueRelayAfterUploadRead(str)
+	}
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			if str, ok := bidi.(*http3.Stream); ok {
 				_ = str.FlushMasqueCoalesce()
-				http3.WakeMasqueRelayAfterUploadRead(str)
 			}
 			nw, ew := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
+				if str, ok := bidi.(*http3.Stream); ok {
+					pendingWake += nw
+					flushWake(str)
+				}
 			}
 			if ew != nil {
+				if str, ok := bidi.(*http3.Stream); ok && pendingWake > 0 {
+					pendingWake = 0
+					http3.WakeMasqueRelayAfterUploadRead(str)
+				}
 				return written, ew
 			}
 			if nr != nw {
@@ -328,6 +359,10 @@ func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.Rea
 			}
 		}
 		if er != nil {
+			if str, ok := bidi.(*http3.Stream); ok && pendingWake > 0 {
+				pendingWake = 0
+				http3.WakeMasqueRelayAfterUploadRead(str)
+			}
 			if er == io.EOF {
 				return written, nil
 			}

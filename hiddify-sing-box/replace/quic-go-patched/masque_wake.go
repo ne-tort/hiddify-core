@@ -3,8 +3,8 @@ package quic
 import (
 	"io"
 	"os"
-	"runtime"
 	"strings"
+	"time"
 
 	"github.com/quic-go/quic-go/internal/flowcontrol"
 	"github.com/quic-go/quic-go/internal/monotime"
@@ -56,16 +56,19 @@ func MasqueDuplexGrantPeerDownloadCredit(s *Stream) bool {
 	return masqueDuplexGrantPeerDownloadCredit(s)
 }
 
-const masqueDuplexUploadStarveThreshold = 2 * 1024 * 1024 // defer S2C only when C2S has full boosted window headroom
+const masqueDuplexUploadStarveThreshold = 5 * 1024 * 1024
 
 // masqueDuplexWithholdPeerDownloadCredit reports whether saturated duplex should defer S2C
-// MAX_STREAM_DATA while local C2S send still has headroom.
+// MAX_STREAM_DATA while C2S send still has headroom or is FC-starved.
 func masqueDuplexWithholdPeerDownloadCredit(s *Stream) bool {
 	if s == nil || !MasqueIsBidiDuplexUploadStarted(s) || s.masqueDuplexFairDeferRelay.Load() {
 		return false
 	}
 	if s.sendStr == nil || s.sendStr.flowController == nil {
 		return false
+	}
+	if MasqueUploadSendStarved(s) {
+		return true
 	}
 	return s.sendStr.flowController.SendWindowSize() >= masqueDuplexUploadStarveThreshold
 }
@@ -121,6 +124,19 @@ func MasqueClearPeerUploadCreditQueue(s *Stream) {
 	}
 }
 
+// MasqueClearConnMaxDataQueue drops stale queued MAX_DATA before boosted duplex arm.
+func MasqueClearConnMaxDataQueue(s *Stream) {
+	conn := masqueStreamConn(s)
+	if conn == nil {
+		return
+	}
+	conn.framer.masqueClearQueuedConnMaxData()
+	if s != nil && s.receiveStr != nil {
+		s.receiveStr.masquePeerUploadConnCreditShipped.Store(false)
+		s.receiveStr.masqueLastPeerUploadConnCreditOffset.Store(0)
+	}
+}
+
 // MasquePokePeerUploadCredit queues C2S MAX_STREAM_DATA on server receive half (bypasses S2C withhold).
 func MasquePokePeerUploadCredit(s *Stream) bool {
 	return masquePokePeerUploadCredit(s)
@@ -151,18 +167,38 @@ func MasquePeerUploadCreditOffset(s *Stream) uint64 {
 	return s.receiveStr.masqueLastPeerUploadCreditOffset.Load()
 }
 
+// MasquePeerUploadConnCreditShipped reports whether paired MAX_DATA was packed since last clear.
+func MasquePeerUploadConnCreditShipped(s *Stream) bool {
+	return s != nil && s.receiveStr != nil && s.receiveStr.masquePeerUploadConnCreditShipped.Load()
+}
+
+// MasquePeerUploadConnCreditOffset reports the last shipped C2S MAX_DATA cumulative offset.
+func MasquePeerUploadConnCreditOffset(s *Stream) uint64 {
+	if s == nil || s.receiveStr == nil {
+		return 0
+	}
+	return s.receiveStr.masqueLastPeerUploadConnCreditOffset.Load()
+}
+
 // MasqueWaitPeerUploadCreditShipped blocks until boosted C2S MAX_STREAM_DATA ships or budget expires.
 func MasqueWaitPeerUploadCreditShipped(s *Stream) {
 	if s == nil || !s.masqueDuplexFairDeferRelay.Load() {
 		return
 	}
-	for i := 0; i < 512; i++ {
-		if MasquePeerUploadCreditShipped(s) && MasquePeerUploadCreditOffset(s) >= masqueRelayMinInitialUploadCredit {
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if MasquePeerUploadCreditShipped(s) &&
+			MasquePeerUploadConnCreditShipped(s) &&
+			MasquePeerUploadCreditOffset(s) >= masqueRelayMinInitialUploadCredit &&
+			MasquePeerUploadConnCreditOffset(s) >= masqueRelayMinInitialUploadCredit {
 			return
 		}
 		MasqueRepromoteDuplexUploadSend(s)
-		masquePokeConnPeerUploadCredit(s)
-		runtime.Gosched()
+		masquePokePeerUploadCredit(s)
+		if conn := masqueStreamConn(s); conn != nil {
+			conn.scheduleSending()
+		}
+		time.Sleep(10 * time.Microsecond)
 	}
 }
 
@@ -170,17 +206,11 @@ func masquePokePeerUploadCredit(s *Stream) bool {
 	if s == nil || s.receiveStr == nil {
 		return false
 	}
-	fc := s.receiveStr.flowController
-	if fc != nil {
-		if !fc.ShouldQueueWindowUpdate() && !flowcontrol.MasqueDuplexForceUpdatePending(fc) {
-			return false
-		}
-	}
 	conn := masqueStreamConn(s)
 	if conn == nil {
 		return false
 	}
-	if masqueQueueStreamMaxDataFrame(s, conn, monotime.Now()) {
+	if masqueQueuePeerUploadCreditPair(s, conn, monotime.Now()) {
 		masqueSyncDuplexUploadStarvedMode(s)
 		return true
 	}
@@ -197,13 +227,24 @@ func masquePokePeerUploadCreditAfterConsume(s *Stream) bool {
 		return false
 	}
 	now := monotime.Now()
-	connPoked := masquePokeConnPeerUploadCredit(s)
-	streamQueued := masqueQueueStreamMaxDataFrame(s, conn, now)
-	if streamQueued || connPoked {
+	queued := masqueQueuePeerUploadCreditPair(s, conn, now)
+	if queued {
 		conn.onHasConnectionData()
 		masqueSyncDuplexUploadStarvedMode(s)
 	}
-	return streamQueued || connPoked
+	return queued
+}
+
+func masqueQueuePeerUploadCreditPair(s *Stream, conn *Conn, now monotime.Time) bool {
+	if s == nil || s.receiveStr == nil || conn == nil {
+		return false
+	}
+	connQueued := masqueQueueConnMaxDataFrame(s, conn, now)
+	streamQueued := masqueQueueStreamMaxDataFrame(s, conn, now)
+	if connQueued || streamQueued {
+		conn.onHasConnectionData()
+	}
+	return connQueued || streamQueued
 }
 
 func masqueQueueStreamMaxDataFrame(s *Stream, conn *Conn, now monotime.Time) bool {
@@ -211,21 +252,21 @@ func masqueQueueStreamMaxDataFrame(s *Stream, conn *Conn, now monotime.Time) boo
 		return false
 	}
 	flowcontrol.SetMasqueDuplexForceUpdate(s.receiveStr.flowController)
-	offset := s.receiveStr.flowController.GetWindowUpdate(now)
-	if offset == 0 {
+	_ = now
+	return s.receiveStr.masqueForceQueueMaxStreamData()
+}
+
+func masqueQueueConnMaxDataFrame(s *Stream, conn *Conn, now monotime.Time) bool {
+	if conn == nil || conn.connFlowController == nil {
 		return false
 	}
-	if last := s.receiveStr.masqueLastPeerUploadCreditOffset.Load(); last != 0 && uint64(offset) <= last {
-		return false
+	flowcontrol.SetMasqueDuplexBoostConnFC(conn.connFlowController)
+	flowcontrol.SetMasqueDuplexForceConnUpdate(conn.connFlowController)
+	offset := conn.connFlowController.GetWindowUpdate(now)
+	if offset > 0 {
+		conn.framer.QueueControlFrame(&wire.MaxDataFrame{MaximumData: offset})
 	}
-	conn.framer.QueueControlFrame(&wire.MaxStreamDataFrame{
-		StreamID:          s.receiveStr.streamID,
-		MaximumStreamData: offset,
-	})
-	s.receiveStr.masqueAckQueuedMaxStreamData()
-	s.receiveStr.masquePeerUploadCreditShipped.Store(true)
-	s.receiveStr.masqueLastPeerUploadCreditOffset.Store(uint64(offset))
-	return true
+	return offset > 0
 }
 
 func masqueSenderConn(sender streamSender) *Conn {
