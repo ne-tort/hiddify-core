@@ -28,6 +28,10 @@ type DialTCPHost interface {
 
 // DialTCP dials TCP over the CONNECT-IP userspace netstack (tcp_transport=connect_ip).
 func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (net.Conn, error) {
+	return dialTCP(ctx, host, destination, true)
+}
+
+func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, allowRetry bool) (net.Conn, error) {
 	if NetstackDebugEnabled() {
 		log.Printf("masque connect_ip tcp: dial request destination=%s", destination.String())
 	}
@@ -98,7 +102,31 @@ func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (ne
 		log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), dialErr)
 	}
 	if dialErr != nil {
+		if allowRetry && shouldRetryDialAfterNetstackReset(dialErr) {
+			if NetstackDebugEnabled() {
+				log.Printf("masque connect_ip tcp: resetting netstack after dial failure destination=%s err=%v", dest.String(), dialErr)
+			}
+			host.LockSession()
+			if host.TCPNetstack() == ns {
+				host.AttachTCPNetstack(nil)
+				host.RecordTCPNetstackReady(false)
+			}
+			host.UnlockSession()
+			_ = ns.Close()
+			return dialTCP(ctx, host, destination, false)
+		}
 		host.ClearHTTPFallbackAfterGiveUp()
 	}
 	return conn, dialErr
+}
+
+func shouldRetryDialAfterNetstackReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

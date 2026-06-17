@@ -5,13 +5,15 @@ import "sync/atomic"
 // WriteQueueDepth is the bounded depth of the forwarder writeCh (server→client segments).
 const WriteQueueDepth = writeQueueDepth
 
-// WriteQueueMetrics tracks CONNECT-IP forwarder writeCh occupancy (optional test/profiling hook).
-type WriteQueueMetrics struct {
+// DownloadQueueDepth is the bounded depth of the forwarder downloadCh (remote→client DATA).
+const DownloadQueueDepth = downloadQueueDepth
+
+type queueDepthMetrics struct {
 	Depth     atomic.Uint64
 	DepthHigh atomic.Uint64
 }
 
-func (m *WriteQueueMetrics) noteEnqueued() {
+func (m *queueDepthMetrics) noteEnqueued() {
 	if m == nil {
 		return
 	}
@@ -24,9 +26,15 @@ func (m *WriteQueueMetrics) noteEnqueued() {
 	}
 }
 
-func (m *WriteQueueMetrics) noteDequeued() {
+func (m *queueDepthMetrics) noteDequeued() {
 	if m == nil {
 		return
 	}
 	m.Depth.Add(^uint64(0))
 }
+
+// WriteQueueMetrics tracks CONNECT-IP forwarder writeCh occupancy (optional test/profiling hook).
+type WriteQueueMetrics = queueDepthMetrics
+
+// DownloadQueueMetrics tracks CONNECT-IP forwarder downloadCh occupancy (optional test/profiling hook).
+type DownloadQueueMetrics = queueDepthMetrics

@@ -33,7 +33,7 @@ func masqueWakeSendAfterUploadWrite(str *Stream, n int) {
 	masqueWakeSendAfterUploadChunk(str, n)
 }
 
-// Prod wake: stream send only; skip WINDOW poke during saturated duplex (upload STREAM budget).
+// Prod wake: stream send only during saturated duplex (no S2C WINDOW poke on upload chunks).
 func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
 	if n <= 0 || !masqueWakeSendOnReceiveRead() || str == nil {
 		return
@@ -46,7 +46,12 @@ func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
 	if qs == nil {
 		return
 	}
-	if quic.MasqueIsBidiDownloadActive(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs) && quic.MasqueDownloadEagerWindowEnabled() {
+	if quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+		quic.MasqueWakeStreamSend(qs)
+		return
+	}
+	if quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueDownloadEagerWindowEnabled() {
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
 	quic.MasqueWakeStreamSend(qs)
@@ -67,7 +72,22 @@ func masqueWakeSendAfterBidiProgress(str *Stream, n int, active ...func(*quic.St
 	if len(active) > 0 && active[0] != nil && !active[0](qs) {
 		return
 	}
-	if !quic.MasqueIsBidiDuplexUploadStarted(qs) && quic.MasqueDownloadEagerWindowEnabled() {
+	if quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		if quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueDownloadEagerWindowEnabled() &&
+			quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
+			quic.MasquePokeDownloadReceiveWindow(qs)
+		}
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+		quic.MasqueWakeStreamSend(qs)
+		return
+	}
+	if quic.MasqueConcurrentUploadPending(qs) && quic.MasqueIsBidiDownloadActive(qs) {
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+		quic.MasqueWakeStreamSend(qs)
+		return
+	}
+	if quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueDownloadEagerWindowEnabled() &&
+		quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
 	quic.MasqueWakeStreamSend(qs)

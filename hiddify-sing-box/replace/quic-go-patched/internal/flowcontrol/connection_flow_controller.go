@@ -96,6 +96,36 @@ func (c *connectionFlowController) EnsureMinimumWindowSize(inc protocol.ByteCoun
 	c.startNewAutoTuningEpoch(now)
 }
 
+// SetMasqueDuplexBoostConnFC enlarges connection receive window during saturated bidi duplex
+// so MAX_DATA grants keep pace with boosted stream windows (avoids ~80 Mbit/s conn FC cap).
+func SetMasqueDuplexBoostConnFC(fc ConnectionFlowController) {
+	cfc, ok := fc.(*connectionFlowController)
+	if !ok {
+		return
+	}
+	cfc.mutex.Lock()
+	defer cfc.mutex.Unlock()
+	cfc.setMasqueDuplexEagerFC(true)
+	if cfc.receiveWindowSize < masqueDuplexMinStreamWindow {
+		cfc.receiveWindowSize = masqueDuplexMinStreamWindow
+	}
+	if cfc.maxReceiveWindowSize < masqueDuplexMinStreamWindow*4 {
+		cfc.maxReceiveWindowSize = masqueDuplexMinStreamWindow * 4
+	}
+	cfc.masqueDuplexForceUpdate = true
+}
+
+// SetMasqueDuplexForceConnUpdate arms the next MAX_DATA regardless of threshold.
+func SetMasqueDuplexForceConnUpdate(fc ConnectionFlowController) {
+	cfc, ok := fc.(*connectionFlowController)
+	if !ok {
+		return
+	}
+	cfc.mutex.Lock()
+	cfc.masqueDuplexForceUpdate = true
+	cfc.mutex.Unlock()
+}
+
 // Reset rests the flow controller. This happens when 0-RTT is rejected.
 // All stream data is invalidated, it's as if we had never opened a stream and never sent any data.
 // At that point, we only have sent stream data, but we didn't have the keys to open 1-RTT keys yet.

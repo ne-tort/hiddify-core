@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -132,6 +133,10 @@ func StreamCapsuleDatagramIngressDropTotal() uint64 {
 	return streamCapsuleDatagramIngressDropTotal.Load()
 }
 
+func ValidationDropTotal() uint64 {
+	return validationDropTotal.Load()
+}
+
 func PolicyDropICMPTotal() uint64 {
 	return policyDropICMPTotal.Load()
 }
@@ -218,12 +223,13 @@ type connRouteView struct {
 
 // connReadPrefetchMax bounds how many additional HTTP DATAGRAM frames we buffer between ReadPacket calls.
 // Draining TryReceiveDatagram frees HTTP/3 ring slots promptly when QUIC→HTTP ingress outpaces callers.
-const connReadPrefetchMax = 512
+const connReadPrefetchMax = 32768
 const connReadPrefetchMask = connReadPrefetchMax - 1
 const sampledDropLogEvery = 1024
 const connDropCounterFlushThreshold = 256
 const connDrainProbeMaxSkip = 64
 const connExpiredPrefetchDropBudget = 64
+const connIngressBackpressureWait = 250 * time.Millisecond
 
 type adaptivePrefetchProbeGate struct {
 	skipBudget       atomic.Int32
@@ -279,6 +285,9 @@ type Conn struct {
 	// HTTP_DATAGRAM capsules on the CONNECT request stream — some peers use only the latter on H3.
 	h3UnifiedDatagramIngress chan []byte
 	h3QuicPumpOnce           sync.Once
+	h3PrefetchDrainOnce      sync.Once
+	prefetchNotify           chan struct{}
+	prefetchCond             *sync.Cond
 	writes                   chan writeCapsule
 
 	prefetchMu    sync.Mutex
@@ -378,6 +387,7 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 		c.datagramCapsuleIngress = make(chan []byte, connReadPrefetchMax)
 	} else {
 		c.h3UnifiedDatagramIngress = make(chan []byte, connReadPrefetchMax)
+		c.prefetchNotify = make(chan struct{}, 256)
 	}
 	if dr, ok := str.(tryDrainHTTPDatagrams); ok && c.datagramCapsuleIngress == nil && c.h3UnifiedDatagramIngress == nil {
 		c.drain = dr
@@ -440,7 +450,77 @@ func (c *Conn) ensureH3QuicDatagramPump() {
 	if c == nil || c.h3UnifiedDatagramIngress == nil {
 		return
 	}
-	c.h3QuicPumpOnce.Do(func() { go c.pumpH3QUICDatagrams() })
+	c.h3QuicPumpOnce.Do(func() {
+		go c.pumpH3QUICDatagrams()
+		c.ensureH3UnifiedPrefetchDrainer()
+	})
+}
+
+func (c *Conn) ensureH3UnifiedPrefetchDrainer() {
+	if c == nil || c.h3UnifiedDatagramIngress == nil {
+		return
+	}
+	c.h3PrefetchDrainOnce.Do(func() {
+		c.prefetchCond = sync.NewCond(&c.prefetchMu)
+		go c.runH3UnifiedIngressPrefetchDrainer()
+	})
+}
+
+func (c *Conn) signalPrefetchNotify() {
+	if c == nil || c.prefetchNotify == nil {
+		return
+	}
+	select {
+	case c.prefetchNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Conn) runH3UnifiedIngressPrefetchDrainer() {
+	for {
+		select {
+		case <-c.closeChan:
+			return
+		case d, ok := <-c.h3UnifiedDatagramIngress:
+			if !ok {
+				return
+			}
+			c.prefetchMu.Lock()
+			for c.prefetchCount >= connReadPrefetchMax {
+				if c.closeChan != nil {
+					select {
+					case <-c.closeChan:
+						c.prefetchMu.Unlock()
+						return
+					default:
+					}
+				}
+				c.prefetchCond.Wait()
+			}
+			tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
+			c.prefetchSlots[tail] = d
+			c.prefetchCount++
+			c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+			c.prefetchMu.Unlock()
+			c.signalPrefetchNotify()
+		}
+	}
+}
+
+func (c *Conn) receiveH3UnifiedPrefetched(ctx context.Context) ([]byte, error) {
+	c.ensureH3QuicDatagramPump()
+	for {
+		if raw, ok, _ := c.takePrefetchedRaw(); ok {
+			return raw, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-c.closeChan:
+			return nil, c.errAfterClose()
+		case <-c.prefetchNotify:
+		}
+	}
 }
 
 func (c *Conn) pumpH3QUICDatagrams() {
@@ -476,12 +556,27 @@ func (c *Conn) pumpH3QUICDatagrams() {
 		case <-c.closeChan:
 			return
 		case c.h3UnifiedDatagramIngress <- d:
-		default:
-			// Keep QUIC datagram receive loop non-blocking: a full ingress queue during
-			// startup (before ReadPacket consumers attach) must not stall connection-level
-			// reads and delay control capsules (ADDRESS_ASSIGN/ROUTE_ADVERTISEMENT).
-			logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped QUIC HTTP_DATAGRAM frame (h3 unified ingress full)")
 		}
+	}
+}
+
+func (c *Conn) enqueueH3UnifiedIngressWithBackpressure(d []byte) bool {
+	timer := time.NewTimer(connIngressBackpressureWait)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-c.closeChan:
+		return false
+	case c.h3UnifiedDatagramIngress <- d:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
@@ -501,6 +596,9 @@ func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
 	c.prefetchHead = (c.prefetchHead + 1) & connReadPrefetchMask
 	c.prefetchCount--
 	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	if c.prefetchCond != nil {
+		c.prefetchCond.Broadcast()
+	}
 	return d, true, c.prefetchCount > 0
 }
 
@@ -517,7 +615,7 @@ func (c *Conn) extendPrefetchFromTry() {
 			select {
 			case raw := <-c.datagramCapsuleIngress:
 				tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
-				c.prefetchSlots[tail] = slices.Clone(raw)
+				c.prefetchSlots[tail] = raw
 				c.prefetchCount++
 				drained++
 			default:
@@ -530,26 +628,7 @@ func (c *Conn) extendPrefetchFromTry() {
 	}
 	if c.h3UnifiedDatagramIngress != nil {
 		c.ensureH3QuicDatagramPump()
-		if !c.prefetchGate.shouldProbe() {
-			return
-		}
-		c.prefetchMu.Lock()
-		defer c.prefetchMu.Unlock()
-		drained := 0
-	h3UnifiedDrain:
-		for c.prefetchCount < connReadPrefetchMax {
-			select {
-			case raw := <-c.h3UnifiedDatagramIngress:
-				tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
-				c.prefetchSlots[tail] = slices.Clone(raw)
-				c.prefetchCount++
-				drained++
-			default:
-				break h3UnifiedDrain
-			}
-		}
-		c.prefetchCountAtomic.Store(int32(c.prefetchCount))
-		c.prefetchGate.observeDrain(drained)
+		// h3 unified ingress is drained by runH3UnifiedIngressPrefetchDrainer (FIFO).
 		return
 	}
 	if c.drain == nil {
@@ -774,7 +853,9 @@ func (c *Conn) readFromStream() error {
 					return c.errAfterClose()
 				case c.h3UnifiedDatagramIngress <- slices.Clone(payload):
 				default:
-					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h3 unified ingress full)")
+					if !c.enqueueH3UnifiedIngressWithBackpressure(slices.Clone(payload)) {
+						logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h3 unified ingress full)")
+					}
 				}
 				continue
 			}
@@ -897,14 +978,7 @@ func (c *Conn) receiveProxiedDatagram(ctx context.Context) ([]byte, error) {
 	}
 	if c.h3UnifiedDatagramIngress != nil {
 		c.ensureH3QuicDatagramPump()
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		case <-c.closeChan:
-			return nil, c.errAfterClose()
-		case d := <-c.h3UnifiedDatagramIngress:
-			return d, nil
-		}
+		return c.receiveH3UnifiedPrefetched(ctx)
 	}
 	data, err := c.str.ReceiveDatagram(ctx)
 	if err != nil {

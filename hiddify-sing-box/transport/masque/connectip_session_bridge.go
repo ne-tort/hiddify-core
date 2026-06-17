@@ -526,6 +526,13 @@ func (s *coreSession) deliverConnectIPTCPIngressNoFlush(pkt []byte) bool {
 		func() bool { return s.ConnectIPTCPInstallInflight.Load() > 0 },
 		func() *connectIPTCPNetstack { return s.IngressTCPNetstack.Load() },
 		s.enqueuePreTCPNetstackIngress,
-		func(pkt []byte, _ *cip.Netstack) { s.noteConnectIPIngressAckForWake(pkt) },
+		func(pkt []byte, _ *cip.Netstack) {
+			s.noteConnectIPIngressAckForWake(pkt)
+			// Native CONNECT-IP TCP (tcp_transport=connect_ip) needs immediate wake on
+			// ACK-only ingress to keep ACK-clock moving under sustained download.
+			if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") && cip.IPv4TCPAckOnly(pkt) {
+				s.flushConnectIPIngressAckWake()
+			}
+		},
 	))
 }

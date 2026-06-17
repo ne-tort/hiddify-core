@@ -119,6 +119,9 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
+	if n > 0 {
+		masqueWakeSendAfterReceiveRead(s, n)
+	}
 	return n, err
 }
 
@@ -132,9 +135,17 @@ func masqueStreamDuplexUploadWake(s *Stream) bool {
 
 const masqueHTTP3WriteToBufLen = 256 * 1024
 
-// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered.
+// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered (64 KiB during duplex).
 func (s *Stream) WriteTo(w io.Writer) (int64, error) {
-	buf := make([]byte, masqueHTTP3WriteToBufLen)
+	wakeBatch := masqueHTTP3WriteToBufLen
+	readCap := masqueHTTP3WriteToBufLen
+	if masqueStreamDuplexUploadWake(s) {
+		wakeBatch = 64 * 1024
+		if qs := s.datagramStream.QUICStream(); qs != nil && quic.MasqueUploadSendStarved(qs) {
+			readCap = 16 * 1024
+		}
+	}
+	buf := make([]byte, readCap)
 	var total int64
 	var deliveryPending int
 	flushDeliveryWake := func(delivered int) {
@@ -142,7 +153,7 @@ func (s *Stream) WriteTo(w io.Writer) (int64, error) {
 			return
 		}
 		deliveryPending += delivered
-		if deliveryPending >= masqueHTTP3WriteToBufLen {
+		if deliveryPending >= wakeBatch {
 			deliveryPending = 0
 			masqueWakeSendAfterReceiveRead(s, delivered)
 		}
@@ -223,17 +234,18 @@ func (s *Stream) flushMasqueWriteCoalesce() error {
 
 // Write queues tunneled CONNECT payload. Bulk uploads coalesce into 256 KiB DATA frames (h2o/Invisv).
 func (s *Stream) Write(b []byte) (int, error) {
+	coalesceLen := masqueHTTP3WriteToBufLen
 	total := len(b)
 	for len(b) > 0 {
 		if cap(s.masqueCoalesceBuf) == 0 {
-			s.masqueCoalesceBuf = make([]byte, 0, masqueHTTP3WriteToBufLen)
+			s.masqueCoalesceBuf = make([]byte, 0, coalesceLen)
 		}
-		space := masqueHTTP3WriteToBufLen - len(s.masqueCoalesceBuf)
+		space := coalesceLen - len(s.masqueCoalesceBuf)
 		if space == 0 {
 			if err := s.flushMasqueWriteCoalesce(); err != nil {
 				return total - len(b), err
 			}
-			space = masqueHTTP3WriteToBufLen
+			space = coalesceLen
 		}
 		n := len(b)
 		if n > space {
@@ -241,7 +253,7 @@ func (s *Stream) Write(b []byte) (int, error) {
 		}
 		s.masqueCoalesceBuf = append(s.masqueCoalesceBuf, b[:n]...)
 		b = b[n:]
-		if len(s.masqueCoalesceBuf) >= masqueHTTP3WriteToBufLen {
+		if len(s.masqueCoalesceBuf) >= coalesceLen {
 			if err := s.flushMasqueWriteCoalesce(); err != nil {
 				return total - len(b), err
 			}

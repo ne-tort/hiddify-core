@@ -7,6 +7,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 var (
@@ -95,4 +97,11 @@ func ExportBenchRefUsqueNetstackDownloadMbps(t *testing.T, duration time.Duratio
 
 func ExportBenchMasqueradeDuplexMinMbps(duration time.Duration) float64 {
 	return benchMasqueradeDuplexMinMbpsOnly(duration)
+}
+
+// ExportInstallDuplexDownloadArmedHook wires beginDuplexDownload barrier for prod-stack duplex synth.
+func ExportInstallDuplexDownloadArmedHook(hook chan struct{}) func() {
+	prev := h3.TestDuplexDownloadArmedHook
+	h3.TestDuplexDownloadArmedHook = hook
+	return func() { h3.TestDuplexDownloadArmedHook = prev }
 }

@@ -21,6 +21,64 @@ type masqueBidiBoostSetter interface {
 	masqueIsBidiSendBoosted(protocol.StreamID) bool
 }
 
+type masqueDuplexFairSetter interface {
+	masqueSetBidiDuplexFair(protocol.StreamID, bool)
+	masqueRepromoteActiveStream(protocol.StreamID) bool
+}
+
+type masqueDuplexFairRelaySetter interface {
+	masqueSetBidiDuplexFairRelay(protocol.StreamID, bool)
+}
+
+type masqueDuplexFairClientSetter interface {
+	masqueSetBidiDuplexFairClient(protocol.StreamID, bool)
+}
+
+type masqueDuplexLimitSetter interface {
+	masqueSetBidiDuplexLimitSend(protocol.StreamID, bool)
+}
+
+type masqueDuplexUploadStarvedSetter interface {
+	masqueSetBidiDuplexUploadStarved(protocol.StreamID, bool)
+}
+
+func masqueSyncDuplexLimitMode(s *Stream) {
+	if s == nil {
+		return
+	}
+	// Client fair-defer uses inline packing; server relay uses fairDeferRelay inline — skip duplex STREAM cap.
+	limit := MasqueIsBidiDuplexUploadStarted(s) && s.masqueIsDownloadActive() &&
+		!s.masqueDuplexFairDeferClient.Load() && !s.masqueDuplexFairDeferRelay.Load()
+	if setter, ok := s.sender.(masqueDuplexLimitSetter); ok {
+		setter.masqueSetBidiDuplexLimitSend(s.StreamID(), limit)
+	}
+	s.masqueSyncDuplexUploadStarved()
+}
+
+func masqueSyncDuplexUploadStarvedMode(s *Stream) {
+	if s == nil {
+		return
+	}
+	starved := false
+	if MasqueIsBidiDuplexUploadStarted(s) && s.masqueIsDownloadActive() {
+		if s.masqueDuplexFairDeferRelay.Load() {
+			starved = true
+		} else {
+			starved = masqueDuplexWithholdPeerDownloadCredit(s) || MasqueUploadSendStarved(s)
+		}
+	}
+	if setter, ok := s.sender.(masqueDuplexUploadStarvedSetter); ok {
+		setter.masqueSetBidiDuplexUploadStarved(s.StreamID(), starved)
+	}
+}
+
+func masquePeerUploadCreditQueued(s *Stream) bool {
+	if s == nil || s.receiveStr == nil {
+		return false
+	}
+	return s.receiveStr.masqueHasQueuedMaxStreamData()
+}
+
 func masqueScheduleDownloadActiveWake(s *Stream) {
 	if s == nil || !masqueWakeSendOnReceiveRead() {
 		return
@@ -47,10 +105,17 @@ func MasqueSetBidiDownloadActive(s *Stream, active bool) {
 	s.setMasqueDownloadReceiveOnly(false)
 	s.setMasqueDownloadActive(active)
 	if active {
-		_ = masquePokeDownloadReceiveWindow(s)
+		if MasqueIsBidiDuplexUploadStarted(s) {
+			s.masqueBoostDuplexFlowControl()
+		} else {
+			_ = masquePokeDownloadReceiveWindow(s)
+		}
 		masqueScheduleDownloadActiveWake(s)
 	}
+	masqueSyncDuplexReceiveAutoUpdate(s)
 	if !MasqueBidiSendBoostEnabled() {
+		s.masqueSyncDuplexFairMode()
+		masqueSyncDuplexLimitMode(s)
 		return
 	}
 	if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
@@ -68,20 +133,50 @@ func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
 	s.setMasqueDownloadReceiveOnly(active)
 	s.setMasqueDownloadActive(active)
 	if active {
-		s.setMasquePeerDuplexLazyFC(true)
-		// One-shot activation poke even on receive-only legs (NoRenotify inside poke).
-		// Skipping here stalled docker iperf download-first before first Read/WriteTo byte.
-		_ = masquePokeDownloadReceiveWindow(s)
+		if MasqueIsBidiDuplexUploadStarted(s) {
+			s.setMasquePeerDuplexLazyFC(false)
+		} else if !s.masqueDuplexFairDeferRelay.Load() {
+			s.setMasquePeerDuplexLazyFC(true)
+		}
+		// Skip activation WINDOW flood when upload already runs — poke on delivery / duplex mark.
+		if !MasqueIsBidiDuplexUploadStarted(s) && !s.masqueDuplexFairDeferRelay.Load() {
+			_ = masquePokeDownloadReceiveWindow(s)
+		}
 		masqueScheduleDownloadActiveWake(s)
 	} else if MasqueBidiSendBoostEnabled() {
 		if setter, ok := s.sender.(masqueBidiBoostSetter); ok {
 			setter.masqueSetBidiSendBoost(s.StreamID(), false)
 		}
 	}
+	s.masqueSyncDuplexFairMode()
+	masqueSyncDuplexLimitMode(s)
 }
 
-// MasqueRepromoteDuplexUploadSend is a no-op without framer boost.
-func MasqueRepromoteDuplexUploadSend(s *Stream) {}
+// MasqueSyncDuplexUploadStarved refreshes framer upload-starved state for duplex fair packing.
+func MasqueSyncDuplexUploadStarved(s *Stream) {
+	masqueSyncDuplexUploadStarvedMode(s)
+}
+
+// MasqueRepromoteDuplexUploadSend re-schedules C2S send when download-active duplex upload runs.
+// Server relay (fairDeferRelay): poke C2S credit before starved sync so framer prioritizes MAX_STREAM_DATA.
+func MasqueRepromoteDuplexUploadSend(s *Stream) {
+	if s == nil || !MasqueIsBidiDuplexUploadStarted(s) {
+		return
+	}
+	if s.masqueDuplexFairDeferRelay.Load() {
+		masqueSyncDuplexUploadStarvedMode(s)
+		if setter, ok := s.sender.(masqueDuplexFairSetter); ok {
+			setter.masqueRepromoteActiveStream(s.StreamID())
+		}
+		MasqueWakeBidiDuplex(s)
+		return
+	}
+	masqueSyncDuplexUploadStarvedMode(s)
+	if setter, ok := s.sender.(masqueDuplexFairSetter); ok {
+		setter.masqueRepromoteActiveStream(s.StreamID())
+	}
+	MasqueWakeStreamSend(s)
+}
 
 // MasqueRepromoteBidiSendBoost re-queues a download-active boosted stream at the framer front
 // when concurrent upload traffic arrives on another goroutine (H3-L1c duplex aggregate ceiling).

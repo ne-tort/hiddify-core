@@ -42,6 +42,91 @@ func ActivateMasqueBidiDuplex(s *Stream) {
 	}
 }
 
+// MarkMasqueBidiDuplexUploadStarted marks concurrent C2S relay during download-active hijack.
+func MarkMasqueBidiDuplexUploadStarted(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	if qs := s.datagramStream.QUICStream(); qs != nil {
+		quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+	}
+}
+
+// IsMasqueBidiDuplexUploadStarted reports saturated duplex on a CONNECT stream.
+func IsMasqueBidiDuplexUploadStarted(s *Stream) bool {
+	if s == nil || s.datagramStream == nil {
+		return false
+	}
+	qs := s.datagramStream.QUICStream()
+	return qs != nil && quic.MasqueIsBidiDuplexUploadStarted(qs)
+}
+
+// WakeMasqueRelayAfterDownloadWrite nudges QUIC after server relay sends download (S2C) during duplex.
+func WakeMasqueRelayAfterDownloadWrite(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil || !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		return
+	}
+	if quic.MasquePeerUploadCreditDue(qs) {
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+	}
+	quic.MasqueWakeStreamSend(qs)
+}
+
+// WakeMasqueRelayAfterUploadRead nudges QUIC after server relay consumes client upload (grant C2S credit).
+func WakeMasqueRelayAfterUploadRead(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil {
+		return
+	}
+	if quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		quic.MasquePokePeerUploadCreditAfterConsume(qs)
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+		return
+	}
+	masqueWakeSendAfterReceiveRead(s, 1)
+}
+
+// ArmMasqueBidiDuplexFair marks saturated duplex on server hijack before bulk relay (both legs known).
+func ArmMasqueBidiDuplexFair(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil {
+		return
+	}
+	// Drop hijack-era 64 KiB queue slot so the first post-arm MAX_STREAM_DATA uses boosted FC.
+	quic.MasqueClearPeerUploadCreditQueue(qs)
+	// Boost + fair-defer before any stream markers poke FC — avoids a 64 KiB MAX_STREAM_DATA
+	// queued at hijack (EnableMasqueConnectStream lazy FC) winning the first control slot.
+	quic.MasqueBoostDuplexReceiveFC(qs)
+	quic.MasqueSetBidiDuplexFairDeferRelay(qs, true)
+	MarkMasqueBidiDuplexUploadStarted(s)
+	ActivateMasqueBidiDuplex(s)
+	quic.MasquePokePeerUploadCredit(qs)
+	quic.MasquePokeConnPeerUploadCredit(qs)
+	quic.MasqueRepromoteDuplexUploadSend(qs)
+}
+
+// WaitMasqueRelayPeerUploadCredit blocks until initial boosted C2S MAX_STREAM_DATA ships (duplex relay gate).
+func WaitMasqueRelayPeerUploadCredit(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil {
+		return
+	}
+	quic.MasqueWaitPeerUploadCreditShipped(qs)
+}
+
 // EnableMasqueRelayDownloadSend marks server S2C tunnel send on hijacked CONNECT streams.
 func EnableMasqueRelayDownloadSend(s *Stream) {
 	if s == nil || s.datagramStream == nil {
@@ -54,6 +139,7 @@ func EnableMasqueRelayDownloadSend(s *Stream) {
 
 // EnableMasqueConnectStream is the single prod CONNECT-stream profile: tunnel DATA parse + lazy receive FC.
 // Does not mark download-active until WriteTo/relay drain starts (avoids upload mis-routing in quic wake).
+// Initial MAX_STREAM_DATA is deferred: server relay arms via ArmMasqueBidiDuplexFair; client via dial prime.
 func EnableMasqueConnectStream(s *Stream) {
 	if s == nil {
 		return
@@ -62,7 +148,6 @@ func EnableMasqueConnectStream(s *Stream) {
 	if s.datagramStream != nil {
 		if qs := s.datagramStream.QUICStream(); qs != nil {
 			quic.MasqueSetPeerDuplexLazyFC(qs, true)
-			quic.MasquePokeDownloadReceiveWindow(qs)
 		}
 	}
 }

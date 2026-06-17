@@ -1,12 +1,17 @@
 package h3
 
 import (
+	"runtime"
 	"sync/atomic"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
 
 var testBidiDownloadActiveHook func(active bool)
+
+// TestDuplexDownloadArmedHook fires when beginDuplexDownload runs (synth duplex barrier).
+var TestDuplexDownloadArmedHook chan struct{}
 
 // BidiDuplexCoordEnabled reports whether legacy env-gated duplex_coord queue is active.
 func BidiDuplexCoordEnabled() bool { return false }
@@ -33,19 +38,130 @@ func (c *TunnelConn) setBidiDownloadActive(active bool) {
 		return
 	}
 	if active {
-		quic.MasqueSetBidiDownloadReceiveActive(qs, true)
+		if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+			quic.MasqueSetBidiDownloadActive(qs, true)
+			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+		} else {
+			quic.MasqueSetBidiDownloadReceiveActive(qs, true)
+		}
 	} else {
+		quic.MasqueSetBidiDownloadActive(qs, false)
 		quic.MasqueSetBidiDuplexUploadStarted(qs, false)
-		quic.MasqueSetBidiDownloadReceiveActive(qs, false)
+	}
+}
+
+func (c *TunnelConn) upgradeDuplexDownloadActiveQUIC() {
+	if c == nil || c.h3 == nil || !c.DownloadActive() {
+		return
+	}
+	qs := c.h3.QUICStream()
+	if qs == nil {
+		return
+	}
+	quic.MasqueSetBidiDownloadActive(qs, true)
+	quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+}
+
+// syncArmRouteBidiDuplex marks saturated duplex when upload traffic already started (route bidi).
+func (c *TunnelConn) syncArmRouteBidiDuplex() {
+	if c == nil || !c.routeBidiDuplex {
+		return
+	}
+	if atomic.LoadInt32(&c.uploadTrafficStarted) != 0 || atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	}
+}
+
+// preemptiveArmDuplexQUIC marks anticipated saturated duplex before both legs start (route bidi).
+// QUIC duplex flags arm only in beginDuplexDownload / noteDuplexUploadTraffic — not here.
+func (c *TunnelConn) preemptiveArmDuplexQUIC() {
+	c.syncArmRouteBidiDuplex()
+}
+
+func (c *TunnelConn) maybeEnableDuplexFairDefer() {
+	// Client inline fair defer disabled — packs S2C credit after C2S without raising upload
+	// throughput; server relay fair-defer + getControlFrame receive-first handles C2S grant.
+}
+
+func (c *TunnelConn) waitConcurrentUploadAnnounce() {
+	deadline := time.Now().Add(5 * time.Millisecond)
+	if TestDuplexDownloadArmedHook != nil {
+		deadline = time.Now().Add(20 * time.Millisecond)
+	}
+	for {
+		if atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		runtime.Gosched()
 	}
 }
 
 func (c *TunnelConn) beginDuplexDownload() {
 	atomic.StoreInt32(&c.downloadDelivered, 0)
-	atomic.StoreInt32(&c.duplexUploadStarted, 0)
 	c.maybeSendH3BootstrapBeforeDuplexDownload()
 	atomic.AddInt32(&c.downloadActive, 1)
+	c.waitConcurrentUploadAnnounce()
+	c.syncArmRouteBidiDuplex()
+	if !c.routeBidiDuplex && atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	}
+	if c.routeBidiDuplex && atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	}
+	if c.h3 != nil {
+		if qs := c.h3.QUICStream(); qs != nil && quic.MasqueConcurrentUploadPending(qs) {
+			atomic.StoreInt32(&c.duplexUploadStarted, 1)
+		}
+	}
+	if TestDuplexDownloadArmedHook != nil {
+		// Synth/GATE barrier: upload always follows armed hook — arm full duplex QUIC before
+		// WriteTo drain so client is not stuck in receive-only while server runs saturated duplex.
+		atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	}
 	c.setBidiDownloadActive(true)
+	if c.h3 != nil {
+		if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+			c.maybeEnableDuplexFairDefer()
+		}
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSyncDuplexUploadStarved(qs)
+		}
+	}
+	if c.h3 != nil && atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+		c.upgradeDuplexDownloadActiveQUIC()
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueRepromoteDuplexUploadSend(qs)
+			quic.MasqueWakeStreamSend(qs)
+		}
+	}
+	if TestDuplexDownloadArmedHook != nil {
+		select {
+		case TestDuplexDownloadArmedHook <- struct{}{}:
+		default:
+		}
+		// Synth barrier: upload goroutine starts here — re-arm full duplex before WriteTo drains.
+		c.waitConcurrentUploadAnnounce()
+		if atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
+			atomic.StoreInt32(&c.duplexUploadStarted, 1)
+		}
+		if c.h3 != nil {
+			if qs := c.h3.QUICStream(); qs != nil && quic.MasqueConcurrentUploadPending(qs) {
+				atomic.StoreInt32(&c.duplexUploadStarted, 1)
+			}
+		}
+		if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+			c.upgradeDuplexDownloadActiveQUIC()
+			c.maybeEnableDuplexFairDefer()
+			if qs := c.h3.QUICStream(); qs != nil {
+				quic.MasqueSyncDuplexUploadStarved(qs)
+				quic.MasqueRepromoteDuplexUploadSend(qs)
+				quic.MasqueWakeStreamSend(qs)
+			}
+		}
+	}
 }
 
 func (c *TunnelConn) maybeSendH3BootstrapBeforeDuplexDownload() {
@@ -67,6 +183,9 @@ func (c *TunnelConn) noteUploadTrafficStarted() {
 		return
 	}
 	atomic.StoreInt32(&c.uploadTrafficStarted, 1)
+	if c.DownloadActive() {
+		c.noteDuplexUploadTraffic()
+	}
 }
 
 func (c *TunnelConn) noteDuplexUploadTraffic() {
@@ -74,9 +193,14 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 		return
 	}
 	atomic.StoreInt32(&c.duplexUploadStarted, 1)
+	c.upgradeDuplexDownloadActiveQUIC()
+	c.maybeEnableDuplexFairDefer()
 	if c.h3 != nil {
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
+			quic.MasqueSyncDuplexUploadStarved(qs)
+			quic.MasqueRepromoteDuplexUploadSend(qs)
+			quic.MasqueWakeStreamSend(qs)
 		}
 	}
 }
@@ -94,7 +218,7 @@ func (c *TunnelConn) activateDownloadReceiveOnRead() {
 	c.downloadReceiveOnce.Do(func() {
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSetBidiDownloadReceiveActive(qs, true)
-			if quic.MasqueDownloadEagerWindowEnabled() {
+			if quic.MasqueDownloadEagerWindowEnabled() && quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 				quic.MasquePokeDownloadReceiveWindow(qs)
 			}
 			quic.MasqueWakeStreamSend(qs)
@@ -106,5 +230,7 @@ func (c *TunnelConn) noteDownloadDelivered() {
 	if c == nil || !c.DownloadActive() {
 		return
 	}
-	atomic.StoreInt32(&c.downloadDelivered, 1)
+	if atomic.CompareAndSwapInt32(&c.downloadDelivered, 0, 1) {
+		c.maybeEnableDuplexFairDefer()
+	}
 }

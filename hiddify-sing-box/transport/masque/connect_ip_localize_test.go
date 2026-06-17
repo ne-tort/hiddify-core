@@ -654,7 +654,20 @@ func TestMasqueConnectIPLocalizeDownload(t *testing.T) {
 	t.Logf("connect-ip localize download verdict: %s", v)
 }
 
-// TestConnectIPDockerTUNKPIInProcGuard proxies docker connect-ip-h3-tun KPI on instant packet link
+// TestLocalizeConnectIPNativeH3PipeL1Reference logs in-proc pipe L1 ceiling (no QUIC) for the
+// same KPI class as native H3 GATE. A large pipe-vs-H3 gap localizes the QUIC dataplane.
+func TestLocalizeConnectIPNativeH3PipeL1Reference(t *testing.T) {
+	const benchDur = 2 * time.Second
+	r := benchConnectIPDownloadLayer(t, "L1", instantPacketLink{}, benchDur)
+	if r.err != nil {
+		t.Fatalf("pipe L1 download: %v", r.err)
+	}
+	t.Logf("connect-ip pipe L1 reference download: %.1f Mbit/s (native H3 GATE target %.0f)", r.mbps, connectIPLocalizeFastMbps)
+	if r.mbps < connectIPLocalizeFastMbps {
+		t.Fatalf("pipe L1 reference below in-proc floor: %.1f < %.0f", r.mbps, connectIPLocalizeFastMbps)
+	}
+}
+
 // (upload/download ≥80 Mbit/s in-proc). Docker tcp_down≥350 @ netem: TestMasqueDockerBenchConnectIPH3TunKPIContract + bench-history.
 func TestConnectIPDockerTUNKPIInProcGuard(t *testing.T) {
 	t.Run("upload", func(t *testing.T) {

@@ -63,6 +63,9 @@ type Stream struct {
 	masqueDownloadActive      atomic.Bool
 	masqueDownloadReceiveOnly atomic.Bool // P2 download leg: poke at activation only (H3-L1c-7c)
 	masqueDuplexUploadStarted atomic.Bool // concurrent upload on same bidi stream during WriteTo drain
+	masqueDuplexFairDeferClient atomic.Bool // client-only: defer MAX_STREAM_DATA behind C2S STREAM (not server relay)
+	masqueDuplexFairDeferRelay  atomic.Bool // server relay: defer MAX_STREAM_DATA behind S2C STREAM during duplex
+	masqueConcurrentUploadPending atomic.Bool // client: upload Write announced before duplex QUIC arm
 }
 
 var (
@@ -191,16 +194,109 @@ func MasqueIsBidiDownloadReceiveOnly(s *Stream) bool {
 	return s != nil && s.masqueDownloadReceiveOnly.Load()
 }
 
+// MasqueSetBidiDuplexFairDeferClient marks client CONNECT streams that should defer S2C
+// MAX_STREAM_DATA until after C2S STREAM in the framer (server relay must not use this).
+func MasqueSetBidiDuplexFairDeferClient(s *Stream, deferControl bool) {
+	if s == nil {
+		return
+	}
+	s.masqueDuplexFairDeferClient.Store(deferControl)
+	if setter, ok := s.sender.(masqueDuplexFairClientSetter); ok {
+		setter.masqueSetBidiDuplexFairClient(s.StreamID(), deferControl)
+	}
+	s.masqueSyncDuplexFairMode()
+	s.masqueSyncDuplexLimitSend()
+}
+
+// MasqueSetBidiDuplexFairDeferRelay marks server hijack relay streams that defer upload
+// MAX_STREAM_DATA behind S2C STREAM so C2S credit ships in the same packet as download bulk.
+func MasqueSetBidiDuplexFairDeferRelay(s *Stream, deferControl bool) {
+	if s == nil {
+		return
+	}
+	s.masqueDuplexFairDeferRelay.Store(deferControl)
+	if setter, ok := s.sender.(masqueDuplexFairRelaySetter); ok {
+		setter.masqueSetBidiDuplexFairRelay(s.StreamID(), deferControl)
+	}
+	s.masqueSyncDuplexFairMode()
+	s.masqueSyncDuplexLimitSend()
+}
+
+func (s *Stream) masqueSyncDuplexFairMode() {
+	if s == nil {
+		return
+	}
+	// Server relay (fairDeferRelay) uses inline fair-relay packing only — do not add to
+	// masqueDuplexFairStreams or first-pass control is skipped until after S2C STREAM.
+	fair := MasqueIsBidiDuplexUploadStarted(s) && s.masqueIsDownloadActive() &&
+		!s.masqueDuplexFairDeferRelay.Load() && !s.masqueDuplexFairDeferClient.Load()
+	if setter, ok := s.sender.(masqueDuplexFairSetter); ok {
+		setter.masqueSetBidiDuplexFair(s.StreamID(), fair)
+	}
+	s.masqueSyncDuplexUploadStarved()
+}
+
+func (s *Stream) masqueSyncDuplexUploadStarved() {
+	masqueSyncDuplexUploadStarvedMode(s)
+}
+
+func (s *Stream) masqueSyncDuplexLimitSend() {
+	masqueSyncDuplexLimitMode(s)
+}
+
+// MasqueBoostDuplexReceiveFC enlarges stream receive window for saturated bidi duplex.
+func MasqueBoostDuplexReceiveFC(s *Stream) {
+	if s == nil || s.receiveStr == nil || s.receiveStr.flowController == nil {
+		return
+	}
+	flowcontrol.SetMasqueDuplexBoostFC(s.receiveStr.flowController)
+}
+
+func (s *Stream) masqueBoostDuplexFlowControl() {
+	MasqueBoostDuplexReceiveFC(s)
+}
+
 // MasqueSetBidiDuplexUploadStarted marks concurrent upload on a download-active bidi stream (duplex GATE).
 func MasqueSetBidiDuplexUploadStarted(s *Stream, started bool) {
-	if s != nil {
-		s.masqueDuplexUploadStarted.Store(started)
+	if s == nil {
+		return
 	}
+	s.masqueDuplexUploadStarted.Store(started)
+	if started {
+		s.masqueConcurrentUploadPending.Store(false)
+		s.setMasquePeerDuplexLazyFC(false)
+		s.masqueBoostDuplexFlowControl()
+		if s.masqueIsDownloadActive() {
+			if s.masqueDuplexFairDeferRelay.Load() {
+				_ = masquePokePeerUploadCredit(s)
+				masqueSyncDuplexUploadStarvedMode(s)
+			} else {
+				MasqueSetBidiDuplexFairDeferClient(s, true)
+				_ = masquePokeDownloadReceiveWindow(s)
+			}
+		}
+	}
+	masqueSyncDuplexReceiveAutoUpdate(s)
+	s.masqueSyncDuplexFairMode()
+	s.masqueSyncDuplexLimitSend()
 }
 
 // MasqueIsBidiDuplexUploadStarted reports saturated duplex upload on the same CONNECT stream.
 func MasqueIsBidiDuplexUploadStarted(s *Stream) bool {
 	return s != nil && s.masqueDuplexUploadStarted.Load()
+}
+
+// MasqueSetConcurrentUploadPending marks anticipated concurrent upload before duplex QUIC arm.
+func MasqueSetConcurrentUploadPending(s *Stream, pending bool) {
+	if s == nil {
+		return
+	}
+	s.masqueConcurrentUploadPending.Store(pending)
+}
+
+// MasqueConcurrentUploadPending reports whether upload was announced before duplex download arm.
+func MasqueConcurrentUploadPending(s *Stream) bool {
+	return s != nil && s.masqueConcurrentUploadPending.Load()
 }
 
 // Peek fills b with stream data, without consuming the stream data.
@@ -278,9 +374,14 @@ func (s *Stream) popStreamFrame(maxBytes protocol.ByteCount, v protocol.Version)
 }
 
 func (s *Stream) getControlFrame(now monotime.Time) (_ ackhandler.Frame, ok, hasMore bool) {
-	f, ok, _ := s.sendStr.getControlFrame(now)
-	if ok {
-		return f, true, true
+	// Server relay / client fair-defer: prioritize receive-half MAX_STREAM_DATA in control order.
+	if s.masqueDuplexFairDeferRelay.Load() || s.masqueDuplexFairDeferClient.Load() {
+		if f, ok, hasMore := s.receiveStr.getControlFrame(now); ok {
+			return f, true, hasMore
+		}
+	}
+	if f, ok, hasMore := s.sendStr.getControlFrame(now); ok {
+		return f, true, hasMore
 	}
 	return s.receiveStr.getControlFrame(now)
 }

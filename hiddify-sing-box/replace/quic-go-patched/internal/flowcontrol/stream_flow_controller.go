@@ -132,13 +132,75 @@ func (c *streamFlowController) IsNewlyBlocked() bool {
 }
 
 func (c *streamFlowController) shouldQueueWindowUpdate() bool {
-	return !c.receivedFinalOffset && c.hasWindowUpdate()
+	if c.masqueDuplexDeferAutoReceiveUpdate {
+		return c.masqueDuplexForceUpdate
+	}
+	return !c.receivedFinalOffset && (c.masqueDuplexForceUpdate || c.hasWindowUpdate())
+}
+
+// MasqueDuplexForceUpdatePending reports whether a forced MAX_STREAM_DATA is armed.
+func MasqueDuplexForceUpdatePending(fc StreamFlowController) bool {
+	sfc, ok := fc.(*streamFlowController)
+	if !ok {
+		return false
+	}
+	sfc.mutex.Lock()
+	pending := sfc.masqueDuplexForceUpdate
+	sfc.mutex.Unlock()
+	return pending
+}
+
+// SetMasqueDuplexForceUpdate arms the next MAX_STREAM_DATA regardless of threshold.
+func SetMasqueDuplexForceUpdate(fc StreamFlowController) {
+	sfc, ok := fc.(*streamFlowController)
+	if !ok {
+		return
+	}
+	sfc.mutex.Lock()
+	sfc.masqueDuplexForceUpdate = true
+	sfc.mutex.Unlock()
+}
+
+// SetMasqueDuplexDeferAutoReceiveUpdate suppresses automatic receive FC updates during duplex.
+func SetMasqueDuplexDeferAutoReceiveUpdate(fc StreamFlowController, deferUpdate bool) {
+	sfc, ok := fc.(*streamFlowController)
+	if !ok {
+		return
+	}
+	sfc.mutex.Lock()
+	sfc.masqueDuplexDeferAutoReceiveUpdate = deferUpdate
+	sfc.mutex.Unlock()
 }
 
 func (c *streamFlowController) ShouldQueueWindowUpdate() bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	return c.shouldQueueWindowUpdate()
+}
+
+const masqueDuplexMinStreamWindow = 2 * 1024 * 1024 // ~1 Gbit/s @ ~16 ms stream RTT
+
+// SetMasqueDuplexBoostFC enlarges stream receive window during saturated bidi duplex so
+// MAX_STREAM_DATA grants ≥2 MiB per update (avoids ~64 KiB/window ≈70 Mbit/s starvation).
+func SetMasqueDuplexBoostFC(fc StreamFlowController) {
+	sfc, ok := fc.(*streamFlowController)
+	if !ok {
+		return
+	}
+	sfc.mutex.Lock()
+	defer sfc.mutex.Unlock()
+	sfc.setMasquePeerDuplexLazyFC(false)
+	sfc.setMasqueDuplexEagerFC(true)
+	if sfc.receiveWindowSize < masqueDuplexMinStreamWindow {
+		sfc.receiveWindowSize = masqueDuplexMinStreamWindow
+	}
+	if sfc.maxReceiveWindowSize < masqueDuplexMinStreamWindow*4 {
+		sfc.maxReceiveWindowSize = masqueDuplexMinStreamWindow * 4
+	}
+	sfc.masqueDuplexForceUpdate = true
+	now := monotime.Now()
+	minConn := protocol.ByteCount(float64(sfc.receiveWindowSize) * protocol.ConnectionFlowControlMultiplier)
+	sfc.connection.EnsureMinimumWindowSize(minConn, now)
 }
 
 // SetMasquePeerDuplexLazyFC enables batched MAX_STREAM_DATA on P2 download CONNECT legs
@@ -164,9 +226,12 @@ func (c *streamFlowController) GetWindowUpdate(now monotime.Time) protocol.ByteC
 
 	oldWindowSize := c.receiveWindowSize
 	offset := c.getWindowUpdate(now)
-	if c.receiveWindowSize > oldWindowSize { // auto-tuning enlarged the window size
+	minConn := protocol.ByteCount(float64(c.receiveWindowSize) * protocol.ConnectionFlowControlMultiplier)
+	if offset > 0 && c.masqueDuplexEagerFC {
+		c.connection.EnsureMinimumWindowSize(minConn, now)
+	} else if c.receiveWindowSize > oldWindowSize { // auto-tuning enlarged the window size
 		c.logger.Debugf("Increasing receive flow control window for stream %d to %d", c.streamID, c.receiveWindowSize)
-		c.connection.EnsureMinimumWindowSize(protocol.ByteCount(float64(c.receiveWindowSize)*protocol.ConnectionFlowControlMultiplier), now)
+		c.connection.EnsureMinimumWindowSize(minConn, now)
 	}
 	return offset
 }

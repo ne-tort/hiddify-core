@@ -5,8 +5,9 @@ import (
 )
 
 const (
-	defaultUploadChunkBytes       = 64 * 1024
-	defaultDuplexUploadChunkBytes = 64 * 1024
+	defaultUploadChunkBytes            = 64 * 1024
+	defaultDuplexUploadChunkBytes      = 64 * 1024
+	duplexSaturatedUploadChunkBytes    = 16 * 1024
 )
 
 // UploadFlushPolicy controls how bulk CONNECT-stream upload is split before hitting the wire.

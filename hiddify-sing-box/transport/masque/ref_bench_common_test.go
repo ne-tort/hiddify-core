@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // refBenchDuration is the default REF synthetic benchmark window (matches GATE synth).
@@ -87,6 +89,10 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 	downDone := make(chan downRes, 1)
 	upDone := make(chan upRes, 1)
 	start := make(chan struct{})
+	downloadArmed := make(chan struct{}, 1)
+	prevArmedHook := h3.TestDuplexDownloadArmedHook
+	h3.TestDuplexDownloadArmedHook = downloadArmed
+	defer func() { h3.TestDuplexDownloadArmedHook = prevArmedHook }()
 	go func() {
 		<-start
 		n, mbps, e := measureTCPDownloadWriteToMbps(conn, duration)
@@ -98,6 +104,7 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 	}()
 	go func() {
 		<-start
+		<-downloadArmed
 		chunk := make([]byte, 256*1024)
 		var upTotal int64
 		stop := time.Now().Add(duration)

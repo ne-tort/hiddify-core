@@ -26,10 +26,12 @@ func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if qs == nil {
 		return
 	}
-	if quic.MasqueDownloadEagerWindowEnabled() && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
-		quic.MasquePokeDownloadReceiveWindow(qs)
+	quic.MasqueRepromoteDuplexUploadSend(qs)
+	if quic.MasqueUploadSendStarved(qs) {
+		quic.MasqueWakeBidiDuplex(qs)
+	} else {
+		quic.MasqueWakeStreamSend(qs)
 	}
-	quic.MasqueWakeStreamSend(qs)
 }
 
 func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
@@ -43,8 +45,25 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	if qs == nil {
 		return
 	}
-	if quic.MasqueDownloadEagerWindowEnabled() && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+	if quic.MasqueUploadSendStarved(qs) {
+		quic.MasqueRepromoteDuplexUploadSend(qs)
+		quic.MasqueWakeBidiDuplex(qs)
+		return
+	}
+	if quic.MasqueDownloadEagerWindowEnabled() && quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
+	quic.MasqueRepromoteDuplexUploadSend(qs)
 	quic.MasqueWakeStreamSend(qs)
+}
+
+func (c *TunnelConn) noteDownloadDeliveryWake(delivered int) {
+	if delivered <= 0 || !c.DownloadActive() {
+		return
+	}
+	pending := atomic.AddInt32(&c.downloadDeliveryPending, int32(delivered))
+	if pending >= int32(tunnelWriteToBufLen) {
+		atomic.AddInt32(&c.downloadDeliveryPending, -int32(tunnelWriteToBufLen))
+		c.wakeBidiSendAfterDownloadDelivery()
+	}
 }

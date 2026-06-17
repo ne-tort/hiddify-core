@@ -58,6 +58,9 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 	downDone := make(chan downRes, 1)
 	upDone := make(chan upRes, 1)
 	start := make(chan struct{})
+	downloadArmed := make(chan struct{}, 1)
+	restoreHook := masque.ExportInstallDuplexDownloadArmedHook(downloadArmed)
+	defer restoreHook()
 	go func() {
 		<-start
 		n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, duration)
@@ -69,6 +72,7 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 	}()
 	go func() {
 		<-start
+		<-downloadArmed
 		chunk := make([]byte, 256*1024)
 		var upTotal int64
 		stop := time.Now().Add(duration)
@@ -230,7 +234,111 @@ func TestGATEH3SynthBidiDuplexProdStack(t *testing.T) {
 	}
 }
 
-// TestGATEH2SynthBidiDuplexProdStack (H2 regression) — H2 prod stack concurrent duplex >= 200 both legs.
+// TestLocalizeConnectStreamH3Symmetric1G logs separate-leg throughput vs 1 Gbit/s symmetric target (OPEN).
+func TestLocalizeConnectStreamH3Symmetric1G(t *testing.T) {
+	const targetMbps = 1000.0
+	const maxAsym = 1.25
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	downPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	upPort := masque.ExportStartH2ConnectStreamUploadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	_, downMbps := measureProdStackDownloadMbps(t, socksPort, downPort, dur)
+	_, upMbps := measureProdStackUploadMbps(t, socksPort, upPort, dur)
+	asym := downMbps / upMbps
+	if upMbps > downMbps {
+		asym = upMbps / downMbps
+	}
+	t.Logf("connect-stream-h3 symmetric-1G localize: down=%.1f up=%.1f asym=%.2f target=%.0f",
+		downMbps, upMbps, asym, targetMbps)
+	if downMbps < targetMbps || upMbps < targetMbps {
+		t.Logf("OPEN: separate legs below %.0f Mbit/s target", targetMbps)
+	}
+	if asym > maxAsym {
+		t.Logf("OPEN: leg asymmetry %.2f > %.2f", asym, maxAsym)
+	}
+}
+
+// TestLocalizeConnectStreamH3DuplexSymmetric1G samples saturated duplex vs 1 Gbit/s symmetric target (OPEN).
+func TestLocalizeConnectStreamH3DuplexSymmetric1G(t *testing.T) {
+	const samples = 8
+	const targetMbps = 1000.0
+	const maxRatio = 1.25
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	var pass, minOfMin float64
+	for i := 0; i < samples; i++ {
+		conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+		_ = conn.SetDeadline(time.Now().Add(dur + 8*time.Second))
+		down, up := measureProdStackDuplexMbps(t, conn, dur)
+		minLeg := down
+		if up < minLeg {
+			minLeg = up
+		}
+		maxLeg := down
+		if up > maxLeg {
+			maxLeg = up
+		}
+		ratio := 1.0
+		if minLeg > 0 {
+			ratio = maxLeg / minLeg
+		}
+		ok := minLeg >= targetMbps && ratio <= maxRatio
+		if ok {
+			pass++
+		}
+		if i == 0 || minLeg < minOfMin || minOfMin == 0 {
+			minOfMin = minLeg
+		}
+		t.Logf("duplex-1G sample %d/%d: down=%.1f up=%.1f min=%.1f ratio=%.2f pass=%v",
+			i+1, samples, down, up, minLeg, ratio, ok)
+		_ = conn.Close()
+	}
+	t.Logf("duplex-1G summary: pass=%.0f/%d min_of_min=%.1f target=%.0f ratio<=%.2f (OPEN)",
+		pass, samples, minOfMin, targetMbps, maxRatio)
+}
+
+// TestLocalizeConnectStreamH3DuplexFairness samples saturated duplex KPI (localization only, no FAIL).
+func TestLocalizeConnectStreamH3DuplexFairness(t *testing.T) {
+	const samples = 5
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	var minOfMin, sumRatio float64
+	for i := 0; i < samples; i++ {
+		conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+		_ = conn.SetDeadline(time.Now().Add(dur + 8*time.Second))
+		down, up := measureProdStackDuplexMbps(t, conn, dur)
+		minLeg := down
+		if up < minLeg {
+			minLeg = up
+		}
+		maxLeg := down
+		if up > maxLeg {
+			maxLeg = up
+		}
+		ratio := 1.0
+		if minLeg > 0 {
+			ratio = maxLeg / minLeg
+		}
+		t.Logf("duplex sample %d/%d: down=%.1f up=%.1f min=%.1f ratio=%.2f",
+			i+1, samples, down, up, minLeg, ratio)
+		if i == 0 || minLeg < minOfMin {
+			minOfMin = minLeg
+		}
+		sumRatio += ratio
+		_ = conn.Close()
+	}
+	t.Logf("duplex fairness summary: min_of_min=%.1f avg_ratio=%.2f (OPEN until stable >=1000 min leg)",
+		minOfMin, sumRatio/float64(samples))
+}
+
 func TestGATEH2SynthBidiDuplexProdStack(t *testing.T) {
 	dur := masque.ExportConnectStreamSynthProdBenchDuration
 	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)

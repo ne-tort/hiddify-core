@@ -28,7 +28,6 @@ type tcp4Tuple struct {
 type packetForwarder struct {
 	conn PacketPlaneConn
 	o    ConnectIPTCPForwarderOptions
-	wMu  sync.Mutex
 	writeCh         chan []byte
 	downloadCh      chan []byte
 	ackCh           chan *tcpForwardSession
@@ -193,6 +192,7 @@ func (f *packetForwarder) runDownloadWriteLoop(ctx context.Context, done chan st
 			if !ok {
 				return
 			}
+			f.o.DownloadQueueMetrics.noteDequeued()
 			err := f.sendPacketNow(pkt)
 			if err != nil {
 				if mcip.IsBenignEgressTeardownError(err) {
@@ -438,6 +438,7 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 		returnPacket(pkt)
 		return net.ErrClosed
 	case f.downloadCh <- pkt:
+		f.o.DownloadQueueMetrics.noteEnqueued()
 		return nil
 	default:
 		select {
@@ -445,6 +446,7 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 			returnPacket(pkt)
 			return net.ErrClosed
 		case f.downloadCh <- pkt:
+			f.o.DownloadQueueMetrics.noteEnqueued()
 			return nil
 		}
 	}
@@ -470,16 +472,13 @@ func (f *packetForwarder) peerPrefixesCached() []netip.Prefix {
 }
 
 // sendPacketNow writes one packet to the CONNECT-IP plane with retry/backoff.
-// wMu is held only around WritePacket attempts, never during sleep.
 func (f *packetForwarder) sendPacketNow(pkt []byte) error {
 	p := RewriteOutgoingPeerDst(pkt, f.peerPrefixesCached())
 	for i := 0; i < icmpRelayMax; i++ {
 		var icmp []byte
 		var err error
 		for attempt := 0; attempt < writePacketMaxPersist; attempt++ {
-			f.wMu.Lock()
 			icmp, err = f.conn.WritePacket(p)
-			f.wMu.Unlock()
 			if err == nil {
 				break
 			}

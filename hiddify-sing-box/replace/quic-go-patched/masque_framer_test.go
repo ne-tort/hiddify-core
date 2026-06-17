@@ -444,7 +444,7 @@ func TestFramerBidiBoostControlFramesFirst(t *testing.T) {
 
 	now := monotime.Now()
 	maxLen := protocol.ByteCount(maxStreamControlFrameSize + 1)
-	frames, _ := framer.appendControlFrames(nil, maxLen, now, protocol.Version1)
+	frames, _ := framer.appendControlFrames(nil, maxLen, now, protocol.Version1, masqueControlFrameAll, nil)
 	if len(frames) != 1 {
 		t.Fatalf("expected 1 control frame, got %d", len(frames))
 	}

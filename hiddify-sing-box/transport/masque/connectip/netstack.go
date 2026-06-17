@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	netstackOutboundQueueDepth             = 2048
+	netstackOutboundQueueDepth             = 8192
 	linkOutboundQueueSlots                 = 65536
 	tcpNetstackNIC             tcpip.NICID = 1
 )

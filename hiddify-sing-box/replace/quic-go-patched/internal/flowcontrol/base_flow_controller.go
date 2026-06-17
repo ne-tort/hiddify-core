@@ -35,6 +35,13 @@ type baseFlowController struct {
 	// masquePeerDuplexLazyFC: P2 download CONNECT leg on shared QUIC conn — batch
 	// MAX_STREAM_DATA so sibling upload C2S keeps packet budget (H3-L1c-7e).
 	masquePeerDuplexLazyFC bool
+	// masqueDuplexEagerFC: saturated bidi duplex — grant credit every ~half window.
+	masqueDuplexEagerFC bool
+	// masqueDuplexForceUpdate: next MAX_STREAM_DATA must fire even if local window already expanded.
+	masqueDuplexForceUpdate bool
+	// masqueDuplexDeferAutoReceiveUpdate: suppress automatic receive-window updates (AddBytesRead)
+	// while saturated duplex defers peer download credit (client WriteTo drain).
+	masqueDuplexDeferAutoReceiveUpdate bool
 }
 
 // IsNewlyBlocked says if it is newly blocked by flow control.
@@ -75,10 +82,17 @@ func (c *baseFlowController) addBytesRead(n protocol.ByteCount) {
 }
 
 func (c *baseFlowController) effectiveWindowUpdateThreshold() float64 {
+	if c.masqueDuplexEagerFC {
+		return 0.25
+	}
 	if c.masquePeerDuplexLazyFC {
 		return 0.005
 	}
 	return windowUpdateThreshold()
+}
+
+func (c *baseFlowController) setMasqueDuplexEagerFC(eager bool) {
+	c.masqueDuplexEagerFC = eager
 }
 
 func (c *baseFlowController) setMasquePeerDuplexLazyFC(lazy bool) {
@@ -94,9 +108,13 @@ func (c *baseFlowController) hasWindowUpdate() bool {
 // getWindowUpdate updates the receive window, if necessary
 // it returns the new offset
 func (c *baseFlowController) getWindowUpdate(now monotime.Time) protocol.ByteCount {
-	if !c.hasWindowUpdate() {
+	if c.masqueDuplexEagerFC && c.receiveWindowSize < masqueDuplexMinStreamWindow {
+		c.receiveWindowSize = masqueDuplexMinStreamWindow
+	}
+	if !c.masqueDuplexForceUpdate && !c.hasWindowUpdate() {
 		return 0
 	}
+	c.masqueDuplexForceUpdate = false
 
 	c.maybeAdjustWindowSize(now)
 	c.receiveWindow = c.bytesRead + c.receiveWindowSize

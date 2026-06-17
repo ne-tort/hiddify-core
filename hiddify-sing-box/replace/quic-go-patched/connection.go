@@ -3020,6 +3020,26 @@ func (c *Conn) masqueRepromoteBidiSendBoost(id protocol.StreamID) {
 	}
 }
 
+func (c *Conn) masqueSetBidiDuplexFair(id protocol.StreamID, fair bool) {
+	c.framer.setMasqueDuplexFair(id, fair)
+}
+
+func (c *Conn) masqueSetBidiDuplexFairRelay(id protocol.StreamID, relay bool) {
+	c.framer.setMasqueDuplexFairRelay(id, relay)
+}
+
+func (c *Conn) masqueSetBidiDuplexFairClient(id protocol.StreamID, client bool) {
+	c.framer.setMasqueDuplexFairClient(id, client)
+}
+
+func (c *Conn) masqueSetBidiDuplexLimitSend(id protocol.StreamID, limit bool) {
+	c.framer.setMasqueDuplexLimit(id, limit)
+}
+
+func (c *Conn) masqueSetBidiDuplexUploadStarved(id protocol.StreamID, starved bool) {
+	c.framer.setMasqueDuplexUploadStarved(id, starved)
+}
+
 func (c *Conn) masqueRepromoteActiveStream(id protocol.StreamID) bool {
 	if c.framer.repromoteActiveStream(id) {
 		c.scheduleSending()

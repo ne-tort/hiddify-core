@@ -291,6 +291,8 @@ func (ing *Ingress) runLoop(ctx context.Context) {
 	readBuffer := make([]byte, 64*1024)
 	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
 	defer tryCancel()
+	drainCtx, drainCancel := context.WithCancel(ctx)
+	defer drainCancel()
 	consecutiveRetryableFailures := 0
 	const retryableReadFailureLimit = 32
 
@@ -341,15 +343,36 @@ func (ing *Ingress) runLoop(ctx context.Context) {
 			ing.dispatchIngressFrame(readBuffer[:n2])
 		}
 		ing.host.IngressFlushAckWake()
+		// Brief blocking drain pulls additional QUIC datagrams per loop iteration so
+		// native CONNECT-IP download keeps ingress ahead of h3 unified queue pressure.
+		batchDeadline, batchCancel := context.WithTimeout(drainCtx, 12*time.Millisecond)
+		for {
+			n3, err3 := reader(batchDeadline, readBuffer)
+			if err3 != nil || n3 <= 0 {
+				break
+			}
+			ing.dispatchIngressFrame(readBuffer[:n3])
+		}
+		batchCancel()
+		ing.host.IngressFlushAckWake()
 	}
 }
 
 func (ing *Ingress) dispatchIngressFrame(pkt []byte) {
+	// Session teardown can race ingress reads; when there are no TCP/UDP consumers,
+	// avoid expensive per-packet classification/drop accounting in the hot loop.
+	if ing.UDPSubsEmpty() && !ing.host.IngressTCPInstallInflight() && ing.host.IngressTCPNetstack() == nil {
+		return
+	}
 	if NetstackDebugEnabled() && len(pkt) >= 20 {
 		ing.host.IngressDebugLog(pkt, len(pkt), ing.host.IngressTCPNetstack() != nil, ing.host.IngressTCPInstallInflight())
 	}
 	if ing.host.IngressTCPFastPath(pkt) {
-		if ing.host.IngressDeliverTCPNoFlush(pkt) {
+		if IPv4TCPHasPayload(pkt) {
+			if ing.host.IngressDeliverTCPNoFlush(pkt) {
+				return
+			}
+		} else if ing.host.IngressDeliverTCP(pkt) {
 			return
 		}
 	}

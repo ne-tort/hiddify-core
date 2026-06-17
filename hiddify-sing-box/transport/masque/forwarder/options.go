@@ -29,4 +29,6 @@ type ConnectIPTCPForwarderOptions struct {
 	Dialer              net.Dialer
 	// WriteQueueMetrics optionally records writeCh depth under backpressure (tests/profiling).
 	WriteQueueMetrics *WriteQueueMetrics
+	// DownloadQueueMetrics optionally records downloadCh depth under S2C DATA pressure.
+	DownloadQueueMetrics *DownloadQueueMetrics
 }

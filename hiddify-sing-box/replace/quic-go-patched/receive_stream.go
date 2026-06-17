@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
@@ -32,6 +33,8 @@ type ReceiveStream struct {
 
 	queuedStopSending   bool
 	queuedMaxStreamData bool
+	masquePeerUploadCreditShipped atomic.Bool
+	masqueLastPeerUploadCreditOffset atomic.Uint64
 
 	// Set once we read the io.EOF or the cancellation error.
 	// Note that for local cancellations, this doesn't necessarily mean that we know the final offset yet.
@@ -475,6 +478,26 @@ func (s *ReceiveStream) handleResetStreamFrameImpl(frame *wire.ResetStreamFrame,
 	return nil
 }
 
+func (s *ReceiveStream) masqueHasQueuedMaxStreamData() bool {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.queuedMaxStreamData
+}
+
+func (s *ReceiveStream) masqueClearQueuedMaxStreamData() {
+	s.mutex.Lock()
+	s.queuedMaxStreamData = false
+	s.mutex.Unlock()
+	s.masquePeerUploadCreditShipped.Store(false)
+	s.masqueLastPeerUploadCreditOffset.Store(0)
+}
+
+func (s *ReceiveStream) masqueAckQueuedMaxStreamData() {
+	s.mutex.Lock()
+	s.queuedMaxStreamData = false
+	s.mutex.Unlock()
+}
+
 func (s *ReceiveStream) masquePokeDownloadReceiveWindow() bool {
 	s.mutex.Lock()
 	if s.isRemoteCancellationEffective() {
@@ -491,11 +514,7 @@ func (s *ReceiveStream) masquePokeDownloadReceiveWindow() bool {
 	}
 	streamID := s.streamID
 	s.mutex.Unlock()
-	// Schedule MAX_STREAM_DATA immediately (parity Read path after AddBytesRead).
-	// Re-notify when already queued so a stalled framer re-prioritizes control frames
-	// between WriteTo chunk deliveries (download stall in windowed bidi without re-poke wake).
 	s.sender.onHasStreamControlFrame(streamID, s)
-	// Conn-level MAX_DATA renotify (parity Read queuedConnWindowUpdate → onHasConnectionData).
 	s.sender.onHasConnectionData()
 	return true
 }
@@ -539,11 +558,17 @@ func (s *ReceiveStream) getControlFrame(now monotime.Time) (_ ackhandler.Frame, 
 		}, true, s.queuedMaxStreamData
 	}
 
+	offset := s.flowController.GetWindowUpdate(now)
+	if offset == 0 {
+		return ackhandler.Frame{}, false, false
+	}
 	s.queuedMaxStreamData = false
+	s.masquePeerUploadCreditShipped.Store(true)
+	s.masqueLastPeerUploadCreditOffset.Store(uint64(offset))
 	return ackhandler.Frame{
 		Frame: &wire.MaxStreamDataFrame{
 			StreamID:          s.streamID,
-			MaximumStreamData: s.flowController.GetWindowUpdate(now),
+			MaximumStreamData: offset,
 		},
 	}, true, false
 }
