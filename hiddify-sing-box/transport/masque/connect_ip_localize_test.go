@@ -802,8 +802,98 @@ func (s *serialWriteShim) Close() error {
 	return s.inner.Close()
 }
 
+// asyncWriteShim mirrors ClientPacketSession batched egress for in-proc TUN proxy tests.
+type asyncWriteShim struct {
+	inner      IPPacketSession
+	once       sync.Once
+	closeOnce  sync.Once
+	ch         chan []byte
+	stop       chan struct{}
+	wg         sync.WaitGroup
+	closed     atomic.Bool
+}
+
+func newAsyncWriteShim(inner IPPacketSession) *asyncWriteShim {
+	return &asyncWriteShim{inner: inner}
+}
+
+func (s *asyncWriteShim) ensureWriter() {
+	s.once.Do(func() {
+		s.ch = make(chan []byte, 8192)
+		s.stop = make(chan struct{})
+		s.wg.Add(1)
+		go s.runWriter()
+	})
+}
+
+func (s *asyncWriteShim) runWriter() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case pkt := <-s.ch:
+			batch := [][]byte{pkt}
+			for len(batch) < 64 {
+				select {
+				case p := <-s.ch:
+					batch = append(batch, p)
+				default:
+					goto send
+				}
+			}
+		send:
+			for _, p := range batch {
+				_, _ = s.inner.WritePacket(p)
+			}
+		}
+	}
+}
+
+func (s *asyncWriteShim) ReadPacket(buffer []byte) (int, error) {
+	return s.inner.ReadPacket(buffer)
+}
+
+func (s *asyncWriteShim) WritePacket(buffer []byte) ([]byte, error) {
+	s.ensureWriter()
+	if s.closed.Load() {
+		return s.inner.WritePacket(buffer)
+	}
+	dup := make([]byte, len(buffer))
+	copy(dup, buffer)
+	select {
+	case <-s.stop:
+		return s.inner.WritePacket(buffer)
+	case s.ch <- dup:
+		return nil, nil
+	default:
+		return s.inner.WritePacket(buffer)
+	}
+}
+
+func (s *asyncWriteShim) Close() error {
+	s.closeOnce.Do(func() {
+		if s.ch != nil {
+			s.closed.Store(true)
+			close(s.stop)
+			s.wg.Wait()
+		}
+	})
+	return s.inner.Close()
+}
+
 type serialWriteLink struct {
 	inner packetLink
+}
+
+type tunSerialAsyncLink struct {
+	inner packetLink
+}
+
+func (l tunSerialAsyncLink) endpoints() (IPPacketSession, IPPacketSession) {
+	client, server := l.inner.endpoints()
+	client = &serialWriteShim{inner: newAsyncWriteShim(client)}
+	return client, server
 }
 
 func (l serialWriteLink) endpoints() (IPPacketSession, IPPacketSession) {
@@ -812,25 +902,31 @@ func (l serialWriteLink) endpoints() (IPPacketSession, IPPacketSession) {
 }
 
 // TestLocalizeConnectIPUploadTUNEgressSerialWrite localizes Docker TUN upload gap: serialized
-// WritePacket + copy per datagram. Large drop vs instant L1 indicates TUN egress path is a KPI factor.
+// WritePacket + copy per datagram. asyncWriteShim (prod ClientPacketSession path) should recover most of the gap.
 func TestLocalizeConnectIPUploadTUNEgressSerialWrite(t *testing.T) {
 	const duration = localizeBenchDuration
 	baseline := benchConnectIPUploadLayer(t, "L1-instant", instantPacketLink{}, duration)
 	serial := benchConnectIPUploadLayer(t, "L1-serial", serialWriteLink{inner: instantPacketLink{}}, duration)
-	if baseline.err != nil || serial.err != nil {
-		t.Fatalf("bench error baseline=%v serial=%v", baseline.err, serial.err)
+	recovered := benchConnectIPUploadLayer(t, "L1-serial+async", tunSerialAsyncLink{inner: instantPacketLink{}}, duration)
+	if baseline.err != nil || serial.err != nil || recovered.err != nil {
+		t.Fatalf("bench error baseline=%v serial=%v recovered=%v", baseline.err, serial.err, recovered.err)
 	}
-	ratio := serial.mbps / baseline.mbps
-	t.Logf("TUN egress serial-write proxy: baseline=%.1f serial=%.1f ratio=%.2f", baseline.mbps, serial.mbps, ratio)
-	if baseline.mbps < connectIPSynthRegressionFloorUpMbps {
-		t.Fatalf("baseline L1 %.1f < regression floor %.1f", baseline.mbps, connectIPSynthRegressionFloorUpMbps)
+	serialRatio := serial.mbps / baseline.mbps
+	recoveredRatio := recovered.mbps / baseline.mbps
+	recoverVsSerial := recovered.mbps / serial.mbps
+	t.Logf("TUN egress proxy: baseline=%.1f serial=%.1f (ratio=%.2f) serial+async=%.1f (ratio=%.2f recover/serial=%.2f)",
+		baseline.mbps, serial.mbps, serialRatio, recovered.mbps, recoveredRatio, recoverVsSerial)
+	const tunAsyncRecoveryVsSerial = 0.85
+	if recoverVsSerial < tunAsyncRecoveryVsSerial {
+		t.Fatalf("serial+async %.1f did not recover serial %.1f (need >= %.0f%%)",
+			recovered.mbps, serial.mbps, tunAsyncRecoveryVsSerial*100)
 	}
-	if serial.mbps < connectIPSynthRegressionFloorUpMbps {
-		t.Fatalf("serial L1 %.1f < regression floor %.1f — TUN proxy reproduces upload collapse", serial.mbps, connectIPSynthRegressionFloorUpMbps)
+	if recovered.mbps < connectIPSynthRegressionFloorUpMbps {
+		t.Fatalf("serial+async %.1f < regression floor %.1f", recovered.mbps, connectIPSynthRegressionFloorUpMbps)
 	}
-	const tunProxyMinRatio = 0.45
-	if ratio < tunProxyMinRatio {
-		t.Logf("OPEN: serial/tun proxy ratio %.2f < %.2f — Docker upload gap likely TUN WritePacket path", ratio, tunProxyMinRatio)
+	const tunProxyCollapseRatio = 0.55
+	if serialRatio < tunProxyCollapseRatio && baseline.mbps >= connectIPSynthRegressionFloorUpMbps {
+		t.Logf("OPEN: serial/tun proxy ratio %.2f — Docker upload gap likely TUN WritePacket path", serialRatio)
 	}
 }
 

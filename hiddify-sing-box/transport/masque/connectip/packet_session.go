@@ -3,6 +3,8 @@ package connectip
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 
 	connectip "github.com/quic-go/connect-ip-go"
 )
@@ -32,6 +34,13 @@ type ClientPacketSession struct {
 	profileLocalIPv6  string
 	overlayH2         bool
 	wakeAfterDatagram func()
+
+	egressOnce    sync.Once
+	egressClose   sync.Once
+	egressCh      chan []byte
+	egressStop    chan struct{}
+	egressWG      sync.WaitGroup
+	egressClosed  atomic.Bool
 }
 
 // NewClientPacketSession constructs a CONNECT-IP packet session wrapper.
@@ -136,8 +145,10 @@ func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 		TrackWriteFail(Errs.Transport, true)
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
 	}
-	icmp, err := s.conn.WritePacket(buffer)
-	return s.accountWrite(len(buffer), icmp, err)
+	if s.tryEnqueueEgress(buffer) {
+		return nil, nil
+	}
+	return s.writePacketDirect(buffer)
 }
 
 // WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
