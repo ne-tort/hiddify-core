@@ -178,10 +178,14 @@ type connectIPUploadHarness struct {
 // connectIPUploadHarnessOpts configures the harness remote TCP target (forwarder onward dial).
 type connectIPUploadHarnessOpts struct {
 	remoteEcho         bool
+	remoteDownloadFeed bool // default: writer loop (download benches); false = discard accepted conns
+	// RemoteConnMode overrides remoteEcho/remoteDownloadFeed per accept ("discard" | "feed").
+	RemoteConnMode     func() string
 	onRemoteAccept     func()
 	WriteQueueMetrics  *fwd.WriteQueueMetrics
 	IngressWakeFlushes *atomic.Int32
 	OutboundWakeCalls  *atomic.Int32
+	EgressWakeFlushes  *atomic.Int32
 }
 
 func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
@@ -193,39 +197,12 @@ func startConnectIPUploadHarness(t *testing.T, link packetLink, opts ...connectI
 	clientSess, serverSess := link.endpoints()
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 
-	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
-		LocalIPv4:        netip.MustParseAddr("198.18.0.2"),
-		LocalIPv6:        netip.MustParseAddr("fd00::2"),
-		MTU:              1372,
-		OnOutboundQueued: outboundWakeHook(o.OutboundWakeCalls),
-	})
+	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPHarnessNetstackOpts(o))
 	if err != nil {
 		t.Fatalf("client netstack: %v", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("remote listen: %v", err)
-	}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			if o.onRemoteAccept != nil {
-				o.onRemoteAccept()
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				if o.remoteEcho {
-					_, _ = io.Copy(c, c)
-				} else {
-					_, _ = io.Copy(io.Discard, c)
-				}
-			}(c)
-		}
-	}()
+	ln := startConnectIPRemoteListener(t, o)
 
 	serverConn := &forwarderPipeConn{
 		IPPacketSession: serverSess,
@@ -342,6 +319,24 @@ func verdictConnectIPUpload(l0, l1, l3 connectIPUploadBenchResult) string {
 		return "L3 window model did not reproduce ceiling (harness calibration)"
 	default:
 		return "inconclusive: review layer Mbps"
+	}
+}
+
+// connectIPUploadNativeLayerHint localizes upload gap after pipe L1 (no QUIC) vs native H3 C2S.
+func connectIPUploadNativeLayerHint(pipeL1Mbps, nativeMbps float64) string {
+	if pipeL1Mbps <= 0 {
+		return "inconclusive: pipe L1 Mbps missing"
+	}
+	ratio := nativeMbps / pipeL1Mbps
+	switch {
+	case pipeL1Mbps < connectIPLocalizeFastMbps:
+		return "bottleneck: forwarder/netstack (pipe L1 below regression floor)"
+	case ratio < connectIPSynthPipeMinRatio:
+		return fmt.Sprintf("bottleneck: QUIC/datagram C2S egress (native/pipe=%.2f < %.2f)", ratio, connectIPSynthPipeMinRatio)
+	case nativeMbps < connectIPSynthProdMinMbps:
+		return "pipe+QUIC regression OK; DoD gap likely TUN/container or platform ceiling — Docker only after this gate PASS"
+	default:
+		return "all in-proc layers at DoD — run Docker connect-ip-h3-tun @0ms"
 	}
 }
 
@@ -508,8 +503,13 @@ func TestConnectIPLocalizeForwarderDownloadWindowedWriteTo(t *testing.T) {
 
 func startConnectIPDownloadHarness(t *testing.T, link packetLink, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
 	t.Helper()
+	var o connectIPUploadHarnessOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	o.remoteDownloadFeed = true
 	clientSess, serverSess := link.endpoints()
-	return startConnectIPLocalizePipeHarness(t, clientSess, serverSess, opts...)
+	return startConnectIPLocalizePipeHarness(t, clientSess, serverSess, o)
 }
 
 func outboundWakeHook(calls *atomic.Int32) func() {
@@ -519,22 +519,15 @@ func outboundWakeHook(calls *atomic.Int32) func() {
 	return func() { calls.Add(1) }
 }
 
-func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPacketSession, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
+func egressBatchWakeHook(calls *atomic.Int32) func() {
+	if calls == nil {
+		return nil
+	}
+	return func() { calls.Add(1) }
+}
+
+func startConnectIPRemoteListener(t *testing.T, o connectIPUploadHarnessOpts) net.Listener {
 	t.Helper()
-	var o connectIPUploadHarnessOpts
-	if len(opts) > 0 {
-		o = opts[0]
-	}
-	peer := netip.MustParsePrefix("198.18.0.2/32")
-	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPTCPNetstackOptions{
-		LocalIPv4:        netip.MustParseAddr("198.18.0.2"),
-		LocalIPv6:        netip.MustParseAddr("fd00::2"),
-		MTU:              1372,
-		OnOutboundQueued: outboundWakeHook(o.OutboundWakeCalls),
-	})
-	if err != nil {
-		t.Fatalf("client netstack: %v", err)
-	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("remote listen: %v", err)
@@ -546,17 +539,63 @@ func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPa
 			if err != nil {
 				return
 			}
+			if o.onRemoteAccept != nil {
+				o.onRemoteAccept()
+			}
 			go func(c net.Conn) {
 				defer c.Close()
-				deadline := time.Now().Add(30 * time.Second)
-				for time.Now().Before(deadline) {
-					if _, err := c.Write(buf); err != nil {
-						return
+				mode := "discard"
+				if o.RemoteConnMode != nil {
+					mode = o.RemoteConnMode()
+				} else if o.remoteDownloadFeed {
+					mode = "feed"
+				} else if o.remoteEcho {
+					mode = "echo"
+				}
+				switch mode {
+				case "feed":
+					deadline := time.Now().Add(30 * time.Second)
+					for time.Now().Before(deadline) {
+						if _, err := c.Write(buf); err != nil {
+							return
+						}
 					}
+				case "echo":
+					_, _ = io.Copy(c, c)
+				default:
+					_, _ = io.Copy(io.Discard, c)
 				}
 			}(c)
 		}
 	}()
+	return ln
+}
+
+func connectIPHarnessNetstackOpts(o connectIPUploadHarnessOpts) connectIPTCPNetstackOptions {
+	return connectIPTCPNetstackOptions{
+		LocalIPv4:             netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6:             netip.MustParseAddr("fd00::2"),
+		MTU:                   1372,
+		OnOutboundQueued:      outboundWakeHook(o.OutboundWakeCalls),
+		OnEgressBatchComplete: egressBatchWakeHook(o.EgressWakeFlushes),
+	}
+}
+
+func startConnectIPLocalizePipeHarness(t *testing.T, clientSess, serverSess IPPacketSession, opts ...connectIPUploadHarnessOpts) *connectIPUploadHarness {
+	t.Helper()
+	var o connectIPUploadHarnessOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	peer := netip.MustParsePrefix("198.18.0.2/32")
+	clientNS, err := newConnectIPTCPNetstack(context.Background(), clientSess, connectIPHarnessNetstackOpts(o))
+	if err != nil {
+		t.Fatalf("client netstack: %v", err)
+	}
+	if o.RemoteConnMode == nil {
+		o.remoteDownloadFeed = true
+	}
+	ln := startConnectIPRemoteListener(t, o)
 	serverConn := &forwarderPipeConn{IPPacketSession: serverSess, peerPrefixes: []netip.Prefix{peer}}
 	fwdCtx, fwdCancel := context.WithCancel(context.Background())
 	fwdDone := make(chan error, 1)
@@ -804,7 +843,15 @@ func TestMasqueConnectIPLocalizeRecycle(t *testing.T) {
 
 	rawClient, serverSess := instantPacketLink{}.endpoints()
 	clientSess := &benignOnceWriteSession{inner: rawClient}
-	h := startConnectIPLocalizePipeHarness(t, clientSess, serverSess)
+	var recyclePhase atomic.Int32
+	h := startConnectIPLocalizePipeHarness(t, clientSess, serverSess, connectIPUploadHarnessOpts{
+		RemoteConnMode: func() string {
+			if recyclePhase.Load() == 0 {
+				return "discard"
+			}
+			return "feed"
+		},
+	})
 	defer h.close()
 
 	upConn := h.dialRemote(t)
@@ -819,6 +866,7 @@ func TestMasqueConnectIPLocalizeRecycle(t *testing.T) {
 	flushConnectIPEgressAfterClose(h)
 	waitConnectIPRecycleReady(t, h, &clientSess.fired)
 
+	recyclePhase.Store(1)
 	downConn := h.dialRemote(t)
 	defer downConn.Close()
 	downBytes, downMbps, err := measureTCPDownloadMbps(downConn, downloadDur)

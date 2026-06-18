@@ -2147,6 +2147,9 @@ func (c *Conn) handleDatagramFrame(f *wire.DatagramFrame) error {
 		}
 	}
 	c.datagramQueue.HandleDatagramFrame(f)
+	// CONNECT-IP upload ACK-clock: nudge send path after inbound DATAGRAM so peer ACK egress
+	// does not wait for the application ReadPacket loop to schedule sending.
+	MasqueWakeConnSend(c)
 	return nil
 }
 

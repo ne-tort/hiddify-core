@@ -26,6 +26,28 @@ func (p QUICDialProfile) hasWarpClientCert() bool {
 // and CONNECT-stream (1420 B leaves room for CONNECT-IP datagram framing on bulk paths).
 const DefaultUDPInitialPacketSize uint16 = 1420
 
+// packetPlaneInitialPacketSize aligns QUIC first-flight MTU with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX
+// so CONNECT-IP can carry larger IPv4 segments per DATAGRAM on jumbo-capable paths (Docker bridge, loopback).
+func packetPlaneInitialPacketSize() uint16 {
+	raw := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX"))
+	if raw == "" {
+		return DefaultUDPInitialPacketSize
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1280 {
+		return DefaultUDPInitialPacketSize
+	}
+	// ceiling + RFC9297/H3 datagram prefix headroom; cap below common jumbo.
+	want := n + 96
+	if want > 9000 {
+		want = 9000
+	}
+	if want < int(DefaultUDPInitialPacketSize) {
+		return DefaultUDPInitialPacketSize
+	}
+	return uint16(want)
+}
+
 const (
 	// BulkStreamFCFloorBytes is the minimum CONNECT-stream QUIC stream FC that escapes the
 	// bench-shaped 64 KiB/RTT ceiling (S43 L256 → >21 Mbit/s @ 35 ms). Prod configs use 128 MiB.
@@ -119,7 +141,7 @@ func FinalizeConnectStreamQUICConfig(cfg *quic.Config) {
 func NewPacketPlaneQUICConfig() *quic.Config {
 	return PacketPlaneQUICConfig(&quic.Config{
 		EnableDatagrams:   true,
-		InitialPacketSize: DefaultUDPInitialPacketSize,
+		InitialPacketSize: packetPlaneInitialPacketSize(),
 	})
 }
 
@@ -139,7 +161,7 @@ func QUICConfigForDial(profile QUICDialProfile) *quic.Config {
 	} else {
 		cfg = NewPacketPlaneQUICConfig()
 	}
-	boostTCPBulkStreamQUICReceiveWindows(cfg)
+	FinalizeConnectStreamQUICConfig(cfg)
 	return cfg
 }
 
@@ -151,7 +173,7 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 	} else {
 		cfg = PacketPlaneQUICConfig(&quic.Config{
 			EnableDatagrams:   TCPConnectStreamHTTP3EnableDatagrams(profile),
-			InitialPacketSize: DefaultUDPInitialPacketSize,
+			InitialPacketSize: packetPlaneInitialPacketSize(),
 		})
 	}
 	FinalizeConnectStreamQUICConfig(cfg)
@@ -221,7 +243,7 @@ func tcpStreamHTTP3LegacyDatagramsEnv() bool {
 func HTTPServerQUICConfig() *quic.Config {
 	cfg := PacketPlaneQUICConfig(&quic.Config{
 		EnableDatagrams:   true,
-		InitialPacketSize: DefaultUDPInitialPacketSize,
+		InitialPacketSize: packetPlaneInitialPacketSize(),
 	})
 	FinalizeConnectStreamQUICConfig(cfg)
 	return cfg

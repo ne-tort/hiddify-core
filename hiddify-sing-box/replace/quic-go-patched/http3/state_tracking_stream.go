@@ -10,7 +10,8 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const streamDatagramQueueLen = 32
+// CONNECT-IP maps every TCP segment to one HTTP DATAGRAM; stock 32 drops under bulk tun load.
+const streamDatagramQueueLen = 8192
 
 var (
 	streamDatagramQueueDropTotal     atomic.Uint64

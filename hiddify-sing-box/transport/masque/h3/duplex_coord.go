@@ -62,12 +62,13 @@ func (c *TunnelConn) upgradeDuplexDownloadActiveQUIC() {
 	quic.MasqueSetBidiDuplexUploadStarted(qs, true)
 }
 
-// syncArmRouteBidiDuplex marks saturated duplex when upload traffic already started (route bidi).
+// syncArmRouteBidiDuplex marks saturated duplex only when noteDuplexUploadTraffic already
+// armed concurrent upload during an active download (not iperf -R params alone).
 func (c *TunnelConn) syncArmRouteBidiDuplex() {
 	if c == nil || !c.routeBidiDuplex {
 		return
 	}
-	if atomic.LoadInt32(&c.uploadTrafficStarted) != 0 || atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
+	if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
 		atomic.StoreInt32(&c.duplexUploadStarted, 1)
 	}
 }
@@ -105,17 +106,6 @@ func (c *TunnelConn) beginDuplexDownload() {
 	atomic.AddInt32(&c.downloadActive, 1)
 	c.waitConcurrentUploadAnnounce()
 	c.syncArmRouteBidiDuplex()
-	if !c.routeBidiDuplex && atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
-		atomic.StoreInt32(&c.duplexUploadStarted, 1)
-	}
-	if c.routeBidiDuplex && atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {
-		atomic.StoreInt32(&c.duplexUploadStarted, 1)
-	}
-	if c.h3 != nil {
-		if qs := c.h3.QUICStream(); qs != nil && quic.MasqueConcurrentUploadPending(qs) {
-			atomic.StoreInt32(&c.duplexUploadStarted, 1)
-		}
-	}
 	if TestDuplexDownloadArmedHook != nil {
 		// Synth/GATE barrier: upload always follows armed hook — arm full duplex QUIC before
 		// WriteTo drain so client is not stuck in receive-only while server runs saturated duplex.
@@ -134,6 +124,15 @@ func (c *TunnelConn) beginDuplexDownload() {
 		c.upgradeDuplexDownloadActiveQUIC()
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueRepromoteDuplexUploadSend(qs)
+			quic.MasqueWakeStreamSend(qs)
+		}
+	}
+	if c.h3 != nil && atomic.LoadInt32(&c.duplexUploadStarted) == 0 {
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetPeerDuplexLazyFC(qs, false)
+			quic.MasqueBoostDuplexReceiveFC(qs)
+			quic.MasquePokeDownloadReceiveWindow(qs)
+			quic.MasquePokeConnPeerUploadCredit(qs)
 			quic.MasqueWakeStreamSend(qs)
 		}
 	}
@@ -169,6 +168,11 @@ func (c *TunnelConn) maybeSendH3BootstrapBeforeDuplexDownload() {
 		// Prod SOCKS/CM always pairs ReaderFrom upload with WriteTo download on one CONNECT
 		// stream. Bootstrap zeros before real iperf3 cookie (upload-first) poison docker -R;
 		// S2C receive credit is armed at dial via PrimeH3UploadBootstrapOnConn.
+		return
+	}
+	if qs := c.h3.QUICStream(); qs != nil &&
+		quic.MasqueIsBidiDownloadReceiveOnly(qs) && atomic.LoadInt32(&c.uploadTrafficStarted) == 0 {
+		// Real iperf -R bulk leg: no C2S params on this CONNECT; bootstrap zeros stall download-primary.
 		return
 	}
 	c.writeMu.Lock()
@@ -218,9 +222,11 @@ func (c *TunnelConn) activateDownloadReceiveOnRead() {
 	c.downloadReceiveOnce.Do(func() {
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSetBidiDownloadReceiveActive(qs, true)
+			quic.MasqueSetPeerDuplexLazyFC(qs, false)
 			if quic.MasqueDownloadEagerWindowEnabled() && quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 				quic.MasquePokeDownloadReceiveWindow(qs)
 			}
+			quic.MasquePokeConnPeerUploadCredit(qs)
 			quic.MasqueWakeStreamSend(qs)
 		}
 	})

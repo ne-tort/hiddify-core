@@ -546,7 +546,7 @@ func TestForwarderDownloadDataBypassesWriteQueue(t *testing.T) {
 	t.Fatalf("download payload=%d want >= %d", total, remoteBytes)
 }
 
-func TestForwarderUploadAckCoalesce(t *testing.T) {
+func TestForwarderUploadAckImmediate(t *testing.T) {
 	t.Parallel()
 	conn := &recordingPacketPlaneConn{}
 	f := newTestPacketForwarder(conn)
@@ -597,11 +597,58 @@ func TestForwarderUploadAckCoalesce(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	ackCount := conn.ackOnlyCount()
-	if ackCount >= segs {
-		t.Fatalf("upload ACK coalesce: ack-only writes=%d want << %d segments", ackCount, segs)
+	if ackCount == 0 {
+		t.Fatal("upload ACK: no ack-only writes (CONNECT-IP ACK-clock)")
 	}
 	if ack, ok := conn.lastAckNumber(); !ok || ack != sess.rcvNxt {
-		t.Fatalf("final ACK number=%v (ok=%v) want rcvNxt=%d", ack, ok, sess.rcvNxt)
+		t.Fatalf("final ACK number=%v (ok=%v) want rcvNxt=%d (ack-only writes=%d)", ack, ok, sess.rcvNxt, ackCount)
+	}
+}
+
+func TestForwarderHandleSegmentOutOfOrderDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+	conn := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(conn)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		srcPort: 52001,
+		dstPort: 443,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         100,
+		iss:         200,
+		rcvNxt:      101,
+		sndNxt:      201,
+		established: true,
+		synAckSent:  true,
+	}
+	sess.add()
+
+	ctx := context.Background()
+	late := buildClientDataSegment(flow, 5000, []byte("late"))
+	sess.handleSegment(ctx, late, header.IPv4(late), header.TCP(late[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	done := make(chan struct{})
+	go func() {
+		ok := buildClientDataSegment(flow, sess.rcvNxt, []byte("ok"))
+		sess.handleSegment(ctx, ok, header.IPv4(ok), header.TCP(ok[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleSegment deadlocked after out-of-order segment")
 	}
 }
 

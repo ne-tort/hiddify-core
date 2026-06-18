@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -20,6 +21,9 @@ var relayGoAuditSource string
 
 // RelayGoAuditSource returns relay.go source for frozen delegate audits (REF-SRC-THIN-2).
 func RelayGoAuditSource() string { return relayGoAuditSource }
+
+// relayDuplexArmUploadBytes avoids arming saturated duplex on iperf -R params (FAKEIPERF / cookie).
+const relayDuplexArmUploadBytes = 64 * 1024
 
 const RelayTunnelBufLen = 256 * 1024
 
@@ -210,19 +214,53 @@ func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWrite
 	return relayTunnelDownloadRelay(out, responseWriter, src)
 }
 
+// relayH3ProbeConcurrentUpload peeks the upload leg: immediate EOF → download-primary (iperf -R bulk).
+func relayH3ProbeConcurrentUpload(uploadSrc io.Reader) (io.Reader, bool) {
+	if uploadSrc == nil {
+		return nil, false
+	}
+	d, ok := uploadSrc.(interface{ SetReadDeadline(time.Time) error })
+	if !ok {
+		return uploadSrc, true
+	}
+	_ = d.SetReadDeadline(time.Now().Add(3 * time.Millisecond))
+	one := make([]byte, 1)
+	n, err := uploadSrc.Read(one)
+	_ = d.SetReadDeadline(time.Time{})
+	if n > 0 {
+		return io.MultiReader(bytes.NewReader(one[:n]), uploadSrc), n >= relayDuplexArmUploadBytes
+	}
+	if errors.Is(err, io.EOF) {
+		return uploadSrc, false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		// iperf -R bulk leg: client has not sent C2S yet (not saturated duplex).
+		return uploadSrc, false
+	}
+	return uploadSrc, false
+}
+
 // relayTCPTunnelBidiStream is the prod H3 hijack relay: full-duplex plain io.CopyBuffer on one bidi stream.
 func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	if str, ok := bidi.(*http3.Stream); ok {
-		http3.ArmMasqueBidiDuplexFair(str)
-	}
 	type closeWriter interface {
 		CloseWrite() error
 	}
 	uploadSrc := relayTunnelUploadSource(reqBody, bidi)
 	if RelayUploadFromStream() && bidi != nil {
 		uploadSrc = StripH3ClientBootstrapUpload(uploadSrc)
+	}
+	uploadSrc, expectsConcurrentUpload := relayH3ProbeConcurrentUpload(uploadSrc)
+	if str, ok := bidi.(*http3.Stream); ok {
+		if expectsConcurrentUpload {
+			http3.ArmMasqueBidiDuplexFair(str)
+			http3.WaitMasqueRelayPeerUploadCredit(str)
+		} else {
+			http3.PrepareMasqueRelayDownloadPrimary(str)
+		}
+		http3.EnableMasqueRelayDownloadSend(str)
 	}
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
@@ -234,10 +272,6 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		}
 		uploadErrCh <- err
 	}()
-	if str, ok := bidi.(*http3.Stream); ok {
-		http3.WaitMasqueRelayPeerUploadCredit(str)
-		http3.EnableMasqueRelayDownloadSend(str)
-	}
 	go func() {
 		_, err := relayTunnelDownloadRelayH3Plain(bidi, targetConn)
 		downloadErrCh <- err
@@ -276,8 +310,12 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 	buf := *bp
 	var written int64
 	var pendingWake int
+	wakeBatch := RelayTunnelFlushBytes
+	if str, ok := dst.(*http3.Stream); ok && !http3.IsMasqueBidiDuplexUploadStarted(str) {
+		wakeBatch = 4 * 1024
+	}
 	flushWake := func(str *http3.Stream) {
-		if str == nil || pendingWake < RelayTunnelFlushBytes {
+		if str == nil || pendingWake < wakeBatch {
 			return
 		}
 		pendingWake = 0
@@ -291,6 +329,9 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 				written += int64(nw)
 				if str, ok := dst.(*http3.Stream); ok {
 					_ = str.FlushMasqueCoalesce()
+					if !http3.IsMasqueBidiDuplexUploadStarted(str) {
+						http3.WakeMasqueRelayAfterDownloadWrite(str)
+					}
 					pendingWake += nw
 					flushWake(str)
 				}
@@ -326,6 +367,21 @@ func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.Rea
 	buf := *bp
 	var written int64
 	var pendingWake int
+	var uploadRelayTotal int
+	var armDuplexOnce sync.Once
+	armDuplexIfNeeded := func(str *http3.Stream, uploaded int) {
+		if str == nil || uploaded <= 0 {
+			return
+		}
+		uploadRelayTotal += uploaded
+		if uploadRelayTotal < relayDuplexArmUploadBytes {
+			return
+		}
+		armDuplexOnce.Do(func() {
+			http3.ArmMasqueBidiDuplexFair(str)
+			http3.WaitMasqueRelayPeerUploadCredit(str)
+		})
+	}
 	flushWake := func(str *http3.Stream) {
 		if str == nil || pendingWake < RelayTunnelUploadWakeBytes {
 			return
@@ -337,6 +393,7 @@ func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.Rea
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			if str, ok := bidi.(*http3.Stream); ok {
+				armDuplexIfNeeded(str, nr)
 				_ = str.FlushMasqueCoalesce()
 			}
 			nw, ew := dst.Write(buf[:nr])

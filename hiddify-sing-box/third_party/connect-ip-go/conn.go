@@ -532,6 +532,20 @@ func (c *Conn) pumpH3QUICDatagrams() {
 			cancel()
 		}
 	}()
+	enqueue := func(d []byte) bool {
+		select {
+		case <-c.closeChan:
+			return false
+		case c.h3UnifiedDatagramIngress <- d:
+			return true
+		default:
+			return c.enqueueH3UnifiedIngressWithBackpressure(d)
+		}
+	}
+	var tryDrain tryDrainHTTPDatagrams
+	if td, ok := c.str.(tryDrainHTTPDatagrams); ok {
+		tryDrain = td
+	}
 	for {
 		d, err := c.str.ReceiveDatagram(ctx)
 		if err != nil {
@@ -552,10 +566,19 @@ func (c *Conn) pumpH3QUICDatagrams() {
 			c.mu.Unlock()
 			return
 		}
-		select {
-		case <-c.closeChan:
+		if !enqueue(d) {
 			return
-		case c.h3UnifiedDatagramIngress <- d:
+		}
+		if tryDrain != nil {
+			for {
+				d2, ok := tryDrain.TryReceiveDatagram()
+				if !ok {
+					break
+				}
+				if !enqueue(d2) {
+					return
+				}
+			}
 		}
 	}
 }

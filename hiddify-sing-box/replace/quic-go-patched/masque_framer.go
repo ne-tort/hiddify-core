@@ -136,7 +136,10 @@ func MasqueSetBidiDownloadReceiveActive(s *Stream, active bool) {
 		if MasqueIsBidiDuplexUploadStarted(s) {
 			s.setMasquePeerDuplexLazyFC(false)
 		} else if !s.masqueDuplexFairDeferRelay.Load() {
-			s.setMasquePeerDuplexLazyFC(true)
+			// Download-primary (iperf -R bulk WriteTo): eager S2C FC + boosted window per RTT.
+			s.setMasquePeerDuplexLazyFC(false)
+			MasqueBoostDuplexReceiveFC(s)
+			_ = masquePokeConnPeerUploadCredit(s)
 		}
 		// Skip activation WINDOW flood when upload already runs — poke on delivery / duplex mark.
 		if !MasqueIsBidiDuplexUploadStarted(s) && !s.masqueDuplexFairDeferRelay.Load() {

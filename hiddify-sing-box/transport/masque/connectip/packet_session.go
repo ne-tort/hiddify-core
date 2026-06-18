@@ -125,6 +125,9 @@ func (s *ClientPacketSession) ReadPacketWithContext(ctx context.Context, buffer 
 		return n, err
 	}
 	TrackPacketRx(n)
+	if n > 0 && s.wakeAfterDatagram != nil {
+		s.wakeAfterDatagram()
+	}
 	return n, err
 }
 

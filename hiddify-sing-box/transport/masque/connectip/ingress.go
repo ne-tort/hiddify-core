@@ -342,10 +342,9 @@ func (ing *Ingress) runLoop(ctx context.Context) {
 			}
 			ing.dispatchIngressFrame(readBuffer[:n2])
 		}
-		ing.host.IngressFlushAckWake()
 		// Brief blocking drain pulls additional QUIC datagrams per loop iteration so
 		// native CONNECT-IP download keeps ingress ahead of h3 unified queue pressure.
-		batchDeadline, batchCancel := context.WithTimeout(drainCtx, 12*time.Millisecond)
+		batchDeadline, batchCancel := context.WithTimeout(drainCtx, time.Millisecond)
 		for {
 			n3, err3 := reader(batchDeadline, readBuffer)
 			if err3 != nil || n3 <= 0 {

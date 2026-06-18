@@ -61,19 +61,25 @@ func IsMasqueBidiDuplexUploadStarted(s *Stream) bool {
 	return qs != nil && quic.MasqueIsBidiDuplexUploadStarted(qs)
 }
 
-// WakeMasqueRelayAfterDownloadWrite nudges QUIC after server relay sends download (S2C) during duplex.
+// WakeMasqueRelayAfterDownloadWrite nudges QUIC after server relay sends download (S2C).
 func WakeMasqueRelayAfterDownloadWrite(s *Stream) {
 	if s == nil || s.datagramStream == nil {
 		return
 	}
 	qs := s.datagramStream.QUICStream()
-	if qs == nil || !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+	if qs == nil {
 		return
 	}
-	if quic.MasquePeerUploadCreditDue(qs) {
-		quic.MasqueRepromoteDuplexUploadSend(qs)
+	if quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		if quic.MasquePeerUploadCreditDue(qs) {
+			quic.MasqueRepromoteDuplexUploadSend(qs)
+		}
+		quic.MasqueWakeStreamSend(qs)
+		return
 	}
-	quic.MasqueWakeStreamSend(qs)
+	if quic.MasqueIsBidiDownloadActive(qs) || quic.MasqueIsBidiDownloadReceiveOnly(qs) {
+		quic.MasqueWakeStreamSend(qs)
+	}
 }
 
 // WakeMasqueRelayAfterUploadRead nudges QUIC after server relay consumes client upload (grant C2S credit).
@@ -116,7 +122,24 @@ func ArmMasqueBidiDuplexFair(s *Stream) {
 	quic.MasqueRepromoteDuplexUploadSend(qs)
 }
 
+// PrepareMasqueRelayDownloadPrimary clears saturated duplex markers on download-only hijack relays.
+func PrepareMasqueRelayDownloadPrimary(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil {
+		return
+	}
+	DeactivateMasqueBidiDuplex(s)
+	quic.MasqueSetBidiDuplexFairDeferRelay(qs, false)
+	// Drop hijack-era 64 KiB lazy FC slot so first post-probe S2C bulk uses boosted windows.
+	quic.MasqueClearPeerUploadCreditQueue(qs)
+	quic.MasqueClearConnMaxDataQueue(qs)
+}
+
 // WaitMasqueRelayPeerUploadCredit blocks until initial boosted C2S MAX_STREAM_DATA ships (duplex relay gate).
+// Download-only CONNECT legs (iperf -R, no C2S bytes) disarm duplex fair after the wait budget.
 func WaitMasqueRelayPeerUploadCredit(s *Stream) {
 	if s == nil || s.datagramStream == nil {
 		return
@@ -125,7 +148,10 @@ func WaitMasqueRelayPeerUploadCredit(s *Stream) {
 	if qs == nil {
 		return
 	}
-	quic.MasqueWaitPeerUploadCreditShipped(qs)
+	if !quic.MasqueWaitPeerUploadCreditShipped(qs) {
+		DeactivateMasqueBidiDuplex(s)
+		quic.MasqueSetBidiDuplexFairDeferRelay(qs, false)
+	}
 }
 
 // EnableMasqueRelayDownloadSend marks server S2C tunnel send on hijacked CONNECT streams.

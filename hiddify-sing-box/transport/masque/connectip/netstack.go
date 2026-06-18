@@ -29,6 +29,7 @@ import (
 
 const (
 	netstackOutboundQueueDepth             = 8192
+	netstackOutboundWriteBatchMax          = 96
 	linkOutboundQueueSlots                 = 65536
 	tcpNetstackNIC             tcpip.NICID = 1
 )
@@ -179,6 +180,10 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 	}
 	ccOpt := tcpip.CongestionControlOption("cubic")
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &ccOpt); err != nil {
+		return nil, errors.Join(Errs.StackInit, gonet.TranslateNetstackError(err))
+	}
+	nodelayOpt := tcpip.TCPDelayEnabled(false)
+	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &nodelayOpt); err != nil {
 		return nil, errors.Join(Errs.StackInit, gonet.TranslateNetstackError(err))
 	}
 	if runtime.GOOS == "windows" {

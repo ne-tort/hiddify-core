@@ -102,6 +102,86 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 	return dr.mbps, upMbps
 }
 
+func measureProdStackDownloadReadMbps(
+	t *testing.T,
+	socksPort uint16,
+	targetPort uint16,
+	duration time.Duration,
+) (int64, float64) {
+	t.Helper()
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(duration + 5*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	buf := make([]byte, 256*1024)
+	var total int64
+	stop := time.Now().Add(duration)
+	for time.Now().Before(stop) {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			total += int64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return total, float64(total*8) / secs / 1e6
+}
+
+func measureProdStackDownloadReadMbpsWindowed(
+	t *testing.T,
+	socksPort uint16,
+	targetPort uint16,
+	duration time.Duration,
+) (int64, float64) {
+	t.Helper()
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	conn = masque.ExportWrapBenchWindowedBidiLinkH3Prod(conn)
+	if err := conn.SetDeadline(time.Now().Add(duration + 5*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	buf := make([]byte, 256*1024)
+	var total int64
+	stop := time.Now().Add(duration)
+	for time.Now().Before(stop) {
+		n, err := conn.Read(buf)
+		if n > 0 {
+			total += int64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+	secs := duration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return total, float64(total*8) / secs / 1e6
+}
+
+func measureProdStackUploadMbpsWindowed(
+	t *testing.T,
+	socksPort uint16,
+	targetPort uint16,
+	duration time.Duration,
+) (int64, float64) {
+	t.Helper()
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	conn = masque.ExportWrapBenchWindowedBidiLinkH3Prod(conn)
+	if err := conn.SetDeadline(time.Now().Add(duration + 5*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPUploadMbps(conn, duration)
+	if err != nil && n == 0 {
+		t.Fatalf("prod stack upload windowed: %v", err)
+	}
+	return n, mbps
+}
+
 func assertSynthProdMbps(t *testing.T, layer, leg string, mbps float64, hint string) {
 	t.Helper()
 	want := masque.ExportConnectStreamSynthProdMinMbps
@@ -405,4 +485,65 @@ func TestGATEH2SynthBidiDuplexProdStack(t *testing.T) {
 
 	assertSynthProdMbps(t, "[H2-L1a/L2 prod stack]", "tcp_down WriteTo duplex", downMbps, "H2 bidi anchor")
 	assertSynthProdMbps(t, "[H2-L1a/L2 prod stack]", "tcp_up duplex", upMbps, "H2 bidi anchor")
+}
+
+// TestLocalizeDockerH30msSequentialLegs mirrors docker run_local connect-stream-h3 @0ms:
+// download-first (iperf -R Read) then fresh SOCKS upload — финальный Docker KPI ≥1000.
+func TestLocalizeDockerH30msSequentialLegs(t *testing.T) {
+	const maxRatio = 2.5
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	targetDown := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	targetUp := masque.ExportStartH2ConnectStreamUploadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	_, downMbps := measureProdStackDownloadReadMbps(t, socksPort, targetDown, dur)
+	t.Logf("docker-analog @0ms download-first (Read/-R): %.1f Mbit/s", downMbps)
+
+	upSocks := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	_, upMbps := measureProdStackUploadMbps(t, upSocks, targetUp, dur)
+	t.Logf("docker-analog @0ms upload leg: %.1f Mbit/s", upMbps)
+
+	assertSynthProdMbps(t, "[H3 docker @0ms seq]", "tcp_down Read/-R", downMbps, "run_local leg1 topology")
+	assertSynthProdMbps(t, "[H3 docker @0ms seq]", "tcp_up leg2", upMbps, "run_local leg2 topology")
+	capUp := maxRatio * max(downMbps, 21.0)
+	if upMbps > capUp {
+		t.Fatalf("tcp_up %.1f > %.1f (docker @0ms asymmetry band)", upMbps, capUp)
+	}
+}
+
+// TestLocalizeDockerH335msSequentialLegs mirrors docker run_local @35ms netem + sequential iperf legs.
+// FAIL пока synth не воспроизводит perf-lab floor; DoD 1000+ — только Docker @0ms.
+func TestLocalizeDockerH335msSequentialLegs(t *testing.T) {
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	targetDown := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	targetUp := masque.ExportStartH2ConnectStreamUploadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	_, downMbps := measureProdStackDownloadReadMbpsWindowed(t, socksPort, targetDown, dur)
+	t.Logf("docker-analog @35ms download-first: %.1f Mbit/s", downMbps)
+
+	upSocks := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	_, upMbps := measureProdStackUploadMbpsWindowed(t, upSocks, targetUp, dur)
+	t.Logf("docker-analog @35ms upload leg: %.1f Mbit/s", upMbps)
+
+	masque.ExportAssertLocalizeDocker35msSequentialLeg(t, "tcp_down", downMbps, masque.ExportConnectStreamDocker35msSeqDownFloorMbps)
+	masque.ExportAssertLocalizeDocker35msSequentialLeg(t, "tcp_up", upMbps, masque.ExportConnectStreamDocker35msSeqUpFloorMbps)
+	capUp := masque.ExportConnectStreamDocker35msSeqMaxRatio * max(downMbps, 21.0)
+	if upMbps > capUp {
+		t.Fatalf("tcp_up %.1f > %.1f (docker @35ms asymmetry band)", upMbps, capUp)
+	}
+}
+
+// TestGATEH3IPerfAnalogDownloadRead uses conn.Read (iperf -R / SOCKS relay) not WriteTo.
+func TestGATEH3IPerfAnalogDownloadRead(t *testing.T) {
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+
+	n, mbps := measureProdStackDownloadReadMbps(t, socksPort, targetPort, dur)
+	t.Logf("iperf-analog Read download: %.1f Mbit/s (%d bytes)", mbps, n)
+	assertSynthProdMbps(t, "[H3 iperf -R Read]", "tcp_down Read", mbps, "docker iperf -R analog")
 }

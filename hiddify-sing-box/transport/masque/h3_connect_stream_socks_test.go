@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,32 @@ func newConnectStreamH3ProdSession(t *testing.T, proxyPort int) (ClientSession, 
 	}
 	t.Cleanup(func() { _ = session.Close() })
 	return session, waitCtx
+}
+
+func newConnectStreamH3DockerLiveSession(t *testing.T) ClientSession {
+	t.Helper()
+	if os.Getenv("DOCKER_LIVE_SERVER") != "1" {
+		t.Skip("set DOCKER_LIVE_SERVER=1 with masque-perf-lab up")
+	}
+	host := strings.TrimSpace(os.Getenv("DOCKER_MASQUE_SERVER"))
+	if host == "" {
+		host = "masque-server-core"
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
+		Server:                   host,
+		ServerPort:               8443,
+		TransportMode:            option.MasqueTransportModeConnectUDP,
+		TCPTransport:             option.MasqueTCPTransportConnectStream,
+		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
+		MasqueQUICCryptoTLS:      &tls.Config{ServerName: host, InsecureSkipVerify: true},
+	})
+	if err != nil {
+		t.Fatalf("docker live connect-stream-h3 session: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
 }
 
 func startH3ConnectStreamSocksRouter(t *testing.T, proxyPort int) uint16 {
@@ -258,12 +285,44 @@ func runH3SocksRealIperf3UploadFirst(t *testing.T, proxyPort int, targetPort uin
 	return n
 }
 
+// TestH3ConnectStreamSocksFakeIperfDownloadNoPulse (H3-Docker) — fake iperf -R handshake
 // with docker iperf -R handshake (banner read + params write + io.Copy download, no upload pulse).
 func TestH3ConnectStreamSocksFakeIperfDownloadNoPulse(t *testing.T) {
 	targetPort := startH2FakeIperfDownloadTarget(t)
 	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
 	n := runH3SocksFakeIperfNoPulse(t, proxyPort, targetPort, int64(h2ConnectStreamSocksMinRead))
 	t.Logf("H3 SOCKS fake iperf no-pulse: %d bytes", n)
+}
+
+// TestGATEH3IperfReverseHandshakeRouteMbps — prod iperf -R WriteTo (no RTT harness); AGENTS KPI ≥1000 Mbit/s.
+func TestGATEH3IperfReverseHandshakeRouteMbps(t *testing.T) {
+	dur := connectStreamSynthProdBenchDuration
+	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
+	socksPort := startH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := socksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(dur + 8*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if string(banner) != "iperf3\r\n" {
+		t.Fatalf("banner: got %q", string(banner))
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := measureTCPDownloadWriteToMbps(conn, dur)
+	if err != nil && n == 0 {
+		t.Fatalf("iperf reverse route WriteTo: %v", err)
+	}
+	t.Logf("iperf reverse route WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < connectStreamSynthProdMinMbps {
+		t.Fatalf("%s", synthKPIDiagnostic("[H3 iperf -R route]", "tcp_down WriteTo", mbps,
+			connectStreamSynthProdMinMbps, "prod path without L256 harness"))
+	}
 }
 
 // TestH3ConnectStreamSocksFakeIperfNoPulseBootstrapOff (H3-Docker neg) — without dial bootstrap
@@ -310,4 +369,175 @@ func TestH3ConnectStreamSocksFakeIperfNoPulseBootstrapOff(t *testing.T) {
 	case <-time.After(9 * time.Second):
 		t.Log("bootstrap=0 blocked >9s on iperf handshake (expected docker stall shape)")
 	}
+}
+
+// TestGATEH3TwinConnectStreamSharedQUICDownloadMbps — twin SOCKS on one QUIC; KPI ≥1000 Mbit/s.
+func TestGATEH3TwinConnectStreamSharedQUICDownloadMbps(t *testing.T) {
+	dur := connectStreamSynthProdBenchDuration
+	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
+	session, _ := newConnectStreamH3ProdSession(t, proxyPort)
+	socksPort := startH3ConnectStreamSocksRouterWithSession(t, session)
+
+	dialTwin := func() net.Conn {
+		t.Helper()
+		conn := socksTCPDial(t, socksPort, targetPort)
+		if err := conn.SetDeadline(time.Now().Add(dur + 10*time.Second)); err != nil {
+			t.Fatalf("set deadline: %v", err)
+		}
+		return conn
+	}
+	connPrimary := dialTwin()
+	connTwin := dialTwin()
+
+	handshake := func(conn net.Conn) {
+		t.Helper()
+		banner := make([]byte, 8)
+		if _, err := io.ReadFull(conn, banner); err != nil {
+			t.Fatalf("read iperf banner: %v", err)
+		}
+		if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+			t.Fatalf("write fake iperf params: %v", err)
+		}
+	}
+	handshake(connPrimary)
+
+	twinDone := make(chan struct{})
+	go func() {
+		defer close(twinDone)
+		handshake(connTwin)
+		_, _ = io.Copy(io.Discard, connTwin)
+	}()
+
+	n, mbps, err := measureTCPDownloadWriteToMbps(connPrimary, dur)
+	<-twinDone
+	if err != nil && n == 0 {
+		t.Fatalf("twin CONNECT download: %v", err)
+	}
+	t.Logf("twin CONNECT shared QUIC download: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < connectStreamSynthProdMinMbps {
+		t.Fatalf("%s", synthKPIDiagnostic("[H3 twin CONNECT]", "tcp_down WriteTo", mbps,
+			connectStreamSynthProdMinMbps, "shared QUIC iperf -R"))
+	}
+}
+
+// TestLocalizeH3TwinConnectStrictL256Ceiling35ms — wire-FC ceiling repro only (~60 Mbit/s max).
+func TestLocalizeH3TwinConnectStrictL256Ceiling35ms(t *testing.T) {
+	dur := connectStreamSynthProdBenchDuration
+	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
+	session, _ := newConnectStreamH3ProdSession(t, proxyPort)
+	socksPort := startH3ConnectStreamSocksRouterWithSession(t, session)
+
+	dialTwin := func() net.Conn {
+		t.Helper()
+		conn := socksTCPDial(t, socksPort, targetPort)
+		if err := conn.SetDeadline(time.Now().Add(dur + 10*time.Second)); err != nil {
+			t.Fatalf("set deadline: %v", err)
+		}
+		return conn
+	}
+	connPrimary := benchWindowedBidiLinkStrictH3L256().wrap(dialTwin())
+	connTwin := dialTwin()
+
+	handshake := func(conn net.Conn) {
+		t.Helper()
+		banner := make([]byte, 8)
+		if _, err := io.ReadFull(conn, banner); err != nil {
+			t.Fatalf("read iperf banner: %v", err)
+		}
+		if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+			t.Fatalf("write fake iperf params: %v", err)
+		}
+	}
+	handshake(connPrimary)
+
+	twinDone := make(chan struct{})
+	go func() {
+		defer close(twinDone)
+		handshake(connTwin)
+		_, _ = io.Copy(io.Discard, connTwin)
+	}()
+
+	n, mbps, err := measureTCPDownloadWriteToMbps(connPrimary, dur)
+	<-twinDone
+	if err != nil && n == 0 {
+		t.Fatalf("twin strict windowed download: %v", err)
+	}
+	t.Logf("twin CONNECT strict L256 windowed 35ms: %.1f Mbit/s (%d bytes)", mbps, n)
+	assertLocalizeStrictL256Ceiling35ms(t, "twin strict L256 handshake", mbps)
+}
+
+// TestLocalizeH3TwinConnectStrictNoParamsL256Ceiling35ms — real iperf -R bulk leg (no C2S params on download CONNECT).
+func TestLocalizeH3TwinConnectStrictNoParamsL256Ceiling35ms(t *testing.T) {
+	dur := connectStreamSynthProdBenchDuration
+	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
+	session, _ := newConnectStreamH3ProdSession(t, proxyPort)
+	socksPort := startH3ConnectStreamSocksRouterWithSession(t, session)
+
+	dialTwin := func() net.Conn {
+		t.Helper()
+		conn := socksTCPDial(t, socksPort, targetPort)
+		if err := conn.SetDeadline(time.Now().Add(dur + 10*time.Second)); err != nil {
+			t.Fatalf("set deadline: %v", err)
+		}
+		return conn
+	}
+	connPrimary := benchWindowedBidiLinkStrictH3L256().wrap(dialTwin())
+	connTwin := dialTwin()
+
+	readBanner := func(conn net.Conn) {
+		t.Helper()
+		banner := make([]byte, 8)
+		if _, err := io.ReadFull(conn, banner); err != nil {
+			t.Fatalf("read iperf banner: %v", err)
+		}
+	}
+	readBanner(connPrimary)
+
+	twinDone := make(chan struct{})
+	go func() {
+		defer close(twinDone)
+		readBanner(connTwin)
+		if _, err := connTwin.Write([]byte("FAKEIPERF")); err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, connTwin)
+	}()
+
+	n, mbps, err := measureTCPDownloadWriteToMbps(connPrimary, dur)
+	<-twinDone
+	if err != nil && n == 0 {
+		t.Fatalf("twin no-params primary download: %v", err)
+	}
+	t.Logf("twin CONNECT no-params primary strict L256 35ms: %.1f Mbit/s (%d bytes)", mbps, n)
+	assertLocalizeStrictL256Ceiling35ms(t, "twin no-params primary", mbps)
+}
+
+// TestLocalizeH3StrictL256CopyCeiling35ms — iperf Read/io.Copy path under L256/35ms harness.
+func TestLocalizeH3StrictL256CopyCeiling35ms(t *testing.T) {
+	dur := connectStreamSynthProdBenchDuration
+	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
+	session, _ := newConnectStreamH3ProdSession(t, proxyPort)
+	socksPort := startH3ConnectStreamSocksRouterWithSession(t, session)
+
+	conn := benchWindowedBidiLinkStrictH3L256().wrap(socksTCPDial(t, socksPort, targetPort))
+	if err := conn.SetDeadline(time.Now().Add(dur + 10*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := measureTCPDownloadCopyMbps(conn, dur)
+	if err != nil && n == 0 {
+		t.Fatalf("twin strict copy download: %v", err)
+	}
+	t.Logf("twin CONNECT strict L256 copy 35ms: %.1f Mbit/s (%d bytes)", mbps, n)
+	assertLocalizeStrictL256Ceiling35ms(t, "strict L256 io.Copy", mbps)
 }

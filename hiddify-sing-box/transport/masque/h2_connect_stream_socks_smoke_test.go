@@ -87,13 +87,17 @@ func startH2ConnectStreamSocksRouterWithSession(t *testing.T, session ClientSess
 }
 
 func socksTCPDial(t *testing.T, socksPort uint16, targetPort uint16) net.Conn {
+	return socksTCPDialHost(t, socksPort, "127.0.0.1", targetPort)
+}
+
+func socksTCPDialHost(t *testing.T, socksPort uint16, targetHost string, targetPort uint16) net.Conn {
 	t.Helper()
 	dialer := socks.NewClient(N.SystemDialer, M.ParseSocksaddrHostPort("127.0.0.1", socksPort), socks.Version5, "", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
-	conn, err := dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort("127.0.0.1", targetPort))
+	conn, err := dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddrHostPort(targetHost, targetPort))
 	if err != nil {
-		t.Fatalf("socks tcp dial: %v", err)
+		t.Fatalf("socks tcp dial %s:%d: %v", targetHost, targetPort, err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
@@ -296,6 +300,53 @@ func startH2FakeIperfDownloadTarget(t *testing.T) uint16 {
 		}
 	}()
 	return port
+}
+
+// startH2FakeIperfStreamingDownloadTargetOn binds on all interfaces (docker live server tests).
+func startH2FakeIperfStreamingDownloadTargetOn(t *testing.T, host string) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatalf("listen fake iperf streaming on %s: %v", host, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				if _, err := conn.Write([]byte("iperf3\r\n")); err != nil {
+					return
+				}
+				// Real iperf3 -R bulk leg: server streams download without waiting for params on this TCP.
+				// Params arrive on a sibling CONNECT; consume any client blob in the background.
+				go func() {
+					buf := make([]byte, 4096)
+					for {
+						if _, err := conn.Read(buf); err != nil {
+							return
+						}
+					}
+				}()
+				payload := make([]byte, 256*1024)
+				for {
+					if _, err := conn.Write(payload); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return port
+}
+
+// startH2FakeIperfStreamingDownloadTarget is iperf3 -R shape: banner, read client blob, stream bulk forever.
+func startH2FakeIperfStreamingDownloadTarget(t *testing.T) uint16 {
+	return startH2FakeIperfStreamingDownloadTargetOn(t, "127.0.0.1")
 }
 
 const iperf3CookieSize = 37

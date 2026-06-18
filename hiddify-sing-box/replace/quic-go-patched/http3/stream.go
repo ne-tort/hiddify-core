@@ -135,7 +135,15 @@ func masqueStreamDuplexUploadWake(s *Stream) bool {
 
 const masqueHTTP3WriteToBufLen = 256 * 1024
 
-// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered (64 KiB during duplex).
+func masqueStreamDownloadPrimaryReceive(s *Stream) bool {
+	if s == nil || s.datagramStream == nil {
+		return false
+	}
+	qs := s.datagramStream.QUICStream()
+	return qs != nil && quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs)
+}
+
+// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered (64 KiB during duplex / download-primary).
 func (s *Stream) WriteTo(w io.Writer) (int64, error) {
 	wakeBatch := masqueHTTP3WriteToBufLen
 	readCap := masqueHTTP3WriteToBufLen
@@ -144,6 +152,9 @@ func (s *Stream) WriteTo(w io.Writer) (int64, error) {
 		if qs := s.datagramStream.QUICStream(); qs != nil && quic.MasqueUploadSendStarved(qs) {
 			readCap = 16 * 1024
 		}
+	} else if masqueStreamDownloadPrimaryReceive(s) {
+		wakeBatch = 4 * 1024
+		readCap = masqueHTTP3WriteToBufLen
 	}
 	buf := make([]byte, readCap)
 	var total int64

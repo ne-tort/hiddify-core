@@ -216,6 +216,9 @@ func (c *TunnelConn) Read(p []byte) (int, error) {
 		if err != nil {
 			err = errors.Join(ErrTunnelConnFailed, err)
 		}
+		if n > 0 {
+			c.noteDownloadDeliveryWake(n)
+		}
 		return n, err
 	}
 	if c.reader == nil {

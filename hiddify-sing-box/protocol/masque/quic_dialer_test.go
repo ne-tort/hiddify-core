@@ -2,15 +2,20 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"net"
 	"syscall"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/adapter/outbound"
+	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	"github.com/sagernet/sing/service"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 // testMasqueNetworkManager is a minimal adapter.NetworkManager for dialer bootstrap tests.
@@ -52,24 +57,92 @@ func (testMasqueNetworkManager) WIFIState() adapter.WIFIState       { return ada
 func (testMasqueNetworkManager) UpdateWIFIState()                  {}
 func (testMasqueNetworkManager) ResetNetwork()                     {}
 
-func TestBuildQUICDialFuncUsesSingBoxDialerWhenNetworkManagerPresent(t *testing.T) {
+func TestBuildQUICDialFuncUsesSingBoxDialerWhenAutoDetectInterface(t *testing.T) {
 	t.Parallel()
-	for _, autoDetect := range []bool{true, false} {
-		autoDetect := autoDetect
-		t.Run(map[bool]string{true: "auto_detect", false: "no_auto_detect"}[autoDetect], func(t *testing.T) {
-			t.Parallel()
-			ctx := service.ContextWith[adapter.NetworkManager](
-				context.Background(),
-				testMasqueNetworkManager{autoDetect: autoDetect},
-			)
-			quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
-			if err != nil {
-				t.Fatalf("build QUIC dial: %v", err)
-			}
-			if quicDial == nil {
-				t.Fatal("expected non-nil QUIC dial when NetworkManager is present (sing-box routed bootstrap)")
-			}
-		})
+	ctx := service.ContextWith[adapter.NetworkManager](
+		context.Background(),
+		testMasqueNetworkManager{autoDetect: true},
+	)
+	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
+	if err != nil {
+		t.Fatalf("build QUIC dial: %v", err)
+	}
+	if quicDial == nil {
+		t.Fatal("expected non-nil QUIC dial when auto_detect_interface is enabled")
+	}
+}
+
+func TestBuildQUICDialFuncTierAWhenNetworkManagerWithoutAutoDetect(t *testing.T) {
+	t.Parallel()
+	ctx := service.ContextWith[adapter.NetworkManager](
+		context.Background(),
+		testMasqueNetworkManager{autoDetect: false},
+	)
+	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
+	if err != nil {
+		t.Fatalf("build QUIC dial: %v", err)
+	}
+	if quicDial != nil {
+		t.Fatal("expected Tier A quic.DialAddr when NetworkManager present but auto_detect_interface is off (docker bench shape)")
+	}
+}
+
+type testMasqueDirectOutbound struct {
+	outbound.Adapter
+}
+
+func (o *testMasqueDirectOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
+	return nil, errors.New("testMasqueDirectOutbound: unused")
+}
+
+func (o *testMasqueDirectOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
+	return nil, errors.New("testMasqueDirectOutbound: unused")
+}
+
+type testMasqueOutboundManager struct {
+	outbounds []adapter.Outbound
+}
+
+func (testMasqueOutboundManager) Start(adapter.StartStage) error { return nil }
+func (testMasqueOutboundManager) Close() error                   { return nil }
+func (m testMasqueOutboundManager) Outbounds() []adapter.Outbound { return m.outbounds }
+func (m testMasqueOutboundManager) Outbound(tag string) (adapter.Outbound, bool) {
+	for _, ob := range m.outbounds {
+		if ob.Tag() == tag {
+			return ob, true
+		}
+	}
+	return nil, false
+}
+func (testMasqueOutboundManager) Default() adapter.Outbound { return nil }
+func (testMasqueOutboundManager) Remove(string) error       { return nil }
+func (testMasqueOutboundManager) Create(context.Context, adapter.Router, log.ContextLogger, string, string, any) error {
+	return nil
+}
+
+func TestBuildQUICDialFuncTierAWhenBootstrapInjectsDirectDetour(t *testing.T) {
+	t.Parallel()
+	direct := &testMasqueDirectOutbound{
+		Adapter: outbound.NewAdapter(C.TypeDirect, "direct", []string{"tcp", "udp"}, nil),
+	}
+	ctx := service.ContextWith[adapter.OutboundManager](
+		context.Background(),
+		testMasqueOutboundManager{outbounds: []adapter.Outbound{direct}},
+	)
+	ctx = service.ContextWith[adapter.NetworkManager](
+		ctx,
+		testMasqueNetworkManager{autoDetect: false},
+	)
+	effective := masqueEffectiveBootstrapDialerOptions(ctx, option.DialerOptions{})
+	if effective.Detour != "direct" {
+		t.Fatalf("expected bootstrap detour direct, got %q", effective.Detour)
+	}
+	quicDial, err := buildQUICDialFunc(ctx, option.DialerOptions{}, false)
+	if err != nil {
+		t.Fatalf("build QUIC dial: %v", err)
+	}
+	if quicDial != nil {
+		t.Fatal("bootstrap detour must not force TierB custom_quic_dial when user DialerOptions are empty")
 	}
 }
 

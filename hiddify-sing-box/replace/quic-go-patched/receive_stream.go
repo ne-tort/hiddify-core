@@ -83,6 +83,12 @@ func (s *ReceiveStream) StreamID() protocol.StreamID {
 	return s.streamID
 }
 
+func (s *ReceiveStream) masqueC2SBytesReceived() protocol.ByteCount {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.readPos
+}
+
 // Read reads data from the stream.
 // Read can be made to time out using [ReceiveStream.SetReadDeadline].
 // If the stream was canceled, the error is a [StreamError].

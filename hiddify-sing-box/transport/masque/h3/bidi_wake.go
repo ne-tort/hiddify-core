@@ -34,8 +34,19 @@ func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	}
 }
 
+func (c *TunnelConn) downloadWakeEligible() bool {
+	if c == nil || c.h3 == nil {
+		return false
+	}
+	if atomic.LoadInt32(&c.downloadActive) != 0 {
+		return true
+	}
+	qs := c.h3.QUICStream()
+	return qs != nil && quic.MasqueIsBidiDownloadReceiveOnly(qs)
+}
+
 func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
-	if c == nil || c.h3 == nil || atomic.LoadInt32(&c.downloadActive) == 0 {
+	if !c.downloadWakeEligible() {
 		return
 	}
 	if c.bidiWakeSink != nil {
@@ -43,6 +54,14 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	}
 	qs := c.h3.QUICStream()
 	if qs == nil {
+		return
+	}
+	if quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		if quic.MasqueDownloadEagerWindowEnabled() {
+			quic.MasquePokeDownloadReceiveWindow(qs)
+			quic.MasquePokeConnPeerUploadCredit(qs)
+		}
+		quic.MasqueWakeStreamSend(qs)
 		return
 	}
 	if quic.MasqueUploadSendStarved(qs) {
@@ -58,7 +77,12 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 }
 
 func (c *TunnelConn) noteDownloadDeliveryWake(delivered int) {
-	if delivered <= 0 || !c.DownloadActive() {
+	if delivered <= 0 || !c.downloadWakeEligible() {
+		return
+	}
+	if qs := c.h3.QUICStream(); qs != nil &&
+		quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
+		c.wakeBidiSendAfterDownloadDelivery()
 		return
 	}
 	pending := atomic.AddInt32(&c.downloadDeliveryPending, int32(delivered))

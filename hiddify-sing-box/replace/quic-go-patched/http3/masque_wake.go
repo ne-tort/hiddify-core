@@ -86,6 +86,13 @@ func masqueWakeSendAfterBidiProgress(str *Stream, n int, active ...func(*quic.St
 		quic.MasqueWakeStreamSend(qs)
 		return
 	}
+	if quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs) &&
+		quic.MasqueDownloadEagerWindowEnabled() {
+		quic.MasquePokeDownloadReceiveWindow(qs)
+		quic.MasquePokeConnPeerUploadCredit(qs)
+		quic.MasqueWakeStreamSend(qs)
+		return
+	}
 	if quic.MasqueIsBidiDownloadActive(qs) && quic.MasqueDownloadEagerWindowEnabled() &&
 		quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 		quic.MasquePokeDownloadReceiveWindow(qs)

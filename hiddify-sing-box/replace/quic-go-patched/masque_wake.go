@@ -56,10 +56,10 @@ func MasqueDuplexGrantPeerDownloadCredit(s *Stream) bool {
 	return masqueDuplexGrantPeerDownloadCredit(s)
 }
 
-const masqueDuplexUploadStarveThreshold = 5 * 1024 * 1024
 
 // masqueDuplexWithholdPeerDownloadCredit reports whether saturated duplex should defer S2C
-// MAX_STREAM_DATA while C2S send still has headroom or is FC-starved.
+// MAX_STREAM_DATA while C2S send is FC-starved. Withholding on upload headroom capped
+// iperf -R download at one boosted stream window (~128 MiB) while upload still had send credit.
 func masqueDuplexWithholdPeerDownloadCredit(s *Stream) bool {
 	if s == nil || !MasqueIsBidiDuplexUploadStarted(s) || s.masqueDuplexFairDeferRelay.Load() {
 		return false
@@ -67,10 +67,7 @@ func masqueDuplexWithholdPeerDownloadCredit(s *Stream) bool {
 	if s.sendStr == nil || s.sendStr.flowController == nil {
 		return false
 	}
-	if MasqueUploadSendStarved(s) {
-		return true
-	}
-	return s.sendStr.flowController.SendWindowSize() >= masqueDuplexUploadStarveThreshold
+	return MasqueUploadSendStarved(s)
 }
 
 // masqueDuplexGrantPeerDownloadCredit reports whether saturated duplex may queue S2C MAX_STREAM_DATA.
@@ -79,9 +76,6 @@ func masqueDuplexGrantPeerDownloadCredit(s *Stream) bool {
 		return true
 	}
 	if !MasqueIsBidiDuplexUploadStarted(s) {
-		if MasqueConcurrentUploadPending(s) && s.masqueIsDownloadActive() {
-			return false
-		}
 		return true
 	}
 	if s.masqueDuplexFairDeferRelay.Load() {
@@ -181,17 +175,15 @@ func MasquePeerUploadConnCreditOffset(s *Stream) uint64 {
 }
 
 // MasqueWaitPeerUploadCreditShipped blocks until boosted C2S MAX_STREAM_DATA ships or budget expires.
-func MasqueWaitPeerUploadCreditShipped(s *Stream) {
+// Reports whether paired stream+conn credit reached the relay gate threshold.
+func MasqueWaitPeerUploadCreditShipped(s *Stream) bool {
 	if s == nil || !s.masqueDuplexFairDeferRelay.Load() {
-		return
+		return false
 	}
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if MasquePeerUploadCreditShipped(s) &&
-			MasquePeerUploadConnCreditShipped(s) &&
-			MasquePeerUploadCreditOffset(s) >= masqueRelayMinInitialUploadCredit &&
-			MasquePeerUploadConnCreditOffset(s) >= masqueRelayMinInitialUploadCredit {
-			return
+		if masquePeerUploadCreditReady(s) {
+			return true
 		}
 		MasqueRepromoteDuplexUploadSend(s)
 		masquePokePeerUploadCredit(s)
@@ -200,6 +192,14 @@ func MasqueWaitPeerUploadCreditShipped(s *Stream) {
 		}
 		time.Sleep(10 * time.Microsecond)
 	}
+	return masquePeerUploadCreditReady(s)
+}
+
+func masquePeerUploadCreditReady(s *Stream) bool {
+	return MasquePeerUploadCreditShipped(s) &&
+		MasquePeerUploadConnCreditShipped(s) &&
+		MasquePeerUploadCreditOffset(s) >= masqueRelayMinInitialUploadCredit &&
+		MasquePeerUploadConnCreditOffset(s) >= masqueRelayMinInitialUploadCredit
 }
 
 func masquePokePeerUploadCredit(s *Stream) bool {
@@ -327,16 +327,18 @@ func masquePokeDownloadReceiveWindow(s *Stream) bool {
 		if !s.masqueIsDownloadActive() {
 			return false
 		}
-		if !masqueDuplexGrantPeerDownloadCredit(s) {
-			return false
-		}
 		s.masqueBoostDuplexFlowControl()
+		if !masqueDuplexGrantPeerDownloadCredit(s) && s.receiveStr.flowController != nil {
+			flowcontrol.SetMasqueDuplexForceUpdate(s.receiveStr.flowController)
+		}
 		return s.receiveStr.masquePokeDownloadReceiveWindow()
 	}
-	// P2 receive-only: batch MAX_STREAM_DATA while sibling upload is idle. During saturated
-	// duplex the server must re-notify upload credit (NoRenotify caps C2S at ~1 window/RTT).
+	// Download-primary CONNECT (iperf -R params then bulk WriteTo): use full WINDOW poke, not
+	// NoRenotify batching — RTT-limited paths need per-delivery credit (docker @35ms gate).
 	if MasqueIsBidiDownloadReceiveOnly(s) && !MasqueIsBidiDuplexUploadStarted(s) {
-		return s.receiveStr.masquePokeDownloadReceiveWindowNoRenotify()
+		streamQueued := s.receiveStr.masquePokeDownloadReceiveWindow()
+		connQueued := masquePokeConnPeerUploadCredit(s)
+		return streamQueued || connQueued
 	}
 	return s.receiveStr.masquePokeDownloadReceiveWindow()
 }
@@ -371,6 +373,9 @@ func masqueWakeAfterDownloadWrite(s *Stream, n int) {
 		return
 	}
 	if s.masqueIsDownloadActive() && MasqueIsBidiDownloadReceiveOnly(s) {
+		if MasqueDownloadEagerWindowEnabled() {
+			masquePokeDownloadReceiveWindow(s)
+		}
 		MasqueWakeStreamSend(s)
 		return
 	}

@@ -336,9 +336,10 @@ func (s *coreSession) newConnectIPPacketSession(conn *connectip.Conn, overlayH2 
 
 func (s *coreSession) scheduleConnectIPDatagramSendWake() {
 	s.ConnectIPIngressAckWake.Schedule()
-	// Flush per outbound datagram (not only egress batch end) so iperf -R duplex on
-	// connect-ip TUN keeps QUIC ingress draining while gVisor emits TCP ACKs/upload.
-	s.flushConnectIPIngressAckWake()
+	// Native packet-plane TCP needs per-datagram wake so ACK-clock egress does not wait for batch fill.
+	if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") {
+		s.flushConnectIPIngressAckWake()
+	}
 }
 
 func (s *coreSession) flushConnectIPIngressAckWakeOnEgress() {
@@ -500,8 +501,12 @@ func (s *coreSession) noteConnectIPIngressAckForWake(pkt []byte) {
 }
 
 func (s *coreSession) flushConnectIPIngressAckWake() {
-	if !s.ConnectIPIngressAckWake.TakePending() {
+	nativeConnectIPTCP := strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip")
+	if !nativeConnectIPTCP && !s.ConnectIPIngressAckWake.TakePending() {
 		return
+	}
+	if nativeConnectIPTCP {
+		s.ConnectIPIngressAckWake.TakePending()
 	}
 	if s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2 {
 		h2c.FlushConnectIPIngressAckWake(s.IPHTTPH2Upload)
@@ -529,8 +534,10 @@ func (s *coreSession) deliverConnectIPTCPIngressNoFlush(pkt []byte) bool {
 		func(pkt []byte, _ *cip.Netstack) {
 			s.noteConnectIPIngressAckForWake(pkt)
 			// Native CONNECT-IP TCP (tcp_transport=connect_ip) needs immediate wake on
-			// ACK-only ingress to keep ACK-clock moving under sustained download.
-			if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") && cip.IPv4TCPAckOnly(pkt) {
+			// every inbound TCP segment (ACK clock + download DATA) so TUN upload does not
+			// sit at the ~64 KiB / RTT ceiling waiting for a batched ingress flush.
+			if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") &&
+				cip.IPv4TCPIngressWakeCandidate(pkt) {
 				s.flushConnectIPIngressAckWake()
 			}
 		},

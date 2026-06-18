@@ -17,14 +17,18 @@ var (
 	ExportNewConnectStreamH2ProdSession             = newConnectStreamH2ProdSession
 	ExportNewConnectStreamH2ProdSessionWithTCPDial  = newConnectStreamH2ProdSessionWithTCPDial
 	ExportStartH2FakeIperfDownloadTarget            = startH2FakeIperfDownloadTarget
+	ExportStartH2FakeIperfStreamingDownloadTarget   = startH2FakeIperfStreamingDownloadTarget
+	ExportStartH2FakeIperfStreamingDownloadTargetOn = startH2FakeIperfStreamingDownloadTargetOn
 	ExportStartH2FakeIperfConcurrentControlTarget   = startH2FakeIperfConcurrentControlTarget
 	ExportStartRealIperf3UploadFirstTarget          = startRealIperf3UploadFirstTarget
 	ExportTestIperf3ClientCookie                    = testIperf3ClientCookie
 	ExportTestIperf3ClientParamsJSON                = testIperf3ClientParamsJSON
 	ExportStartH3ConnectStreamSocksRouter           = startH3ConnectStreamSocksRouter
 	ExportStartH3ConnectStreamSocksRouterWithSession = startH3ConnectStreamSocksRouterWithSession
+	ExportNewConnectStreamH3DockerLiveSession       = newConnectStreamH3DockerLiveSession
 	ExportNewConnectStreamH3ProdSession             = newConnectStreamH3ProdSession
 	ExportSocksTCPDial                              = socksTCPDial
+	ExportSocksTCPDialHost                          = socksTCPDialHost
 	ExportBenchWindowedBidiLinkStrict               = benchWindowedBidiLinkStrict
 	ExportBenchWindowedBidiLinkStrictH3             = benchWindowedBidiLinkStrictH3
 	ExportBenchWindowedBidiLinkStrictH3L256         = benchWindowedBidiLinkStrictH3L256
@@ -32,9 +36,22 @@ var (
 	ExportLocalizeBenchDuration                     = localizeBenchDuration
 	ExportConnectStreamVPSKPITargetDown             = connectStreamVPSKPITargetDownMbps
 	ExportConnectStreamSynthProdMinMbps             = connectStreamSynthProdMinMbps
+	ExportConnectStreamStrictL256Ceiling35msMbps    = connectStreamStrictL256Ceiling35msMbps
+	ExportConnectStreamStrictL256CeilingBandMbps    = connectStreamStrictL256CeilingBandMbps
+	ExportConnectStreamDocker35msSeqDownFloorMbps   = connectStreamDocker35msSeqDownFloorMbps
+	ExportConnectStreamDocker35msSeqUpFloorMbps     = connectStreamDocker35msSeqUpFloorMbps
+	ExportConnectStreamDocker35msSeqMaxRatio          = connectStreamDocker35msSeqMaxRatio
 	ExportConnectStreamSynthParityMinRatio          = connectStreamSynthParityMinRatio
 	ExportConnectStreamSynthDuplexMaxRatio          = connectStreamSynthDuplexMaxRatio
 	ExportConnectStreamSynthProdBenchDuration       = connectStreamSynthProdBenchDuration
+	ExportConnectIPSynthProdMinMbps                 = connectIPSynthProdMinMbps
+	ExportConnectIPSynthRegressionFloorUpMbps       = connectIPSynthRegressionFloorUpMbps
+	ExportConnectIPSynthRegressionFloorDownMbpsLinux   = connectIPSynthRegressionFloorDownMbpsLinux
+	ExportConnectIPSynthRegressionFloorDownMbpsDesktop = connectIPSynthRegressionFloorDownMbpsDesktop
+	ExportConnectIPSynthPipeMinRatio                = connectIPSynthPipeMinRatio
+	ExportConnectIPSynthMaxAsymRatio                = connectIPSynthMaxAsymRatio
+	ExportConnectIPSynthProdBenchDuration             = connectIPSynthProdBenchDuration
+	ExportConnectIPDockerProdMinMbps                  = connectIPDockerProdMinMbps
 	ExportStartH2ConnectStreamUploadTarget          = startH2ConnectStreamUploadTarget
 	ExportLocalizeBenchMinBytes                     int64 = localizeBenchMinBytes
 	ExportH3HonestGateMinBytes                      int64 = h3HonestGateMinBytes
@@ -104,4 +121,33 @@ func ExportInstallDuplexDownloadArmedHook(hook chan struct{}) func() {
 	prev := h3.TestDuplexDownloadArmedHook
 	h3.TestDuplexDownloadArmedHook = hook
 	return func() { h3.TestDuplexDownloadArmedHook = prev }
+}
+
+func ExportAssertLocalizeStrictL256Ceiling35ms(t *testing.T, label string, mbps float64) {
+	assertLocalizeStrictL256Ceiling35ms(t, label, mbps)
+}
+
+func ExportAssertLocalizeDocker35msSequentialLeg(t *testing.T, leg string, mbps, floorMbps float64) {
+	assertLocalizeDocker35msSequentialLeg(t, leg, mbps, floorMbps)
+}
+
+// ExportConnectIPUploadBench is pipe/native upload Mbps for masque_test gates.
+type ExportConnectIPUploadBench struct {
+	Layer string
+	Mbps  float64
+	Bytes int64
+	Err   error
+}
+
+func exportConnectIPUploadBench(r connectIPUploadBenchResult) ExportConnectIPUploadBench {
+	return ExportConnectIPUploadBench{Layer: r.layer, Mbps: r.mbps, Bytes: r.bytes, Err: r.err}
+}
+
+func ExportBenchConnectIPUploadInstantL1(t *testing.T, duration time.Duration) ExportConnectIPUploadBench {
+	t.Helper()
+	return exportConnectIPUploadBench(benchConnectIPUploadLayer(t, "L1", instantPacketLink{}, duration))
+}
+
+func ExportConnectIPUploadNativeHint(pipeL1Mbps, nativeMbps float64) string {
+	return connectIPUploadNativeLayerHint(pipeL1Mbps, nativeMbps)
 }

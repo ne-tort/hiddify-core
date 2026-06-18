@@ -342,6 +342,7 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 		quic.ReleaseHTTP3DatagramBuffer(bufPtr)
 		return err
 	}
+	quic.MasqueWakeConnSend(c.conn)
 	return nil
 }
 
@@ -375,6 +376,8 @@ func (c *rawConn) receiveDatagramDispatch(b []byte) error {
 		return nil
 	}
 	dg.enqueueDatagram(b[n:])
+	// Per-ACK wake: upload egress must not wait for the receiveDatagrams batch loop to finish.
+	quic.MasqueWakeConnSend(c.conn)
 	return nil
 }
 
@@ -398,6 +401,9 @@ func (c *rawConn) receiveDatagrams() error {
 				return err
 			}
 		}
+		// CONNECT-IP download: ingress datagrams become gVisor TCP DATA; wake QUIC send so
+		// client ACK egress does not wait a full RTT behind the receive loop.
+		quic.MasqueWakeConnSend(c.conn)
 	}
 }
 

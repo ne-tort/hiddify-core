@@ -10,7 +10,7 @@ const (
 	// DefaultDatagramCeilingMax is the inclusive upper bound for CONNECT-IP IPv4 datagram bytes.
 	DefaultDatagramCeilingMax = 1500
 	// DatagramSlack is QUIC/H3 HTTP DATAGRAM framing overhead reserved from the ceiling for gVisor link MTU.
-	DatagramSlack = 128
+	DatagramSlack = 80
 )
 
 // DatagramCeilingMax returns the configured CONNECT-IP datagram ceiling max.

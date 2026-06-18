@@ -86,9 +86,10 @@ func masqueBootstrapDirectDetourTag(ctx context.Context) string {
 	return ""
 }
 
-// masqueBootstrapShouldUseSingBoxDefaultDialer mirrors common/dialer/default.go: when
-// sing-box NetworkManager is available and no explicit detour was resolved, bootstrap dials
-// still use dialer.New (interface binding when route.auto_detect_interface is enabled).
+// masqueBootstrapShouldUseSingBoxDefaultDialer mirrors common/dialer/default.go: bootstrap
+// dials use dialer.New only when route.auto_detect_interface is enabled (interface binding).
+// NetworkManager alone must not force connected UDP / custom QUIC dial — that path caps
+// CONNECT-stream download (~100–150 Mbit/s) while Tier A quic.DialAddr matches synth gates.
 //
 // Only applies when the user left DialerOptions at defaults (strictly empty). If they
 // set fields such as domain_resolver without detour, we keep Tier A per historical MASQUE behavior.
@@ -100,7 +101,10 @@ func masqueBootstrapShouldUseSingBoxDefaultDialer(ctx context.Context, options o
 		return false
 	}
 	nm := service.FromContext[adapter.NetworkManager](ctx)
-	return nm != nil
+	if nm == nil {
+		return false
+	}
+	return nm.AutoDetectInterface()
 }
 
 // buildMasqueTCPDialFunc wires sing-box TCP dialing (detour, routing) for MASQUE HTTP/2 overlay paths.
@@ -156,9 +160,12 @@ func buildQUICDialFunc(ctx context.Context, options option.DialerOptions, remote
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	rawOptions := options
 	options = masqueEffectiveBootstrapDialerOptions(ctx, options)
-	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(options)
-	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
+	// Bootstrap may inject detour=direct for TUN-safe TCP; that must not force TierB QUIC
+	// (connectedPacketConn caps CONNECT-stream download in docker/sing-box bench).
+	requireCustom := dialerOptionsRequireCustomMasqueQUICPacketConn(rawOptions)
+	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, rawOptions)
 	if !requireCustom && !forceProtect {
 		return nil, nil
 	}

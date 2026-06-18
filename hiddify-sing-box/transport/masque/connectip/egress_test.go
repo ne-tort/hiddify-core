@@ -111,6 +111,7 @@ func TestOutboundWriterSchedulesDrainAfterWrite(t *testing.T) {
 	if _, err := stack.deliverOutboundWriterItem(payload, 0); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
+	stack.afterOutboundWriteBatch()
 	select {
 	case <-stack.outboundPoke:
 	case <-time.After(time.Second):
@@ -143,11 +144,7 @@ func TestScheduleOutboundDrainAfterWritePokesDrain(t *testing.T) {
 
 func TestNetstackOnOutboundQueuedOnDrain(t *testing.T) {
 	var queued atomic.Int32
-	sess := &packetPipeSession{
-		recvCh:  make(chan []byte, 8),
-		sendCh:  make(chan []byte, 8),
-		closeCh: make(chan struct{}),
-	}
+	sess := &taggedWriteSession{tag: 'X'}
 	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
 		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
 		LocalIPv6: netip.MustParseAddr("fd00::2"),
@@ -159,10 +156,13 @@ func TestNetstackOnOutboundQueuedOnDrain(t *testing.T) {
 		t.Fatalf("create stack: %v", err)
 	}
 	defer stack.Close()
+	stack.ensureOutboundWriter()
 
-	pkt := buildTestIPv4TCP(t, 0x18, []byte("payload"))
-	stack.InjectInboundOwned(CloneInboundFrame(pkt))
-	stack.ScheduleOutboundDrain()
+	payload := borrowOutboundBuf(4)
+	copy(payload, []byte{'X', 0x00, 0x00, 0x28})
+	if !stack.enqueueOutboundPayload(payload, 0) {
+		t.Fatal("expected outbound enqueue")
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

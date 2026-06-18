@@ -104,80 +104,113 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 			}
 			return err
 		}
-		if n < header.IPv4MinimumSize {
-			continue
-		}
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-			log.Printf("masque connect_ip forwarder: read n=%d first_byte=0x%02x", n, buf[0])
-		}
-		pkt := buf[:n]
-		if pkt[0]>>4 != 4 || len(pkt) < header.IPv4MinimumSize {
-			continue
-		}
-		if pkt[9] == uint8(header.UDPProtocolNumber) {
-			f.handleUDPPacket(ctx, pkt, header.IPv4(pkt))
-			continue
-		}
-		if pkt[9] != uint8(header.TCPProtocolNumber) {
-			continue
-		}
-		iph := header.IPv4(pkt)
-		if totalLen := int(iph.TotalLength()); totalLen >= header.IPv4MinimumSize && totalLen < len(pkt) {
-			pkt = pkt[:totalLen]
-			iph = header.IPv4(pkt)
-		}
-		ihl := int(pkt[0]&0x0f) * 4
-		if ihl < header.IPv4MinimumSize || ihl+header.TCPMinimumSize > len(pkt) {
-			continue
-		}
-		tc := header.TCP(pkt[ihl:])
-		doff := int(pkt[ihl+12]>>4) * 4
-		if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-				log.Printf("masque connect_ip forwarder: drop invalid tcp header doff=%d ihl=%d len=%d", doff, ihl, len(pkt))
-			}
-			continue
-		}
-		tcpLen := uint16(len(pkt) - ihl)
-		payloadLen := tcpLen - uint16(doff)
-		var payCsum uint16
-		if payloadLen > 0 {
-			payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
-		}
-		if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-				log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x", csum)
-			}
-			continue
-		}
-		flow := tcp4Tuple{
-			srcAddr: iph.SourceAddress(),
-			dstAddr: iph.DestinationAddress(),
-			srcPort: tc.SourcePort(),
-			dstPort: tc.DestinationPort(),
-		}
-		flags := tc.Flags()
-		if flags&(header.TCPFlagSyn|header.TCPFlagAck) == header.TCPFlagSyn {
-			f.handleSyn(ctx, pkt, iph, tc, flow)
-			continue
-		}
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" && flags&header.TCPFlagSyn != 0 {
-			log.Printf("masque connect_ip forwarder: skip non-syn flags=0x%02x", flags)
-		}
-		if flags&header.TCPFlagRst != 0 {
-			f.dropFlow(flow)
-			continue
-		}
-		s := f.getSession(flow)
-		if s == nil {
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-				log.Printf("masque connect_ip forwarder: no session flags=0x%x %s:%d -> %s:%d",
-					uint8(flags), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
-			}
-			continue
-		}
-		s.handleSegment(ctx, pkt, iph, tc, ihl, doff)
+		f.dispatchReadPacket(ctx, conn, buf, n)
 	}
+}
+
+type packetBurstReader interface {
+	ReadPacketWithContext(context.Context, []byte) (int, error)
+}
+
+func (f *packetForwarder) dispatchReadPacket(ctx context.Context, conn PacketPlaneConn, buf []byte, n int) {
+	if n < header.IPv4MinimumSize {
+		return
+	}
+	f.handleReadPacket(ctx, buf[:n])
+	br, ok := conn.(packetBurstReader)
+	if !ok {
+		return
+	}
+	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
+	defer tryCancel()
+	for {
+		n2, err := br.ReadPacketWithContext(tryCtx, buf)
+		if err != nil || n2 < header.IPv4MinimumSize {
+			break
+		}
+		f.handleReadPacket(ctx, buf[:n2])
+	}
+	batchCtx, batchCancel := context.WithTimeout(ctx, time.Millisecond)
+	defer batchCancel()
+	for {
+		n3, err := br.ReadPacketWithContext(batchCtx, buf)
+		if err != nil || n3 < header.IPv4MinimumSize {
+			break
+		}
+		f.handleReadPacket(ctx, buf[:n3])
+	}
+}
+
+func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: read n=%d first_byte=0x%02x", len(pkt), pkt[0])
+	}
+	if pkt[0]>>4 != 4 || len(pkt) < header.IPv4MinimumSize {
+		return
+	}
+	if pkt[9] == uint8(header.UDPProtocolNumber) {
+		f.handleUDPPacket(ctx, pkt, header.IPv4(pkt))
+		return
+	}
+	if pkt[9] != uint8(header.TCPProtocolNumber) {
+		return
+	}
+	iph := header.IPv4(pkt)
+	if totalLen := int(iph.TotalLength()); totalLen >= header.IPv4MinimumSize && totalLen < len(pkt) {
+		pkt = pkt[:totalLen]
+		iph = header.IPv4(pkt)
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl < header.IPv4MinimumSize || ihl+header.TCPMinimumSize > len(pkt) {
+		return
+	}
+	tc := header.TCP(pkt[ihl:])
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: drop invalid tcp header doff=%d ihl=%d len=%d", doff, ihl, len(pkt))
+		}
+		return
+	}
+	tcpLen := uint16(len(pkt) - ihl)
+	payloadLen := tcpLen - uint16(doff)
+	var payCsum uint16
+	if payloadLen > 0 {
+		payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
+	}
+	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x", csum)
+		}
+		return
+	}
+	flow := tcp4Tuple{
+		srcAddr: iph.SourceAddress(),
+		dstAddr: iph.DestinationAddress(),
+		srcPort: tc.SourcePort(),
+		dstPort: tc.DestinationPort(),
+	}
+	flags := tc.Flags()
+	if flags&(header.TCPFlagSyn|header.TCPFlagAck) == header.TCPFlagSyn {
+		f.handleSyn(ctx, pkt, iph, tc, flow)
+		return
+	}
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" && flags&header.TCPFlagSyn != 0 {
+		log.Printf("masque connect_ip forwarder: skip non-syn flags=0x%02x", flags)
+	}
+	if flags&header.TCPFlagRst != 0 {
+		f.dropFlow(flow)
+		return
+	}
+	s := f.getSession(flow)
+	if s == nil {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: no session flags=0x%x %s:%d -> %s:%d",
+				uint8(flags), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
+		}
+		return
+	}
+	s.handleSegment(ctx, pkt, iph, tc, ihl, doff)
 }
 
 func (f *packetForwarder) runDownloadWriteLoop(ctx context.Context, done chan struct{}) {

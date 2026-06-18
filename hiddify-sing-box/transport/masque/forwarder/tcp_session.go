@@ -130,16 +130,23 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 			_ = s.sendAckOnly()
 			return
 		}
-		if _, err := s.outbound.Write(payload); err != nil {
-			go s.close()
-			return
-		}
 		s.rcvNxt += uint32(len(payload))
 		_ = s.scheduleAckOnly()
-		if err := s.maybeFlushRemote(len(payload) <= 512); err != nil {
-			go s.close()
-			return
-		}
+		payCopy := append([]byte(nil), payload...)
+		go func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if s.closed.Load() {
+				return
+			}
+			if _, err := s.outbound.Write(payCopy); err != nil {
+				go s.close()
+				return
+			}
+			if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
+				go s.close()
+			}
+		}()
 	}
 
 	if flags&header.TCPFlagFin != 0 {
@@ -194,14 +201,16 @@ func (s *tcpForwardSession) buildAckOnlyPacket() []byte {
 }
 
 func (s *tcpForwardSession) scheduleAckOnly() error {
-	if !s.ackPending.CompareAndSwap(false, true) {
-		return nil
-	}
-	return s.f.scheduleAck(s)
+	// Immediate ACK via writeCh (async). ackCh coalescing alone capped upload at ~64 KiB/RTT;
+	// sync sendPacketNow under session mu blocked segment processing on QUIC backpressure.
+	return s.sendAckOnly()
 }
 
 func (s *tcpForwardSession) sendAckOnly() error {
 	pkt := s.buildAckOnlyPacket()
+	if len(pkt) == 0 {
+		return nil
+	}
 	return s.f.enqueueWrite(pkt)
 }
 

@@ -93,6 +93,46 @@ func IntegrationStartH2FakeIperfDownloadTarget(t *testing.T) uint16 {
 	return port
 }
 
+// IntegrationStartH2FakeIperfStreamingDownloadTarget serves iperf3 banner + unbounded bulk (iperf -R WriteTo gate).
+func IntegrationStartH2FakeIperfStreamingDownloadTarget(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen fake iperf streaming: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := uint16(ln.Addr().(*net.TCPAddr).Port)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				if _, err := conn.Write([]byte("iperf3\r\n")); err != nil {
+					return
+				}
+				go func() {
+					buf := make([]byte, 4096)
+					for {
+						if _, err := conn.Read(buf); err != nil {
+							return
+						}
+					}
+				}()
+				payload := make([]byte, 256*1024)
+				for {
+					if _, err := conn.Write(payload); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return port
+}
+
 func IntegrationSocksTCPDial(t *testing.T, socksPort, targetPort uint16) net.Conn {
 	t.Helper()
 	dialer := socks.NewClient(N.SystemDialer, M.ParseSocksaddrHostPort("127.0.0.1", socksPort), socks.Version5, "", "")

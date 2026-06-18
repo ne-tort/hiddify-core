@@ -181,6 +181,14 @@ func (s *Stream) wakeBlockedSendHalf() {
 	s.sendStr.wakeBlockedWriter(s.sendStr.sender)
 }
 
+// MasqueClientC2SBytesReceived reports C2S bytes consumed on the stream receive half (server relay gate).
+func MasqueClientC2SBytesReceived(s *Stream) int64 {
+	if s == nil || s.receiveStr == nil {
+		return 0
+	}
+	return int64(s.receiveStr.masqueC2SBytesReceived())
+}
+
 // MasqueIsBidiDownloadActive reports whether MasqueSetBidiDownloadActive marked this stream
 // download-active (server hijack relay / client WriteTo download leg).
 func MasqueIsBidiDownloadActive(s *Stream) bool {

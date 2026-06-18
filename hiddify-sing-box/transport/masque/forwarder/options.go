@@ -9,7 +9,7 @@ const (
 	// DefaultDatagramCeilingMax is the CONNECT-IP IPv4 datagram ceiling before H3 slack.
 	DefaultDatagramCeilingMax = 1500
 	// DatagramSlack is subtracted from the ceiling when sizing forwarder segments (H3 overhead).
-	DatagramSlack = 128
+	DatagramSlack = 80
 )
 
 // PacketPlaneConn is the CONNECT-IP session packet I/O surface used by the S2 forwarder.

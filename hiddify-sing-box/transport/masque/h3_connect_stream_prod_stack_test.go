@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +236,116 @@ func TestGATEDockerH3SynthFakeIperfNoPulse(t *testing.T) {
 	t.Logf("GATE-DOCKER-H3 fake iperf: %d bytes (handshake+bulk, no stall)", n)
 	if n < h3ProdStackFakeIperfMinBytes {
 		t.Fatalf("GATE-DOCKER-H3 short read: %d want >= %d", n, h3ProdStackFakeIperfMinBytes)
+	}
+}
+
+// TestGATEDockerH3SynthIperfReverseWriteToMbps — prod stack iperf -R WriteTo; AGENTS KPI ≥1000 Mbit/s.
+func TestGATEDockerH3SynthIperfReverseWriteToMbps(t *testing.T) {
+	minMbps := masque.ExportConnectStreamSynthProdMinMbps
+	targetPort := masque.ExportStartH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(masque.ExportConnectStreamSynthProdBenchDuration + 8*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, masque.ExportConnectStreamSynthProdBenchDuration)
+	if err != nil && n == 0 {
+		t.Fatalf("GATE-DOCKER-H3 WriteTo: %v", err)
+	}
+	t.Logf("GATE-DOCKER-H3 iperf reverse WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < minMbps {
+		t.Fatalf("GATE-DOCKER-H3 iperf reverse %.1f < %.0f Mbit/s (AGENTS KPI)", mbps, minMbps)
+	}
+}
+
+// TestLocalizeDockerH335msIperfReverseWriteTo — prod stack @35ms harness, iperf -R WriteTo (localize vs perf-lab).
+func TestLocalizeDockerH335msIperfReverseWriteTo(t *testing.T) {
+	floorMbps := masque.ExportConnectStreamDocker35msSeqDownFloorMbps
+	targetPort := masque.ExportStartH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	conn = masque.ExportWrapBenchWindowedBidiLinkH3Prod(conn)
+	if err := conn.SetDeadline(time.Now().Add(masque.ExportConnectStreamSynthProdBenchDuration + 8*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, masque.ExportConnectStreamSynthProdBenchDuration)
+	if err != nil && n == 0 {
+		t.Fatalf("GATE-DOCKER-H3 windowed WriteTo: %v", err)
+	}
+	t.Logf("localize docker @35ms iperf reverse WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
+	masque.ExportAssertLocalizeDocker35msSequentialLeg(t, "tcp_down WriteTo", mbps, floorMbps)
+}
+
+// TestLocalizeDockerH3StrictL256Ceiling35ms — L256/35ms wire-FC ceiling repro (~60 Mbit/s max).
+func TestLocalizeDockerH3StrictL256Ceiling35ms(t *testing.T) {
+	targetPort := masque.ExportStartH2FakeIperfStreamingDownloadTarget(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+	conn = masque.ExportWrapBenchWindowedBidiLinkStrictH3L256(conn)
+	if err := conn.SetDeadline(time.Now().Add(masque.ExportConnectStreamSynthProdBenchDuration + 8*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, masque.ExportConnectStreamSynthProdBenchDuration)
+	if err != nil && n == 0 {
+		t.Fatalf("GATE-DOCKER-H3 strict windowed WriteTo: %v", err)
+	}
+	t.Logf("GATE-DOCKER-H3 iperf reverse strict windowed 35ms: %.1f Mbit/s (%d bytes)", mbps, n)
+	masque.ExportAssertLocalizeStrictL256Ceiling35ms(t, "docker strict L256", mbps)
+}
+
+// TestGATEDockerLiveMasqueServerIperfReverseWriteToMbps isolates docker masque-server-core vs synth client.
+// Run inside masque-backend: DOCKER_LIVE_SERVER=1 DOCKER_TEST_TARGET_HOST=<this container IP> go test -run TestGATEDockerLiveMasqueServerIperfReverseWriteToMbps
+func TestGATEDockerLiveMasqueServerIperfReverseWriteToMbps(t *testing.T) {
+	minMbps := masque.ExportConnectStreamSynthProdMinMbps
+	targetHost := strings.TrimSpace(os.Getenv("DOCKER_TEST_TARGET_HOST"))
+	if targetHost == "" {
+		t.Skip("set DOCKER_TEST_TARGET_HOST to this container IP on masque-backend")
+	}
+	session := masque.ExportNewConnectStreamH3DockerLiveSession(t)
+	targetPort := masque.ExportStartH2FakeIperfStreamingDownloadTargetOn(t, "0.0.0.0")
+	socksPort := masque.ExportStartH3ConnectStreamSocksRouterWithSession(t, session)
+	conn := masque.ExportSocksTCPDialHost(t, socksPort, targetHost, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(masque.ExportConnectStreamSynthProdBenchDuration + 8*time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read iperf banner: %v", err)
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write fake iperf params: %v", err)
+	}
+	n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, masque.ExportConnectStreamSynthProdBenchDuration)
+	if err != nil && n == 0 {
+		t.Fatalf("docker live server WriteTo: %v", err)
+	}
+	t.Logf("docker live server iperf reverse WriteTo: %.1f Mbit/s (%d bytes)", mbps, n)
+	if mbps < minMbps {
+		t.Fatalf("docker live server %.1f < %.0f Mbit/s (AGENTS KPI)", mbps, minMbps)
 	}
 }
 

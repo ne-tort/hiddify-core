@@ -23,8 +23,9 @@ const MaxUndecryptablePackets = 32
 // This is the value that Chromium is using
 const ConnectionFlowControlMultiplier = 1.5
 
-// DefaultInitialMaxStreamData is the default initial stream-level flow control window for receiving data
-const DefaultInitialMaxStreamData = (1 << 10) * 512 // 512 kb
+// DefaultInitialMaxStreamData is the default initial stream-level flow control window for receiving data.
+// 2 MiB keeps one RTT of in-flight S2C above the ~256 KiB BDP at 35 ms / 60 Mbit/s (512 KiB stock cap starved docker tcp_down).
+const DefaultInitialMaxStreamData = 2 * 1024 * 1024
 
 // DefaultInitialMaxData is the connection-level flow control window for receiving data
 const DefaultInitialMaxData = ConnectionFlowControlMultiplier * DefaultInitialMaxStreamData

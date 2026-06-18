@@ -10,15 +10,38 @@ const connectStreamVPSKPITargetDownMbps = 21.0
 
 // GATE-H3-SYNTH / H2 anchor — prod stack in-proc (LaunchMasqueStack + SOCKS/CM, no artificial window wrap).
 const (
-	connectStreamSynthProdMinMbps      = 200.0 // min(up, down) target; satisfactory ≈ H2 synth
-	connectStreamSynthParityMinRatio   = 0.85  // H3/H2 on paired gate (H3 not >15% behind H2)
-	connectStreamSynthDuplexMaxRatio   = 4.0   // max(up,down)/min(up,down) on concurrent duplex
+	connectStreamSynthProdMinMbps       = 1000.0 // min(up, down) on applicable synth GATE (AGENTS DoD)
+	connectStreamSynthParityMinRatio    = 0.85   // H3/H2 on paired gate (H3 not >15% behind H2)
+	connectStreamSynthDuplexMaxRatio    = 4.0    // max(up,down)/min(up,down) on concurrent duplex
 	connectStreamSynthProdBenchDuration = 2 * time.Second
+	// connectStreamStrictL256Ceiling35msMbps — theoretical max at L256 wire-FC + 35 ms RTT (localize only).
+	connectStreamStrictL256Ceiling35msMbps = 59.0
+	connectStreamStrictL256CeilingBandMbps = 52.0
+	// connectStreamDocker35msSeq* — perf-lab connect-stream-h3 @35ms netem, sequential iperf legs (localize repro).
+	// Обновлять после реального Docker run (не DoD 1000+).
+	connectStreamDocker35msSeqDownFloorMbps = 150.0 // stale perf-lab ~224
+	connectStreamDocker35msSeqUpFloorMbps   = 50.0  // stale perf-lab ~68
+	connectStreamDocker35msSeqMaxRatio      = 4.0
+)
+
+// GATE-CONNECT-IP — packet plane (tcp_transport=connect_ip); DoD @ Docker 0ms matches connect-stream (1000+ each leg).
+const (
+	connectIPSynthProdMinMbps                    = 1000.0 // long-term / Linux in-proc target; Windows native ~165 OPEN
+	connectIPSynthRegressionFloorUpMbps          = 80.0   // anti-regression (docker 35ms upload baseline)
+	connectIPSynthRegressionFloorDownMbpsLinux   = 280.0  // Linux in-proc native ceiling band
+	connectIPSynthRegressionFloorDownMbpsDesktop = 120.0  // Windows/Darwin in-proc QUIC/datagram ceiling band
+	connectIPSynthPipeMinRatio                   = 0.45   // native/pipe L1 — forwarder vs QUIC overhead localize
+	connectIPSynthMaxAsymRatio                   = 8.0
+	connectIPSynthProdBenchDuration              = 2 * time.Second
+	connectIPDockerProdMinMbps                   = 1000.0 // connect-ip-h3-tun hard gate @0ms netem
+	connectIPDockerRegressionFloorUpMbps         = 80.0   // @35ms dev regression only
+	connectIPDockerRegressionFloorDownMbps       = 350.0
+	connectIPDockerMaxAsymRatio                  = 4.0    // WARN when exceeded @0ms
 )
 
 // GATE-CONNECT-UDP-SYNTH — prod profile in-proc (transport_mode=connect_udp); same throughput mission as TCP.
 const (
-	connectUDPSynthProdMinMbps         = 200.0 // DoD min each leg (up/down); Docker final floor
+	connectUDPSynthProdMinMbps         = 1000.0 // DoD min each leg (up/down)
 	connectUDPSynthInstantMinMbps      = 500.0 // synth instant-link GATE (in-proc ceiling target)
 	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
 	connectUDPSynthParityMinRatio      = 0.85  // H3/H2 paired gate
