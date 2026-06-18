@@ -780,6 +780,60 @@ func (s *benignOnceWriteSession) Close() error {
 	return s.inner.Close()
 }
 
+// serialWriteShim models TUN-style single-threaded WritePacket (mutex + extra copy per datagram).
+type serialWriteShim struct {
+	inner IPPacketSession
+	mu    sync.Mutex
+}
+
+func (s *serialWriteShim) ReadPacket(buffer []byte) (int, error) {
+	return s.inner.ReadPacket(buffer)
+}
+
+func (s *serialWriteShim) WritePacket(buffer []byte) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dup := make([]byte, len(buffer))
+	copy(dup, buffer)
+	return s.inner.WritePacket(dup)
+}
+
+func (s *serialWriteShim) Close() error {
+	return s.inner.Close()
+}
+
+type serialWriteLink struct {
+	inner packetLink
+}
+
+func (l serialWriteLink) endpoints() (IPPacketSession, IPPacketSession) {
+	client, server := l.inner.endpoints()
+	return &serialWriteShim{inner: client}, server
+}
+
+// TestLocalizeConnectIPUploadTUNEgressSerialWrite localizes Docker TUN upload gap: serialized
+// WritePacket + copy per datagram. Large drop vs instant L1 indicates TUN egress path is a KPI factor.
+func TestLocalizeConnectIPUploadTUNEgressSerialWrite(t *testing.T) {
+	const duration = localizeBenchDuration
+	baseline := benchConnectIPUploadLayer(t, "L1-instant", instantPacketLink{}, duration)
+	serial := benchConnectIPUploadLayer(t, "L1-serial", serialWriteLink{inner: instantPacketLink{}}, duration)
+	if baseline.err != nil || serial.err != nil {
+		t.Fatalf("bench error baseline=%v serial=%v", baseline.err, serial.err)
+	}
+	ratio := serial.mbps / baseline.mbps
+	t.Logf("TUN egress serial-write proxy: baseline=%.1f serial=%.1f ratio=%.2f", baseline.mbps, serial.mbps, ratio)
+	if baseline.mbps < connectIPSynthRegressionFloorUpMbps {
+		t.Fatalf("baseline L1 %.1f < regression floor %.1f", baseline.mbps, connectIPSynthRegressionFloorUpMbps)
+	}
+	if serial.mbps < connectIPSynthRegressionFloorUpMbps {
+		t.Fatalf("serial L1 %.1f < regression floor %.1f — TUN proxy reproduces upload collapse", serial.mbps, connectIPSynthRegressionFloorUpMbps)
+	}
+	const tunProxyMinRatio = 0.45
+	if ratio < tunProxyMinRatio {
+		t.Logf("OPEN: serial/tun proxy ratio %.2f < %.2f — Docker upload gap likely TUN WritePacket path", ratio, tunProxyMinRatio)
+	}
+}
+
 // waitConnectIPRecycleReady blocks until upload teardown injects benign 0x100 and egress drains.
 func waitConnectIPRecycleReady(t *testing.T, h *connectIPUploadHarness, fired *atomic.Bool) {
 	t.Helper()

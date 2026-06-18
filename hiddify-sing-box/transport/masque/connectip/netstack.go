@@ -29,7 +29,7 @@ import (
 
 const (
 	netstackOutboundQueueDepth             = 8192
-	netstackOutboundWriteBatchMax          = 96
+	netstackOutboundWriteBatchMax          = 128
 	linkOutboundQueueSlots                 = 65536
 	tcpNetstackNIC             tcpip.NICID = 1
 )

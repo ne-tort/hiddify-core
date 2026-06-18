@@ -350,8 +350,10 @@ func (s *Netstack) writePacketWithRetry(outbound []byte) ([]byte, error) {
 			return nil, err
 		}
 		if attempt+1 < maxAttempts {
-			// Brief backoff on QUIC/datagram backpressure (conn FC / queue full).
-			time.Sleep(time.Duration(attempt+1) * 50 * time.Microsecond)
+			// Brief backoff only after several QUIC/datagram backpressure rounds.
+			if attempt >= 3 {
+				time.Sleep(time.Duration(attempt-2) * 50 * time.Microsecond)
+			}
 			runtime.Gosched()
 		}
 	}

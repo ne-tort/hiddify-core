@@ -298,6 +298,14 @@ func (s *Stream) SendDatagram(b []byte) error {
 	return s.datagramStream.SendDatagram(b)
 }
 
+// SendProxiedIPDatagram queues CONNECT-IP egress (context prefix + IP) with one pooled-buffer copy.
+func (s *Stream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
+	if s == nil || s.conn == nil {
+		return errors.New("http3: nil stream")
+	}
+	return s.conn.sendProxiedIPDatagram(s.StreamID(), contextPrefix, ipPacket)
+}
+
 func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	// TODO: reject if datagrams are not negotiated (yet)
 	return s.datagramStream.ReceiveDatagram(ctx)
@@ -431,6 +439,11 @@ func (s *RequestStream) SetDeadline(t time.Time) error {
 // as the server might drop datagrams which it can't associate with an existing request.
 func (s *RequestStream) SendDatagram(b []byte) error {
 	return s.str.SendDatagram(b)
+}
+
+// SendProxiedIPDatagram queues CONNECT-IP egress with one pooled-buffer copy.
+func (s *RequestStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
+	return s.str.SendProxiedIPDatagram(contextPrefix, ipPacket)
 }
 
 // ReceiveDatagram receives HTTP Datagrams (RFC 9297).

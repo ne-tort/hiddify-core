@@ -329,12 +329,32 @@ func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
 	*bufPtr = (*bufPtr)[:0]
 	*bufPtr = quicvarint.Append(*bufPtr, quarterStreamID)
 	*bufPtr = append(*bufPtr, b...)
+	return c.enqueuePooledHTTPDatagram(quarterStreamID, len(b), bufPtr)
+}
+
+// sendProxiedIPDatagram enqueues RFC9297 proxied IP with one copy into the QUIC DATAGRAM buffer.
+func (c *rawConn) sendProxiedIPDatagram(streamID quic.StreamID, contextPrefix, ipPacket []byte) error {
+	quarterStreamID := uint64(streamID / 4)
+	varintLen := quicvarint.Len(quarterStreamID)
+	total := varintLen + len(contextPrefix) + len(ipPacket)
+	bufPtr := quic.AcquireHTTP3DatagramBuffer()
+	if cap(*bufPtr) < total {
+		*bufPtr = make([]byte, 0, total)
+	}
+	*bufPtr = (*bufPtr)[:0]
+	*bufPtr = quicvarint.Append(*bufPtr, quarterStreamID)
+	*bufPtr = append(*bufPtr, contextPrefix...)
+	*bufPtr = append(*bufPtr, ipPacket...)
+	return c.enqueuePooledHTTPDatagram(quarterStreamID, len(contextPrefix)+len(ipPacket), bufPtr)
+}
+
+func (c *rawConn) enqueuePooledHTTPDatagram(quarterStreamID uint64, payloadLen int, bufPtr *[]byte) error {
 	if c.qlogger != nil {
 		c.qlogger.RecordEvent(qlog.DatagramCreated{
 			QuaterStreamID: quarterStreamID,
 			Raw: qlog.RawInfo{
 				Length:        len(*bufPtr),
-				PayloadLength: len(b),
+				PayloadLength: payloadLen,
 			},
 		})
 	}

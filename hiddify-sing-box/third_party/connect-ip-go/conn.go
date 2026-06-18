@@ -61,6 +61,11 @@ type tryDrainHTTPDatagrams interface {
 	TryReceiveDatagram() ([]byte, bool)
 }
 
+// proxiedIPDatagramSender is implemented by HTTP/3 CONNECT-IP streams for single-copy egress.
+type proxiedIPDatagramSender interface {
+	SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error
+}
+
 var (
 	_ http3Stream = &http3.Stream{}
 	_ http3Stream = &http3.RequestStream{}
@@ -1437,31 +1442,35 @@ func DatagramContextIDPrefix() []byte {
 }
 
 func (c *Conn) writePacketAfterCompose(datagram []byte, icmpSource []byte) (icmp []byte, err error) {
-	if err := c.str.SendDatagram(datagram); err != nil {
-		var errDTL *quic.DatagramTooLargeError
-		if errors.As(err, &errDTL) {
-			icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ptbMTUFromDatagramTooLarge(errDTL))
-			if icmpErr != nil {
-				log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
-				return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
-			}
-			if icmpPacket == nil {
-				return nil, fmt.Errorf("connect-ip: compose ICMP PTB produced nil packet")
-			}
-			return icmpPacket, nil
+	return c.finishWritePacketSend(icmpSource, c.str.SendDatagram(datagram))
+}
+
+func (c *Conn) finishWritePacketSend(icmpSource []byte, err error) (icmp []byte, retErr error) {
+	if err == nil {
+		return nil, nil
+	}
+	var errDTL *quic.DatagramTooLargeError
+	if errors.As(err, &errDTL) {
+		icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ptbMTUFromDatagramTooLarge(errDTL))
+		if icmpErr != nil {
+			log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
+			return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
 		}
-		select {
-		case <-c.closeChan:
-			return nil, c.errAfterClose()
-		default:
-			if connectIPH2CapsulePipeCleanUploadTermination(err) {
-				return nil, err
-			}
-			err = wrapConnectIPIngressDatagramErr(c, err)
+		if icmpPacket == nil {
+			return nil, fmt.Errorf("connect-ip: compose ICMP PTB produced nil packet")
+		}
+		return icmpPacket, nil
+	}
+	select {
+	case <-c.closeChan:
+		return nil, c.errAfterClose()
+	default:
+		if connectIPH2CapsulePipeCleanUploadTermination(err) {
 			return nil, err
 		}
+		err = wrapConnectIPIngressDatagramErr(c, err)
+		return nil, err
 	}
-	return nil, nil
 }
 
 func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
@@ -1474,6 +1483,17 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 			return nil, c.errAfterClose()
 		default:
 		}
+	}
+	if ps, ok := c.str.(proxiedIPDatagramSender); ok {
+		ip := make([]byte, len(b))
+		copy(ip, b)
+		if err := c.prepareOutgoingProxiedPacket(ip, c.routeView.Load()); err != nil {
+			logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
+			err = fmt.Errorf("connect-ip: compose datagram: %w", err)
+			err = wrapConnectIPStreamDataplaneErr(c, err)
+			return nil, err
+		}
+		return c.finishWritePacketSend(b, ps.SendProxiedIPDatagram(contextIDZero, ip))
 	}
 	buf := datagramPool.Get().(*[]byte)
 	defer datagramPool.Put(buf)
