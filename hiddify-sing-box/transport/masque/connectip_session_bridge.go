@@ -330,20 +330,22 @@ func (s *coreSession) newConnectIPPacketSession(conn *connectip.Conn, overlayH2 
 		ProfileLocalIPv4:  s.Options.ProfileLocalIPv4,
 		ProfileLocalIPv6:  s.Options.ProfileLocalIPv6,
 		OverlayH2:         overlayH2,
-		WakeAfterDatagram: s.scheduleConnectIPDatagramSendWake,
+		WakeAfterDatagram: s.pokeConnectIPEgressSend,
 	})
 }
 
-func (s *coreSession) scheduleConnectIPDatagramSendWake() {
-	s.ConnectIPIngressAckWake.Schedule()
-	// Native packet-plane TCP needs per-datagram wake so ACK-clock egress does not wait for batch fill.
-	if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") {
-		s.flushConnectIPIngressAckWake()
+func (s *coreSession) pokeConnectIPEgressSend() {
+	if s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2 {
+		h2c.FlushConnectIPIngressAckWake(s.IPHTTPH2Upload)
+		return
+	}
+	if s.IPConn != nil {
+		s.IPConn.FlushOutgoingDatagramSend()
 	}
 }
 
-func (s *coreSession) flushConnectIPIngressAckWakeOnEgress() {
-	s.flushConnectIPIngressAckWake()
+func (s *coreSession) nativeConnectIPTCPDeferredWake() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip")
 }
 
 // --- ingress host (connectip.IngressHost) ---
@@ -390,12 +392,15 @@ func (h connectIPIngressHost) IngressDeliverTCPNoFlush(pkt []byte) bool {
 }
 
 func (h connectIPIngressHost) IngressDeliverTCP(pkt []byte) bool {
-	ok := h.s.deliverConnectIPTCPIngressNoFlush(pkt)
-	h.s.flushConnectIPIngressAckWake()
-	return ok
+	return h.s.deliverConnectIPTCPIngressNoFlush(pkt)
 }
 
 func (h connectIPIngressHost) IngressFlushAckWake() {
+	if h.s.nativeConnectIPTCPDeferredWake() {
+		// Egress batches already FlushOutgoingDatagramSend; ingress MasqueWakeSend duplicated ~1×/ACK.
+		h.s.ConnectIPIngressAckWake.TakePending()
+		return
+	}
 	h.s.flushConnectIPIngressAckWake()
 }
 
@@ -501,12 +506,8 @@ func (s *coreSession) noteConnectIPIngressAckForWake(pkt []byte) {
 }
 
 func (s *coreSession) flushConnectIPIngressAckWake() {
-	nativeConnectIPTCP := strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip")
-	if !nativeConnectIPTCP && !s.ConnectIPIngressAckWake.TakePending() {
+	if !s.ConnectIPIngressAckWake.TakePending() {
 		return
-	}
-	if nativeConnectIPTCP {
-		s.ConnectIPIngressAckWake.TakePending()
 	}
 	if s.currentUDPHTTPLayer() == option.MasqueHTTPLayerH2 {
 		h2c.FlushConnectIPIngressAckWake(s.IPHTTPH2Upload)
@@ -519,12 +520,6 @@ func (s *coreSession) flushConnectIPIngressAckWake() {
 	h3t.FlushConnectIPIngressAckWake(s.currentUDPHTTPLayer(), sender)
 }
 
-func (s *coreSession) deliverConnectIPTCPIngress(pkt []byte) bool {
-	ok := s.deliverConnectIPTCPIngressNoFlush(pkt)
-	s.flushConnectIPIngressAckWake()
-	return ok
-}
-
 func (s *coreSession) deliverConnectIPTCPIngressNoFlush(pkt []byte) bool {
 	return cip.DeliverTCPIngress(pkt, cip.WireTCPIngressDeliver(
 		func() *connectIPTCPNetstack { return s.IngressTCPNetstack.Load() },
@@ -532,13 +527,8 @@ func (s *coreSession) deliverConnectIPTCPIngressNoFlush(pkt []byte) bool {
 		func() *connectIPTCPNetstack { return s.IngressTCPNetstack.Load() },
 		s.enqueuePreTCPNetstackIngress,
 		func(pkt []byte, _ *cip.Netstack) {
-			s.noteConnectIPIngressAckForWake(pkt)
-			// Native CONNECT-IP TCP (tcp_transport=connect_ip) needs immediate wake on
-			// every inbound TCP segment (ACK clock + download DATA) so TUN upload does not
-			// sit at the ~64 KiB / RTT ceiling waiting for a batched ingress flush.
-			if strings.EqualFold(strings.TrimSpace(s.Options.TCPTransport), "connect_ip") &&
-				cip.IPv4TCPIngressWakeCandidate(pkt) {
-				s.flushConnectIPIngressAckWake()
+			if !s.nativeConnectIPTCPDeferredWake() {
+				s.noteConnectIPIngressAckForWake(pkt)
 			}
 		},
 	))

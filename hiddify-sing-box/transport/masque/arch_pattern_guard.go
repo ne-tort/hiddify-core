@@ -14,6 +14,8 @@ const (
 	connectStreamSynthParityMinRatio    = 0.85   // H3/H2 on paired gate (H3 not >15% behind H2)
 	connectStreamSynthDuplexMaxRatio    = 4.0    // max(up,down)/min(up,down) on concurrent duplex
 	connectStreamSynthProdBenchDuration = 2 * time.Second
+	connectStreamSynthDuplexGateSamples = 20   // one stack, N dials (not go test -count)
+	connectStreamSynthDuplexGateMinPass   = 15   // min PASS samples of GateSamples @1000 each leg
 	// connectStreamStrictL256Ceiling35msMbps — theoretical max at L256 wire-FC + 35 ms RTT (localize only).
 	connectStreamStrictL256Ceiling35msMbps = 59.0
 	connectStreamStrictL256CeilingBandMbps = 52.0
@@ -31,9 +33,15 @@ const (
 	connectIPSynthRegressionFloorDownMbpsLinux   = 280.0  // Linux in-proc native ceiling band
 	connectIPSynthRegressionFloorDownMbpsDesktop = 120.0  // Windows/Darwin in-proc QUIC/datagram ceiling band
 	connectIPSynthPipeMinRatio                   = 0.45   // native/pipe L1 — forwarder vs QUIC overhead localize
+	connectIPSynthPipeFastMinMbps                = 250.0  // pipe L1 fast enough to compare QUIC overhead
+	connectIPSynthPipeFastTargetRatio            = 0.85   // OPEN target when pipe >= PipeFastMinMbps
+	connectIPSynthPipeFastFloorRatio             = 0.60   // hard fail when pipe fast — raise toward Target as KPI closes
+	connectIPSynthWakeEstSegmentBytes            = 680    // native upload avg RFC9297+TCP segment (not 1400 MSS — test est_dgrams)
 	connectIPSynthMaxAsymRatio                   = 8.0
 	connectIPSynthProdBenchDuration              = 2 * time.Second
 	connectIPDockerProdMinMbps                   = 1000.0 // connect-ip-h3-tun hard gate @0ms netem
+	// connectIPDockerStaleUploadMbps — KPI-TRACK 2026-06-17 @0ms connect-ip-h3-tun (Linux Docker).
+	connectIPDockerStaleUploadMbps               = 71.0
 	connectIPDockerRegressionFloorUpMbps         = 80.0   // @35ms dev regression only
 	connectIPDockerRegressionFloorDownMbps       = 350.0
 	connectIPDockerMaxAsymRatio                  = 4.0    // WARN when exceeded @0ms

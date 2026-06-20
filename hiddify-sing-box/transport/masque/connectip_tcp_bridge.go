@@ -55,10 +55,13 @@ func (h connectIPTCPDialHost) MaybeStartConnectIPIngressLocked() {
 }
 
 func (h connectIPTCPDialHost) NewTCPNetstack(ctx context.Context, session mcip.PacketSession) (mcip.TCPNetstack, error) {
-	return mcip.NewProductionTCPNetstack(ctx, session, sessionBootstrapFrom(session), mcip.NetstackOptions{
-		OnOutboundQueued:      h.s.scheduleConnectIPDatagramSendWake,
-		OnEgressBatchComplete: h.s.flushConnectIPIngressAckWakeOnEgress,
-	})
+	// Egress wake is batched on ClientPacketSession (WakeAfterDatagram). Per-packet
+	// OnOutboundQueued duplicated scheduleConnectIPDatagramSendWake and dominated wake churn.
+	hooks := mcip.NetstackOptions{}
+	if cps, ok := session.(*mcip.ClientPacketSession); ok {
+		hooks.OnEgressBatchComplete = cps.ScheduleEgressFlush
+	}
+	return mcip.NewProductionTCPNetstack(ctx, session, sessionBootstrapFrom(session), hooks)
 }
 
 func (h connectIPTCPDialHost) OnTCPNetstackFactoryError() {

@@ -99,6 +99,22 @@ func WakeMasqueRelayAfterUploadRead(s *Stream) {
 	masqueWakeSendAfterReceiveRead(s, 1)
 }
 
+// ArmMasqueBidiDuplexParallel marks saturated duplex without fair-defer relay gate or credit wait (H2 relay parity).
+func ArmMasqueBidiDuplexParallel(s *Stream) {
+	if s == nil || s.datagramStream == nil {
+		return
+	}
+	qs := s.datagramStream.QUICStream()
+	if qs == nil {
+		return
+	}
+	quic.MasqueClearPeerUploadCreditQueue(qs)
+	quic.MasqueClearConnMaxDataQueue(qs)
+	quic.MasqueBoostDuplexReceiveFC(qs)
+	MarkMasqueBidiDuplexUploadStarted(s)
+	ActivateMasqueBidiDuplex(s)
+}
+
 // ArmMasqueBidiDuplexFair marks saturated duplex on server hijack before bulk relay (both legs known).
 func ArmMasqueBidiDuplexFair(s *Stream) {
 	if s == nil || s.datagramStream == nil {

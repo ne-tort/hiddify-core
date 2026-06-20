@@ -23,7 +23,8 @@ var relayGoAuditSource string
 func RelayGoAuditSource() string { return relayGoAuditSource }
 
 // relayDuplexArmUploadBytes avoids arming saturated duplex on iperf -R params (FAKEIPERF / cookie).
-const relayDuplexArmUploadBytes = 64 * 1024
+// Download-primary uses PrepareMasqueRelayDownloadPrimary instead; neutral duplex arms on first C2S bulk.
+const relayDuplexArmUploadBytes = 4 * 1024
 
 const RelayTunnelBufLen = 256 * 1024
 
@@ -214,31 +215,50 @@ func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWrite
 	return relayTunnelDownloadRelay(out, responseWriter, src)
 }
 
-// relayH3ProbeConcurrentUpload peeks the upload leg: immediate EOF → download-primary (iperf -R bulk).
-func relayH3ProbeConcurrentUpload(uploadSrc io.Reader) (io.Reader, bool) {
+// relayH3UploadLegMode classifies the upload leg before relay goroutines start.
+type relayH3UploadLegMode int
+
+const (
+	// relayH3UploadLegNeutral — no bytes yet (timeout) or upload started; both legs may run.
+	relayH3UploadLegNeutral relayH3UploadLegMode = iota
+	// relayH3UploadLegDownloadPrimary — immediate EOF on upload (iperf -R, no C2S).
+	relayH3UploadLegDownloadPrimary
+)
+
+// relayH3ProbeUploadLeg peeks the upload leg before relay goroutines start.
+func relayH3ProbeUploadLeg(uploadSrc io.Reader) (io.Reader, relayH3UploadLegMode) {
 	if uploadSrc == nil {
-		return nil, false
+		return nil, relayH3UploadLegNeutral
 	}
-	d, ok := uploadSrc.(interface{ SetReadDeadline(time.Time) error })
-	if !ok {
-		return uploadSrc, true
+	useTimeout := false
+	if d, ok := uploadSrc.(interface{ SetReadDeadline(time.Time) error }); ok {
+		useTimeout = true
+		_ = d.SetReadDeadline(time.Now().Add(3 * time.Millisecond))
 	}
-	_ = d.SetReadDeadline(time.Now().Add(3 * time.Millisecond))
 	one := make([]byte, 1)
 	n, err := uploadSrc.Read(one)
-	_ = d.SetReadDeadline(time.Time{})
+	if useTimeout {
+		if d, ok := uploadSrc.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = d.SetReadDeadline(time.Time{})
+		}
+	}
 	if n > 0 {
-		return io.MultiReader(bytes.NewReader(one[:n]), uploadSrc), n >= relayDuplexArmUploadBytes
+		return io.MultiReader(bytes.NewReader(one[:n]), uploadSrc), relayH3UploadLegNeutral
 	}
 	if errors.Is(err, io.EOF) {
-		return uploadSrc, false
+		return uploadSrc, relayH3UploadLegDownloadPrimary
 	}
 	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		// iperf -R bulk leg: client has not sent C2S yet (not saturated duplex).
-		return uploadSrc, false
+	if useTimeout && errors.As(err, &ne) && ne.Timeout() {
+		return uploadSrc, relayH3UploadLegNeutral
 	}
-	return uploadSrc, false
+	return uploadSrc, relayH3UploadLegNeutral
+}
+
+// relayH3ProbeConcurrentUpload reports saturated duplex at probe (legacy; always false — arm at 64 KiB in upload relay).
+func relayH3ProbeConcurrentUpload(uploadSrc io.Reader) (io.Reader, bool) {
+	r, _ := relayH3ProbeUploadLeg(uploadSrc)
+	return r, false
 }
 
 // relayTCPTunnelBidiStream is the prod H3 hijack relay: full-duplex plain io.CopyBuffer on one bidi stream.
@@ -252,12 +272,10 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 	if RelayUploadFromStream() && bidi != nil {
 		uploadSrc = StripH3ClientBootstrapUpload(uploadSrc)
 	}
-	uploadSrc, expectsConcurrentUpload := relayH3ProbeConcurrentUpload(uploadSrc)
+	uploadSrc, uploadLegMode := relayH3ProbeUploadLeg(uploadSrc)
 	if str, ok := bidi.(*http3.Stream); ok {
-		if expectsConcurrentUpload {
-			http3.ArmMasqueBidiDuplexFair(str)
-			http3.WaitMasqueRelayPeerUploadCredit(str)
-		} else {
+		switch uploadLegMode {
+		case relayH3UploadLegDownloadPrimary:
 			http3.PrepareMasqueRelayDownloadPrimary(str)
 		}
 		http3.EnableMasqueRelayDownloadSend(str)
@@ -378,8 +396,7 @@ func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.Rea
 			return
 		}
 		armDuplexOnce.Do(func() {
-			http3.ArmMasqueBidiDuplexFair(str)
-			http3.WaitMasqueRelayPeerUploadCredit(str)
+			http3.ArmMasqueBidiDuplexParallel(str)
 		})
 	}
 	flushWake := func(str *http3.Stream) {

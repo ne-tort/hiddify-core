@@ -9,13 +9,7 @@ import (
 //go:embed relay_bidi_boost.go
 var relayBidiBoostAuditSource string
 
-func TestRelayTunnelSetBidiDownloadActiveNilSafe(t *testing.T) {
-	relayTunnelSetBidiDownloadActive(nil, true)
-	relayTunnelSetBidiDownloadActive(struct{}{}, true)
-}
-
-// TestRelayTunnelBidiDownloadBoostWireLock (REF-SRC-SB-5): H3 hijack relay must call
-// relayTunnelSetBidiDownloadActive before duplex goroutines (parity h3.TunnelConn WriteTo).
+// TestRelayTunnelBidiDownloadBoostWireLock: H3 hijack relay must enable download send before duplex goroutines.
 func TestRelayTunnelBidiDownloadBoostWireLock(t *testing.T) {
 	t.Parallel()
 	idxFn := strings.Index(relayGoAuditSource, "func relayTCPTunnelBidiStream")
@@ -23,34 +17,22 @@ func TestRelayTunnelBidiDownloadBoostWireLock(t *testing.T) {
 		t.Fatal("relay.go missing relayTCPTunnelBidiStream")
 	}
 	section := relayGoAuditSource[idxFn:]
-	idxActive := strings.Index(section, "relayTunnelSetBidiDownloadActive(bidi, true)")
+	idxActive := strings.Index(section, "EnableMasqueRelayDownloadSend(str)")
 	idxGo := strings.Index(section, "go func() {")
 	if idxActive < 0 || idxGo < 0 || idxActive > idxGo {
 		t.Fatalf(
-			"relayTCPTunnelBidiStream: relayTunnelSetBidiDownloadActive must precede first go func (active=%d go=%d)",
+			"relayTCPTunnelBidiStream: EnableMasqueRelayDownloadSend must precede first go func (active=%d go=%d)",
 			idxActive, idxGo,
 		)
 	}
 	for _, needle := range []string{
-		"relayTunnelSetBidiDownloadActive(bidi, true)",
-		"defer relayTunnelSetBidiDownloadActive(bidi, false)",
-		"relayTunnelDownloadRelayH3Bidi(bidi, targetConn, bidi)",
-		"relayTunnelCopyBufferBidiUpload(targetConn, uploadSrc, bidi)",
+		"relayH3ProbeUploadLeg",
+		"relayTunnelDownloadRelayH3Plain(bidi, targetConn)",
+		"relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)",
 		"relayTunnelPrimeDownload(src)",
 	} {
 		if !strings.Contains(relayGoAuditSource, needle) {
-			t.Fatalf("relay.go missing REF-SRC-SB-5 anchor %q", needle)
-		}
-	}
-	for _, needle := range []string{
-		"quic.MasqueSetBidiDownloadActive",
-		"quic.MasquePokeDownloadReceiveWindow",
-		"quic.MasqueWakeBidiDuplex",
-		"MASQUE_RELAY_BIDI_DOWNLOAD_WRITE_WAKE",
-		"relayTunnelWakeBidiAfterUploadRead",
-	} {
-		if !strings.Contains(relayBidiBoostAuditSource, needle) {
-			t.Fatalf("relay_bidi_boost.go missing anchor %q", needle)
+			t.Fatalf("relay.go missing relay anchor %q", needle)
 		}
 	}
 }

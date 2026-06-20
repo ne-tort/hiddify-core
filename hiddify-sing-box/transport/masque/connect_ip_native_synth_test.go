@@ -130,6 +130,43 @@ func measureNativeDownloadReadMbps(conn net.Conn, duration time.Duration) (int64
 	return total, float64(total*8) / secs / 1e6, nil
 }
 
+func benchConnectIPNativeUploadH3(t *testing.T, duration time.Duration) (float64, int64) {
+	t.Helper()
+	uploadLn := startConnectIPNativeUploadSink(t)
+	proxyPort := startHybridConnectIPH3Server(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, masque.ClientOptions{
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+		TransportMode:       "connect_ip",
+		TCPTransport:        "connect_ip",
+	})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	defer session.Close()
+	if _, err := session.OpenIPSession(ctx); err != nil {
+		t.Fatalf("OpenIPSession: %v", err)
+	}
+
+	upPort := uint16(uploadLn.Addr().(*net.TCPAddr).Port)
+	upConn, err := session.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", upPort))
+	if err != nil {
+		t.Fatalf("dial upload: %v", err)
+	}
+	defer upConn.Close()
+
+	bytes, mbps, err := measureNativeUploadMbps(upConn, duration)
+	if err != nil {
+		t.Logf("native upload ended: %v", err)
+	}
+	return mbps, bytes
+}
+
 func primeNativeTCPDownload(conn net.Conn) {
 	const primeBytes = 4 << 20
 	if wt, ok := conn.(io.WriterTo); ok {

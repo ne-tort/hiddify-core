@@ -14,6 +14,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"golang.org/x/net/http2"
 )
 
@@ -59,7 +60,7 @@ func startInProcessH2UDPConnectProxy(t testing.TB) int {
 	}
 	tlsLn := tls.NewListener(ln, serverTLS)
 	srv := &http.Server{Handler: mux}
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+	if err := http2.ConfigureServer(srv, h2c.BulkHTTP2ServerConfig()); err != nil {
 		t.Fatalf("configure http2 server: %v", err)
 	}
 	var wg sync.WaitGroup

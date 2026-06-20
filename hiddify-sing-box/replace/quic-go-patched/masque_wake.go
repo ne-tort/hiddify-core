@@ -538,5 +538,23 @@ func MasqueWakeConnSend(c *Conn) {
 	if c == nil {
 		return
 	}
+	if masqueWakeConnSendHook != nil {
+		masqueWakeConnSendHook()
+	}
 	c.scheduleSending()
+}
+
+// MasqueWakeConnSendDatagramCoalesced schedules send after batched proxied-IP enqueue; redundant
+// flushDatagramSendWake calls in one send loop turn invoke the test hook once.
+func MasqueWakeConnSendDatagramCoalesced(c *Conn) {
+	if c == nil {
+		return
+	}
+	c.scheduleSending()
+	if !c.masqueDatagramWakeCoalesced.CompareAndSwap(false, true) {
+		return
+	}
+	if masqueWakeConnSendHook != nil {
+		masqueWakeConnSendHook()
+	}
 }

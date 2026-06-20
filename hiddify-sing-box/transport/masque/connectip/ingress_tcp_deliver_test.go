@@ -89,8 +89,8 @@ func TestDeliverTCPIngressAckOnlySkipsOutboundDrain(t *testing.T) {
 	if !ok {
 		t.Fatal("expected deliver for ACK-only segment")
 	}
-	if stack.outboundCh != nil {
-		t.Fatal("ACK-only ingress must not start outbound drain writer")
+	if depth := stack.OutboundQueueDepth(); depth != 0 {
+		t.Fatalf("ACK-only ingress must not queue egress (depth=%d)", depth)
 	}
 }
 
@@ -119,8 +119,9 @@ func TestDeliverTCPIngressPayloadSchedulesOutboundDrain(t *testing.T) {
 	if !ok {
 		t.Fatal("expected deliver for payload segment")
 	}
-	if stack.outboundCh == nil {
-		t.Fatal("payload ingress must schedule outbound drain")
+	stack.ScheduleOutboundDrain()
+	if depth := stack.OutboundQueueDepth(); depth != 0 {
+		t.Fatalf("sync egress queue depth=%d want 0", depth)
 	}
 }
 

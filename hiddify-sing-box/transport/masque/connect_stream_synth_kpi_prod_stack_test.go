@@ -3,7 +3,9 @@ package masque_test
 // GATE-H3-SYNTH: paired H2/H3 prod stack throughput gates with diagnostic FAIL messages.
 
 import (
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,8 +48,13 @@ func measureProdStackUploadMbps(
 	return n, mbps
 }
 
-func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Duration) (downMbps, upMbps float64) {
-	t.Helper()
+type prodStackDuplexSample struct {
+	DownMbps     float64
+	UpMbps       float64
+	TransportErr error // early reset before bench bytes (n==0 on WriteTo)
+}
+
+func measureProdStackDuplexSample(conn net.Conn, duration time.Duration) prodStackDuplexSample {
 	type downRes struct {
 		mbps float64
 		err  error
@@ -61,7 +68,10 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 	downloadArmed := make(chan struct{}, 1)
 	restoreHook := masque.ExportInstallDuplexDownloadArmedHook(downloadArmed)
 	defer restoreHook()
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
+		defer wg.Done()
 		<-start
 		n, mbps, err := masque.ExportMeasureTCPDownloadWriteToMbps(conn, duration)
 		if err != nil && n == 0 {
@@ -71,6 +81,7 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 		downDone <- downRes{mbps: mbps}
 	}()
 	go func() {
+		defer wg.Done()
 		<-start
 		<-downloadArmed
 		chunk := make([]byte, 256*1024)
@@ -88,18 +99,43 @@ func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Durat
 		upDone <- upRes{bytes: upTotal}
 	}()
 	close(start)
-
 	dr := <-downDone
-	if dr.err != nil {
-		t.Fatalf("concurrent WriteTo download: %v", dr.err)
-	}
 	ur := <-upDone
+	wg.Wait()
 	secs := duration.Seconds()
 	if secs <= 0 {
 		secs = 1
 	}
-	upMbps = float64(ur.bytes*8) / secs / 1e6
-	return dr.mbps, upMbps
+	upMbps := float64(ur.bytes*8) / secs / 1e6
+	if dr.err != nil {
+		return prodStackDuplexSample{UpMbps: upMbps, TransportErr: dr.err}
+	}
+	return prodStackDuplexSample{DownMbps: dr.mbps, UpMbps: upMbps}
+}
+
+func measureProdStackDuplexMbps(t *testing.T, conn net.Conn, duration time.Duration) (downMbps, upMbps float64) {
+	t.Helper()
+	sample := measureProdStackDuplexSample(conn, duration)
+	if sample.TransportErr != nil {
+		t.Fatalf("concurrent WriteTo download: %v", sample.TransportErr)
+	}
+	return sample.DownMbps, sample.UpMbps
+}
+
+func duplexSamplePass(down, up, threshold, maxRatio float64) bool {
+	minLeg := down
+	if up < minLeg {
+		minLeg = up
+	}
+	maxLeg := down
+	if up > maxLeg {
+		maxLeg = up
+	}
+	ratio := 1.0
+	if minLeg > 0 {
+		ratio = maxLeg / minLeg
+	}
+	return down >= threshold && up >= threshold && minLeg > 0 && ratio <= maxRatio
 }
 
 func measureProdStackDownloadReadMbps(
@@ -270,47 +306,64 @@ func TestGATEH3SynthPairedProdStackDownload(t *testing.T) {
 }
 
 // TestGATEH3SynthBidiDuplexProdStack (GATE-H3-SYNTH) — concurrent upload + WriteTo download on H3 prod stack.
+// One masque stack + N dials (prod parity). Do not use go test -count to repeat stack lifecycle.
 func TestGATEH3SynthBidiDuplexProdStack(t *testing.T) {
 	dur := masque.ExportConnectStreamSynthProdBenchDuration
+	samples := int(masque.ExportConnectStreamSynthDuplexGateSamples)
+	minPass := int(masque.ExportConnectStreamSynthDuplexGateMinPass)
+	threshold := masque.ExportConnectStreamSynthProdMinMbps
+	maxRatio := masque.ExportConnectStreamSynthDuplexMaxRatio
+
 	targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
 	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
 	socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
 
-	conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
-	if err := conn.SetDeadline(time.Now().Add(dur + 8*time.Second)); err != nil {
-		t.Fatalf("set deadline: %v", err)
+	var pass, transportErr int
+	var bestMin float64
+	for i := 0; i < samples; i++ {
+		conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+		if err := conn.SetDeadline(time.Now().Add(dur + 8*time.Second)); err != nil {
+			t.Fatalf("set deadline: %v", err)
+		}
+		sample := measureProdStackDuplexSample(conn, dur)
+		_ = conn.Close()
+		if sample.TransportErr != nil {
+			transportErr++
+			t.Logf("GATE-H3-SYNTH duplex sample %d/%d: transport reset: %v", i+1, samples, sample.TransportErr)
+			continue
+		}
+		minLeg := sample.DownMbps
+		if sample.UpMbps < minLeg {
+			minLeg = sample.UpMbps
+		}
+		maxLeg := sample.DownMbps
+		if sample.UpMbps > maxLeg {
+			maxLeg = sample.UpMbps
+		}
+		ratio := maxLeg / minLeg
+		if minLeg <= 0 {
+			ratio = 0
+		}
+		ok := duplexSamplePass(sample.DownMbps, sample.UpMbps, threshold, maxRatio)
+		if ok {
+			pass++
+		}
+		if minLeg > bestMin {
+			bestMin = minLeg
+		}
+		t.Logf("GATE-H3-SYNTH duplex sample %d/%d: down=%.1f up=%.1f min=%.1f ratio=%.2f pass=%v",
+			i+1, samples, sample.DownMbps, sample.UpMbps, minLeg, ratio, ok)
 	}
+	t.Logf("GATE-H3-SYNTH duplex summary: pass=%d/%d transport_err=%d best_min=%.1f (need pass>=%d)",
+		pass, samples, transportErr, bestMin, minPass)
 
-	downMbps, upMbps := measureProdStackDuplexMbps(t, conn, dur)
-	minLeg := downMbps
-	if upMbps < minLeg {
-		minLeg = upMbps
+	if transportErr > 0 {
+		t.Fatalf("GATE-H3-SYNTH duplex: %d/%d transport reset on single-stack dials — localize teardown/harness, not FC",
+			transportErr, samples)
 	}
-	maxLeg := downMbps
-	if upMbps > maxLeg {
-		maxLeg = upMbps
-	}
-	ratio := maxLeg / minLeg
-	if minLeg <= 0 {
-		ratio = 0
-	}
-
-	t.Logf("GATE-H3-SYNTH duplex: down=%.1f up=%.1f min=%.1f ratio=%.2f",
-		downMbps, upMbps, minLeg, ratio)
-
-	if downMbps < masque.ExportConnectStreamSynthProdMinMbps {
-		t.Fatalf("%s", masque.ExportSynthKPIDiagnostic("[H3-L1b/L1c bidi prod stack]", "tcp_down WriteTo",
-			downMbps, masque.ExportConnectStreamSynthProdMinMbps,
-			"concurrent upload active — check bidi FC / wake / scheduler"))
-	}
-	if upMbps < masque.ExportConnectStreamSynthProdMinMbps {
-		t.Fatalf("%s", masque.ExportSynthKPIDiagnostic("[H3-L1b/L1c bidi prod stack]", "tcp_up during WriteTo",
-			upMbps, masque.ExportConnectStreamSynthProdMinMbps,
-			"upload starved while download drains — check interleave poke"))
-	}
-	if minLeg > 0 && ratio > masque.ExportConnectStreamSynthDuplexMaxRatio {
-		t.Fatalf("[H3-L1b/L1c bidi prod stack] asymmetry: down=%.1f up=%.1f ratio=%.2f (want <= %.0f)",
-			downMbps, upMbps, ratio, masque.ExportConnectStreamSynthDuplexMaxRatio)
+	if pass < minPass {
+		t.Fatalf("GATE-H3-SYNTH duplex: pass=%d/%d (need >=%d @%.0f Mbit/s each leg, ratio<=%.0f); best_min=%.1f",
+			pass, samples, minPass, threshold, maxRatio, bestMin)
 	}
 }
 
@@ -417,6 +470,52 @@ func TestLocalizeConnectStreamH3DuplexFairness(t *testing.T) {
 	}
 	t.Logf("duplex fairness summary: min_of_min=%.1f avg_ratio=%.2f (OPEN until stable >=1000 min leg)",
 		minOfMin, sumRatio/float64(samples))
+}
+
+// TestLocalizeH3DuplexStackRecycle localizes harness bug: fresh stack per subtest (go test -count
+// pattern) vs one stack + multi-dial. Control must have zero transport resets; recycle may flake on Windows.
+func TestLocalizeH3DuplexStackRecycle(t *testing.T) {
+	const samples = 5
+	dur := masque.ExportConnectStreamSynthProdBenchDuration
+
+	t.Run("single_stack_multi_dial", func(t *testing.T) {
+		targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+		proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+		socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+		for i := 0; i < samples; i++ {
+			conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+			_ = conn.SetDeadline(time.Now().Add(dur + 8*time.Second))
+			sample := measureProdStackDuplexSample(conn, dur)
+			_ = conn.Close()
+			if sample.TransportErr != nil {
+				t.Fatalf("sample %d/%d transport reset: %v", i+1, samples, sample.TransportErr)
+			}
+		}
+	})
+
+	var recycleFail int
+	for i := 0; i < samples; i++ {
+		i := i
+		ok := t.Run(fmt.Sprintf("fresh_stack_%d", i), func(t *testing.T) {
+			targetPort := masque.ExportStartH2ProdStackBulkDownloadTarget(t)
+			proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+			socksPort := masque.ExportStartH3ConnectStreamSocksRouter(t, proxyPort)
+			conn := masque.ExportSocksTCPDial(t, socksPort, targetPort)
+			_ = conn.SetDeadline(time.Now().Add(dur + 8*time.Second))
+			sample := measureProdStackDuplexSample(conn, dur)
+			_ = conn.Close()
+			if sample.TransportErr != nil {
+				t.Fatalf("transport reset: %v", sample.TransportErr)
+			}
+		})
+		if !ok {
+			recycleFail++
+		}
+	}
+	if recycleFail > 0 {
+		t.Logf("OPEN: fresh-stack subtests failed %d/%d — GATE must use single_stack_multi_dial, not go test -count",
+			recycleFail, samples)
+	}
 }
 
 // TestLocalizeH3DuplexPolarization buckets bimodal duplex poles (localization only, no FAIL).

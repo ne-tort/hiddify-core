@@ -137,7 +137,6 @@ func DialH2Overlay(ctx context.Context, cfg H2OverlayDialConfig, template *urite
 		RemoteAddr:    raddr,
 		AsyncDownlink: true,
 	})
-	go pc.RunDownlinkPump()
 	if err := pc.Prime(); err != nil {
 		_ = pc.Close()
 		return nil, err

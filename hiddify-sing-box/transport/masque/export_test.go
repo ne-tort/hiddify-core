@@ -44,14 +44,21 @@ var (
 	ExportConnectStreamSynthParityMinRatio          = connectStreamSynthParityMinRatio
 	ExportConnectStreamSynthDuplexMaxRatio          = connectStreamSynthDuplexMaxRatio
 	ExportConnectStreamSynthProdBenchDuration       = connectStreamSynthProdBenchDuration
+	ExportConnectStreamSynthDuplexGateSamples       = connectStreamSynthDuplexGateSamples
+	ExportConnectStreamSynthDuplexGateMinPass       = connectStreamSynthDuplexGateMinPass
 	ExportConnectIPSynthProdMinMbps                 = connectIPSynthProdMinMbps
 	ExportConnectIPSynthRegressionFloorUpMbps       = connectIPSynthRegressionFloorUpMbps
 	ExportConnectIPSynthRegressionFloorDownMbpsLinux   = connectIPSynthRegressionFloorDownMbpsLinux
 	ExportConnectIPSynthRegressionFloorDownMbpsDesktop = connectIPSynthRegressionFloorDownMbpsDesktop
 	ExportConnectIPSynthPipeMinRatio                = connectIPSynthPipeMinRatio
+	ExportConnectIPSynthPipeFastMinMbps             = connectIPSynthPipeFastMinMbps
+	ExportConnectIPSynthPipeFastTargetRatio         = connectIPSynthPipeFastTargetRatio
+	ExportConnectIPSynthPipeFastFloorRatio          = connectIPSynthPipeFastFloorRatio
+	ExportConnectIPSynthWakeEstSegmentBytes         = connectIPSynthWakeEstSegmentBytes
 	ExportConnectIPSynthMaxAsymRatio                = connectIPSynthMaxAsymRatio
 	ExportConnectIPSynthProdBenchDuration             = connectIPSynthProdBenchDuration
 	ExportConnectIPDockerProdMinMbps                  = connectIPDockerProdMinMbps
+	ExportConnectIPDockerStaleUploadMbps              = connectIPDockerStaleUploadMbps
 	ExportStartH2ConnectStreamUploadTarget          = startH2ConnectStreamUploadTarget
 	ExportLocalizeBenchMinBytes                     int64 = localizeBenchMinBytes
 	ExportH3HonestGateMinBytes                      int64 = h3HonestGateMinBytes
@@ -145,7 +152,7 @@ func exportConnectIPUploadBench(r connectIPUploadBenchResult) ExportConnectIPUpl
 
 func ExportBenchConnectIPUploadInstantL1(t *testing.T, duration time.Duration) ExportConnectIPUploadBench {
 	t.Helper()
-	return exportConnectIPUploadBench(benchConnectIPUploadLayer(t, "L1", instantPacketLink{}, duration))
+	return exportConnectIPUploadBench(benchConnectIPUploadLayerBest(t, "L1-prod", prodInstantPacketLink{}, duration, 3))
 }
 
 func ExportConnectIPUploadNativeHint(pipeL1Mbps, nativeMbps float64) string {

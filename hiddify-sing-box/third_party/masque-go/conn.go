@@ -136,15 +136,13 @@ func (c *proxiedConn) takePrefetched() ([]byte, bool, bool) {
 	return d, true, c.prefetchCount > 0
 }
 
-func (c *proxiedConn) extendPrefetchFromTry() {
+func (c *proxiedConn) extendPrefetchFromTry(force bool) {
 	if c.drain == nil {
 		return
 	}
-	// Cheap lock-free probe budget check before taking prefetchMu.
-	if !c.prefetchGate.shouldProbe() {
+	if !force && !c.prefetchGate.shouldProbe() {
 		return
 	}
-	// Batch drain under one prefetchMu (avoids lock/unlock per datagram).
 	c.prefetchMu.Lock()
 	defer c.prefetchMu.Unlock()
 	drained := 0
@@ -159,7 +157,9 @@ func (c *proxiedConn) extendPrefetchFromTry() {
 		drained++
 	}
 	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
-	c.prefetchGate.observeDrain(drained)
+	if shouldObserveDrainProbe(force, drained) {
+		c.prefetchGate.observeDrain(drained)
+	}
 }
 
 func (c *proxiedConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
@@ -189,20 +189,27 @@ start:
 		fromPrefetch = true
 		hasBufferedPrefetch = hasMore
 	} else {
-		data, err = c.str.ReceiveDatagram(ctx)
-		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				return 0, nil, err
+		c.extendPrefetchFromTry(true)
+		if raw, ok, hasMore := c.takePrefetched(); ok {
+			data = raw
+			fromPrefetch = true
+			hasBufferedPrefetch = hasMore
+		} else {
+			data, err = c.str.ReceiveDatagram(ctx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					return 0, nil, err
+				}
+				// The context is cancelled asynchronously (in a Go routine spawned from time.AfterFunc).
+				// We need to check if a new deadline has already been set.
+				c.deadlineMx.Lock()
+				restart := time.Now().Before(c.deadline)
+				c.deadlineMx.Unlock()
+				if restart {
+					goto start
+				}
+				return 0, nil, os.ErrDeadlineExceeded
 			}
-			// The context is cancelled asynchronously (in a Go routine spawned from time.AfterFunc).
-			// We need to check if a new deadline has already been set.
-			c.deadlineMx.Lock()
-			restart := time.Now().Before(c.deadline)
-			c.deadlineMx.Unlock()
-			if restart {
-				goto start
-			}
-			return 0, nil, os.ErrDeadlineExceeded
 		}
 	}
 	payload, ok, err := parseProxiedDatagramPayload(data)
@@ -224,7 +231,7 @@ start:
 			}
 		}
 		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
-			c.extendPrefetchFromTry()
+			c.extendPrefetchFromTry(false)
 		}
 		goto start
 	}
@@ -246,7 +253,7 @@ start:
 			}
 		}
 		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
-			c.extendPrefetchFromTry()
+			c.extendPrefetchFromTry(false)
 		}
 		goto start
 	}
@@ -257,9 +264,13 @@ start:
 	// This mirrors the behavior of large UDP datagrams received on a UDP socket (on Linux).
 	n = copy(b, payload)
 	if !fromPrefetch || !hasBufferedPrefetch {
-		c.extendPrefetchFromTry()
+		c.extendPrefetchFromTry(false)
 	}
 	return n, c.remoteAddr, nil
+}
+
+func (c *proxiedConn) enqueueDatagram(data []byte) error {
+	return c.str.SendDatagram(data)
 }
 
 // WriteTo sends a UDP datagram to the target.
@@ -273,7 +284,7 @@ func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 		data = data[:minCap]
 		data[0] = 0
 		copy(data[len(contextIDZero):], p)
-		err = c.str.SendDatagram(data)
+		err = c.enqueueDatagram(data)
 		*bufPtr = data[:0]
 		proxiedConnWriteBufPool.Put(bufPtr)
 		return n, err
@@ -283,7 +294,7 @@ func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 	b := make([]byte, minCap)
 	b[0] = 0
 	copy(b[len(contextIDZero):], p)
-	err = c.str.SendDatagram(b)
+	err = c.enqueueDatagram(b)
 	return n, err
 }
 

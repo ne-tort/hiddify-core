@@ -54,7 +54,6 @@ func (c *localizeBidiWakeCounters) NoteDownloadWake() { c.Download.Add(1) }
 type localizeInjectors struct {
 	WriteQueueMetrics  *fwd.WriteQueueMetrics
 	IngressWakeFlushes *atomic.Int32
-	OutboundWakeCalls  *atomic.Int32
 	BidiWake           *localizeBidiWakeCounters
 }
 
@@ -62,7 +61,6 @@ func newLocalizeInjectors() localizeInjectors {
 	return localizeInjectors{
 		WriteQueueMetrics:  &fwd.WriteQueueMetrics{},
 		IngressWakeFlushes: &atomic.Int32{},
-		OutboundWakeCalls:  &atomic.Int32{},
 		BidiWake:           &localizeBidiWakeCounters{},
 	}
 }
@@ -71,7 +69,6 @@ func (i localizeInjectors) connectIPOpts() connectIPUploadHarnessOpts {
 	return connectIPUploadHarnessOpts{
 		WriteQueueMetrics:  i.WriteQueueMetrics,
 		IngressWakeFlushes: i.IngressWakeFlushes,
-		OutboundWakeCalls:  i.OutboundWakeCalls,
 	}
 }
 
@@ -160,7 +157,7 @@ func TestLocalizeHarnessBenchContract(t *testing.T) {
 		t.Fatal("windowed wide bidi link params drift")
 	}
 	inj := newLocalizeInjectors()
-	if inj.WriteQueueMetrics == nil || inj.OutboundWakeCalls == nil || inj.IngressWakeFlushes == nil {
+	if inj.WriteQueueMetrics == nil || inj.IngressWakeFlushes == nil {
 		t.Fatal("injectors not allocated")
 	}
 	if inj.BidiWake == nil {

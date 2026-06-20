@@ -19,7 +19,6 @@ import (
 
 type (
 	h2ConnectUDPPacketConn = cudp.H2PacketConn
-	h2UDPDownlinkItem      = cudp.H2DownlinkItem
 	masqueUDPAddr          = cudp.UDPAddr
 )
 

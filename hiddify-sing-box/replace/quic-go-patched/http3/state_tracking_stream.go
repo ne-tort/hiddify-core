@@ -38,8 +38,9 @@ func StreamDatagramRecvClosedDropTotal() uint64 {
 type stateTrackingStream struct {
 	*quic.Stream
 
-	sendDatagram func([]byte) error
-	hasData      chan struct{}
+	sendDatagram       func([]byte) error
+	sendDatagramNoWake func([]byte) error
+	hasData            chan struct{}
 	queue        [][]byte // TODO: use a ring buffer
 
 	mx      sync.Mutex
@@ -55,12 +56,13 @@ type streamClearer interface {
 	clearStream(quic.StreamID)
 }
 
-func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram func([]byte) error) *stateTrackingStream {
+func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram, sendDatagramNoWake func([]byte) error) *stateTrackingStream {
 	t := &stateTrackingStream{
-		Stream:       s,
-		clearer:      clearer,
-		sendDatagram: sendDatagram,
-		hasData:      make(chan struct{}, 1),
+		Stream:             s,
+		clearer:            clearer,
+		sendDatagram:       sendDatagram,
+		sendDatagramNoWake: sendDatagramNoWake,
+		hasData:            make(chan struct{}, 1),
 	}
 
 	context.AfterFunc(s.Context(), func() {
@@ -139,6 +141,19 @@ func (s *stateTrackingStream) SendDatagram(b []byte) error {
 	}
 
 	return s.sendDatagram(b)
+}
+
+func (s *stateTrackingStream) SendDatagramNoWake(b []byte) error {
+	s.mx.Lock()
+	sendErr := s.sendErr
+	s.mx.Unlock()
+	if sendErr != nil {
+		return sendErr
+	}
+	if s.sendDatagramNoWake == nil {
+		return s.sendDatagram(b)
+	}
+	return s.sendDatagramNoWake(b)
 }
 
 func (s *stateTrackingStream) signalHasDatagram() {

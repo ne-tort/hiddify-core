@@ -32,7 +32,7 @@ type IngressHost interface {
 	IngressTCPNetstackForInject() *Netstack
 	IngressTCPFastPath(pkt []byte) bool
 	IngressDeliverTCP(pkt []byte) bool
-	// IngressDeliverTCPNoFlush is like IngressDeliverTCP but defers MasqueWakeSend flush to IngressFlushAckWake.
+	// IngressDeliverTCPNoFlush delivers TCP ingress without per-packet transport wake; flush via IngressFlushAckWake.
 	IngressDeliverTCPNoFlush(pkt []byte) bool
 	IngressFlushAckWake()
 	IngressOnReadFatal(err error)
@@ -367,11 +367,7 @@ func (ing *Ingress) dispatchIngressFrame(pkt []byte) {
 		ing.host.IngressDebugLog(pkt, len(pkt), ing.host.IngressTCPNetstack() != nil, ing.host.IngressTCPInstallInflight())
 	}
 	if ing.host.IngressTCPFastPath(pkt) {
-		if IPv4TCPHasPayload(pkt) {
-			if ing.host.IngressDeliverTCPNoFlush(pkt) {
-				return
-			}
-		} else if ing.host.IngressDeliverTCP(pkt) {
+		if ing.host.IngressDeliverTCPNoFlush(pkt) {
 			return
 		}
 	}

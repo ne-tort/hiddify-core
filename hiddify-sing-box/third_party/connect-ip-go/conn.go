@@ -66,6 +66,19 @@ type proxiedIPDatagramSender interface {
 	SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error
 }
 
+// proxiedIPDatagramCoalescedSender extends proxiedIPDatagramSender with batched QUIC send wake.
+type proxiedIPDatagramCoalescedSender interface {
+	proxiedIPDatagramSender
+	SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error
+	FlushProxiedIPDatagramSend()
+}
+
+// proxiedIPDatagramInPlaceSender enqueues proxied IP from caller-owned pool buffers with headroom.
+type proxiedIPDatagramInPlaceSender interface {
+	proxiedIPDatagramCoalescedSender
+	SendProxiedIPDatagramInPlaceNoWake(contextPrefix, ipPacket []byte, release func()) error
+}
+
 var (
 	_ http3Stream = &http3.Stream{}
 	_ http3Stream = &http3.RequestStream{}
@@ -1474,6 +1487,59 @@ func (c *Conn) finishWritePacketSend(icmpSource []byte, err error) (icmp []byte,
 }
 
 func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
+	return c.writePacketMaybeWake(b, true)
+}
+
+// WritePacketNoWake enqueues egress without per-datagram QUIC send wake. Call FlushOutgoingDatagramSend
+// after a batch (ClientPacketSession egress writer does this).
+func (c *Conn) WritePacketNoWake(b []byte) (icmp []byte, err error) {
+	return c.writePacketMaybeWake(b, false)
+}
+
+// WritePacketInPlaceNoWake prepares and enqueues from a caller-owned buffer (TTL decrement in place).
+// When retained is true the buffer stays owned by QUIC until the registered outbound releaser runs.
+func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, err error) {
+	if len(b) == 0 {
+		return nil, false, fmt.Errorf("connect-ip: empty packet")
+	}
+	if c.closeChan != nil {
+		select {
+		case <-c.closeChan:
+			return nil, false, c.errAfterClose()
+		default:
+		}
+	}
+	if err := c.prepareOutgoingProxiedPacket(b, c.routeView.Load()); err != nil {
+		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
+		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
+		err = wrapConnectIPStreamDataplaneErr(c, err)
+		return nil, false, err
+	}
+	if cis, ok := c.str.(proxiedIPDatagramInPlaceSender); ok && outboundPayloadReleaser != nil && outboundPoolSlice != nil && outboundPoolSlice(b) {
+		ip := b
+		release := func() { outboundPayloadReleaser(ip) }
+		if err := cis.SendProxiedIPDatagramInPlaceNoWake(contextIDZero, b, release); err != nil {
+			icmp, retErr := c.finishWritePacketSend(b, err)
+			return icmp, false, retErr
+		}
+		return nil, true, nil
+	}
+	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
+		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, b))
+		return icmp, false, retErr
+	}
+	icmp, retErr := c.WritePacketNoWake(b)
+	return icmp, false, retErr
+}
+
+// FlushOutgoingDatagramSend schedules one QUIC send after batched WritePacketNoWake/InPlaceNoWake.
+func (c *Conn) FlushOutgoingDatagramSend() {
+	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
+		cs.FlushProxiedIPDatagramSend()
+	}
+}
+
+func (c *Conn) writePacketMaybeWake(b []byte, wake bool) (icmp []byte, err error) {
 	if len(b) == 0 {
 		return nil, fmt.Errorf("connect-ip: empty packet")
 	}
@@ -1492,6 +1558,11 @@ func (c *Conn) WritePacket(b []byte) (icmp []byte, err error) {
 			err = fmt.Errorf("connect-ip: compose datagram: %w", err)
 			err = wrapConnectIPStreamDataplaneErr(c, err)
 			return nil, err
+		}
+		if !wake {
+			if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
+				return c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, ip))
+			}
 		}
 		return c.finishWritePacketSend(b, ps.SendProxiedIPDatagram(contextIDZero, ip))
 	}

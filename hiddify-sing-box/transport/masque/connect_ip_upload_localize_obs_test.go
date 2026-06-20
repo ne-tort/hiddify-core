@@ -1,59 +1,30 @@
 package masque_test
 
 import (
-	"context"
-	"crypto/tls"
-	"net"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/transport/masque"
-	M "github.com/sagernet/sing/common/metadata"
 )
 
 // TestLocalizeConnectIPUploadNativeObs logs drop counters and native/pipe ratio (localization only).
 func TestLocalizeConnectIPUploadNativeObs(t *testing.T) {
 	duration := masque.ExportLocalizeBenchDuration
-	pipe := masque.ExportBenchConnectIPUploadInstantL1(t, duration)
-	if pipe.Err != nil {
-		t.Fatalf("pipe L1: %v", pipe.Err)
-	}
 
 	streamDropBefore := http3.StreamDatagramQueueDropTotal()
 	rcvDropBefore := quic.DatagramReceiveQueueDropTotal()
 
-	uploadLn := startConnectIPNativeUploadSink(t)
-	proxyPort := startHybridConnectIPH3Server(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	nativeMbps, _ := benchConnectIPNativeUploadH3(t, connectIPNativeSynthBenchDur)
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, masque.ClientOptions{
-		Server:              "127.0.0.1",
-		ServerPort:          uint16(proxyPort),
-		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TransportMode:       "connect_ip",
-		TCPTransport:        "connect_ip",
-	})
-	if err != nil {
-		t.Fatalf("session: %v", err)
-	}
-	defer session.Close()
-	if _, err := session.OpenIPSession(ctx); err != nil {
-		t.Fatalf("OpenIPSession: %v", err)
-	}
+	runtime.GC()
+	time.Sleep(200 * time.Millisecond)
 
-	upPort := uint16(uploadLn.Addr().(*net.TCPAddr).Port)
-	upConn, err := session.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", upPort))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer upConn.Close()
-
-	upBytes, nativeMbps, upErr := measureNativeUploadMbps(upConn, connectIPNativeSynthBenchDur)
-	if upErr != nil && upBytes == 0 {
-		t.Fatalf("upload: %v", upErr)
+	pipe := masque.ExportBenchConnectIPUploadInstantL1(t, duration)
+	if pipe.Err != nil {
+		t.Fatalf("pipe L1: %v", pipe.Err)
 	}
 
 	streamDrop := http3.StreamDatagramQueueDropTotal() - streamDropBefore

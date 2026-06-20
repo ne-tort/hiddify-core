@@ -1,16 +1,20 @@
 package connectudp
 
 import (
+	"bytes"
 	"net"
 	"testing"
 
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing-box/option"
 )
 
 const (
 	datagramSplitBenchPayloadLen = DefaultBenchUDPPayloadLen
-	datagramSplitMaxNsPerB     = 800.0
-	parseHTTPDatagramMaxNsPerOp  = 200.0
+	datagramSplitMaxNsPerB       = 800.0
+	parseHTTPDatagramMaxNsPerOp    = 200.0
+	capsuleEncodeMaxNsPerB         = 800.0
+	capsuleScanMaxNsPerB           = 800.0
 )
 
 var benchParseHTTPDatagramSample = []byte{0x00, 0x01, 0x02, 0x03}
@@ -90,4 +94,53 @@ func TestConnectUDPParseHTTPDatagramCPUBudget(t *testing.T) {
 			}
 		}
 	}, parseHTTPDatagramMaxNsPerOp, 1)
+}
+
+// TestConnectUDPH2CapsuleEncodeCPUBudget locks RFC9297 encode ns/byte for one 512 B datagram.
+func TestConnectUDPH2CapsuleEncodeCPUBudget(t *testing.T) {
+	payload := make([]byte, datagramSplitBenchPayloadLen)
+	assertConnectUDPUnitCPUBudget(t, "H2CapsuleEncode512B", func(b *testing.B) {
+		var pending bytes.Buffer
+		b.SetBytes(int64(len(payload)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			pending.Reset()
+			if err := h2c.AppendUDPPayloadAsDatagramCapsules(&pending, payload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}, capsuleEncodeMaxNsPerB, int64(datagramSplitBenchPayloadLen))
+}
+
+// TestConnectUDPH2CapsuleScanCPUBudget locks inline server scan ns/byte on batched wire.
+func TestConnectUDPH2CapsuleScanCPUBudget(t *testing.T) {
+	payload := make([]byte, datagramSplitBenchPayloadLen)
+	var wire bytes.Buffer
+	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+		t.Fatal(err)
+	}
+	batch := wire.Bytes()
+	assertConnectUDPUnitCPUBudget(t, "H2CapsuleScan512B", func(b *testing.B) {
+		b.SetBytes(int64(len(payload)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			buf := batch
+			for len(buf) > 0 {
+				inner, n, err := h2c.ParseNextDatagramCapsuleWire(buf)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if n == 0 {
+					b.Fatal("truncated batch")
+				}
+				buf = buf[n:]
+				if inner == nil {
+					continue
+				}
+				if _, ok, perr := ParseHTTPDatagramUDP(inner); !ok || perr != nil {
+					b.Fatal(perr)
+				}
+			}
+		}
+	}, capsuleScanMaxNsPerB, int64(datagramSplitBenchPayloadLen))
 }

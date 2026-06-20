@@ -1,11 +1,11 @@
 package h2
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/dunglas/httpsfv"
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
@@ -121,6 +121,86 @@ func ParseCapsule(r quicvarint.Reader) (CapsuleType, io.Reader, error) {
 	return ct, &capsuleExactReader{R: io.LimitedReader{R: r, N: int64(length)}}, nil
 }
 
+// ParseNextDatagramCapsuleWire parses one RFC9297 capsule prefix from wire.
+// Returns consumed=0 when wire is truncated (caller should read more). For non-DATAGRAM
+// capsules inner is nil and the full capsule is skipped via consumed.
+func ParseNextDatagramCapsuleWire(wire []byte) (inner []byte, consumed int, err error) {
+	if len(wire) == 0 {
+		return nil, 0, nil
+	}
+	ct, n1, err := quicvarint.Parse(wire)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	if n1 >= len(wire) {
+		return nil, 0, nil
+	}
+	length, n2, err := quicvarint.Parse(wire[n1:])
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+	headerLen := n1 + n2
+	total := headerLen + int(length)
+	if total < headerLen || len(wire) < total {
+		return nil, 0, nil
+	}
+	if CapsuleType(ct) != CapsuleTypeDatagram {
+		if length > uint64(NondatagramMaxCapsulePayload) {
+			return nil, 0, fmt.Errorf("%w: non-datagram capsule exceeds %d bytes",
+				ErrOversizedDeclared, NondatagramMaxCapsulePayload)
+		}
+		return nil, total, nil
+	}
+	if length > uint64(MaxCapsulePayload()) {
+		return nil, 0, fmt.Errorf("%w: DATAGRAM capsule payload exceeds %d bytes",
+			ErrOversizedDeclared, MaxCapsulePayload())
+	}
+	return wire[headerLen:total], total, nil
+}
+
+var capsulePayloadPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, MaxCapsulePayload())
+		return &b
+	},
+}
+
+// ReadCapsulePayload reads the declared capsule body from ParseCapsule's reader.
+// release returns the backing buffer to a pool; omit calling release when payload is retained.
+func ReadCapsulePayload(r io.Reader) (payload []byte, release func(), err error) {
+	nop := func() {}
+	er, ok := r.(*capsuleExactReader)
+	if !ok {
+		p, err := io.ReadAll(r)
+		return p, nop, err
+	}
+	n := int(er.R.N)
+	if n <= 0 {
+		return nil, nop, nil
+	}
+	bp := capsulePayloadPool.Get().(*[]byte)
+	buf := *bp
+	if cap(buf) < n {
+		buf = make([]byte, n)
+	}
+	payload = buf[:n]
+	if _, err := io.ReadFull(r, payload); err != nil {
+		*bp = buf[:0]
+		capsulePayloadPool.Put(bp)
+		return nil, nop, err
+	}
+	return payload, func() {
+		*bp = buf[:0]
+		capsulePayloadPool.Put(bp)
+	}, nil
+}
+
 // WriteAll writes all of p to w per the io.Writer contract (partial writes without error).
 func WriteAll(w io.Writer, p []byte) (int, error) {
 	if w == nil {
@@ -172,15 +252,25 @@ func FlushRequestBody(w io.Writer) {
 
 // AppendDatagramCapsuleWire serializes one RFC 9297 DATAGRAM capsule without flushing.
 func AppendDatagramCapsuleWire(w io.Writer, udpPayload []byte) error {
-	dgram := make([]byte, 1+len(udpPayload))
-	dgram[0] = 0
-	copy(dgram[1:], udpPayload)
-	var buf bytes.Buffer
-	if err := writeCapsule(&buf, CapsuleTypeDatagram, dgram); err != nil {
+	dgramLen := 1 + len(udpPayload)
+	hdrLen := quicvarint.Len(uint64(CapsuleTypeDatagram)) + quicvarint.Len(uint64(dgramLen))
+	total := hdrLen + dgramLen
+	if total <= 2048 {
+		var scratch [2048]byte
+		wire := appendDatagramCapsuleWireBytes(scratch[:0], udpPayload)
+		_, err := WriteAll(w, wire)
 		return err
 	}
-	_, err := WriteAll(w, buf.Bytes())
+	wire := appendDatagramCapsuleWireBytes(make([]byte, 0, total), udpPayload)
+	_, err := WriteAll(w, wire)
 	return err
+}
+
+func appendDatagramCapsuleWireBytes(dst []byte, udpPayload []byte) []byte {
+	dgramLen := 1 + len(udpPayload)
+	dst = quicvarint.Append(quicvarint.Append(dst, uint64(CapsuleTypeDatagram)), uint64(dgramLen))
+	dst = append(dst, 0)
+	return append(dst, udpPayload...)
 }
 
 // AppendUDPPayloadAsDatagramCapsules splits a UDP payload into DATAGRAM capsules without flushing.

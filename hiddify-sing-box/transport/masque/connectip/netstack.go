@@ -28,8 +28,7 @@ import (
 )
 
 const (
-	netstackOutboundQueueDepth             = 8192
-	netstackOutboundWriteBatchMax          = 128
+	netstackOutboundWriteBatchMax          = 256
 	linkOutboundQueueSlots                 = 65536
 	tcpNetstackNIC             tcpip.NICID = 1
 )
@@ -72,33 +71,29 @@ func CloneInboundFrame(data []byte) []byte {
 }
 
 func borrowOutboundBuf(n int) []byte {
-	bp := netstackOutboundBufPool.Get().(*[]byte)
-	b := *bp
-	if cap(b) < n {
-		b = make([]byte, n)
-	} else {
-		b = b[:n]
-	}
-	return b
+	return borrowOutboundPayload(n)
 }
 
 func returnOutboundBuf(b []byte) {
 	if cap(b) > 64*1024 {
 		return
 	}
-	b = b[:0]
-	netstackOutboundBufPool.Put(&b)
+	if !IsOutboundPoolSlice(b) {
+		return
+	}
+	base := reclaimOutboundPoolBuf(b)
+	if base == nil {
+		return
+	}
+	netstackOutboundBufPool.Put(&base)
 }
 
 // NetstackOptions configures a CONNECT-IP gVisor TCP stack.
 type NetstackOptions struct {
-	LocalIPv4            netip.Addr
-	LocalIPv6            netip.Addr
-	MTU                  int
-	OutboundQueueMetrics *OutboundQueueMetrics
-	// OnOutboundQueued runs when gVisor egress is queued for WritePacket (schedule ACK wake).
-	OnOutboundQueued func()
-	// OnEgressBatchComplete runs after one exclusive outbound drain cycle (batched MasqueWakeSend).
+	LocalIPv4 netip.Addr
+	LocalIPv6 netip.Addr
+	MTU       int
+	// OnEgressBatchComplete runs after one gVisor egress batch (FlushEgressBatch / transport poke).
 	OnEgressBatchComplete func()
 }
 
@@ -117,12 +112,6 @@ type Netstack struct {
 	closed                atomic.Bool
 	terminalErr           atomic.Value
 	done                  chan struct{}
-	outboundOnce          sync.Once
-	outboundCh            chan outboundItem
-	outboundMetrics       *OutboundQueueMetrics
-	outboundPoke          chan struct{}
-	outboundWG            sync.WaitGroup
-	onOutboundQueued      func()
 	onEgressBatchComplete func()
 }
 
@@ -216,8 +205,6 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 		done:                  make(chan struct{}),
 		installedV4:           opts.LocalIPv4,
 		installedV6:           opts.LocalIPv6,
-		outboundMetrics:       opts.OutboundQueueMetrics,
-		onOutboundQueued:      opts.OnOutboundQueued,
 		onEgressBatchComplete: opts.OnEgressBatchComplete,
 	}
 	s.notifyHandle = endpoint.AddNotify(s)
@@ -446,7 +433,6 @@ func (s *Netstack) Close() error {
 		close(s.done)
 		s.endpoint.RemoveNotify(s.notifyHandle)
 		closeErr = s.session.Close()
-		s.outboundWG.Wait()
 		s.endpoint.Close()
 		s.gStack.RemoveNIC(tcpNetstackNIC)
 		s.gStack.Close()

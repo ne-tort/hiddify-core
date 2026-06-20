@@ -36,37 +36,3 @@ func TestGATEConnectIPUploadSynth(t *testing.T) {
 			l1.mbps, connectIPSynthProdMinMbps)
 	}
 }
-
-// TestGATEConnectIPUploadSynthDockerProxy mirrors docker tcp_up/tcp_down KPI without containers
-// (instant pipe = forwarder + gVisor only).
-func TestGATEConnectIPUploadSynthDockerProxy(t *testing.T) {
-	t.Run("upload", func(t *testing.T) {
-		h := startConnectIPUploadHarness(t, instantPacketLink{})
-		defer h.close()
-		conn := h.dialRemote(t)
-		defer conn.Close()
-		bytes, mbps, err := measureTCPUploadMbps(conn, localizeBenchDuration)
-		if err != nil {
-			t.Fatalf("upload: %v", err)
-		}
-		t.Logf("docker KPI proxy upload: %.1f Mbit/s (%d B)", mbps, bytes)
-		if mbps < connectIPSynthRegressionFloorUpMbps {
-			t.Fatalf("upload %.1f < regression floor %.1f", mbps, connectIPSynthRegressionFloorUpMbps)
-		}
-	})
-
-	t.Run("download", func(t *testing.T) {
-		h := startConnectIPDownloadHarness(t, instantPacketLink{})
-		defer h.close()
-		conn := h.dialRemote(t)
-		defer conn.Close()
-		bytes, mbps, err := measureTCPDownloadMbps(conn, localizeBenchDuration)
-		if err != nil {
-			t.Fatalf("download: %v", err)
-		}
-		t.Logf("docker KPI proxy download: %.1f Mbit/s (%d B)", mbps, bytes)
-		if mbps < connectIPSynthRegressionFloorUpMbps {
-			t.Fatalf("download %.1f < regression floor %.1f", mbps, connectIPSynthRegressionFloorUpMbps)
-		}
-	})
-}

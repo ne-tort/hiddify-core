@@ -98,16 +98,24 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 	}
 }
 
-// TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce verifies coalesced downlink still
-// performs exactly one FlushResponse per logical flush (G41: no double-flush inside WriteDatagramCapsule).
+// TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce verifies interactive downlink flushes
+// immediately while bulk coalesce waits for threshold or FlushPending.
 func TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce(t *testing.T) {
 	rec := &flushCountResponseWriter{}
 	w := &H2ResponseWriter{ResponseWriter: rec}
 	if err := w.WriteUDPPayloadAsCapsules([]byte("ping")); err != nil {
 		t.Fatal(err)
 	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("interactive downlink flushes=%d want 1", got)
+	}
+	rec.flushes.Store(0)
+	w.bulkDownlink = true
+	if err := w.WriteUDPPayloadAsCapsules([]byte("pong")); err != nil {
+		t.Fatal(err)
+	}
 	if got := rec.flushes.Load(); got != 0 {
-		t.Fatalf("small payload should coalesce before flush, flushes=%d want 0", got)
+		t.Fatalf("bulk small payload should coalesce before flush, flushes=%d want 0", got)
 	}
 	if err := w.FlushPending(); err != nil {
 		t.Fatal(err)
@@ -124,13 +132,35 @@ func TestH2ResponseWriterWriteUDPPayloadAsCapsulesFlushesOnce(t *testing.T) {
 	}
 }
 
-// TestH2ResponseWriterDownlinkCoalesceBatchesFlush verifies burst downlink batches capsule
+// TestH2ResponseWriterTimerArmsOnce verifies prod timer: armed on first sub-threshold append,
+// not reset on each append (debounced reset capped fountain ~400 Mbit/s vs ~600+ one-shot arm).
+func TestH2ResponseWriterTimerArmsOnce(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	w := &H2ResponseWriter{ResponseWriter: rec, bulkDownlink: true}
+	payload := []byte("x")
+	for i := 0; i < 5; i++ {
+		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(H2DownlinkCoalesceMaxDelay / 4)
+	}
+	if got := rec.flushes.Load(); got < 1 {
+		t.Fatalf("one-shot timer should flush after first idle, flushes=%d want >=1", got)
+	}
+}
+
+// TestServeH2DownlinkCoalesceBatchesFlush verifies burst downlink batches capsule
 // wire bytes at H2DownlinkCoalesceThreshold instead of flushing per UDP read (max-burst path).
 func TestServeH2DownlinkCoalesceBatchesFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := &H2ResponseWriter{ResponseWriter: rec}
+	w := &H2ResponseWriter{
+		ResponseWriter:    rec,
+		bulkDownlink:      true,
+		rapidDownlinkHits: h2DownlinkBulkEnterHits,
+		lastDownlinkAt:    time.Now(),
+	}
 	const chunk = 4096
-	const nChunks = 10 // 40 KiB → expect 2 flushes (32 KiB threshold + final), not 10
+	const nChunks = H2DownlinkCoalesceThreshold/chunk + 2 // 64 KiB threshold + remainder
 	payload := bytes.Repeat([]byte{'u'}, chunk)
 	for i := 0; i < nChunks; i++ {
 		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
@@ -138,13 +168,13 @@ func TestServeH2DownlinkCoalesceBatchesFlush(t *testing.T) {
 		}
 	}
 	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("mid-burst flushes=%d want 1 at 32 KiB threshold", got)
+		t.Fatalf("mid-burst flushes=%d want 1 at %d B threshold", got, H2DownlinkCoalesceThreshold)
 	}
 	if err := w.FlushPending(); err != nil {
 		t.Fatal(err)
 	}
 	if got := rec.flushes.Load(); got != 2 {
-		t.Fatalf("final flushes=%d want 2 (32 KiB batch + remainder)", got)
+		t.Fatalf("final flushes=%d want 2 (%d B batch + remainder)", got, H2DownlinkCoalesceThreshold)
 	}
 }
 

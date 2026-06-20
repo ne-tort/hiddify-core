@@ -89,23 +89,33 @@ func (s *benignOnceWriteSession) Close() error {
 }
 
 type retryableThenOKWriteSession struct {
+	inner         PacketSession
 	failRemaining atomic.Int32
 	written       atomic.Int32
 }
 
-func (s *retryableThenOKWriteSession) ReadPacket(_ []byte) (int, error) {
-	return 0, net.ErrClosed
+func (s *retryableThenOKWriteSession) ReadPacket(buffer []byte) (int, error) {
+	return s.inner.ReadPacket(buffer)
 }
 
-func (s *retryableThenOKWriteSession) WritePacket(_ []byte) ([]byte, error) {
+func (s *retryableThenOKWriteSession) WritePacket(payload []byte) ([]byte, error) {
+	_, _, err := s.WritePacketFromNetstack(payload)
+	return nil, err
+}
+
+func (s *retryableThenOKWriteSession) WritePacketFromNetstack(payload []byte) (retained bool, icmp []byte, err error) {
 	if s.failRemaining.Add(-1) >= 0 {
-		return nil, context.DeadlineExceeded
+		return false, nil, context.DeadlineExceeded
 	}
 	s.written.Add(1)
-	return nil, nil
+	if xfer, ok := s.inner.(PacketWriteTransferSession); ok {
+		return xfer.WritePacketFromNetstack(payload)
+	}
+	_, err = s.inner.WritePacket(payload)
+	return false, nil, err
 }
 
-func (s *retryableThenOKWriteSession) Close() error { return nil }
+func (s *retryableThenOKWriteSession) Close() error { return s.inner.Close() }
 
 func TestIsBenignConnectIPEgressTeardownError(t *testing.T) {
 	t.Parallel()
@@ -151,87 +161,73 @@ func TestConnectIPTCPNetstackFailWithErrorDoesNotClosePacketSession(t *testing.T
 	}
 }
 
-type benignThenBlockWriteSession struct {
-	writes atomic.Int32
-	block  chan struct{}
-}
-
-func (s *benignThenBlockWriteSession) ReadPacket(_ []byte) (int, error) {
-	return 0, net.ErrClosed
-}
-
-func (s *benignThenBlockWriteSession) WritePacket(_ []byte) ([]byte, error) {
-	if s.writes.Add(1) == 1 {
-		return nil, &quic.ApplicationError{ErrorCode: 0x100, Remote: true}
-	}
-	<-s.block
-	return nil, nil
-}
-
-func (s *benignThenBlockWriteSession) Close() error { return nil }
-
-func TestConnectIPTCPNetstackBenignTeardownFlushesOutboundQueue(t *testing.T) {
-	sess := &benignThenBlockWriteSession{block: make(chan struct{})}
-	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
-		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
-		LocalIPv6: netip.MustParseAddr("fd00::2"),
-	})
-	if err != nil {
-		t.Fatalf("create stack: %v", err)
-	}
-	defer stack.Close()
-
-	payload := []byte{0x45, 0x00, 0x00, 0x28}
-	stack.outboundOnce.Do(func() {
-		stack.outboundCh = make(chan outboundItem, netstackOutboundQueueDepth)
-	})
-	const staleQueued = 8
-	for i := 0; i < staleQueued; i++ {
-		p := borrowOutboundBuf(len(payload))
-		copy(p, payload)
-		stack.outboundCh <- outboundItem{payload: p, persist: 0}
-	}
-	if depth := stack.OutboundQueueDepth(); depth != staleQueued {
-		t.Fatalf("setup queue depth=%d want %d", depth, staleQueued)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		_ = stack.DeliverOutboundPacket(payload)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("egress wedged after benign teardown with stale outbound queue")
-	}
-	if got := sess.writes.Load(); got != 1 {
-		t.Fatalf("expected one WritePacket before flush, got %d", got)
-	}
-	if depth := stack.OutboundQueueDepth(); depth != 0 {
-		t.Fatalf("outbound queue depth=%d want 0 after benign flush", depth)
-	}
-}
-
 func TestConnectIPTCPNetstackWriteNotifyRetriesSameOutboundOnTransientWrite(t *testing.T) {
-	sess := &retryableThenOKWriteSession{}
-	sess.failRemaining.Store(5)
-	stack, err := NewNetstack(context.Background(), sess, NetstackOptions{
+	rawClient, serverSession := newPacketPipePair()
+	clientSession := &retryableThenOKWriteSession{inner: rawClient}
+	clientSession.failRemaining.Store(5)
+	clientStack, err := NewNetstack(context.Background(), clientSession, NetstackOptions{
 		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
 		LocalIPv6: netip.MustParseAddr("fd00::2"),
 	})
 	if err != nil {
-		t.Fatalf("create stack: %v", err)
+		t.Fatalf("create client stack: %v", err)
 	}
-	defer stack.Close()
+	serverStack, err := NewNetstack(context.Background(), serverSession, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.1"),
+		LocalIPv6: netip.MustParseAddr("fd00::1"),
+	})
+	if err != nil {
+		t.Fatalf("create server stack: %v", err)
+	}
+	waitClientIngress := runIngressRelay(clientSession, clientStack)
+	waitServerIngress := runIngressRelay(serverSession, serverStack)
+	defer func() {
+		_ = clientStack.Close()
+		_ = serverStack.Close()
+		_ = rawClient.Close()
+		_ = serverSession.Close()
+		waitClientIngress()
+		waitServerIngress()
+	}()
 
-	payload := []byte{0x45, 0x00, 0x00, 0x28}
-	if err := stack.DeliverOutboundPacket(payload); err != nil {
-		t.Fatalf("deliver outbound: %v", err)
+	serverAddr := netip.MustParseAddrPort("198.18.0.1:18081")
+	listener, err := gonet.ListenTCP(serverStack.GStack(), tcpipFullAddress(serverAddr), ipv4Protocol(serverAddr))
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
 	}
-	if got := sess.written.Load(); got != 1 {
-		t.Fatalf("expected one successful write after retries, got %d", got)
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(io.Discard, c)
+			}(conn)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := clientStack.DialContext(ctx, socksaddrFromAddrPort(serverAddr))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
 	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("probe")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if clientSession.written.Load() >= 1 {
+			return
+		}
+		clientStack.ScheduleOutboundDrain()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected successful egress write after retries, writes=%d", clientSession.written.Load())
 }
 
 func newPacketPipePair() (*packetPipeSession, *packetPipeSession) {

@@ -15,6 +15,9 @@ const (
 	// occasional control traffic and drops under bursty tun/UDP load.
 	maxDatagramSendQueueLen = 65536
 	maxDatagramRcvQueueLen  = 262144
+	// When upload DATA is pending, cap pure-ACK datagrams so download ACK floods do not
+	// HOL-block C2S payload (TestLocalizeConnectIPUploadNativeConcurrentDownloadPollution).
+	maxDatagramAckWhileData = 4096
 )
 
 // datagramRcvQueueDropTotal counts inbound DATAGRAM frames dropped because rcvQueue
@@ -27,9 +30,12 @@ func DatagramReceiveQueueDropTotal() uint64 {
 }
 
 type datagramQueue struct {
-	sendMx    sync.Mutex
-	sendQueue ringbuffer.RingBuffer[*wire.DatagramFrame]
-	sent      chan struct{} // used to notify Add that a datagram was dequeued
+	sendMx sync.Mutex
+	// sendData holds proxied-IP frames carrying TCP payload; sendAck holds pure ACK/control.
+	sendData     ringbuffer.RingBuffer[*wire.DatagramFrame]
+	sendAck      ringbuffer.RingBuffer[*wire.DatagramFrame]
+	peekFromData bool
+	sent         chan struct{} // used to notify Add that a datagram was dequeued
 
 	rcvMx sync.Mutex
 	// rcvRing is a fixed-capacity ring (len == maxDatagramRcvQueueLen when non-nil).
@@ -58,9 +64,34 @@ func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
 	}
 }
 
-// Add queues a new DATAGRAM frame for sending.
+func (h *datagramQueue) sendLenLocked() int {
+	return h.sendData.Len() + h.sendAck.Len()
+}
+
+func (h *datagramQueue) pushSendLocked(f *wire.DatagramFrame) {
+	if masqueDatagramFrameHasTCPPayload(f) {
+		h.sendData.PushBack(f)
+		return
+	}
+	if !h.sendData.Empty() && h.sendAck.Len() >= maxDatagramAckWhileData {
+		dropped := h.sendAck.PopFront()
+		releaseOutgoingDatagramPayload(dropped)
+	}
+	h.sendAck.PushBack(f)
+}
+
+// Add queues a new DATAGRAM frame for sending and schedules the send loop.
 // sendQueue grows up to maxDatagramSendQueueLen; beyond that Add blocks until a send drains the queue.
 func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
+	return h.add(f, true)
+}
+
+// AddNoWake enqueues without scheduling send work — batched CONNECT-IP NoWake+Flush uses one wake per batch.
+func (h *datagramQueue) AddNoWake(f *wire.DatagramFrame) error {
+	return h.add(f, false)
+}
+
+func (h *datagramQueue) add(f *wire.DatagramFrame, wake bool) error {
 	h.sendMx.Lock()
 
 	for {
@@ -73,10 +104,12 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 			return err
 		default:
 		}
-		if h.sendQueue.Len() < maxDatagramSendQueueLen {
-			h.sendQueue.PushBack(f)
+		if h.sendLenLocked() < maxDatagramSendQueueLen {
+			h.pushSendLocked(f)
 			h.sendMx.Unlock()
-			h.hasData()
+			if wake {
+				h.hasData()
+			}
 			return nil
 		}
 		select {
@@ -98,29 +131,48 @@ func (h *datagramQueue) Add(f *wire.DatagramFrame) error {
 func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
-	if h.sendQueue.Empty() {
-		return nil
-	}
-	return h.sendQueue.PeekFront()
+	return h.peekSendLocked()
 }
 
-// Rotate moves the front DATAGRAM frame to the back of the send queue.
-// It returns false if the queue has fewer than 2 elements.
+func (h *datagramQueue) peekSendLocked() *wire.DatagramFrame {
+	if !h.sendData.Empty() {
+		h.peekFromData = true
+		return h.sendData.PeekFront()
+	}
+	if !h.sendAck.Empty() {
+		h.peekFromData = false
+		return h.sendAck.PeekFront()
+	}
+	return nil
+}
+
+// Rotate moves the front DATAGRAM frame to the back of the active send queue.
+// It returns false if the active queue has fewer than 2 elements.
 func (h *datagramQueue) Rotate() bool {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
-	if h.sendQueue.Len() < 2 {
+	q := &h.sendAck
+	if !h.sendData.Empty() {
+		q = &h.sendData
+	}
+	if q.Len() < 2 {
 		return false
 	}
-	f := h.sendQueue.PopFront()
-	h.sendQueue.PushBack(f)
+	f := q.PopFront()
+	q.PushBack(f)
 	return true
 }
 
 func (h *datagramQueue) Pop() {
 	h.sendMx.Lock()
 	defer h.sendMx.Unlock()
-	_ = h.sendQueue.PopFront()
+	if h.peekFromData && !h.sendData.Empty() {
+		_ = h.sendData.PopFront()
+	} else if !h.sendAck.Empty() {
+		_ = h.sendAck.PopFront()
+	} else if !h.sendData.Empty() {
+		_ = h.sendData.PopFront()
+	}
 	select {
 	case h.sent <- struct{}{}:
 	default:
@@ -202,13 +254,21 @@ func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
 	}
 }
 
+func (h *datagramQueue) drainSendLocked() {
+	for !h.sendData.Empty() {
+		f := h.sendData.PopFront()
+		releaseOutgoingDatagramPayload(f)
+	}
+	for !h.sendAck.Empty() {
+		f := h.sendAck.PopFront()
+		releaseOutgoingDatagramPayload(f)
+	}
+}
+
 func (h *datagramQueue) CloseWithError(e error) {
 	h.closeErr = e
 	close(h.closed)
 	h.sendMx.Lock()
-	for !h.sendQueue.Empty() {
-		f := h.sendQueue.PopFront()
-		releaseOutgoingDatagramPayload(f)
-	}
+	h.drainSendLocked()
 	h.sendMx.Unlock()
 }

@@ -298,12 +298,50 @@ func (s *Stream) SendDatagram(b []byte) error {
 	return s.datagramStream.SendDatagram(b)
 }
 
+// SendDatagramNoWake enqueues CONNECT-UDP HTTP datagram without per-packet QUIC send wake.
+func (s *Stream) SendDatagramNoWake(b []byte) error {
+	if s == nil || s.datagramStream == nil {
+		return errors.New("http3: nil stream")
+	}
+	if nw, ok := s.datagramStream.(interface{ SendDatagramNoWake([]byte) error }); ok {
+		return nw.SendDatagramNoWake(b)
+	}
+	return s.datagramStream.SendDatagram(b)
+}
+
 // SendProxiedIPDatagram queues CONNECT-IP egress (context prefix + IP) with one pooled-buffer copy.
 func (s *Stream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
 	if s == nil || s.conn == nil {
 		return errors.New("http3: nil stream")
 	}
 	return s.conn.sendProxiedIPDatagram(s.StreamID(), contextPrefix, ipPacket)
+}
+
+// SendProxiedIPDatagramNoWake enqueues proxied IP without per-datagram QUIC send wake.
+func (s *Stream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	if s == nil || s.conn == nil {
+		return errors.New("http3: nil stream")
+	}
+	return s.conn.sendProxiedIPDatagramNoWake(s.StreamID(), contextPrefix, ipPacket)
+}
+
+// SendProxiedIPDatagramInPlaceNoWake enqueues from a caller-owned IP buffer with pool headroom.
+func (s *Stream) SendProxiedIPDatagramInPlaceNoWake(contextPrefix, ipPacket []byte, release func()) error {
+	if s == nil || s.conn == nil {
+		if release != nil {
+			release()
+		}
+		return errors.New("http3: nil stream")
+	}
+	return s.conn.sendProxiedIPDatagramInPlaceNoWake(s.StreamID(), contextPrefix, ipPacket, release)
+}
+
+// FlushProxiedIPDatagramSend schedules one QUIC send after a batched proxied-IP enqueue.
+func (s *Stream) FlushProxiedIPDatagramSend() {
+	if s == nil || s.conn == nil {
+		return
+	}
+	s.conn.flushDatagramSendWake()
 }
 
 func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -444,6 +482,21 @@ func (s *RequestStream) SendDatagram(b []byte) error {
 // SendProxiedIPDatagram queues CONNECT-IP egress with one pooled-buffer copy.
 func (s *RequestStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
 	return s.str.SendProxiedIPDatagram(contextPrefix, ipPacket)
+}
+
+// SendProxiedIPDatagramNoWake enqueues proxied IP without per-datagram QUIC send wake.
+func (s *RequestStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	return s.str.SendProxiedIPDatagramNoWake(contextPrefix, ipPacket)
+}
+
+// SendProxiedIPDatagramInPlaceNoWake enqueues from a caller-owned IP buffer with pool headroom.
+func (s *RequestStream) SendProxiedIPDatagramInPlaceNoWake(contextPrefix, ipPacket []byte, release func()) error {
+	return s.str.SendProxiedIPDatagramInPlaceNoWake(contextPrefix, ipPacket, release)
+}
+
+// FlushProxiedIPDatagramSend schedules one QUIC send after a batched proxied-IP enqueue.
+func (s *RequestStream) FlushProxiedIPDatagramSend() {
+	s.str.FlushProxiedIPDatagramSend()
 }
 
 // ReceiveDatagram receives HTTP Datagrams (RFC 9297).

@@ -75,6 +75,73 @@ func TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush(t *testing.T) {
 	}
 }
 
+func TestParseNextDatagramCapsuleWireRoundTrip(t *testing.T) {
+	var wire bytes.Buffer
+	payload := bytes.Repeat([]byte("z"), 512)
+	if err := AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+		t.Fatal(err)
+	}
+	buf := wire.Bytes()
+	var reassembled []byte
+	for len(buf) > 0 {
+		inner, n, err := ParseNextDatagramCapsuleWire(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			t.Fatal("expected consumed bytes")
+		}
+		buf = buf[n:]
+		if inner == nil {
+			continue
+		}
+		if inner[0] != 0 {
+			t.Fatalf("expected context 0, got %d", inner[0])
+		}
+		reassembled = append(reassembled, inner[1:]...)
+	}
+	if !bytes.Equal(reassembled, payload) {
+		t.Fatalf("reassembled len=%d want %d", len(reassembled), len(payload))
+	}
+}
+
+func TestParseNextDatagramCapsuleWireIncomplete(t *testing.T) {
+	var wire bytes.Buffer
+	if err := AppendDatagramCapsuleWire(&wire, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	trunc := wire.Bytes()[:wire.Len()-2]
+	_, n, err := ParseNextDatagramCapsuleWire(trunc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("consumed=%d want 0 on truncated wire", n)
+	}
+}
+
+func TestReadCapsulePayloadPooled(t *testing.T) {
+	var wire bytes.Buffer
+	if err := AppendDatagramCapsuleWire(&wire, []byte("udp")); err != nil {
+		t.Fatal(err)
+	}
+	ct, cr, err := ParseCapsule(quicvarint.NewReader(bytes.NewReader(wire.Bytes())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ct != CapsuleTypeDatagram {
+		t.Fatalf("type=%v", ct)
+	}
+	body, release, err := ReadCapsulePayload(cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if string(body) != "\x00udp" {
+		t.Fatalf("body=%q", body)
+	}
+}
+
 func TestMaxCapsulePayloadMTUParityWithH3(t *testing.T) {
 	ceilingMax := cip.DatagramCeilingMax()
 	if got := MaxCapsulePayload(); got != cip.H2MaxCapsulePayload(ceilingMax) {

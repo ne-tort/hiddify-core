@@ -8,12 +8,16 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
 	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/yosida95/uritemplate/v3"
+	"golang.org/x/net/http2"
 )
 
 type h2TransportLink interface {
@@ -53,6 +57,96 @@ func newH2ConnectUDPSession(t *testing.T, proxyPort int, link h2TransportLink) (
 	}
 	t.Cleanup(func() { _ = session.Close() })
 	return session, waitCtx
+}
+
+func newH2OverlayDirectDialConfig(tb testing.TB, proxyPort int, link h2TransportLink) cudp.H2OverlayDialConfig {
+	tb.Helper()
+	if link == nil {
+		link = instantH2Link{}
+	}
+	clientTLS := connectUDPTestTLS.Clone()
+	clientTLS.InsecureSkipVerify = true
+	clientTLS.ServerName = "127.0.0.1"
+	tr, err := h2c.NewClientTransport(h2c.ClientDialConfig{
+		TLSConfig:          clientTLS,
+		DialHostCandidates: []string{""},
+		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return link.wrapTCP(conn), nil
+		},
+	})
+	if err != nil {
+		tb.Fatalf("h2 overlay transport: %v", err)
+	}
+	return cudp.H2OverlayDialConfig{
+		EnsureTransport: func(context.Context) (*http2.Transport, error) {
+			return tr, nil
+		},
+		ResolveDialAddr: func() string {
+			return net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort))
+		},
+	}
+}
+
+func dialH2OverlayDirect(tb testing.TB, proxyPort int, link h2TransportLink, target string) net.PacketConn {
+	tb.Helper()
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	tpl, err := uritemplate.New(rawTpl)
+	if err != nil {
+		tb.Fatalf("template: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	tb.Cleanup(cancel)
+	pc, err := cudp.DialH2Overlay(ctx, newH2OverlayDirectDialConfig(tb, proxyPort, link), tpl, target)
+	if err != nil {
+		tb.Fatalf("DialH2Overlay: %v", err)
+	}
+	tb.Cleanup(func() { _ = pc.Close() })
+	return pc
+}
+
+func benchConnectUDPH2OverlayDirectUpload(
+	tb testing.TB,
+	link h2TransportLink,
+	duration time.Duration,
+	payloadLen int,
+) (int64, float64, error) {
+	tb.Helper()
+	if payloadLen <= 0 {
+		payloadLen = cudp.DefaultBenchUDPPayloadLen
+	}
+	sink, _ := runUDPSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
+	proxyPort := startInProcessH2UDPConnectProxy(tb)
+	pkt := dialH2OverlayDirect(tb, proxyPort, link, net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port)))
+	return benchConnectUDPPacketUpload(pkt, sinkAddr, duration, 0, payloadLen)
+}
+
+func benchConnectUDPH2OverlayDirectDownloadFountain(
+	tb testing.TB,
+	link h2TransportLink,
+	duration time.Duration,
+	payloadLen int,
+) (int64, float64, error) {
+	tb.Helper()
+	if payloadLen <= 0 {
+		payloadLen = cudp.DefaultBenchUDPPayloadLen
+	}
+	fountain := startUDPFountain(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	fountainAddr := fountain.LocalAddr().(*net.UDPAddr)
+	proxyPort := startInProcessH2UDPConnectProxy(tb)
+	pkt := dialH2OverlayDirect(tb, proxyPort, link, net.JoinHostPort(fountainAddr.IP.String(), strconv.Itoa(fountainAddr.Port)))
+	prime := make([]byte, cudp.DefaultBenchUDPPayloadLen)
+	_ = pkt.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := pkt.WriteTo(prime, fountainAddr); err != nil {
+		return 0, 0, err
+	}
+	time.Sleep(50 * time.Millisecond)
+	return benchConnectUDPPacketReceiveOnly(pkt, duration, payloadLen)
 }
 
 // TestCoreSessionConnectUDPEchoH2ListenPacketInProcess exercises ListenPacket CONNECT-UDP over H2

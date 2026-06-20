@@ -29,6 +29,12 @@ const (
 	H2DownlinkCoalesceThreshold = 32 * 1024
 	// H2DownlinkCoalesceMaxDelay bounds latency when a single small datagram stays below threshold.
 	H2DownlinkCoalesceMaxDelay = 2 * time.Millisecond
+	// h2DownlinkBulkEnterGap: UDP reads closer than this count toward bulk coalesce (fountain flood).
+	h2DownlinkBulkEnterGap = 50 * time.Microsecond
+	// h2DownlinkBulkExitGap: spaced reads leave bulk mode (echo / pipeline-1 RTT).
+	h2DownlinkBulkExitGap = 500 * time.Microsecond
+	// h2DownlinkBulkEnterHits: consecutive rapid arrivals before bulk coalesce arms.
+	h2DownlinkBulkEnterHits = 4
 )
 
 func isH2ServeTransientReadErr(err error) bool {
@@ -86,10 +92,32 @@ func isH2ServeTerminalConnErr(err error) bool {
 // H2ResponseWriter serializes downlink capsule writes + batched flush (connect-ip-go h2ServerCapsuleStream parity).
 type H2ResponseWriter struct {
 	http.ResponseWriter
-	mu          sync.Mutex
-	pending     bytes.Buffer
-	flushTimer  *time.Timer
-	flushTimerC chan struct{}
+	mu             sync.Mutex
+	pending        bytes.Buffer
+	flushTimer     *time.Timer
+	flushTimerC    chan struct{}
+	lastDownlinkAt      time.Time
+	rapidDownlinkHits   int
+	bulkDownlink        bool
+}
+
+func (w *H2ResponseWriter) noteDownlinkArrivalLocked(now time.Time) {
+	if !w.lastDownlinkAt.IsZero() {
+		gap := now.Sub(w.lastDownlinkAt)
+		switch {
+		case gap <= h2DownlinkBulkEnterGap:
+			w.rapidDownlinkHits++
+			if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
+				w.bulkDownlink = true
+			}
+		case gap >= h2DownlinkBulkExitGap:
+			w.bulkDownlink = false
+			w.rapidDownlinkHits = 0
+		default:
+			w.rapidDownlinkHits = 0
+		}
+	}
+	w.lastDownlinkAt = now
 }
 
 // WriteUDPPayloadAsCapsules frames udpPayload as RFC 9297 DATAGRAM capsules on the HTTP/2 response body.
@@ -102,8 +130,12 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 		}
 		return h2c.WriteDatagramCapsule(w.ResponseWriter, nil)
 	}
+	w.noteDownlinkArrivalLocked(time.Now())
 	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&w.pending, udpPayload); err != nil {
 		return err
+	}
+	if !w.bulkDownlink {
+		return w.flushPendingLocked()
 	}
 	if w.pending.Len() >= H2DownlinkCoalesceThreshold {
 		return w.flushPendingLocked()

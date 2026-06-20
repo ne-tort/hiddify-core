@@ -1272,8 +1272,6 @@ func (s *Proxy) proxyConnReceive(conn *net.UDPConn, str *http3.Stream) error {
 		sendBackoff.onProgress()
 	}
 }
-
-// Close closes the proxy, immediately terminating all proxied flows.
 func (s *Proxy) Close() error {
 	s.mx.Lock()
 	s.closed = true

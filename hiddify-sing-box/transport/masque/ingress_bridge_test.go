@@ -33,9 +33,10 @@ func TestConnectIPIngressAckWakeAfterDeliver(t *testing.T) {
 	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	s.IngressTCPNetstack.Store(ns)
 
-	if !s.deliverConnectIPTCPIngress(pkt) {
+	if !s.deliverConnectIPTCPIngressNoFlush(pkt) {
 		t.Fatal("expected TCP ingress deliver")
 	}
+	s.flushConnectIPIngressAckWake()
 	if s.ConnectIPIngressAckWake.Pending() {
 		t.Fatal("wake must be flushed after deliver on H3")
 	}
@@ -98,9 +99,10 @@ func TestConnectIPIngressAckWakeH2MockUploadFullLoop(t *testing.T) {
 	s.IPHTTPH2Upload = upload
 	s.IngressTCPNetstack.Store(ns)
 
-	if !s.deliverConnectIPTCPIngress(pkt) {
+	if !s.deliverConnectIPTCPIngressNoFlush(pkt) {
 		t.Fatal("expected TCP ingress deliver")
 	}
+	s.flushConnectIPIngressAckWake()
 	if upload.flushCalls != 1 {
 		t.Fatalf("H2 full ingress loop must flush upload once, got %d", upload.flushCalls)
 	}
@@ -146,9 +148,10 @@ func TestConnectIPIngressAckWakeH3MockClientConnFullLoop(t *testing.T) {
 	s.IngressTCPNetstack.Store(ns)
 	s.connectIPAckWakeSender = wake
 
-	if !s.deliverConnectIPTCPIngress(pkt) {
+	if !s.deliverConnectIPTCPIngressNoFlush(pkt) {
 		t.Fatal("expected TCP ingress deliver")
 	}
+	s.flushConnectIPIngressAckWake()
 	if wake.calls != 1 {
 		t.Fatalf("H3 full ingress loop must MasqueWakeSend once, got %d", wake.calls)
 	}

@@ -44,6 +44,14 @@ func sessionBootstrapFrom(session IPPacketSession) cip.SessionBootstrap {
 }
 
 func newConnectIPTCPNetstack(ctx context.Context, session IPPacketSession, opts connectIPTCPNetstackOptions) (*connectIPTCPNetstack, error) {
+	if opts.OnEgressBatchComplete == nil {
+		type egressFlusher interface {
+			ScheduleEgressFlush()
+		}
+		if flusher, ok := session.(egressFlusher); ok {
+			opts.OnEgressBatchComplete = flusher.ScheduleEgressFlush
+		}
+	}
 	return cip.NewNetstack(ctx, session, cip.NetstackOptions(opts))
 }
 

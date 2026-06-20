@@ -132,21 +132,23 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 		}
 		s.rcvNxt += uint32(len(payload))
 		_ = s.scheduleAckOnly()
-		payCopy := append([]byte(nil), payload...)
-		go func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if s.closed.Load() {
-				return
-			}
-			if _, err := s.outbound.Write(payCopy); err != nil {
-				go s.close()
-				return
-			}
-			if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
-				go s.close()
-			}
-		}()
+		// Inline remote write: per-segment goroutines capped upload at ~150 Mbit/s in-proc
+		// (goroutine + copy churn at gVisor MSS PPS). pkt is reused by the read loop after return.
+		payCopy := borrowPacket(len(payload))
+		copy(payCopy, payload)
+		if s.closed.Load() {
+			returnPacket(payCopy)
+			return
+		}
+		if _, err := s.outbound.Write(payCopy); err != nil {
+			returnPacket(payCopy)
+			go s.close()
+			return
+		}
+		returnPacket(payCopy)
+		if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
+			go s.close()
+		}
 	}
 
 	if flags&header.TCPFlagFin != 0 {
@@ -201,8 +203,8 @@ func (s *tcpForwardSession) buildAckOnlyPacket() []byte {
 }
 
 func (s *tcpForwardSession) scheduleAckOnly() error {
-	// Immediate ACK via writeCh (async). ackCh coalescing alone capped upload at ~64 KiB/RTT;
-	// sync sendPacketNow under session mu blocked segment processing on QUIC backpressure.
+	// Coalesce via writeCh drain (coalesceQueuedAckOnly), not ackCh batch flush:
+	// ackCh-only coalescing capped windowed upload at ~64 KiB/RTT in-proc.
 	return s.sendAckOnly()
 }
 

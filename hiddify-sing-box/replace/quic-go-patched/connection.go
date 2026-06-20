@@ -174,6 +174,7 @@ type Conn struct {
 
 	notifyReceivedPacket chan struct{}
 	sendingScheduled     chan struct{}
+	masqueDatagramWakeCoalesced atomic.Bool
 	receivedPacketMx     sync.Mutex
 	receivedPackets      ringbuffer.RingBuffer[receivedPacket]
 
@@ -2147,9 +2148,8 @@ func (c *Conn) handleDatagramFrame(f *wire.DatagramFrame) error {
 		}
 	}
 	c.datagramQueue.HandleDatagramFrame(f)
-	// CONNECT-IP upload ACK-clock: nudge send path after inbound DATAGRAM so peer ACK egress
-	// does not wait for the application ReadPacket loop to schedule sending.
-	MasqueWakeConnSend(c)
+	// HTTP/3 CONNECT-IP/UDP schedules MasqueWakeConnSend in receiveDatagramDispatch after
+	// quarter-stream routing — avoid double wake per inbound DATAGRAM frame here.
 	return nil
 }
 
@@ -2491,6 +2491,7 @@ func (c *Conn) triggerSending(now monotime.Time) error {
 }
 
 func (c *Conn) sendPackets(now monotime.Time) error {
+	c.masqueDatagramWakeCoalesced.Store(false)
 	if c.perspective == protocol.PerspectiveClient && c.handshakeConfirmed {
 		if pm := c.pathManagerOutgoing.Load(); pm != nil {
 			connID, frame, tr, ok := pm.NextPathToProbe()
@@ -3096,7 +3097,11 @@ func (c *Conn) SendDatagram(p []byte) error {
 	bufPtr := AcquireHTTP3DatagramBuffer()
 	*bufPtr = (*bufPtr)[:0]
 	*bufPtr = append(*bufPtr, p...)
-	return c.enqueuePooledOutgoingDatagramFrame(bufPtr)
+	if err := c.enqueuePooledOutgoingDatagramFrame(bufPtr); err != nil {
+		return err
+	}
+	c.scheduleSending()
+	return nil
 }
 
 // EnqueuePooledHTTPDatagram queues a QUIC DATAGRAM whose payload already contains the
@@ -3126,12 +3131,46 @@ func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte) error {
 		attachPooledOutgoingPayload(f, bufPtr)
 	}
 
-	err := c.datagramQueue.Add(f)
+	err := c.datagramQueue.AddNoWake(f)
 	if err != nil {
 		if f.OutgoingPayloadRelease != nil {
 			releaseOutgoingDatagramPayload(f)
 		} else {
 			ReleaseHTTP3DatagramBuffer(bufPtr)
+		}
+		return err
+	}
+	return nil
+}
+
+// EnqueueOutgoingDatagramWithRelease queues a QUIC DATAGRAM frame. When release is non-nil,
+// it runs after the payload is copied into outgoing crypto frames (or on enqueue failure).
+func (c *Conn) EnqueueOutgoingDatagramWithRelease(data []byte, release func()) error {
+	if !c.supportsDatagrams() {
+		if release != nil {
+			release()
+		}
+		return errors.New("datagram support disabled")
+	}
+	f := &wire.DatagramFrame{DataLenPresent: true}
+	maxDataLen := min(
+		f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version),
+		protocol.ByteCount(c.currentMTUEstimate.Load()),
+	)
+	if protocol.ByteCount(len(data)) > maxDataLen {
+		if release != nil {
+			release()
+		}
+		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+	}
+	f.Data = data
+	if release != nil {
+		f.OutgoingPayloadRelease = release
+	}
+	err := c.datagramQueue.AddNoWake(f)
+	if err != nil {
+		if f.OutgoingPayloadRelease != nil {
+			releaseOutgoingDatagramPayload(f)
 		}
 		return err
 	}

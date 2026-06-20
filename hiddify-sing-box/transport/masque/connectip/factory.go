@@ -113,9 +113,7 @@ func (f tcpNetstackFactory) newWithBootstrap(ctx context.Context, session Packet
 		LocalIPv4:             localV4,
 		LocalIPv6:             localV6,
 		MTU:                   mtu,
-		OnOutboundQueued:      extra.OnOutboundQueued,
 		OnEgressBatchComplete: extra.OnEgressBatchComplete,
-		OutboundQueueMetrics:  extra.OutboundQueueMetrics,
 	})
 	if err != nil {
 		return nil, err

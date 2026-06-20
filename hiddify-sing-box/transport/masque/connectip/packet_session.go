@@ -3,8 +3,6 @@ package connectip
 import (
 	"context"
 	"errors"
-	"sync"
-	"sync/atomic"
 
 	connectip "github.com/quic-go/connect-ip-go"
 )
@@ -34,13 +32,6 @@ type ClientPacketSession struct {
 	profileLocalIPv6  string
 	overlayH2         bool
 	wakeAfterDatagram func()
-
-	egressOnce    sync.Once
-	egressClose   sync.Once
-	egressCh      chan []byte
-	egressStop    chan struct{}
-	egressWG      sync.WaitGroup
-	egressClosed  atomic.Bool
 }
 
 // NewClientPacketSession constructs a CONNECT-IP packet session wrapper.
@@ -134,9 +125,6 @@ func (s *ClientPacketSession) ReadPacketWithContext(ctx context.Context, buffer 
 		return n, err
 	}
 	TrackPacketRx(n)
-	if n > 0 && s.wakeAfterDatagram != nil {
-		s.wakeAfterDatagram()
-	}
 	return n, err
 }
 
@@ -145,10 +133,33 @@ func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 		TrackWriteFail(Errs.Transport, true)
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
 	}
-	if s.tryEnqueueEgress(buffer) {
-		return nil, nil
+	pkt := borrowOutboundBuf(len(buffer))
+	copy(pkt, buffer)
+	icmp, err := s.writePacketDirectNoWake(pkt)
+	if err != nil {
+		returnOutboundBuf(pkt)
+		return icmp, err
 	}
-	return s.writePacketDirect(buffer)
+	returnOutboundBuf(pkt)
+	return icmp, nil
+}
+
+// WritePacketFromNetstack sends a netstack pool buffer in-place (NoWake); caller flushes the batch.
+func (s *ClientPacketSession) WritePacketFromNetstack(outbound []byte) (retained bool, icmp []byte, err error) {
+	if s.datagramCeiling > 0 && len(outbound) > s.datagramCeiling {
+		TrackWriteFail(Errs.Transport, true)
+		return false, nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
+	}
+	icmp, retained, err = s.conn.WritePacketInPlaceNoWake(outbound)
+	if err != nil {
+		TrackWriteFail(err, false)
+		return false, icmp, err
+	}
+	TrackPacketTx(len(outbound))
+	if len(icmp) > 0 {
+		TrackPTBRx()
+	}
+	return retained, icmp, nil
 }
 
 // WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.

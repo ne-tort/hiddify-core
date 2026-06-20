@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
@@ -127,10 +128,11 @@ func TestH2PacketConnClosesOnWriteBodyError(t *testing.T) {
 	_ = pr.CloseWithError(errors.New("test closed read side"))
 
 	c := NewH2PacketConn(H2PacketConnConfig{ReqBody: pw})
-	n, err := c.WriteTo([]byte{42}, nil)
+	payload := bytes.Repeat([]byte{42}, h2UploadCoalesceThreshold)
+	n, err := c.WriteTo(payload, nil)
 	require.Error(t, err)
 	require.Equal(t, 0, n)
-	require.Contains(t, err.Error(), "write body")
+	require.Contains(t, err.Error(), "flush body")
 	require.True(t, c.IsClosed())
 }
 
@@ -145,7 +147,8 @@ func TestH2PacketConnWriteToCleanEOFWithoutClose(t *testing.T) {
 	c := NewH2PacketConn(H2PacketConnConfig{
 		ReqBody: eofWriteCloser{},
 	})
-	n, err := c.WriteTo([]byte{1, 2, 3}, nil)
+	payload := bytes.Repeat([]byte{1, 2, 3}, h2UploadCoalesceThreshold/3+1)
+	n, err := c.WriteTo(payload, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.EOF)
 	require.False(t, c.IsClosed())
@@ -160,7 +163,8 @@ func TestH2PacketConnWriteToCleanErrClosedPipeWithoutClose(t *testing.T) {
 	c := NewH2PacketConn(H2PacketConnConfig{
 		ReqBody: errClosedPipeWriteCloser{},
 	})
-	n, err := c.WriteTo([]byte{1, 2, 3}, nil)
+	payload := bytes.Repeat([]byte{1, 2, 3}, h2UploadCoalesceThreshold/3+1)
+	n, err := c.WriteTo(payload, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 	require.False(t, c.IsClosed())
@@ -207,6 +211,7 @@ func TestH2PacketConnWriteToSplitsLargePayloadIntoRFC9297Capsules(t *testing.T) 
 	n, err := c.WriteTo(payload, nil)
 	require.NoError(t, err)
 	require.Equal(t, total, n)
+	time.Sleep(H2DownlinkCoalesceMaxDelay + 2*time.Millisecond)
 
 	r := quicvarint.NewReader(bytes.NewReader(capWC.buf.Bytes()))
 	var reassembled []byte
@@ -320,4 +325,86 @@ func TestH2PacketConnReadFromDropsShortNonICMPPayload(t *testing.T) {
 	n, _, err := c.ReadFrom(make([]byte, 64))
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, ErrPortUnreachable)
+}
+
+func peelUploadPendingCompleteCapsules(pending []byte, maxWire int) (wire, rest []byte) {
+	consumed := 0
+	for consumed < len(pending) {
+		if consumed >= maxWire {
+			break
+		}
+		_, n, err := h2c.ParseNextDatagramCapsuleWire(pending[consumed:])
+		if err != nil || n == 0 {
+			break
+		}
+		if consumed+n > maxWire {
+			break
+		}
+		consumed += n
+	}
+	if consumed == 0 {
+		return nil, pending
+	}
+	return append([]byte(nil), pending[:consumed]...), append([]byte(nil), pending[consumed:]...)
+}
+
+// TestPeelUploadPendingCompleteCapsulesNeverSplits documents that bidi upload interleave
+// must peel only full RFC9297 capsules (byte-offset peel corrupts the wire stream).
+func TestPeelUploadPendingCompleteCapsulesNeverSplits(t *testing.T) {
+	var buf bytes.Buffer
+	for i := 0; i < 10; i++ {
+		require.NoError(t, h2c.AppendDatagramCapsuleWire(&buf, []byte{byte(i), byte(i + 1)}))
+	}
+	pending := buf.Bytes()
+	wire, rest := peelUploadPendingCompleteCapsules(pending, 20)
+	require.NotEmpty(t, wire)
+	require.NotEmpty(t, rest)
+	require.Less(t, len(wire), len(pending))
+	for len(wire) > 0 {
+		_, n, err := h2c.ParseNextDatagramCapsuleWire(wire)
+		require.NoError(t, err)
+		require.Greater(t, n, 0)
+		wire = wire[n:]
+	}
+	_, n, err := h2c.ParseNextDatagramCapsuleWire(rest)
+	require.NoError(t, err)
+	require.Greater(t, n, 0)
+}
+
+// TestH2PacketConnAdaptiveUploadInteractiveFlush verifies duplex spaced WriteTo flushes immediately
+// (parity server adaptive downlink) without breaking upload-only coalesce.
+func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
+	capture := &udpCapsuleCaptureWriteCloser{}
+	c := NewH2PacketConn(H2PacketConnConfig{
+		ReqBody: capture,
+		Resp:    &http.Response{Body: io.NopCloser(bytes.NewReader(nil))},
+	})
+	c.duplexActive.Store(true)
+	payload := []byte("ping")
+
+	if _, err := c.WriteTo(payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	if capture.buf.Len() == 0 {
+		t.Fatal("interactive WriteTo should flush immediately")
+	}
+	capture.buf.Reset()
+
+	time.Sleep(h2UploadBulkExitGap)
+	if _, err := c.WriteTo(payload, nil); err != nil {
+		t.Fatal(err)
+	}
+	if capture.buf.Len() == 0 {
+		t.Fatal("spaced duplex WriteTo should flush immediately")
+	}
+
+	uploadOnly := &udpCapsuleCaptureWriteCloser{}
+	plain := NewH2PacketConn(H2PacketConnConfig{ReqBody: uploadOnly})
+	small := []byte("x")
+	if _, err := plain.WriteTo(small, nil); err != nil {
+		t.Fatal(err)
+	}
+	if uploadOnly.buf.Len() != 0 {
+		t.Fatal("upload-only sub-threshold should coalesce before timer/flush")
+	}
 }

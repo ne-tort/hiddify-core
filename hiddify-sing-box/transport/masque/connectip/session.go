@@ -15,6 +15,13 @@ type PacketSession interface {
 	Close() error
 }
 
+// PacketWriteTransferSession accepts netstack outbound pool buffer ownership on WritePacket
+// (avoids copy into ClientPacketSession async egress).
+type PacketWriteTransferSession interface {
+	PacketSession
+	WritePacketFromNetstack(outbound []byte) (retained bool, icmp []byte, err error)
+}
+
 // PacketSessionWithContext is an optional context-aware packet reader.
 type PacketSessionWithContext interface {
 	ReadPacketWithContext(ctx context.Context, buffer []byte) (int, error)

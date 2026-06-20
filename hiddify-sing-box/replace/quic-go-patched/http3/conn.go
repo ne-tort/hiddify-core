@@ -10,6 +10,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3/qlog"
@@ -18,6 +19,9 @@ import (
 )
 
 const maxQuarterStreamID = 1<<60 - 1
+
+// proxiedIPDatagramHeadroom matches connect-ip netstack pool layout (varint + context prefix).
+const proxiedIPDatagramHeadroom = 16
 
 // invalidStreamID is a stream ID that is invalid. The first valid stream ID in QUIC is 0.
 const invalidStreamID = quic.StreamID(-1)
@@ -133,7 +137,10 @@ func (c *rawConn) openControlStream(settings *settingsFrame) (*quic.SendStream, 
 }
 
 func (c *rawConn) TrackStream(str *quic.Stream) *stateTrackingStream {
-	hstr := newStateTrackingStream(str, c, func(b []byte) error { return c.sendDatagram(str.StreamID(), b) })
+	hstr := newStateTrackingStream(str, c,
+		func(b []byte) error { return c.sendDatagram(str.StreamID(), b) },
+		func(b []byte) error { return c.sendDatagramNoWake(str.StreamID(), b) },
+	)
 
 	var pending [][]byte
 	c.streamMx.Lock()
@@ -324,16 +331,33 @@ func (c *rawConn) handleControlStream(str *quic.ReceiveStream) {
 }
 
 func (c *rawConn) sendDatagram(streamID quic.StreamID, b []byte) error {
+	return c.sendDatagramMaybeWake(streamID, b, true)
+}
+
+func (c *rawConn) sendDatagramNoWake(streamID quic.StreamID, b []byte) error {
+	return c.sendDatagramMaybeWake(streamID, b, false)
+}
+
+func (c *rawConn) sendDatagramMaybeWake(streamID quic.StreamID, b []byte, wake bool) error {
 	quarterStreamID := uint64(streamID / 4)
 	bufPtr := quic.AcquireHTTP3DatagramBuffer()
 	*bufPtr = (*bufPtr)[:0]
 	*bufPtr = quicvarint.Append(*bufPtr, quarterStreamID)
 	*bufPtr = append(*bufPtr, b...)
-	return c.enqueuePooledHTTPDatagram(quarterStreamID, len(b), bufPtr)
+	return c.enqueuePooledHTTPDatagramMaybeWake(quarterStreamID, len(b), bufPtr, wake)
 }
 
 // sendProxiedIPDatagram enqueues RFC9297 proxied IP with one copy into the QUIC DATAGRAM buffer.
 func (c *rawConn) sendProxiedIPDatagram(streamID quic.StreamID, contextPrefix, ipPacket []byte) error {
+	return c.sendProxiedIPDatagramMaybeWake(streamID, contextPrefix, ipPacket, true)
+}
+
+// sendProxiedIPDatagramNoWake enqueues proxied IP without scheduling QUIC send work.
+func (c *rawConn) sendProxiedIPDatagramNoWake(streamID quic.StreamID, contextPrefix, ipPacket []byte) error {
+	return c.sendProxiedIPDatagramMaybeWake(streamID, contextPrefix, ipPacket, false)
+}
+
+func (c *rawConn) sendProxiedIPDatagramMaybeWake(streamID quic.StreamID, contextPrefix, ipPacket []byte, wake bool) error {
 	quarterStreamID := uint64(streamID / 4)
 	varintLen := quicvarint.Len(quarterStreamID)
 	total := varintLen + len(contextPrefix) + len(ipPacket)
@@ -345,10 +369,85 @@ func (c *rawConn) sendProxiedIPDatagram(streamID quic.StreamID, contextPrefix, i
 	*bufPtr = quicvarint.Append(*bufPtr, quarterStreamID)
 	*bufPtr = append(*bufPtr, contextPrefix...)
 	*bufPtr = append(*bufPtr, ipPacket...)
-	return c.enqueuePooledHTTPDatagram(quarterStreamID, len(contextPrefix)+len(ipPacket), bufPtr)
+	return c.enqueuePooledHTTPDatagramMaybeWake(quarterStreamID, len(contextPrefix)+len(ipPacket), bufPtr, wake)
+}
+
+func proxiedIPFrameFromPool(ipPacket []byte, prefixLen int) (frame []byte, ok bool) {
+	if prefixLen <= 0 || prefixLen > proxiedIPDatagramHeadroom || len(ipPacket) == 0 {
+		return nil, false
+	}
+	if cap(ipPacket) < len(ipPacket)+proxiedIPDatagramHeadroom {
+		return nil, false
+	}
+	ipStart := uintptr(unsafe.Pointer(unsafe.SliceData(ipPacket)))
+	basePtr := unsafe.Pointer(ipStart - uintptr(proxiedIPDatagramHeadroom))
+	fullCap := cap(ipPacket) + proxiedIPDatagramHeadroom
+	full := unsafe.Slice((*byte)(basePtr), fullCap)
+	prefixStart := proxiedIPDatagramHeadroom - prefixLen
+	end := proxiedIPDatagramHeadroom + len(ipPacket)
+	if end > fullCap {
+		return nil, false
+	}
+	return full[prefixStart:end], true
+}
+
+func (c *rawConn) sendProxiedIPDatagramInPlaceNoWake(streamID quic.StreamID, contextPrefix, ipPacket []byte, release func()) error {
+	return c.sendProxiedIPDatagramInPlaceMaybeWake(streamID, contextPrefix, ipPacket, release, false)
+}
+
+func (c *rawConn) sendProxiedIPDatagramInPlaceMaybeWake(streamID quic.StreamID, contextPrefix, ipPacket []byte, release func(), wake bool) error {
+	quarterStreamID := uint64(streamID / 4)
+	varintLen := quicvarint.Len(quarterStreamID)
+	prefixLen := varintLen + len(contextPrefix)
+	if prefixLen > proxiedIPDatagramHeadroom {
+		err := c.sendProxiedIPDatagramMaybeWake(streamID, contextPrefix, ipPacket, wake)
+		if release != nil {
+			release()
+		}
+		return err
+	}
+	frame, ok := proxiedIPFrameFromPool(ipPacket, prefixLen)
+	if !ok {
+		err := c.sendProxiedIPDatagramMaybeWake(streamID, contextPrefix, ipPacket, wake)
+		if release != nil {
+			release()
+		}
+		return err
+	}
+	buf := quicvarint.Append(frame[:0], quarterStreamID)
+	if len(buf) != varintLen {
+		if release != nil {
+			release()
+		}
+		return fmt.Errorf("http3: proxied IP varint length mismatch")
+	}
+	copy(frame[varintLen:prefixLen], contextPrefix)
+	err := c.conn.EnqueueOutgoingDatagramWithRelease(frame, release)
+	if err != nil {
+		return err
+	}
+	if wake {
+		quic.MasqueWakeConnSend(c.conn)
+	}
+	return nil
+}
+
+func (c *rawConn) flushDatagramSendWake() {
+	if c == nil || c.conn == nil {
+		return
+	}
+	quic.MasqueWakeConnSendDatagramCoalesced(c.conn)
+}
+
+func (c *rawConn) flushDatagramReceiveWake() {
+	c.flushDatagramSendWake()
 }
 
 func (c *rawConn) enqueuePooledHTTPDatagram(quarterStreamID uint64, payloadLen int, bufPtr *[]byte) error {
+	return c.enqueuePooledHTTPDatagramMaybeWake(quarterStreamID, payloadLen, bufPtr, true)
+}
+
+func (c *rawConn) enqueuePooledHTTPDatagramMaybeWake(quarterStreamID uint64, payloadLen int, bufPtr *[]byte, wake bool) error {
 	if c.qlogger != nil {
 		c.qlogger.RecordEvent(qlog.DatagramCreated{
 			QuaterStreamID: quarterStreamID,
@@ -362,7 +461,9 @@ func (c *rawConn) enqueuePooledHTTPDatagram(quarterStreamID uint64, payloadLen i
 		quic.ReleaseHTTP3DatagramBuffer(bufPtr)
 		return err
 	}
-	quic.MasqueWakeConnSend(c.conn)
+	if wake {
+		quic.MasqueWakeConnSend(c.conn)
+	}
 	return nil
 }
 
@@ -396,8 +497,6 @@ func (c *rawConn) receiveDatagramDispatch(b []byte) error {
 		return nil
 	}
 	dg.enqueueDatagram(b[n:])
-	// Per-ACK wake: upload egress must not wait for the receiveDatagrams batch loop to finish.
-	quic.MasqueWakeConnSend(c.conn)
 	return nil
 }
 
@@ -421,9 +520,7 @@ func (c *rawConn) receiveDatagrams() error {
 				return err
 			}
 		}
-		// CONNECT-IP download: ingress datagrams become gVisor TCP DATA; wake QUIC send so
-		// client ACK egress does not wait a full RTT behind the receive loop.
-		quic.MasqueWakeConnSend(c.conn)
+		c.flushDatagramReceiveWake()
 	}
 }
 

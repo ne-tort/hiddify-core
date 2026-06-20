@@ -600,6 +600,12 @@ func TestForwarderUploadAckImmediate(t *testing.T) {
 	if ackCount == 0 {
 		t.Fatal("upload ACK: no ack-only writes (CONNECT-IP ACK-clock)")
 	}
+	if ackCount >= segs {
+		t.Fatalf("upload ACK: no coalescing ack-only writes=%d for %d segments", ackCount, segs)
+	}
+	if ackCount > segs/2 {
+		t.Logf("OPEN: upload ACK coalesce ack-only=%d for %d segments (ideal << %d)", ackCount, segs, segs/2)
+	}
 	if ack, ok := conn.lastAckNumber(); !ok || ack != sess.rcvNxt {
 		t.Fatalf("final ACK number=%v (ok=%v) want rcvNxt=%d (ack-only writes=%d)", ack, ok, sess.rcvNxt, ackCount)
 	}
