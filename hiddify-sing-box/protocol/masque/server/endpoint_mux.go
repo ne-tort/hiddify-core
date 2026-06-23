@@ -4,7 +4,7 @@ import (
 	"net"
 	"net/http"
 
-	qmasque "github.com/quic-go/masque-go"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -29,7 +29,7 @@ type EndpointMuxFields struct {
 	Dialer   net.Dialer
 	Authorize func(*http.Request) bool
 	Hooks    TemplateAuthorityHooks
-	OnUDPProxyCreated func(*qmasque.Proxy)
+	OnUDPProxyCreated func(*cudprelay.Proxy)
 }
 
 // BuildEndpointMuxHost constructs MuxHost from endpoint adapter fields.

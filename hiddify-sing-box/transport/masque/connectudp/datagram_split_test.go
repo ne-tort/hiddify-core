@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/stretchr/testify/require"
 )
@@ -98,15 +99,15 @@ func h3DataplaneErrMapper(op string, err error) error {
 	return fmt.Errorf("masque h3 dataplane connect-udp %s: %w", op, err)
 }
 
-func newSplitConn(pc net.PacketConn, maxPayload int, httpLayer string) *DatagramSplitConn {
-	opts := DatagramSplitOptions{
+func newSplitConn(pc net.PacketConn, maxPayload int, httpLayer string) *cudpsplit.DatagramSplitConn {
+	opts := cudpsplit.DatagramSplitOptions{
 		MaxPayload: maxPayload,
 		HTTPLayer:  httpLayer,
 	}
 	if httpLayer == option.MasqueHTTPLayerH3 {
 		opts.MapDataplaneErr = h3DataplaneErrMapper
 	}
-	return NewDatagramSplitConn(pc, opts)
+	return cudpsplit.NewDatagramSplitConn(pc, opts)
 }
 
 func TestDatagramSplitConnH3WrapsDataplaneErrors(t *testing.T) {

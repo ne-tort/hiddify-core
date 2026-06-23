@@ -11,21 +11,25 @@ import (
 //go:embed connect_udp.go
 var connectUDPGoSource string
 
+//go:embed connectudp/handler.go
+var connectUDPHandlerSource string
+
 // TestConnectUDPWireContract locks CLIENT-SERVER-CONTRACTS § L4 wire invariants.
 func TestConnectUDPWireContract(t *testing.T) {
 	t.Parallel()
 	contracts := readConnectUDPContractsDoc(t)
+	combined := connectUDPGoSource + "\n" + connectUDPHandlerSource
 
-	requireContractSubstrings(t, connectUDPGoSource, "connect_udp.go",
-		`masqueRequestProtocolConnectUDP = "connect-udp"`,
+	requireContractSubstrings(t, combined, "connect_udp handler",
+		`RequestProtocol = cudpframe.RequestProtocol`,
 		"udpProxy.Proxy(w, parsed)",
-		"cudp.ServeH2(w, r, conn)",
+		"cudph2.ServeH2(w, r, conn)",
 		"EnableFullDuplex()",
 		"CapsuleProtocolHeader",
-		"ConnectUDPTargetPolicy",
-		"checkConnectUDPTargetPolicy",
+		"TargetPolicy",
+		"checkTargetPolicy",
 	)
-	if strings.Contains(connectUDPGoSource, "relay.TCPTunnel") {
+	if strings.Contains(combined, "relay.TCPTunnel") {
 		t.Fatal("CONNECT-UDP must not use relay.TCPTunnel (L2 stream only)")
 	}
 

@@ -25,6 +25,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	udpnat "github.com/sagernet/sing/common/udpnat2"
 	"github.com/sagernet/sing/common/x/list"
 )
 
@@ -127,6 +128,11 @@ func markConnectionCopyDuplex(conn net.Conn) {
 
 func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dialer, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = adapter.WithContext(ctx, &metadata)
+	var tunUpload *tunPacketUploadRelay
+	if nc, ok := conn.(udpnat.Conn); ok {
+		tunUpload = &tunPacketUploadRelay{}
+		nc.SetHandler(tunUpload)
+	}
 	var (
 		remotePacketConn   net.PacketConn
 		remoteConn         net.Conn
@@ -235,7 +241,13 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	if udpTimeout > 0 {
 		ctx, conn = canceler.NewPacketConn(ctx, conn, udpTimeout)
 	}
+	tuneUDPPacketConn(conn)
+	tuneUDPPacketConn(remotePacketConn)
 	destination := bufio.NewPacketConn(remotePacketConn)
+	if tunUpload != nil {
+		tunUpload.attach(destination)
+		onClose = N.AppendClose(onClose, func(error) { tunUpload.flush() })
+	}
 	m.access.Lock()
 	element := m.connections.PushBack(conn)
 	m.access.Unlock()
@@ -245,7 +257,9 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		m.connections.Remove(element)
 	})
 	var done atomic.Bool
-	go m.packetConnectionCopy(ctx, conn, destination, false, &done, onClose)
+	if tunUpload == nil {
+		go m.packetConnectionCopy(ctx, conn, destination, false, &done, onClose)
+	}
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
@@ -478,7 +492,7 @@ func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.P
 	if direction {
 		err = copyPacketDownload(ctx, source, destination)
 	} else {
-		_, err = bufio.CopyPacket(destination, source)
+		err = copyPacketUpload(ctx, source, destination)
 	}
 	if !direction {
 		if err == nil {
@@ -506,6 +520,72 @@ func (m *ConnectionManager) packetConnectionCopy(ctx context.Context, source N.P
 // packetRelayMuxHeadroom is reserved before WritePacket on muxed inbounds (e.g. vmess serverMux)
 // that call ExtendHeader on the relay buffer; a full 16 KiB ReadPacket leaves FreeLen()==0 and panics.
 const packetRelayMuxHeadroom = 32
+
+// packetRelayC2SFlushInterval drains async CONNECT-UDP write queues during SOCKS→MASQUE upload relay.
+const packetRelayC2SFlushInterval = 32
+
+func flushC2SWritesChain(conn any) {
+	for conn != nil {
+		if f, ok := conn.(interface{ FlushC2SWrites() }); ok {
+			f.FlushC2SWrites()
+		}
+		up, ok := conn.(interface{ Upstream() any })
+		if !ok {
+			break
+		}
+		conn = up.Upstream()
+	}
+}
+
+// copyPacketUpload relays inbound UDP (e.g. SOCKS5 ASSOCIATE) to masque/outbound. Periodic C2S flush
+// prevents server-side async writeCh backpressure from stalling SOCKS recv and dropping bursts.
+func copyPacketUpload(ctx context.Context, source N.PacketReader, destination N.PacketWriter) error {
+	buffer := buf.NewPacket()
+	defer buffer.Release()
+	packetsSinceFlush := 0
+	defer flushC2SWritesChain(destination)
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		default:
+		}
+		buffer.Reset()
+		destinationAddr, err := source.ReadPacket(buffer)
+		if err != nil {
+			if E.IsClosedOrCanceled(err) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			default:
+			}
+			return err
+		}
+		if buffer.IsEmpty() {
+			continue
+		}
+		if buffer.Start() < packetRelayMuxHeadroom || buffer.FreeLen() < packetRelayMuxHeadroom {
+			clone := buf.NewPacket()
+			payloadLen := buffer.Len()
+			clone.Resize(packetRelayMuxHeadroom, payloadLen)
+			copy(clone.Bytes(), buffer.Bytes())
+			err = destination.WritePacket(clone, destinationAddr)
+			clone.Release()
+			if err != nil {
+				return err
+			}
+		} else if err = destination.WritePacket(buffer, destinationAddr); err != nil {
+			return err
+		}
+		packetsSinceFlush++
+		if packetsSinceFlush >= packetRelayC2SFlushInterval {
+			flushC2SWritesChain(destination)
+			packetsSinceFlush = 0
+		}
+	}
+}
 
 // copyPacketDownload relays masque/outbound UDP to the TUN inbound side. CONNECT-UDP ICMP
 // (ErrUDPPortUnreachable) must not tear down the relay — keep draining like H3 proxiedConn.

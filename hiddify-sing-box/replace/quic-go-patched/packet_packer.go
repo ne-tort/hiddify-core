@@ -641,6 +641,62 @@ func (p *packetPacker) maybeGetAppDataPacket(
 	return pl
 }
 
+// packDatagramFramesIntoPayload coalesces multiple RFC 9221 DATAGRAM frames into one QUIC packet
+// while space remains (CONNECT-UDP fountain S2C throughput).
+func (p *packetPacker) packDatagramFramesIntoPayload(pl *payload, maxPayloadSize protocol.ByteCount, v protocol.Version) {
+	const maxDatagramFramesPerPacket = 16
+	for packed := 0; packed < maxDatagramFramesPerPacket; packed++ {
+		f := p.datagramQueue.Peek()
+		if f == nil {
+			return
+		}
+		size := f.Length(v)
+		if size <= maxPayloadSize-pl.length {
+			pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
+			pl.length += size
+			p.datagramQueue.Pop()
+			continue
+		}
+		// Prioritize DATAGRAM payload when ACK co-packing is the only thing preventing progress.
+		if pl.ack != nil && size <= maxPayloadSize && len(pl.frames) == 0 {
+			pl.length -= pl.ack.Length(v)
+			pl.ack = nil
+			pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
+			pl.length += size
+			p.datagramQueue.Pop()
+			continue
+		}
+		if pl.ack != nil || len(pl.frames) > 0 {
+			return
+		}
+		// Head doesn't fit an otherwise empty payload: rotate once or drop oversized head.
+		if p.datagramQueue.Rotate() {
+			if next := p.datagramQueue.Peek(); next != nil {
+				nextSize := next.Length(v)
+				if nextSize <= maxPayloadSize-pl.length {
+					pl.frames = append(pl.frames, ackhandler.Frame{Frame: next})
+					pl.length += nextSize
+					p.datagramQueue.Pop()
+				} else {
+					if !p.datagramQueue.Rotate() {
+						// Queue shape changed unexpectedly; best-effort drop current head.
+					}
+					if oversized := p.datagramQueue.Peek(); oversized != nil {
+						datagramPackerOversizeDropTotal.Add(1)
+						releaseOutgoingDatagramPayload(oversized)
+						p.datagramQueue.Pop()
+					}
+				}
+			}
+		} else {
+			datagramPackerOversizeDropTotal.Add(1)
+			releaseOutgoingDatagramPayload(f)
+			p.datagramQueue.Pop()
+		}
+		return
+	}
+}
+
 func (p *packetPacker) composeNextPacket(
 	maxPayloadSize protocol.ByteCount,
 	onlyAck, ackAllowed bool,
@@ -660,67 +716,18 @@ func (p *packetPacker) composeNextPacket(
 
 	var pl payload
 	if ackAllowed {
-		if ack := p.acks.GetAckFrame(protocol.Encryption1RTT, now, !hasRetransmission && !hasData); ack != nil {
-			ack.Truncate(maxPayloadSize, v)
-			pl.ack = ack
-			pl.length += ack.Length(v)
+		skipAckForDatagramBurst := p.datagramQueue != nil && p.datagramQueue.SendLen() > 0
+		if !skipAckForDatagramBurst {
+			if ack := p.acks.GetAckFrame(protocol.Encryption1RTT, now, !hasRetransmission && !hasData); ack != nil {
+				ack.Truncate(maxPayloadSize, v)
+				pl.ack = ack
+				pl.length += ack.Length(v)
+			}
 		}
 	}
 
 	if p.datagramQueue != nil {
-		if f := p.datagramQueue.Peek(); f != nil {
-			size := f.Length(v)
-			if size <= maxPayloadSize-pl.length { // DATAGRAM frame fits
-				pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
-				pl.length += size
-				p.datagramQueue.Pop()
-			} else {
-				// Prioritize DATAGRAM payload when ACK co-packing is the only thing
-				// preventing progress. ACKs can still be emitted in subsequent packets.
-				// This avoids repeated DATAGRAM deferral under sustained ACK pressure.
-				if pl.ack != nil && size <= maxPayloadSize {
-					pl.length -= pl.ack.Length(v)
-					pl.ack = nil
-					pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
-					pl.length += size
-					p.datagramQueue.Pop()
-					goto datagramDone
-				}
-				if pl.ack != nil {
-					goto datagramDone
-				}
-				// The head DATAGRAM frame doesn't fit an otherwise empty payload.
-				// Try to avoid HOL blocking by rotating the queue once and packing the next frame.
-				if p.datagramQueue.Rotate() {
-					if next := p.datagramQueue.Peek(); next != nil {
-						nextSize := next.Length(v)
-						if nextSize <= maxPayloadSize-pl.length {
-							pl.frames = append(pl.frames, ackhandler.Frame{Frame: next})
-							pl.length += nextSize
-							p.datagramQueue.Pop()
-						} else {
-							// Two oversized heads in a row must still make progress.
-							// Rotate back to restore original head and drop it.
-							if !p.datagramQueue.Rotate() {
-								// Queue shape changed unexpectedly; best-effort drop current head.
-							}
-							if oversized := p.datagramQueue.Peek(); oversized != nil {
-								datagramPackerOversizeDropTotal.Add(1)
-								releaseOutgoingDatagramPayload(oversized)
-								p.datagramQueue.Pop()
-							}
-						}
-					}
-				} else {
-					// Single-entry queue: drop to avoid permanent no-progress loops.
-					datagramPackerOversizeDropTotal.Add(1)
-					releaseOutgoingDatagramPayload(f)
-					p.datagramQueue.Pop()
-				}
-			}
-		datagramDone:
-			// If frame still doesn't fit, it remains queued for a future packet (or is dropped by oversized-head logic).
-		}
+		p.packDatagramFramesIntoPayload(&pl, maxPayloadSize, v)
 	}
 
 	if pl.ack != nil && !hasData && !hasRetransmission {

@@ -18,6 +18,9 @@ const (
 	// When upload DATA is pending, cap pure-ACK datagrams so download ACK floods do not
 	// HOL-block C2S payload (TestLocalizeConnectIPUploadNativeConcurrentDownloadPollution).
 	maxDatagramAckWhileData = 4096
+	// NoWake enqueue must still schedule send when the queue is deep; otherwise Add blocks
+	// without hasData and fountain S2C stalls (CONNECT-UDP bulk download).
+	datagramNoWakeBlockWakeThreshold = 16
 )
 
 // datagramRcvQueueDropTotal counts inbound DATAGRAM frames dropped because rcvQueue
@@ -68,6 +71,13 @@ func (h *datagramQueue) sendLenLocked() int {
 	return h.sendData.Len() + h.sendAck.Len()
 }
 
+// SendLen returns queued outgoing DATAGRAM frames awaiting pack/send.
+func (h *datagramQueue) SendLen() int {
+	h.sendMx.Lock()
+	defer h.sendMx.Unlock()
+	return h.sendLenLocked()
+}
+
 func (h *datagramQueue) pushSendLocked(f *wire.DatagramFrame) {
 	if masqueDatagramFrameHasTCPPayload(f) {
 		h.sendData.PushBack(f)
@@ -112,11 +122,19 @@ func (h *datagramQueue) add(f *wire.DatagramFrame, wake bool) error {
 			}
 			return nil
 		}
+		// Queue full: re-poke send loop before blocking (CONNECT-UDP sustained upload stall).
+		if h.sendLenLocked() >= datagramNoWakeBlockWakeThreshold {
+			h.sendMx.Unlock()
+			h.hasData()
+			h.sendMx.Lock()
+			continue
+		}
 		select {
 		case <-h.sent: // drain the queue so we don't loop immediately
 		default:
 		}
 		h.sendMx.Unlock()
+		h.hasData()
 		select {
 		case <-h.closed:
 			return h.closeErr
@@ -188,7 +206,7 @@ func (h *datagramQueue) ensureRcvRingLocked() [][]byte {
 
 // HandleDatagramFrame handles a received DATAGRAM frame.
 func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
-	data := make([]byte, len(f.Data))
+	data := acquireMasqueDatagramRecvBuf(len(f.Data))
 	copy(data, f.Data)
 	var queued bool
 	h.rcvMx.Lock()
@@ -206,8 +224,10 @@ func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 		datagramRcvQueueDropTotal.Add(1)
 	}
 	h.rcvMx.Unlock()
-	if !queued && h.logger.Debug() {
-		h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
+	if !queued {
+		if h.logger.Debug() {
+			h.logger.Debugf("Discarding received DATAGRAM frame (%d bytes payload)", len(f.Data))
+		}
 	}
 }
 

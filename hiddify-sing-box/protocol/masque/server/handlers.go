@@ -7,7 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	qmasque "github.com/quic-go/masque-go"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
+	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -35,7 +36,7 @@ type MuxHost struct {
 	RelaxAuthority        func(option.MasqueEndpointOptions, string) bool
 	RequestForParse  func(*http.Request, *uritemplate.Template, bool) *http.Request
 	AuthorityMatches func(templateHost, requestHost string, relax bool) bool
-	OnUDPProxyCreated       func(*qmasque.Proxy)
+	OnUDPProxyCreated       func(*cudprelay.Proxy)
 }
 
 // BuildMuxHandler constructs the MASQUE server ServeMux (UDP/IP/TCP template paths).
@@ -73,7 +74,7 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 		})
 		return mux, nil
 	}
-	udpProxy := &qmasque.Proxy{}
+	udpProxy := &cudprelay.Proxy{}
 	if host.OnUDPProxyCreated != nil {
 		host.OnUDPProxyCreated(udpProxy)
 	}
@@ -83,9 +84,9 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 			return
 		}
 		parseR := host.RequestForParse(r, udpTemplate, host.RelaxAuthority(host.Options, TemplateFieldUDP))
-		req, err := qmasque.ParseRequest(parseR, udpTemplate)
+		req, err := cudpframe.ParseRequest(parseR, udpTemplate)
 		if err != nil {
-			var perr *qmasque.RequestParseError
+			var perr *cudpframe.RequestParseError
 			if errors.As(err, &perr) {
 				w.WriteHeader(perr.HTTPStatus)
 				return

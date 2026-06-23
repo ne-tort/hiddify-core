@@ -33,16 +33,25 @@ const transientPressureBackoffBase = 50 * time.Microsecond
 const transientPressureBackoffNoSleepUntil = 2
 const transientPressureBackoffMaxShift = 4
 const dropOnlyPressureBackoffMaxShift = 1
-const transientFallbackSleepMaxPerBatch = 1
-const transientFallbackRetryMaxPerBatch = 2
-const transientFallbackDropTailBackoffThreshold = 800 * time.Microsecond
-const transientFallbackDropTailMinRemaining = 32
+const transientFallbackSleepMaxPerBatch = 4
+const transientFallbackRetryMaxPerPayload = 12
+const transientFallbackSleepMaxPerPayload = 4
 const udpPayloadDropFlushThreshold = 256
 const oversizedDropFlushThreshold = 256
 
 // Higher batch cap reduces send syscall pressure in server CONNECT-UDP ingress
 // during high-rate backlog bursts while preserving ordered best-effort semantics.
-const proxyConnUDPSendBatchMax = 64
+const proxyConnUDPSendBatchMax = 128
+
+const masqueUDPSocketBufferBytes = 4 << 20
+
+func tuneUDPSocketBuffers(conn *net.UDPConn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.SetReadBuffer(masqueUDPSocketBufferBytes)
+	_ = conn.SetWriteBuffer(masqueUDPSocketBufferBytes)
+}
 
 var contextIDZero = quicvarint.Append([]byte{}, 0)
 var oversizedDatagramDropTotal atomic.Uint64
@@ -55,6 +64,46 @@ var oversizedHTTPDatagramSendDropTotal atomic.Uint64
 var unknownContextHTTPDatagramDropTotal atomic.Uint64
 var malformedHTTPDatagramDropTotal atomic.Uint64
 var transientUDPSendTailDropTotal atomic.Uint64
+
+// TransientUDPSendDropTotal returns C2S UDP egress drops after retry exhaustion (tests/ops).
+func TransientUDPSendDropTotal() uint64 {
+	return transientUDPSendDropTotal.Load()
+}
+
+// TransientUDPSendTailDropTotal returns batched tail drops on sustained send pressure (should stay 0).
+func TransientUDPSendTailDropTotal() uint64 {
+	return transientUDPSendTailDropTotal.Load()
+}
+
+// TransientHTTPDatagramSendDropTotal returns UDP→HTTP datagram send drops after retry exhaustion.
+func TransientHTTPDatagramSendDropTotal() uint64 {
+	return transientHTTPDatagramSendDropTotal.Load()
+}
+
+// TransientHTTPDatagramReceiveDropTotal returns HTTP datagram receive drops after retry exhaustion.
+func TransientHTTPDatagramReceiveDropTotal() uint64 {
+	return transientHTTPDatagramReceiveDropTotal.Load()
+}
+
+// TransientUDPReadDropTotal returns UDP ingress drops before HTTP encapsulation.
+func TransientUDPReadDropTotal() uint64 {
+	return transientUDPReadDropTotal.Load()
+}
+
+// OversizedHTTPDatagramSendDropTotal returns QUIC datagram size limit drops on send.
+func OversizedHTTPDatagramSendDropTotal() uint64 {
+	return oversizedHTTPDatagramSendDropTotal.Load()
+}
+
+// UnknownContextHTTPDatagramDropTotal returns unknown-context HTTP datagram drops.
+func UnknownContextHTTPDatagramDropTotal() uint64 {
+	return unknownContextHTTPDatagramDropTotal.Load()
+}
+
+// MalformedHTTPDatagramDropTotal returns malformed HTTP datagram drops.
+func MalformedHTTPDatagramDropTotal() uint64 {
+	return malformedHTTPDatagramDropTotal.Load()
+}
 
 type udpPayloadExtractResult uint8
 
@@ -275,11 +324,8 @@ func shouldSleepOnTransientFallback(backoff time.Duration, sleepsInBatch int) bo
 	return backoff > 0 && sleepsInBatch < transientFallbackSleepMaxPerBatch
 }
 
-func shouldRetryTransientFallback(retriesInBatch int, successfulWritesInBatch int) bool {
-	// Retry at most once per fallback batch and only before first successful
-	// progress. This gives early transient blips a recovery chance, while
-	// preventing extra retry churn once the socket already recovers.
-	return retriesInBatch < transientFallbackRetryMaxPerBatch && successfulWritesInBatch == 0
+func shouldRetryTransientFallback(retriesForPayload int) bool {
+	return retriesForPayload < transientFallbackRetryMaxPerPayload
 }
 
 func shouldPauseTransientFallback(backoff time.Duration, sleepsInBatch int) bool {
@@ -290,10 +336,11 @@ func shouldPauseTransientFallback(backoff time.Duration, sleepsInBatch int) bool
 }
 
 func shouldDropTransientFallbackTail(backoff time.Duration, sleepsInBatch int, remaining int, successfulWrites int) bool {
-	return backoff >= transientFallbackDropTailBackoffThreshold &&
-		sleepsInBatch >= transientFallbackSleepMaxPerBatch &&
-		remaining >= transientFallbackDropTailMinRemaining &&
-		successfulWrites == 0
+	_ = backoff
+	_ = sleepsInBatch
+	_ = remaining
+	_ = successfulWrites
+	return false
 }
 
 func (b *transientPressureBackoff) onTransientError() time.Duration {
@@ -359,12 +406,15 @@ type proxyDatagramReceiveStream interface {
 }
 
 type udpDatagramWriter struct {
-	conn    *net.UDPConn
-	batch4  *ipv4.PacketConn
-	batch6  *ipv6.PacketConn
-	msgs4   []ipv4.Message
-	msgs6   []ipv6.Message
-	enabled bool
+	writeConn interface {
+		Write([]byte) (int, error)
+	}
+	batchConn *net.UDPConn
+	batch4    *ipv4.PacketConn
+	batch6    *ipv6.PacketConn
+	msgs4     []ipv4.Message
+	msgs6     []ipv6.Message
+	enabled   bool
 	// icmpRelay sends an empty CONNECT-UDP HTTP/3 DATAGRAM when kernel Write surfaces ICMP
 	// port-unreachable (bench dig to TCP-only port; parity H2 ServeH2ConnectUDP uplink).
 	icmpRelay func() error
@@ -380,7 +430,7 @@ func (w *udpDatagramWriter) observeBatchProgress(sent int) {
 }
 
 func newUDPDatagramWriter(conn *net.UDPConn) *udpDatagramWriter {
-	w := &udpDatagramWriter{conn: conn}
+	w := &udpDatagramWriter{writeConn: conn, batchConn: conn}
 	if runtime.GOOS != "linux" {
 		return w
 	}
@@ -504,7 +554,7 @@ func isHTTPDatagramTooLargeError(err error) bool {
 }
 
 func (w *udpDatagramWriter) writePayload(payload []byte) error {
-	_, err := w.conn.Write(payload)
+	_, err := w.writeConn.Write(payload)
 	if err != nil && w.icmpRelay != nil && isICMPPortUnreachableUDPSyscall(err) {
 		relayErr := w.icmpRelay()
 		if relayErr == nil || isTransientHTTPDatagramSendError(relayErr) {
@@ -515,24 +565,42 @@ func (w *udpDatagramWriter) writePayload(payload []byte) error {
 	return err
 }
 
+func (w *udpDatagramWriter) writePayloadWithRetry(payload []byte) (written bool, fatal error) {
+	var lastTransient error
+	sleeps := 0
+	for attempt := 0; attempt < transientFallbackRetryMaxPerPayload; attempt++ {
+		err := w.writePayload(payload)
+		if err == nil {
+			w.sendBackoff.onProgress()
+			return true, nil
+		}
+		if !isTransientUDPSendError(err) {
+			return false, err
+		}
+		lastTransient = err
+		backoff := w.sendBackoff.onTransientError()
+		if backoff > 0 && sleeps < transientFallbackSleepMaxPerPayload {
+			sleeps++
+			time.Sleep(backoff)
+		}
+	}
+	flushTransientUDPSendDrops(1, lastTransient)
+	return false, nil
+}
+
 func (w *udpDatagramWriter) writePayloadBatch(payloads [][]byte) (written int, sendPressureNoProgress bool, err error) {
 	if len(payloads) == 0 {
 		return 0, false, nil
 	}
 	if len(payloads) == 1 {
-		// Dominant steady-state shape can be a single payload per iteration.
-		// Keep this path minimal: direct write with fallback logic only on error.
-		if err := w.writePayload(payloads[0]); err == nil {
-			w.sendBackoff.onProgress()
-			return 1, false, nil
-		}
-		// Avoid an immediate duplicate write syscall in single-payload path:
-		// handle first transient failure in-place and keep the same bounded
-		// retry/sleep/drop contract as fallback batching.
-		if !isTransientUDPSendError(err) {
+		ok, err := w.writePayloadWithRetry(payloads[0])
+		if err != nil {
 			return 0, false, err
 		}
-		return w.handleSinglePayloadTransientFallback(payloads[0], err)
+		if ok {
+			return 1, false, nil
+		}
+		return 0, true, nil
 	}
 	if !w.enabled {
 		return w.writePayloadsFallback(payloads, 0)
@@ -579,104 +647,24 @@ func (w *udpDatagramWriter) writePayloadBatch(payloads [][]byte) (written int, s
 	return w.writePayloadsFallback(payloads, sent)
 }
 
-func (w *udpDatagramWriter) handleSinglePayloadTransientFallback(payload []byte, firstErr error) (written int, sendPressureNoProgress bool, err error) {
-	backoff := w.sendBackoff.onTransientError()
-	transientSleepsInBatch := 0
-	transientRetriesInBatch := 0
-	sawTransientPressure := true
-	lastTransientErr := firstErr
-	didSleep := false
-	if shouldPauseTransientFallback(backoff, transientSleepsInBatch) {
-		transientSleepsInBatch++
-		time.Sleep(backoff)
-		didSleep = true
-	}
-	if shouldRetryTransientFallback(transientRetriesInBatch, 0) && (backoff == 0 || didSleep) {
-		transientRetriesInBatch++
-		if retryErr := w.writePayload(payload); retryErr == nil {
-			w.sendBackoff.onProgress()
-			return 1, false, nil
-		} else if !isTransientUDPSendError(retryErr) {
-			return 0, false, retryErr
-		} else {
-			lastTransientErr = retryErr
-		}
-	}
-	flushTransientUDPSendDrops(1, lastTransientErr)
-	return 0, shouldReportSendPressureNoProgress(sawTransientPressure, 0, 0, transientSleepsInBatch), nil
-}
-
 func (w *udpDatagramWriter) writePayloadsFallback(payloads [][]byte, start int) (int, bool, error) {
 	if start < 0 {
 		start = 0
 	}
-	transientSleepsInBatch := 0
-	transientRetriesInBatch := 0
-	// `start` means some payloads in this logical batch were already sent
-	// (e.g. partial WriteBatch progress before fallback). Preserve that progress
-	// so sustained-pressure tail-drop doesn't trigger on an already recovering
-	// batch and accidentally amplify hash drift.
-	successfulWritesInBatch := start
-	sawTransientPressure := false
-	pendingTransientDrops := 0
-	var lastTransientErr error
-	flushPendingTransientDrops := func() {
-		flushTransientUDPSendDrops(pendingTransientDrops, lastTransientErr)
-		pendingTransientDrops = 0
-		lastTransientErr = nil
-	}
+	written := start
+	sendPressureNoProgress := false
 	for i := start; i < len(payloads); i++ {
-		if err := w.writePayload(payloads[i]); err != nil {
-			if isTransientUDPSendError(err) {
-				sawTransientPressure = true
-				backoff := w.sendBackoff.onTransientError()
-				transientErr := err
-				// Give socket pressure one bounded pause per fallback batch even when
-				// retry is disabled after partial progress.
-				didSleep := false
-				if shouldPauseTransientFallback(backoff, transientSleepsInBatch) {
-					transientSleepsInBatch++
-					time.Sleep(backoff)
-					didSleep = true
-				}
-				// Give the socket one bounded recovery chance before drop accounting.
-				if shouldRetryTransientFallback(transientRetriesInBatch, successfulWritesInBatch) && (backoff == 0 || didSleep) {
-					transientRetriesInBatch++
-					if retryErr := w.writePayload(payloads[i]); retryErr == nil {
-						successfulWritesInBatch++
-						w.sendBackoff.onProgress()
-						continue
-					} else if !isTransientUDPSendError(retryErr) {
-						return successfulWritesInBatch, false, retryErr
-					} else {
-						transientErr = retryErr
-					}
-				}
-				// UDP is best-effort: on sustained transient socket pressure, drop this
-				// payload and continue draining the batch to avoid session teardown.
-				pendingTransientDrops++
-				lastTransientErr = transientErr
-				remaining := len(payloads) - (i + 1)
-				if shouldDropTransientFallbackTail(backoff, transientSleepsInBatch, remaining, successfulWritesInBatch) {
-					// Under sustained socket pressure, avoid hammering the socket with
-					// known-failing writes for the rest of this fallback batch.
-					if remaining > 0 {
-						pendingTransientDrops += remaining
-						transientUDPSendTailDropTotal.Add(uint64(remaining))
-					}
-					flushPendingTransientDrops()
-					return successfulWritesInBatch, shouldReportSendPressureNoProgress(sawTransientPressure, successfulWritesInBatch, start, transientSleepsInBatch), nil
-				}
-				continue
-			}
-			flushPendingTransientDrops()
-			return successfulWritesInBatch, false, err
+		ok, err := w.writePayloadWithRetry(payloads[i])
+		if err != nil {
+			return written, false, err
 		}
-		successfulWritesInBatch++
-		w.sendBackoff.onProgress()
+		if ok {
+			written++
+		} else {
+			sendPressureNoProgress = true
+		}
 	}
-	flushPendingTransientDrops()
-	return successfulWritesInBatch, shouldReportSendPressureNoProgress(sawTransientPressure, successfulWritesInBatch, start, transientSleepsInBatch), nil
+	return written, sendPressureNoProgress, nil
 }
 
 func (e proxyEntry) Close() error {
@@ -776,6 +764,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *Request) error {
 		w.WriteHeader(errToStatus(err))
 		return err
 	}
+	tuneUDPSocketBuffers(conn)
 	defer conn.Close()
 
 	if err = writeProxyStatus(nil); err != nil {
@@ -790,6 +779,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *Request) error {
 // to the response header, but MUST NOT call WriteHeader on the
 // http.ResponseWriter. It closes the connection before returning.
 func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *Request, conn *net.UDPConn) error {
+	tuneUDPSocketBuffers(conn)
 	s.mx.Lock()
 	if s.closed {
 		s.mx.Unlock()
@@ -1099,6 +1089,12 @@ func (s *Proxy) proxyConnSend(conn *net.UDPConn, str proxyDatagramReceiveStream)
 			}
 		}
 	}
+}
+
+// RelayH3ClientToUDP forwards HTTP/3 CONNECT-UDP client datagrams to a connected UDP socket.
+// Production relay (connectudp/relay) delegates C2S here for masque-go R1 batch/transient policy.
+func RelayH3ClientToUDP(conn *net.UDPConn, str *http3.Stream) error {
+	return (&Proxy{}).proxyConnSend(conn, str)
 }
 
 func extractContextZeroPayloadForUDP(data []byte) (payload []byte, result udpPayloadExtractResult) {

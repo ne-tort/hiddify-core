@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"testing"
 
-	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 )
 
 func TestH2ConnectUDPPacketConnCloseClosesReqPipeReader(t *testing.T) {
 	pr, pw := io.Pipe()
-	c := cudp.NewH2PacketConn(cudp.H2PacketConnConfig{
+	c := cudph2.NewPacketConn(cudph2.PacketConnConfig{
 		ReqPipeR: pr,
 		ReqBody:  pw,
 		Resp:     &http.Response{Body: io.NopCloser(bytes.NewReader(nil))},

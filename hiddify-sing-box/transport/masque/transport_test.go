@@ -24,7 +24,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
-	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	msess "github.com/sagernet/sing-box/transport/masque/session"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
@@ -1246,7 +1246,7 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 		t.Fatalf("expected h2 transport churn then success (2 CONNECT-UDP attempts), got %d", call.Load())
 	}
 	defer pc.Close()
-	if inner, ok := pc.(*cudp.DatagramSplitConn); !ok || inner.PacketConn != okPC {
+	if inner, ok := pc.(*cudpsplit.DatagramSplitConn); !ok || inner.PacketConn != okPC {
 		t.Fatalf("expected masque udp split wrapper around stub PacketConn, got %T %+v", pc, pc)
 	}
 }

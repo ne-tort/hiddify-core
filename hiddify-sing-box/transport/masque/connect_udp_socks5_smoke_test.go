@@ -77,7 +77,7 @@ func startConnectUDPMasqueSession(t *testing.T, proxyPort int) ClientSession {
 	if err != nil {
 		t.Fatalf("new connect_udp session: %v", err)
 	}
-	t.Cleanup(func() { _ = session.Close() })
+	t.Cleanup(func() { closeConnectUDPTestSession(session) })
 	return session
 }
 
@@ -108,7 +108,7 @@ func startSocks5AssociateRelay(t *testing.T, router adapter.ConnectionRouterEx, 
 					bufio.NewReader(c),
 					nil,
 					upstream,
-					nil,
+					route.TunedPacketListener{},
 					C.UDPTimeout,
 					M.SocksaddrFromNet(c.RemoteAddr()),
 					nil,

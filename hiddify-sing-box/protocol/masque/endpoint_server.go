@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	qmasque "github.com/quic-go/masque-go"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
@@ -38,7 +38,7 @@ type ServerEndpoint struct {
 	// tcpTLSListener is the TLS listener (HTTP/2 ALPN) dual-stacked with QUIC on the same host:port.
 	tcpTLSListener net.Listener
 	http2Server    *http.Server
-	udpProxy       *qmasque.Proxy
+	udpProxy       *cudprelay.Proxy
 	ready          atomic.Bool
 	closing        atomic.Bool
 	startErr       server.StartErrorStore
@@ -123,7 +123,7 @@ func (e *ServerEndpoint) endpointMuxFields() server.EndpointMuxFields {
 			RequestForParse:  masqueHTTPRequestForTemplateParse,
 			AuthorityMatches: masqueRequestAuthorityMatchesTemplate,
 		},
-		OnUDPProxyCreated: func(p *qmasque.Proxy) {
+		OnUDPProxyCreated: func(p *cudprelay.Proxy) {
 			e.udpProxy = p
 		},
 	}

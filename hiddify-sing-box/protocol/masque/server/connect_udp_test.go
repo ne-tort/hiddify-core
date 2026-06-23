@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
+	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -81,9 +82,9 @@ func TestHandleConnectUDPRejectsWrongH2Protocol(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/443", nil)
 	req.Header.Set(":protocol", "connect-ip")
-	parsed := &qmasque.Request{Host: "example.com", Target: "example.com:443"}
+	parsed := &cudpframe.Request{Host: "example.com", Target: "example.com:443"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{})
+	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{})
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
@@ -95,9 +96,9 @@ func TestHandleConnectUDPRejectsInvalidTarget(t *testing.T) {
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.invalid/443", nil)
 	req.Header.Set(":protocol", "connect-udp")
 	// Pass target policy; H2 ResolveUDPAddr fails with DNS → 502 + Proxy-Status.
-	parsed := &qmasque.Request{Host: "example.invalid", Target: "example.invalid:443"}
+	parsed := &cudpframe.Request{Host: "example.invalid", Target: "example.invalid:443"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{AllowPrivateTargets: true})
+	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{AllowPrivateTargets: true})
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadGateway)
@@ -112,9 +113,9 @@ func TestHandleConnectUDPRejectsPrivateTargetH2(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
 	req.Header.Set(":protocol", "connect-udp")
-	parsed := &qmasque.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
+	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{})
+	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{})
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusForbidden)
@@ -126,9 +127,9 @@ func TestHandleConnectUDPRejectsBlockedPortH2(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/53", nil)
 	req.Header.Set(":protocol", "connect-udp")
-	parsed := &qmasque.Request{Host: "example.com", Target: "example.com:53"}
+	parsed := &cudpframe.Request{Host: "example.com", Target: "example.com:53"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{
+	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{
 		BlockedTargetPorts: []uint16{53},
 	})
 
@@ -149,9 +150,9 @@ func TestHandleConnectUDPRejectsPrivateTargetH3(t *testing.T) {
 	t.Parallel()
 	rec := &mockH3ConnectUDPResponse{}
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
-	parsed := &qmasque.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
+	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
 
-	HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{})
+	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{})
 
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusForbidden)
@@ -170,11 +171,11 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/"+strconv.Itoa(port), io.NopCloser(http.NoBody))
 	req.Header.Set(":protocol", "connect-udp")
-	parsed := &qmasque.Request{Host: "127.0.0.1", Target: target}
+	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: target}
 
 	done := make(chan struct{})
 	go func() {
-		HandleConnectUDP(rec, req, parsed, &qmasque.Proxy{}, ConnectUDPTargetPolicy{AllowPrivateTargets: true})
+		HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{AllowPrivateTargets: true})
 		close(done)
 	}()
 

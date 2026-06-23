@@ -764,9 +764,8 @@ func TestShouldSleepOnTransientFallback(t *testing.T) {
 }
 
 func TestShouldRetryTransientFallback(t *testing.T) {
-	require.True(t, shouldRetryTransientFallback(0, 0))
-	require.False(t, shouldRetryTransientFallback(transientFallbackRetryMaxPerBatch, 0))
-	require.False(t, shouldRetryTransientFallback(0, 1))
+	require.True(t, shouldRetryTransientFallback(0))
+	require.False(t, shouldRetryTransientFallback(transientFallbackRetryMaxPerPayload))
 }
 
 func TestShouldPauseTransientFallback(t *testing.T) {
@@ -776,13 +775,8 @@ func TestShouldPauseTransientFallback(t *testing.T) {
 }
 
 func TestShouldDropTransientFallbackTail(t *testing.T) {
-	require.False(t, shouldDropTransientFallbackTail(0, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining, 0))
-	require.False(t, shouldDropTransientFallbackTail(transientFallbackDropTailBackoffThreshold-time.Microsecond, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining, 0))
-	require.False(t, shouldDropTransientFallbackTail(transientFallbackDropTailBackoffThreshold, transientFallbackSleepMaxPerBatch-1, transientFallbackDropTailMinRemaining, 0))
-	require.False(t, shouldDropTransientFallbackTail(transientFallbackDropTailBackoffThreshold, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining-1, 0))
-	require.False(t, shouldDropTransientFallbackTail(transientFallbackDropTailBackoffThreshold, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining, 1))
-	require.True(t, shouldDropTransientFallbackTail(transientFallbackDropTailBackoffThreshold, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining, 0))
-	require.True(t, shouldDropTransientFallbackTail(800*time.Microsecond, transientFallbackSleepMaxPerBatch, transientFallbackDropTailMinRemaining+4, 0))
+	// Tail-drop disabled: burst zero-loss KPI must not shed remainder of batch.
+	require.False(t, shouldDropTransientFallbackTail(800*time.Microsecond, transientFallbackSleepMaxPerBatch, 64, 0))
 }
 
 func TestUDPPayloadDropTallyBatching(t *testing.T) {

@@ -45,17 +45,26 @@ type tryDrainHTTPDatagrams interface {
 	TryReceiveDatagram() ([]byte, bool)
 }
 
-const proxiedConnPrefetchMax = 512
-const proxiedConnPrefetchMask = proxiedConnPrefetchMax - 1
-const proxiedConnExpiredPrefetchDropBudget = 64
+const (
+	proxiedConnPrefetchMax               = 512
+	proxiedConnPrefetchMask              = proxiedConnPrefetchMax - 1
+	proxiedConnExpiredPrefetchDropBudget = 64
+	proxiedConnPrefetchDrainProbeMaxSkip = 64
+	proxiedConnWriteHTTPBatchFlush       = 8
+	proxiedConnWriteQueueCap             = 2048
+	proxiedConnWriteCloseDrainWait       = 2 * time.Second
+)
+
+type proxiedConnDatagramFlushSender interface {
+	SendDatagramNoWake([]byte) error
+	FlushProxiedIPDatagramSend()
+}
 
 // Bounds for draining ignored capsules on the HTTP/3 CONNECT-UDP request stream (skipCapsules).
-// Parity with sing-box transport/masque h2_connect_udp.go: hostile varints must not drive
-// unbounded reads through io.Copy(io.Discard, capsuleBody).
 const (
-	skipCapsuleDatagramMaxPayload                      = 1500 + 128
-	skipCapsuleNondatagramMaxPayload                   = 65536
-	capsuleTypeDatagram              http3.CapsuleType = 0
+	skipCapsuleDatagramMaxPayload    = 1500 + 128
+	skipCapsuleNondatagramMaxPayload = 65536
+	capsuleTypeDatagram              = http3.CapsuleType(0)
 )
 
 var (
@@ -69,17 +78,29 @@ type proxiedConn struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 
-	closed   atomic.Bool // set when Close is called
+	closed   atomic.Bool
 	readDone chan struct{}
 
-	// O(1) dequeue: bounded ring of datagrams drained via TryReceiveDatagram between ReadFrom calls.
-	prefetchMu    sync.Mutex
-	prefetchSlots [][]byte
-	prefetchHead  int
-	prefetchCount int
-	// Lock-free empty-queue check for hot ReadFrom path.
+	pumpOnce       sync.Once
+	prefetchNotify chan struct{}
+	pumpCtx        context.Context
+	pumpCancel     context.CancelFunc
+
+	prefetchMu          sync.Mutex
+	prefetchSlots       [][]byte
+	prefetchHead        int
+	prefetchCount       int
 	prefetchCountAtomic atomic.Int32
 	prefetchGate        adaptiveTryDrainGate
+
+	writeFlushSender  proxiedConnDatagramFlushSender
+	writeMu           sync.Mutex
+	pendingWriteBatch int
+	writeOnce         sync.Once
+	writeCloseOnce    sync.Once
+	writeCh           chan []byte
+	writeDone         chan struct{}
+	writeErr          atomic.Pointer[error]
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -97,7 +118,6 @@ var ErrICMPPortUnreachable = errors.New("masque connect-udp icmp port unreachabl
 func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	c := &proxiedConn{
 		str:           str,
-		drain:         nil,
 		localAddr:     local,
 		remoteAddr:    remote,
 		readDone:      make(chan struct{}),
@@ -106,7 +126,13 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
 		c.drain = dr
 	}
+	if fs, ok := str.(proxiedConnDatagramFlushSender); ok {
+		c.writeFlushSender = fs
+	}
+	c.prefetchNotify = make(chan struct{}, 256)
+	c.pumpCtx, c.pumpCancel = context.WithCancel(context.Background())
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
+	c.startDatagramPump()
 	go func() {
 		defer close(c.readDone)
 		if err := skipCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) && !c.closed.Load() {
@@ -115,6 +141,139 @@ func newProxiedConn(str http3Stream, local, remote net.Addr) *proxiedConn {
 		str.Close()
 	}()
 	return c
+}
+
+func (c *proxiedConn) startDatagramPump() {
+	c.pumpOnce.Do(func() {
+		go c.pumpH3Datagrams()
+	})
+}
+
+func (c *proxiedConn) pumpH3Datagrams() {
+	for {
+		if c.closed.Load() {
+			return
+		}
+		if c.drainTryReceiveIntoPrefetch() > 0 {
+			continue
+		}
+		if c.prefetchCountAtomic.Load() >= proxiedConnPrefetchMax {
+			select {
+			case <-c.pumpCtx.Done():
+				return
+			case <-c.prefetchNotify:
+			case <-time.After(10 * time.Microsecond):
+			}
+			continue
+		}
+		data, err := c.str.ReceiveDatagram(c.pumpCtx)
+		if err != nil {
+			if c.closed.Load() || errors.Is(err, context.Canceled) {
+				return
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			continue
+		}
+		if !c.enqueuePrefetchedRaw(data) {
+			continue
+		}
+		c.drainTryReceiveIntoPrefetch()
+	}
+}
+
+func (c *proxiedConn) drainTryReceiveIntoPrefetch() int {
+	return c.drainTryReceiveBatchIntoPrefetch()
+}
+
+func (c *proxiedConn) drainTryReceiveBatchIntoPrefetch() int {
+	total := 0
+	for c.prefetchCountAtomic.Load() < proxiedConnPrefetchMax {
+		n := c.drainOneTryReceiveBatch()
+		if n == 0 {
+			break
+		}
+		total += n
+	}
+	return total
+}
+
+func (c *proxiedConn) drainOneTryReceiveBatch() int {
+	if c.drain == nil {
+		return 0
+	}
+	space := proxiedConnPrefetchMax - int(c.prefetchCountAtomic.Load())
+	if space <= 0 {
+		return 0
+	}
+	const maxBatch = 32
+	var batch [maxBatch][]byte
+	n := 0
+	for n < space && n < maxBatch {
+		raw, ok := c.drain.TryReceiveDatagram()
+		if !ok {
+			break
+		}
+		batch[n] = raw
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	c.prefetchMu.Lock()
+	drained := 0
+	for i := 0; i < n && c.prefetchCount < proxiedConnPrefetchMax; i++ {
+		tail := (c.prefetchHead + c.prefetchCount) & proxiedConnPrefetchMask
+		c.prefetchSlots[tail] = batch[i]
+		c.prefetchCount++
+		drained++
+	}
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	c.prefetchMu.Unlock()
+	if drained > 0 {
+		c.signalPrefetchReady()
+	}
+	return drained
+}
+
+func (c *proxiedConn) signalPrefetchReady() {
+	select {
+	case c.prefetchNotify <- struct{}{}:
+	default:
+	}
+}
+
+func (c *proxiedConn) extendPrefetchFromTry(force bool) int {
+	if c.drain == nil {
+		return 0
+	}
+	if !force && !c.prefetchGate.shouldProbe() {
+		return 0
+	}
+	drained := c.drainTryReceiveBatchIntoPrefetch()
+	if shouldObserveDrainProbe(force, drained) {
+		c.prefetchGate.observeDrain(drained)
+	}
+	return drained
+}
+
+func (c *proxiedConn) enqueuePrefetchedRaw(data []byte) bool {
+	c.prefetchMu.Lock()
+	defer c.prefetchMu.Unlock()
+	if c.prefetchCount >= proxiedConnPrefetchMax {
+		select {
+		case c.prefetchNotify <- struct{}{}:
+		default:
+		}
+		return false
+	}
+	tail := (c.prefetchHead + c.prefetchCount) & proxiedConnPrefetchMask
+	c.prefetchSlots[tail] = data
+	c.prefetchCount++
+	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+	c.signalPrefetchReady()
+	return true
 }
 
 func (c *proxiedConn) takePrefetched() ([]byte, bool, bool) {
@@ -127,42 +286,38 @@ func (c *proxiedConn) takePrefetched() ([]byte, bool, bool) {
 		c.prefetchCountAtomic.Store(0)
 		return nil, false, false
 	}
+	wasFull := c.prefetchCount == proxiedConnPrefetchMax
 	idx := c.prefetchHead
 	d := c.prefetchSlots[idx]
 	c.prefetchSlots[idx] = nil
 	c.prefetchHead = (c.prefetchHead + 1) & proxiedConnPrefetchMask
 	c.prefetchCount--
 	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
-	return d, true, c.prefetchCount > 0
+	hasMore := c.prefetchCount > 0
+	if wasFull {
+		select {
+		case c.prefetchNotify <- struct{}{}:
+		default:
+		}
+	}
+	return d, true, hasMore
 }
 
-func (c *proxiedConn) extendPrefetchFromTry(force bool) {
-	if c.drain == nil {
-		return
-	}
-	if !force && !c.prefetchGate.shouldProbe() {
-		return
-	}
-	c.prefetchMu.Lock()
-	defer c.prefetchMu.Unlock()
-	drained := 0
-	for c.prefetchCount < proxiedConnPrefetchMax {
-		raw, ok := c.drain.TryReceiveDatagram()
-		if !ok {
-			break
+func (c *proxiedConn) waitPrefetched(ctx context.Context) ([]byte, error) {
+	for {
+		if raw, ok, _ := c.takePrefetched(); ok {
+			return raw, nil
 		}
-		tail := (c.prefetchHead + c.prefetchCount) & proxiedConnPrefetchMask
-		c.prefetchSlots[tail] = raw
-		c.prefetchCount++
-		drained++
-	}
-	c.prefetchCountAtomic.Store(int32(c.prefetchCount))
-	if shouldObserveDrainProbe(force, drained) {
-		c.prefetchGate.observeDrain(drained)
+		select {
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		case <-c.prefetchNotify:
+		}
 	}
 }
 
 func (c *proxiedConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
+	c.startDatagramPump()
 	expiredPrefetchDrops := 0
 start:
 	c.deadlineMx.Lock()
@@ -195,13 +350,11 @@ start:
 			fromPrefetch = true
 			hasBufferedPrefetch = hasMore
 		} else {
-			data, err = c.str.ReceiveDatagram(ctx)
+			data, err = c.waitPrefetched(ctx)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
 					return 0, nil, err
 				}
-				// The context is cancelled asynchronously (in a Go routine spawned from time.AfterFunc).
-				// We need to check if a new deadline has already been set.
 				c.deadlineMx.Lock()
 				restart := time.Now().Before(c.deadline)
 				c.deadlineMx.Unlock()
@@ -212,77 +365,176 @@ start:
 			}
 		}
 	}
-	payload, ok, err := parseProxiedDatagramPayload(data)
-	if err != nil {
-		// CONNECT-UDP uses unreliable DATAGRAMs: malformed frames must not tear down the flow.
-		cancelErr, cancelled := ctxCancelled()
-		if cancelled {
-			c.deadlineMx.Lock()
-			deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
-			c.deadlineMx.Unlock()
-			if deadlineExceeded {
-				expiredPrefetchDrops++
-				if expiredPrefetchDrops >= proxiedConnExpiredPrefetchDropBudget {
-					return 0, nil, os.ErrDeadlineExceeded
-				}
-			}
-			if cancelErr != nil && !errors.Is(cancelErr, context.Canceled) {
-				return 0, nil, cancelErr
-			}
-		}
-		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
-			c.extendPrefetchFromTry(false)
-		}
-		goto start
+	payload, ok, parseErr := parseProxiedDatagramPayload(data)
+	if parseErr != nil {
+		goto dropAndContinue
 	}
 	if !ok {
-		// Drop this datagram. We currently only support proxying of UDP payloads.
-		cancelErr, cancelled := ctxCancelled()
-		if cancelled {
-			c.deadlineMx.Lock()
-			deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
-			c.deadlineMx.Unlock()
-			if deadlineExceeded {
-				expiredPrefetchDrops++
-				if expiredPrefetchDrops >= proxiedConnExpiredPrefetchDropBudget {
-					return 0, nil, os.ErrDeadlineExceeded
-				}
-			}
-			if cancelErr != nil && !errors.Is(cancelErr, context.Canceled) {
-				return 0, nil, cancelErr
-			}
-		}
-		if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
-			c.extendPrefetchFromTry(false)
-		}
-		goto start
+		goto dropAndContinue
 	}
 	if len(payload) == 0 {
 		return 0, c.remoteAddr, ErrICMPPortUnreachable
 	}
-	// If b is too small, additional bytes are discarded.
-	// This mirrors the behavior of large UDP datagrams received on a UDP socket (on Linux).
 	n = copy(b, payload)
 	if !fromPrefetch || !hasBufferedPrefetch {
 		c.extendPrefetchFromTry(false)
 	}
 	return n, c.remoteAddr, nil
+
+dropAndContinue:
+	c.deadlineMx.Lock()
+	deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
+	c.deadlineMx.Unlock()
+	if deadlineExceeded {
+		expiredPrefetchDrops++
+		if expiredPrefetchDrops >= proxiedConnExpiredPrefetchDropBudget {
+			return 0, nil, os.ErrDeadlineExceeded
+		}
+	}
+	cancelErr, cancelled := ctxCancelled()
+	if cancelled {
+		if cancelErr != nil && !errors.Is(cancelErr, context.Canceled) {
+			return 0, nil, cancelErr
+		}
+	}
+	if (!fromPrefetch || !hasBufferedPrefetch) && !cancelled {
+		c.extendPrefetchFromTry(false)
+	}
+	goto start
+}
+
+func (c *proxiedConn) startWritePump() {
+	if c.writeFlushSender == nil {
+		return
+	}
+	c.writeOnce.Do(func() {
+		c.writeCh = make(chan []byte, proxiedConnWriteQueueCap)
+		c.writeDone = make(chan struct{})
+		go c.pumpH3C2S()
+	})
+}
+
+func (c *proxiedConn) pumpH3C2S() {
+	defer close(c.writeDone)
+	for {
+		data, ok := <-c.writeCh
+		if !ok {
+			break
+		}
+		c.writeMu.Lock()
+		if err := c.sendDatagramLocked(data); err != nil {
+			c.storeWriteErr(err)
+		}
+		for len(c.writeCh) > 0 {
+			data = <-c.writeCh
+			if err := c.sendDatagramLocked(data); err != nil {
+				c.storeWriteErr(err)
+			}
+		}
+		c.flushPendingWriteBatchLocked()
+		c.writeMu.Unlock()
+	}
+	c.writeMu.Lock()
+	c.flushPendingWriteBatchLocked()
+	c.writeMu.Unlock()
+}
+
+func (c *proxiedConn) sendDatagramLocked(data []byte) error {
+	if c.writeFlushSender == nil {
+		return c.str.SendDatagram(data)
+	}
+	if err := c.writeFlushSender.SendDatagramNoWake(data); err != nil {
+		return err
+	}
+	c.pendingWriteBatch++
+	if c.pendingWriteBatch >= proxiedConnWriteHTTPBatchFlush {
+		c.pendingWriteBatch = 0
+		c.writeFlushSender.FlushProxiedIPDatagramSend()
+	}
+	return nil
+}
+
+func (c *proxiedConn) flushPendingWriteBatchLocked() {
+	if c.writeFlushSender == nil || c.pendingWriteBatch == 0 {
+		return
+	}
+	c.pendingWriteBatch = 0
+	c.writeFlushSender.FlushProxiedIPDatagramSend()
 }
 
 func (c *proxiedConn) enqueueDatagram(data []byte) error {
+	if c.writeFlushSender != nil {
+		c.writeMu.Lock()
+		err := c.sendDatagramLocked(data)
+		c.writeMu.Unlock()
+		return err
+	}
 	return c.str.SendDatagram(data)
 }
 
-// WriteTo sends a UDP datagram to the target.
-// The net.Addr parameter is ignored.
+func (c *proxiedConn) flushPendingWriteBatch() {
+	if c.writeFlushSender == nil {
+		return
+	}
+	c.writeMu.Lock()
+	pending := c.pendingWriteBatch
+	c.pendingWriteBatch = 0
+	c.writeMu.Unlock()
+	if pending > 0 {
+		c.writeFlushSender.FlushProxiedIPDatagramSend()
+	}
+}
+
+func (c *proxiedConn) storeWriteErr(err error) {
+	if err != nil {
+		c.writeErr.Store(&err)
+	}
+}
+
+func (c *proxiedConn) takeWriteErr() error {
+	if p := c.writeErr.Swap(nil); p != nil {
+		return *p
+	}
+	return nil
+}
+
 func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	c.startDatagramPump()
+	if err := c.takeWriteErr(); err != nil {
+		return 0, err
+	}
 	n = len(p)
 	minCap := len(contextIDZero) + len(p)
+	if c.writeFlushSender != nil {
+		c.startWritePump()
+		bufPtr := proxiedConnWriteBufPool.Get().(*[]byte)
+		data := *bufPtr
+		if cap(data) < minCap {
+			*bufPtr = data[:0]
+			proxiedConnWriteBufPool.Put(bufPtr)
+			data = make([]byte, minCap)
+			copy(data, contextIDZero)
+			copy(data[len(contextIDZero):], p)
+		} else {
+			data = data[:minCap]
+			copy(data, contextIDZero)
+			copy(data[len(contextIDZero):], p)
+		}
+		select {
+		case c.writeCh <- data:
+			return n, nil
+		case <-c.pumpCtx.Done():
+			return 0, net.ErrClosed
+		}
+	}
 	bufPtr := proxiedConnWriteBufPool.Get().(*[]byte)
 	data := *bufPtr
 	if cap(data) >= minCap {
 		data = data[:minCap]
-		data[0] = 0
+		copy(data, contextIDZero)
 		copy(data[len(contextIDZero):], p)
 		err = c.enqueueDatagram(data)
 		*bufPtr = data[:0]
@@ -292,7 +544,7 @@ func (c *proxiedConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
 	*bufPtr = data[:0]
 	proxiedConnWriteBufPool.Put(bufPtr)
 	b := make([]byte, minCap)
-	b[0] = 0
+	copy(b, contextIDZero)
 	copy(b[len(contextIDZero):], p)
 	err = c.enqueueDatagram(b)
 	return n, err
@@ -302,23 +554,15 @@ func parseProxiedDatagramPayload(data []byte) (payload []byte, ok bool, err erro
 	if len(data) == 0 {
 		return nil, false, io.EOF
 	}
-	// CONNECT-UDP hot path: context ID 0 is encoded as one byte 0x00.
 	if data[0] == 0 {
 		return data[1:], true, nil
 	}
-	// Fast-reject one-byte non-zero context IDs without quicvarint.Parse.
-	// QUIC varint prefixes with 00 use a single byte encoding (0..63).
 	if data[0]&0xc0 == 0 {
 		return nil, false, nil
 	}
-	// Fast-reject multi-byte non-zero contexts when high-order varint bits are
-	// already non-zero. Context ID 0 can only use this prefix if those bits are zero.
 	if data[0]&0x3f != 0 {
 		return nil, false, nil
 	}
-	// Fast-path multi-byte varint with zero high-order bits:
-	// - accept canonical 2/4/8-byte zero context-id,
-	// - fast-reject non-zero values directly for tolerant-drop path.
 	switch data[0] >> 6 {
 	case 1:
 		if len(data) < 2 {
@@ -345,12 +589,37 @@ func parseProxiedDatagramPayload(data []byte) (payload []byte, ok bool, err erro
 		}
 		return nil, false, nil
 	}
-	// Unreachable after the prefix checks above, but keep a safe malformed fallback.
 	return nil, false, io.EOF
+}
+
+func (c *proxiedConn) FlushC2SWrites() {
+	c.flushPendingWriteBatch()
+	if c.writeCh == nil {
+		return
+	}
+	deadline := time.Now().Add(proxiedConnWriteCloseDrainWait)
+	for time.Now().Before(deadline) {
+		if len(c.writeCh) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Microsecond)
+	}
 }
 
 func (c *proxiedConn) Close() error {
 	c.closed.Store(true)
+	c.pumpCancel()
+	c.signalPrefetchReady()
+	c.FlushC2SWrites()
+	if c.writeCh != nil {
+		c.writeCloseOnce.Do(func() {
+			close(c.writeCh)
+		})
+		select {
+		case <-c.writeDone:
+		case <-time.After(proxiedConnWriteCloseDrainWait):
+		}
+	}
 	c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
 	err := c.str.Close()
 	<-c.readDone
@@ -363,13 +632,8 @@ func (c *proxiedConn) Close() error {
 	return err
 }
 
-func (c *proxiedConn) LocalAddr() net.Addr {
-	return c.localAddr
-}
-
-func (c *proxiedConn) RemoteAddr() net.Addr {
-	return c.remoteAddr
-}
+func (c *proxiedConn) LocalAddr() net.Addr  { return c.localAddr }
+func (c *proxiedConn) RemoteAddr() net.Addr { return c.remoteAddr }
 
 func (c *proxiedConn) SetDeadline(t time.Time) error {
 	_ = c.SetWriteDeadline(t)
@@ -384,11 +648,9 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 	)
 
 	c.deadlineMx.Lock()
-
 	oldDeadline := c.deadline
 	c.deadline = t
 	now := time.Now()
-	// Stop the timer.
 	if t.IsZero() {
 		if c.readDeadlineTimer != nil && !c.readDeadlineTimer.Stop() {
 			timerNeedDrain = true
@@ -400,7 +662,6 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 		}
 		return nil
 	}
-	// If the deadline already expired, cancel immediately.
 	if !t.After(now) {
 		cancelOutside = c.readCtxCancel
 		c.deadlineMx.Unlock()
@@ -408,11 +669,7 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 		return nil
 	}
 	deadline := t.Sub(now)
-	// if we already have a timer, reset it
 	if c.readDeadlineTimer != nil {
-		// Within the previous window: replace ctx so ReceiveDatagram abandons the old timer window.
-		// After the previous instant has passed, the timer may already have fired and canceled readCtx;
-		// if we only Reset without a fresh ctx, ReadFrom can spin (canceled ctx + restart GOTO).
 		replaceReadCtx := now.Before(oldDeadline)
 		if !replaceReadCtx && c.readCtx.Err() != nil {
 			replaceReadCtx = true
@@ -422,7 +679,7 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 			c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 		}
 		c.readDeadlineTimer.Reset(deadline)
-	} else { // this is the first time the timer is set
+	} else {
 		c.readDeadlineTimer = time.AfterFunc(deadline, func() {
 			c.deadlineMx.Lock()
 			shouldCancel := !c.deadline.IsZero() && c.deadline.Before(time.Now())
@@ -441,7 +698,6 @@ func (c *proxiedConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *proxiedConn) SetWriteDeadline(time.Time) error {
-	// TODO(#22): This is currently blocked on a change in quic-go's API.
 	return nil
 }
 

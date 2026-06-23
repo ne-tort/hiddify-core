@@ -97,6 +97,9 @@ func WakeMasqueRelayAfterUploadRead(s *Stream) {
 		return
 	}
 	masqueWakeSendAfterReceiveRead(s, 1)
+	if s.conn != nil && s.conn.conn != nil {
+		quic.MasqueWakeConnSend(s.conn.conn)
+	}
 }
 
 // ArmMasqueBidiDuplexParallel marks saturated duplex without fair-defer relay gate or credit wait (H2 relay parity).
@@ -191,6 +194,26 @@ func EnableMasqueConnectStream(s *Stream) {
 	if s.datagramStream != nil {
 		if qs := s.datagramStream.QUICStream(); qs != nil {
 			quic.MasqueSetPeerDuplexLazyFC(qs, true)
+		}
+	}
+}
+
+// WakeMasqueClientAfterDatagramReceive schedules QUIC send after CONNECT-UDP client S2C read (echo duplex interleave).
+func WakeMasqueClientAfterDatagramReceive(s *Stream) {
+	if s == nil || s.conn == nil || s.conn.conn == nil {
+		return
+	}
+	quic.MasqueWakeConnSend(s.conn.conn)
+}
+
+// WakeMasqueClientAfterDatagramReceiveFrom works on Stream or RequestStream without exporting RequestStream.str.
+func WakeMasqueClientAfterDatagramReceiveFrom(str interface{}) {
+	switch s := str.(type) {
+	case *Stream:
+		WakeMasqueClientAfterDatagramReceive(s)
+	case *RequestStream:
+		if s != nil {
+			WakeMasqueClientAfterDatagramReceive(s.str)
 		}
 	}
 }

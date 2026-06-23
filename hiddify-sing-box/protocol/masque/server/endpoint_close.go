@@ -1,14 +1,14 @@
 package server
 
 import (
-	qmasque "github.com/quic-go/masque-go"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	btls "github.com/sagernet/sing-box/common/tls"
 )
 
 // MasqueEndpointCloseInput carries runtime resources held by ServerEndpoint.Close.
 type MasqueEndpointCloseInput struct {
 	Stack         MasqueStack
-	UDPProxy      *qmasque.Proxy
+	UDPProxy      *cudprelay.Proxy
 	SingServerTLS btls.ServerConfig
 }
 

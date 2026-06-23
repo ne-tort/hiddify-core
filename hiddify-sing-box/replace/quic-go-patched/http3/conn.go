@@ -338,6 +338,30 @@ func (c *rawConn) sendDatagramNoWake(streamID quic.StreamID, b []byte) error {
 	return c.sendDatagramMaybeWake(streamID, b, false)
 }
 
+// enqueueOutgoingDatagramFrameNoWake queues a fully formatted HTTP/3 DATAGRAM frame
+// (quarter-stream-id varint + payload). release runs after payload is copied into outgoing frames.
+func (c *rawConn) enqueueOutgoingDatagramFrameNoWake(data []byte, release func()) error {
+	if c == nil || c.conn == nil {
+		if release != nil {
+			release()
+		}
+		return errors.New("http3: nil conn")
+	}
+	if c.qlogger != nil {
+		quarterStreamID, n, err := quicvarint.Parse(data)
+		if err == nil {
+			c.qlogger.RecordEvent(qlog.DatagramCreated{
+				QuaterStreamID: quarterStreamID,
+				Raw: qlog.RawInfo{
+					Length:        len(data),
+					PayloadLength: len(data) - n,
+				},
+			})
+		}
+	}
+	return c.conn.EnqueueOutgoingDatagramWithRelease(data, release)
+}
+
 func (c *rawConn) sendDatagramMaybeWake(streamID quic.StreamID, b []byte, wake bool) error {
 	quarterStreamID := uint64(streamID / 4)
 	bufPtr := quic.AcquireHTTP3DatagramBuffer()
@@ -439,6 +463,14 @@ func (c *rawConn) flushDatagramSendWake() {
 	quic.MasqueWakeConnSendDatagramCoalesced(c.conn)
 }
 
+// DatagramSendBacklog returns queued outgoing QUIC DATAGRAM frames on this connection.
+func (c *rawConn) DatagramSendBacklog() int {
+	if c == nil || c.conn == nil {
+		return 0
+	}
+	return c.conn.DatagramSendBacklog()
+}
+
 func (c *rawConn) flushDatagramReceiveWake() {
 	c.flushDatagramSendWake()
 }
@@ -470,6 +502,7 @@ func (c *rawConn) enqueuePooledHTTPDatagramMaybeWake(quarterStreamID uint64, pay
 func (c *rawConn) receiveDatagramDispatch(b []byte) error {
 	quarterStreamID, n, err := quicvarint.Parse(b)
 	if err != nil {
+		quic.ReleaseMasqueDatagramReceiveBuffer(b)
 		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
 		return fmt.Errorf("could not read quarter stream id: %w", err)
 	}
@@ -483,20 +516,29 @@ func (c *rawConn) receiveDatagramDispatch(b []byte) error {
 		})
 	}
 	if quarterStreamID > maxQuarterStreamID {
+		quic.ReleaseMasqueDatagramReceiveBuffer(b)
 		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeDatagramError), "")
 		return fmt.Errorf("invalid quarter stream id: %d", quarterStreamID)
 	}
+	payloadLen := len(b) - n
+	if n > 0 {
+		copy(b, b[n:])
+	}
+	b = b[:payloadLen]
 	streamID := quic.StreamID(4 * quarterStreamID)
 	c.streamMx.RLock()
 	dg, ok := c.streams[streamID]
 	c.streamMx.RUnlock()
 	if !ok {
-		if !c.enqueueUnknownStreamDatagram(streamID, b[n:]) {
+		if !c.enqueueUnknownStreamDatagram(streamID, b) {
 			unknownStreamDatagramDropTotal.Add(1)
 		}
+		quic.ReleaseMasqueDatagramReceiveBuffer(b)
 		return nil
 	}
-	dg.enqueueDatagram(b[n:])
+	if !dg.enqueueDatagramOwned(b) {
+		quic.ReleaseMasqueDatagramReceiveBuffer(b)
+	}
 	return nil
 }
 

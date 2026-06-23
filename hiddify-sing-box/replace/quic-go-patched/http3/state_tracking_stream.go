@@ -10,40 +10,33 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// CONNECT-IP maps every TCP segment to one HTTP DATAGRAM; stock 32 drops under bulk tun load.
-const streamDatagramQueueLen = 8192
+const streamDatagramQueueLen = 65536
 
 var (
-	streamDatagramQueueDropTotal     atomic.Uint64
+	streamDatagramQueueDropTotal      atomic.Uint64
 	streamDatagramRecvClosedDropTotal atomic.Uint64
 )
 
-// StreamDatagramQueueDropTotal returns process-wide count of stream datagram enqueue drops (queue full).
 func StreamDatagramQueueDropTotal() uint64 {
 	return streamDatagramQueueDropTotal.Load()
 }
 
-// StreamDatagramRecvClosedDropTotal returns process-wide count of datagram enqueue drops after recv closed.
 func StreamDatagramRecvClosedDropTotal() uint64 {
 	return streamDatagramRecvClosedDropTotal.Load()
 }
 
-// stateTrackingStream is an implementation of quic.Stream that delegates
-// to an underlying stream
-// it takes care of proxying send and receive errors onto an implementation of
-// the errorSetter interface (intended to be occupied by a datagrammer)
-// it is also responsible for clearing the stream based on its ID from its
-// parent connection, this is done through the streamClearer interface when
-// both the send and receive sides are closed
 type stateTrackingStream struct {
 	*quic.Stream
 
 	sendDatagram       func([]byte) error
 	sendDatagramNoWake func([]byte) error
 	hasData            chan struct{}
-	queue        [][]byte // TODO: use a ring buffer
+	queue              [][]byte
+	queueHead          int
+	queueCount         int
 
-	mx      sync.Mutex
+	sendMx  sync.Mutex
+	recvMx  sync.Mutex
 	sendErr error
 	recvErr error
 
@@ -64,41 +57,39 @@ func newStateTrackingStream(s *quic.Stream, clearer streamClearer, sendDatagram,
 		sendDatagramNoWake: sendDatagramNoWake,
 		hasData:            make(chan struct{}, 1),
 	}
-
 	context.AfterFunc(s.Context(), func() {
 		t.closeSend(context.Cause(s.Context()))
 	})
-
 	return t
 }
 
-func (s *stateTrackingStream) closeSend(e error) {
-	s.mx.Lock()
-	defer s.mx.Unlock()
+func (s *stateTrackingStream) maybeClearStream() {
+	s.sendMx.Lock()
+	s.recvMx.Lock()
+	if s.sendErr != nil && s.recvErr != nil {
+		s.clearer.clearStream(s.StreamID())
+	}
+	s.recvMx.Unlock()
+	s.sendMx.Unlock()
+}
 
-	// clear the stream the first time both the send
-	// and receive are finished
+func (s *stateTrackingStream) closeSend(e error) {
+	s.sendMx.Lock()
 	if s.sendErr == nil {
-		if s.recvErr != nil {
-			s.clearer.clearStream(s.StreamID())
-		}
 		s.sendErr = e
 	}
+	s.sendMx.Unlock()
+	s.maybeClearStream()
 }
 
 func (s *stateTrackingStream) closeReceive(e error) {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-
-	// clear the stream the first time both the send
-	// and receive are finished
+	s.recvMx.Lock()
 	if s.recvErr == nil {
-		if s.sendErr != nil {
-			s.clearer.clearStream(s.StreamID())
-		}
 		s.recvErr = e
 		s.signalHasDatagram()
 	}
+	s.recvMx.Unlock()
+	s.maybeClearStream()
 }
 
 func (s *stateTrackingStream) Close() error {
@@ -133,20 +124,19 @@ func (s *stateTrackingStream) Read(b []byte) (int, error) {
 }
 
 func (s *stateTrackingStream) SendDatagram(b []byte) error {
-	s.mx.Lock()
+	s.sendMx.Lock()
 	sendErr := s.sendErr
-	s.mx.Unlock()
+	s.sendMx.Unlock()
 	if sendErr != nil {
 		return sendErr
 	}
-
 	return s.sendDatagram(b)
 }
 
 func (s *stateTrackingStream) SendDatagramNoWake(b []byte) error {
-	s.mx.Lock()
+	s.sendMx.Lock()
 	sendErr := s.sendErr
-	s.mx.Unlock()
+	s.sendMx.Unlock()
 	if sendErr != nil {
 		return sendErr
 	}
@@ -163,48 +153,65 @@ func (s *stateTrackingStream) signalHasDatagram() {
 	}
 }
 
-func (s *stateTrackingStream) enqueueDatagram(data []byte) {
-	s.mx.Lock()
-	defer s.mx.Unlock()
+func (s *stateTrackingStream) popQueueLocked() ([]byte, bool) {
+	if s.queueCount == 0 || s.queue == nil {
+		return nil, false
+	}
+	data := s.queue[s.queueHead]
+	s.queue[s.queueHead] = nil
+	s.queueHead = (s.queueHead + 1) % streamDatagramQueueLen
+	s.queueCount--
+	return data, true
+}
 
+func (s *stateTrackingStream) enqueueDatagram(data []byte) {
+	owned := quic.AcquireMasqueDatagramRecvBuf(len(data))
+	copy(owned, data)
+	if !s.enqueueDatagramOwned(owned) {
+		quic.ReleaseMasqueDatagramReceiveBuffer(owned)
+	}
+}
+
+// enqueueDatagramOwned queues a pooled receive buffer without copying (caller transfers ownership).
+func (s *stateTrackingStream) enqueueDatagramOwned(owned []byte) bool {
+	s.recvMx.Lock()
+	defer s.recvMx.Unlock()
 	if s.recvErr != nil {
 		streamDatagramRecvClosedDropTotal.Add(1)
-		return
+		return false
 	}
-	if len(s.queue) >= streamDatagramQueueLen {
+	if s.queueCount >= streamDatagramQueueLen {
 		streamDatagramQueueDropTotal.Add(1)
-		return
+		return false
 	}
-	s.queue = append(s.queue, data)
+	if s.queue == nil {
+		s.queue = make([][]byte, streamDatagramQueueLen)
+	}
+	tail := (s.queueHead + s.queueCount) % streamDatagramQueueLen
+	s.queue[tail] = owned
+	s.queueCount++
 	s.signalHasDatagram()
+	return true
 }
 
 func (s *stateTrackingStream) TryReceiveDatagram() ([]byte, bool) {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
-		return data, true
-	}
-	return nil, false
+	s.recvMx.Lock()
+	defer s.recvMx.Unlock()
+	return s.popQueueLocked()
 }
 
 func (s *stateTrackingStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 start:
-	s.mx.Lock()
-	if len(s.queue) > 0 {
-		data := s.queue[0]
-		s.queue = s.queue[1:]
-		s.mx.Unlock()
+	s.recvMx.Lock()
+	if data, ok := s.popQueueLocked(); ok {
+		s.recvMx.Unlock()
 		return data, nil
 	}
 	if receiveErr := s.recvErr; receiveErr != nil {
-		s.mx.Unlock()
+		s.recvMx.Unlock()
 		return nil, receiveErr
 	}
-	s.mx.Unlock()
-
+	s.recvMx.Unlock()
 	select {
 	case <-ctx.Done():
 		return nil, context.Cause(ctx)

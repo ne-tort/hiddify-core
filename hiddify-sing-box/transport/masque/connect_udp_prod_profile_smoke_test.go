@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
-	cudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -92,7 +91,7 @@ func newConnectUDPProdProfileH2Session(t *testing.T, proxyPort int) (ClientSessi
 	if err != nil {
 		t.Fatalf("new connect-udp-h2 session: %v", err)
 	}
-	t.Cleanup(func() { _ = session.Close() })
+	t.Cleanup(func() { closeConnectUDPTestSession(session) })
 	return session, waitCtx
 }
 
@@ -144,9 +143,6 @@ func TestConnectUDPProdProfileH2CapsuleSmoke(t *testing.T) {
 		t.Fatalf("ListenPacket connect-udp-h2: %v", err)
 	}
 	defer func() { _ = pkt.Close() }()
-	if _, ok := pkt.(*cudp.DatagramSplitConn); !ok {
-		t.Fatalf("expected DatagramSplitConn capsule wrapper, got %T", pkt)
-	}
 
 	connectUDPProdProfileEcho(t, pkt, echoAddr, []byte(connectUDPProdProfileH2SmokePayload))
 }

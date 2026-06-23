@@ -2461,6 +2461,9 @@ func (c *Conn) triggerSending(now monotime.Time) error {
 		c.blocked = blockModeHardBlocked
 		return nil
 	case ackhandler.SendPacingLimited:
+		if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+			return c.sendPackets(now)
+		}
 		deadline := c.sentPacketHandler.TimeUntilSend()
 		if deadline.IsZero() {
 			deadline = deadlineSendImmediately
@@ -2471,6 +2474,9 @@ func (c *Conn) triggerSending(now monotime.Time) error {
 		// sends enough ACKs to allow its peer to utilize the bandwidth.
 		return c.maybeSendAckOnlyPacket(now)
 	case ackhandler.SendAck:
+		if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+			return c.sendPackets(now)
+		}
 		// We can at most send a single ACK only packet.
 		// There will only be a new ACK after receiving new packets.
 		// SendAck is only returned when we're congestion limited, so we don't need to set the pacing timer.
@@ -2577,23 +2583,33 @@ func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
 		c.sendQueue.Send(buf, 0, ecn)
 
 		if c.sendQueue.WouldBlock() {
+			if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+				c.scheduleSending()
+			}
 			return nil
 		}
 		sendMode := c.sentPacketHandler.SendMode(now)
 		if sendMode == ackhandler.SendPacingLimited {
-			c.resetPacingDeadline()
-			return nil
+			if !(c.config.EnableDatagrams && c.datagramSendBacklog() > 0) {
+				c.resetPacingDeadline()
+				return nil
+			}
+		} else if sendMode != ackhandler.SendAny {
+			if !(c.config.EnableDatagrams && c.datagramSendBacklog() > 0) {
+				return nil
+			}
 		}
-		if sendMode != ackhandler.SendAny {
-			return nil
-		}
-		// Prioritize receiving of packets over sending out more packets.
+		// Prioritize receiving of packets over sending out more packets,
+		// unless batched CONNECT-UDP C2S datagrams are still queued (duplex echo).
 		c.receivedPacketMx.Lock()
 		hasPackets := !c.receivedPackets.Empty()
 		c.receivedPacketMx.Unlock()
-		if hasPackets {
-			c.pacingDeadline = deadlineSendImmediately
-			return nil
+		if hasPackets && c.datagramSendBacklog() == 0 {
+			// CONNECT-UDP fountain S2C: keep bursting while CC allows even if ACKs are queued.
+			if !(c.config.EnableDatagrams && (sendMode == ackhandler.SendAny || sendMode == ackhandler.SendPacingLimited)) {
+				c.pacingDeadline = deadlineSendImmediately
+				return nil
+			}
 		}
 	}
 }
@@ -2620,10 +2636,14 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 		if !dontSendMore {
 			sendMode := c.sentPacketHandler.SendMode(now)
 			if sendMode == ackhandler.SendPacingLimited {
-				c.resetPacingDeadline()
-			}
-			if sendMode != ackhandler.SendAny {
-				dontSendMore = true
+				if !(c.config.EnableDatagrams && c.datagramSendBacklog() > 0) {
+					c.resetPacingDeadline()
+					dontSendMore = true
+				}
+			} else if sendMode != ackhandler.SendAny {
+				if !(c.config.EnableDatagrams && c.datagramSendBacklog() > 0) {
+					dontSendMore = true
+				}
 			}
 		}
 
@@ -2642,19 +2662,29 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 		c.sendQueue.Send(buf, uint16(maxSize), ecn)
 
 		if dontSendMore {
+			if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+				c.scheduleSending()
+			}
 			return nil
 		}
 		if c.sendQueue.WouldBlock() {
+			if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+				c.scheduleSending()
+			}
 			return nil
 		}
 
-		// Prioritize receiving of packets over sending out more packets.
+		// Prioritize receiving of packets over sending out more packets (non-datagram paths).
+		sendMode := c.sentPacketHandler.SendMode(now)
 		c.receivedPacketMx.Lock()
 		hasPackets := !c.receivedPackets.Empty()
 		c.receivedPacketMx.Unlock()
-		if hasPackets {
-			c.pacingDeadline = deadlineSendImmediately
-			return nil
+		if hasPackets && c.datagramSendBacklog() == 0 {
+			// CONNECT-UDP fountain S2C: keep bursting while CC allows even if ACKs are queued.
+			if !(c.config.EnableDatagrams && (sendMode == ackhandler.SendAny || sendMode == ackhandler.SendPacingLimited)) {
+				c.pacingDeadline = deadlineSendImmediately
+				return nil
+			}
 		}
 
 		ecn = nextECN
@@ -2875,6 +2905,11 @@ func (c *Conn) maxPacketSize() protocol.ByteCount {
 		// If the server sends a max_udp_payload_size that's smaller than this size, we can ignore this:
 		// Apparently the server still processed the (fully padded) Initial packet anyway.
 		if c.perspective == protocol.PerspectiveClient {
+			return protocol.ByteCount(c.config.InitialPacketSize)
+		}
+		// CONNECT-UDP/IP servers configure InitialPacketSize (1420+); use it for DATAGRAM coalesce
+		// instead of stock 1200 B until path MTU discovery arms (loopback synth fountain S2C).
+		if c.config.EnableDatagrams && c.config.InitialPacketSize > protocol.MinInitialPacketSize {
 			return protocol.ByteCount(c.config.InitialPacketSize)
 		}
 		// On the server side, there's no downside to using 1200 bytes until we received the client's transport
@@ -3131,7 +3166,7 @@ func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte) error {
 		attachPooledOutgoingPayload(f, bufPtr)
 	}
 
-	err := c.datagramQueue.AddNoWake(f)
+	err := c.datagramQueue.Add(f)
 	if err != nil {
 		if f.OutgoingPayloadRelease != nil {
 			releaseOutgoingDatagramPayload(f)
@@ -3183,6 +3218,18 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 		return nil, errors.New("datagram support disabled")
 	}
 	return c.datagramQueue.Receive(ctx)
+}
+
+func (c *Conn) datagramSendBacklog() int {
+	if !c.config.EnableDatagrams || c.datagramQueue == nil {
+		return 0
+	}
+	return c.datagramQueue.SendLen()
+}
+
+// DatagramSendBacklog returns queued outgoing DATAGRAM frames awaiting pack/send.
+func (c *Conn) DatagramSendBacklog() int {
+	return c.datagramSendBacklog()
 }
 
 // TryReceiveDatagram returns immediately with the next received QUIC DATAGRAM payload when

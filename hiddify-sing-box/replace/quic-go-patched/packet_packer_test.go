@@ -668,6 +668,31 @@ func TestPackDatagramFrames(t *testing.T) {
 	require.NotEmpty(t, buffer.Data)
 }
 
+func TestPackMultipleDatagramFramesCoalesce(t *testing.T) {
+	const maxPacketSize = 1200
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveServer)
+
+	tp.ackFramer.EXPECT().GetAckFrame(protocol.Encryption1RTT, gomock.Any(), true)
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42), protocol.PacketNumberLen2)
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(0x42))
+	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, tp.datagramQueue.Add(&wire.DatagramFrame{
+			DataLenPresent: true,
+			Data:           bytes.Repeat([]byte{byte('a' + i)}, 200),
+		}))
+	}
+	tp.framer.EXPECT().HasData()
+	buffer := getPacketBuffer()
+	p, err := tp.packer.AppendPacket(buffer, maxPacketSize, monotime.Now(), protocol.Version1)
+	require.NoError(t, err)
+	require.Len(t, p.Frames, 3)
+	require.Nil(t, tp.datagramQueue.Peek())
+	require.NotEmpty(t, buffer.Data)
+}
+
 func TestPackLargeDatagramFrame(t *testing.T) {
 	// If ACK co-packing is the only reason a DATAGRAM doesn't fit, the packeter
 	// should prioritize DATAGRAM and defer ACK to a later packet.

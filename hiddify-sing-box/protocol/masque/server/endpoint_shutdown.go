@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	qmasque "github.com/quic-go/masque-go"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	btls "github.com/sagernet/sing-box/common/tls"
 )
 
@@ -13,7 +13,7 @@ const defaultMasqueShutdownTimeout = 8 * time.Second
 // ShutdownMasqueEndpointConfig tears down listeners started by LaunchMasqueStack or connect-stream-only path.
 type ShutdownMasqueEndpointConfig struct {
 	Stack           *MasqueStack
-	UDPProxy        *qmasque.Proxy
+	UDPProxy        *cudprelay.Proxy
 	SingServerTLS   btls.ServerConfig
 	ShutdownTimeout time.Duration
 }

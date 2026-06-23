@@ -1,6 +1,7 @@
 package h2
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -271,6 +272,49 @@ func appendDatagramCapsuleWireBytes(dst []byte, udpPayload []byte) []byte {
 	dst = quicvarint.Append(quicvarint.Append(dst, uint64(CapsuleTypeDatagram)), uint64(dgramLen))
 	dst = append(dst, 0)
 	return append(dst, udpPayload...)
+}
+
+// Wire prefix for synth bench 512 B UDP payload (RFC9297 DATAGRAM ctx 0); suffix is raw UDP bytes.
+var datagramCapsule512Prefix = func() []byte {
+	wire := appendDatagramCapsuleWireBytes(nil, make([]byte, 512))
+	return append([]byte(nil), wire[:len(wire)-512]...)
+}()
+
+// DatagramCapsule512WireLen is the on-wire byte length of one 512 B UDP DATAGRAM capsule (synth bench shape).
+var DatagramCapsule512WireLen = len(datagramCapsule512Prefix) + 512
+
+// TryConsumeDatagramCapsule512Wire fast-parses a fixed-size 512 B UDP DATAGRAM capsule (ctx 0).
+// Returns consumed=0 when wire does not match the synth bench shape — caller falls back to generic parse.
+func TryConsumeDatagramCapsule512Wire(wire []byte) (udpPayload []byte, consumed int, ok bool) {
+	if len(wire) < DatagramCapsule512WireLen {
+		return nil, 0, false
+	}
+	if wire[0] != 0 || wire[3] != 0 {
+		return nil, 0, false
+	}
+	if !bytes.Equal(wire[:len(datagramCapsule512Prefix)], datagramCapsule512Prefix) {
+		return nil, 0, false
+	}
+	off := len(datagramCapsule512Prefix)
+	return wire[off : off+512], DatagramCapsule512WireLen, true
+}
+
+// AppendDatagramCapsuleBuffer appends one RFC 9297 DATAGRAM capsule into dst without WriteAll scratch.
+func AppendDatagramCapsuleBuffer(dst *bytes.Buffer, udpPayload []byte) {
+	if dst == nil {
+		return
+	}
+	if len(udpPayload) == 512 {
+		dst.Grow(len(datagramCapsule512Prefix) + 512)
+		dst.Write(datagramCapsule512Prefix)
+		dst.Write(udpPayload)
+		return
+	}
+	dgramLen := 1 + len(udpPayload)
+	hdrLen := quicvarint.Len(uint64(CapsuleTypeDatagram)) + quicvarint.Len(uint64(dgramLen))
+	dst.Grow(hdrLen + dgramLen)
+	wire := appendDatagramCapsuleWireBytes(dst.AvailableBuffer()[:0], udpPayload)
+	dst.Write(wire)
 }
 
 // AppendUDPPayloadAsDatagramCapsules splits a UDP payload into DATAGRAM capsules without flushing.

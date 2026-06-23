@@ -5,6 +5,8 @@ import (
 	"net"
 	"testing"
 
+	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing-box/option"
 )
@@ -22,7 +24,7 @@ var benchParseHTTPDatagramSample = []byte{0x00, 0x01, 0x02, 0x03}
 // BenchmarkConnectUDPDatagramSplitWrite profiles CONNECT-UDP H2 split WriteTo hot path.
 func BenchmarkConnectUDPDatagramSplitWrite(b *testing.B) {
 	stub := &stubPacketConn{failAfterNWrites: -1}
-	conn := NewDatagramSplitConn(stub, DatagramSplitOptions{
+	conn := cudpsplit.NewDatagramSplitConn(stub, cudpsplit.DatagramSplitOptions{
 		MaxPayload: 1200,
 		HTTPLayer:  option.MasqueHTTPLayerH2,
 	})
@@ -44,7 +46,7 @@ func BenchmarkConnectUDPParseHTTPDatagramUDP(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, ok, err := ParseHTTPDatagramUDP(sample); !ok || err != nil {
+		if _, ok, err := cudpframe.ParseHTTPDatagramUDP(sample); !ok || err != nil {
 			b.Fatalf("parse: ok=%v err=%v", ok, err)
 		}
 	}
@@ -67,7 +69,7 @@ func assertConnectUDPUnitCPUBudget(t *testing.T, name string, bench func(*testin
 func TestConnectUDPDatagramSplitCPUBudget(t *testing.T) {
 	assertConnectUDPUnitCPUBudget(t, "DatagramSplitWrite", func(b *testing.B) {
 		stub := &stubPacketConn{failAfterNWrites: -1}
-		conn := NewDatagramSplitConn(stub, DatagramSplitOptions{
+		conn := cudpsplit.NewDatagramSplitConn(stub, cudpsplit.DatagramSplitOptions{
 			MaxPayload: 1200,
 			HTTPLayer:  option.MasqueHTTPLayerH2,
 		})
@@ -89,7 +91,7 @@ func TestConnectUDPParseHTTPDatagramCPUBudget(t *testing.T) {
 	assertConnectUDPUnitCPUBudget(t, "ParseHTTPDatagramUDP", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, ok, err := ParseHTTPDatagramUDP(sample); !ok || err != nil {
+			if _, ok, err := cudpframe.ParseHTTPDatagramUDP(sample); !ok || err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -137,10 +139,40 @@ func TestConnectUDPH2CapsuleScanCPUBudget(t *testing.T) {
 				if inner == nil {
 					continue
 				}
-				if _, ok, perr := ParseHTTPDatagramUDP(inner); !ok || perr != nil {
+				if _, ok, perr := cudpframe.ParseHTTPDatagramUDP(inner); !ok || perr != nil {
 					b.Fatal(perr)
 				}
 			}
 		}
 	}, capsuleScanMaxNsPerB, int64(datagramSplitBenchPayloadLen))
+}
+
+// TestConnectUDPH2Capsule512FastScanCPUBudget locks fixed-stride 512 B scan vs generic ParseNext.
+func TestConnectUDPH2Capsule512FastScanCPUBudget(t *testing.T) {
+	payload := make([]byte, datagramSplitBenchPayloadLen)
+	var wire bytes.Buffer
+	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+		t.Fatal(err)
+	}
+	batch := wire.Bytes()
+	if len(batch) != h2c.DatagramCapsule512WireLen {
+		t.Fatalf("unexpected wire len: got %d want %d", len(batch), h2c.DatagramCapsule512WireLen)
+	}
+	assertConnectUDPUnitCPUBudget(t, "H2Capsule512FastScan", func(b *testing.B) {
+		b.SetBytes(int64(len(payload)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			buf := batch
+			for len(buf) > 0 {
+				udp, n, ok := h2c.TryConsumeDatagramCapsule512Wire(buf)
+				if !ok || n == 0 {
+					b.Fatal("fast scan miss on synth wire")
+				}
+				if len(udp) != len(payload) {
+					b.Fatalf("udp len %d want %d", len(udp), len(payload))
+				}
+				buf = buf[n:]
+			}
+		}
+	}, capsuleScanMaxNsPerB/2, int64(datagramSplitBenchPayloadLen))
 }

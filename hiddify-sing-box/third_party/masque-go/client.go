@@ -70,6 +70,25 @@ func (c *Client) DialAddr(ctx context.Context, proxyTemplate *uritemplate.Templa
 	return c.dial(ctx, str, masqueAddr{target})
 }
 
+// DialAddrStream opens CONNECT-UDP and returns the HTTP/3 request stream for external PacketConn wrapping.
+func (c *Client) DialAddrStream(ctx context.Context, proxyTemplate *uritemplate.Template, target string) (*http3.RequestStream, net.Addr, net.Addr, *http.Response, error) {
+	if proxyTemplate == nil {
+		return nil, nil, nil, nil, errors.New("masque: CONNECT-UDP URI template is not configured")
+	}
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("failed to parse target: %w", err)
+	}
+	str, err := proxyTemplate.Expand(uritemplate.Values{
+		uriTemplateTargetHost: uritemplate.String(host),
+		uriTemplateTargetPort: uritemplate.String(port),
+	})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("masque: failed to expand Template: %w", err)
+	}
+	return c.dialStream(ctx, str, masqueAddr{target})
+}
+
 // Dial dials a proxied connection to a target server.
 func (c *Client) Dial(ctx context.Context, proxyTemplate *uritemplate.Template, raddr *net.UDPAddr) (net.PacketConn, *http.Response, error) {
 	if proxyTemplate == nil {
@@ -85,33 +104,33 @@ func (c *Client) Dial(ctx context.Context, proxyTemplate *uritemplate.Template, 
 	return c.dial(ctx, str, raddr)
 }
 
-func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Addr) (net.PacketConn, *http.Response, error) {
+func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr net.Addr) (*http3.RequestStream, net.Addr, net.Addr, *http.Response, error) {
 	u, err := url.Parse(expandedTemplate)
 	if err != nil {
-		return nil, nil, fmt.Errorf("masque: failed to parse URI: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("masque: failed to parse URI: %w", err)
 	}
 
 	if err := c.ensureConnected(ctx, u.Host); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	select {
 	case <-ctx.Done():
-		return nil, nil, context.Cause(ctx)
+		return nil, nil, nil, nil, context.Cause(ctx)
 	case <-c.clientConn.Context().Done():
-		return nil, nil, context.Cause(c.clientConn.Context())
+		return nil, nil, nil, nil, context.Cause(c.clientConn.Context())
 	case <-c.clientConn.ReceivedSettings():
 	}
 	settings := c.clientConn.Settings()
 	if !settings.EnableExtendedConnect {
-		return nil, nil, errors.New("masque: server didn't enable Extended CONNECT")
+		return nil, nil, nil, nil, errors.New("masque: server didn't enable Extended CONNECT")
 	}
 	if !settings.EnableDatagrams {
-		return nil, nil, errors.New("masque: server didn't enable Datagrams")
+		return nil, nil, nil, nil, errors.New("masque: server didn't enable Datagrams")
 	}
 
 	rstr, err := c.openRequestStreamWithReconnect(ctx, u.Host)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
 	if t := strings.TrimSpace(c.BearerToken); t != "" {
@@ -124,25 +143,22 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 		Header: hdr,
 		URL:    u,
 	}); err != nil {
-		return nil, nil, fmt.Errorf("masque: failed to send request: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("masque: failed to send request: %w", err)
 	}
 	rsp, err := rstr.ReadResponse()
 	if err != nil {
-		return nil, nil, fmt.Errorf("masque: failed to read response: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("masque: failed to read response: %w", err)
 	}
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
-		return nil, rsp, fmt.Errorf("masque: server responded with %d", rsp.StatusCode)
+		return nil, nil, nil, rsp, fmt.Errorf("masque: server responded with %d", rsp.StatusCode)
 	}
 
 	if dialUDPTestAfterSuccessfulCONNECTResponse != nil {
 		dialUDPTestAfterSuccessfulCONNECTResponse(ctx)
 	}
-	// Post-handshake cancel gate: do not hand out CONNECT-UDP if the dial ctx was canceled
-	// during ReadResponse/handshake (parity with HTTP/2 CONNECT-UDP/connect-ip DialHTTP2 and
-	// connect-ip Dial over HTTP/3).
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
 		_ = rstr.Close()
-		return nil, rsp, ctxErr
+		return nil, nil, nil, rsp, ctxErr
 	}
 
 	if _, udp := raddr.(*net.UDPAddr); !udp {
@@ -151,7 +167,16 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 		}
 	}
 
-	return newProxiedConn(rstr, masqueAddr{c.conn.LocalAddr().String()}, raddr), rsp, nil
+	local := masqueAddr{c.conn.LocalAddr().String()}
+	return rstr, local, raddr, rsp, nil
+}
+
+func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Addr) (net.PacketConn, *http.Response, error) {
+	rstr, local, remote, rsp, err := c.dialStream(ctx, expandedTemplate, raddr)
+	if err != nil {
+		return nil, rsp, err
+	}
+	return newProxiedConn(rstr, local, remote), rsp, nil
 }
 
 // Extract the Proxy-Status next-hop value as a UDPAddr.

@@ -54,12 +54,21 @@ const (
 	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
 	connectUDPSynthParityMinRatio      = 0.85  // H3/H2 paired gate
 	connectUDPSynthProdBenchDuration   = 2 * time.Second
+	// connectUDPSynthMaxLossPct matches docker BENCH_UDP_MAX_LOSS_PCT (paced probe gate).
+	connectUDPSynthMaxLossPct = 5.0
+	// connectUDPSynthUploadWriteStall is max wait per WriteTo in stability gates (fail fast, not 60s test timeout).
+	connectUDPSynthUploadWriteStall = 500 * time.Millisecond
+	// connectUDPSynthStabilityWallSlack is extra wall time allowed beyond bench duration for teardown.
+	connectUDPSynthStabilityWallSlack = 3 * time.Second
+	// connectUDPEchoDownloadPrimeDepth: in-flight cap for unlimited bg WriteTo + prime depth (pipeline localize shape).
+	connectUDPEchoDownloadPrimeDepth = 128
 )
 
 // Legacy docker paced probe band (BENCH_UDP_TARGET_MBIT=8) — localize/regression only, not GATE DoD.
+// Compensated pacing (PaceSleepUntil) targets sink goodput ≈ target; floor uses MinPacedGoodputMbit.
 const (
-	connectUDPLegacyPacedMinMbps = 3.5
-	connectUDPLegacyPacedMaxMbps = 5.5
+	connectUDPLegacyPacedMinMbps = 7.0
+	connectUDPLegacyPacedMaxMbps = 8.5
 )
 
 // CPU budget gates (ns/byte on fixed 4 MiB bench via testing.Benchmark). Update AGENTS.md after each run.

@@ -309,6 +309,17 @@ func (s *Stream) SendDatagramNoWake(b []byte) error {
 	return s.datagramStream.SendDatagram(b)
 }
 
+// SendDatagramFrameNoWake enqueues a fully formatted HTTP/3 DATAGRAM frame without per-packet wake.
+func (s *Stream) SendDatagramFrameNoWake(data []byte, release func()) error {
+	if s == nil || s.conn == nil {
+		if release != nil {
+			release()
+		}
+		return errors.New("http3: nil stream")
+	}
+	return s.conn.enqueueOutgoingDatagramFrameNoWake(data, release)
+}
+
 // SendProxiedIPDatagram queues CONNECT-IP egress (context prefix + IP) with one pooled-buffer copy.
 func (s *Stream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
 	if s == nil || s.conn == nil {
@@ -342,6 +353,14 @@ func (s *Stream) FlushProxiedIPDatagramSend() {
 		return
 	}
 	s.conn.flushDatagramSendWake()
+}
+
+// DatagramSendBacklog returns queued outgoing QUIC DATAGRAM frames on the HTTP/3 connection.
+func (s *Stream) DatagramSendBacklog() int {
+	if s == nil || s.conn == nil {
+		return 0
+	}
+	return s.conn.DatagramSendBacklog()
 }
 
 func (s *Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -477,6 +496,11 @@ func (s *RequestStream) SetDeadline(t time.Time) error {
 // as the server might drop datagrams which it can't associate with an existing request.
 func (s *RequestStream) SendDatagram(b []byte) error {
 	return s.str.SendDatagram(b)
+}
+
+// SendDatagramNoWake enqueues an HTTP Datagram without per-packet QUIC send wake.
+func (s *RequestStream) SendDatagramNoWake(b []byte) error {
+	return s.str.SendDatagramNoWake(b)
 }
 
 // SendProxiedIPDatagram queues CONNECT-IP egress with one pooled-buffer copy.

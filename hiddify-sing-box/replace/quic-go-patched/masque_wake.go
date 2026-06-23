@@ -550,10 +550,15 @@ func MasqueWakeConnSendDatagramCoalesced(c *Conn) {
 	if c == nil {
 		return
 	}
-	c.scheduleSending()
 	if !c.masqueDatagramWakeCoalesced.CompareAndSwap(false, true) {
+		// CONNECT-UDP fountain may flush multiple relay batches before sendPackets runs;
+		// do not drop schedule when DATAGRAM backlog still has frames.
+		if c.config.EnableDatagrams && c.datagramSendBacklog() > 0 {
+			c.scheduleSending()
+		}
 		return
 	}
+	c.scheduleSending()
 	if masqueWakeConnSendHook != nil {
 		masqueWakeConnSendHook()
 	}
