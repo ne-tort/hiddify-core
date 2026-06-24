@@ -1,3 +1,5 @@
+//go:build masque_ref
+
 package masque
 
 import (
@@ -21,14 +23,10 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-const (
-	uriTemplateTargetHost = "target_host"
-	uriTemplateTargetPort = "target_port"
-)
-
 const maxUDPPayloadSize = 1500
 const sampledOversizeLogEvery = 65536
 const proxyConnDrainProbeMaxSkip = 64
+const proxyConnTryDrainMax = 32
 const transientPressureBackoffBase = 50 * time.Microsecond
 const transientPressureBackoffNoSleepUntil = 2
 const transientPressureBackoffMaxShift = 4
@@ -54,56 +52,6 @@ func tuneUDPSocketBuffers(conn *net.UDPConn) {
 }
 
 var contextIDZero = quicvarint.Append([]byte{}, 0)
-var oversizedDatagramDropTotal atomic.Uint64
-var oversizedUDPPacketDropTotal atomic.Uint64
-var transientUDPSendDropTotal atomic.Uint64
-var transientUDPReadDropTotal atomic.Uint64
-var transientHTTPDatagramSendDropTotal atomic.Uint64
-var transientHTTPDatagramReceiveDropTotal atomic.Uint64
-var oversizedHTTPDatagramSendDropTotal atomic.Uint64
-var unknownContextHTTPDatagramDropTotal atomic.Uint64
-var malformedHTTPDatagramDropTotal atomic.Uint64
-var transientUDPSendTailDropTotal atomic.Uint64
-
-// TransientUDPSendDropTotal returns C2S UDP egress drops after retry exhaustion (tests/ops).
-func TransientUDPSendDropTotal() uint64 {
-	return transientUDPSendDropTotal.Load()
-}
-
-// TransientUDPSendTailDropTotal returns batched tail drops on sustained send pressure (should stay 0).
-func TransientUDPSendTailDropTotal() uint64 {
-	return transientUDPSendTailDropTotal.Load()
-}
-
-// TransientHTTPDatagramSendDropTotal returns UDP→HTTP datagram send drops after retry exhaustion.
-func TransientHTTPDatagramSendDropTotal() uint64 {
-	return transientHTTPDatagramSendDropTotal.Load()
-}
-
-// TransientHTTPDatagramReceiveDropTotal returns HTTP datagram receive drops after retry exhaustion.
-func TransientHTTPDatagramReceiveDropTotal() uint64 {
-	return transientHTTPDatagramReceiveDropTotal.Load()
-}
-
-// TransientUDPReadDropTotal returns UDP ingress drops before HTTP encapsulation.
-func TransientUDPReadDropTotal() uint64 {
-	return transientUDPReadDropTotal.Load()
-}
-
-// OversizedHTTPDatagramSendDropTotal returns QUIC datagram size limit drops on send.
-func OversizedHTTPDatagramSendDropTotal() uint64 {
-	return oversizedHTTPDatagramSendDropTotal.Load()
-}
-
-// UnknownContextHTTPDatagramDropTotal returns unknown-context HTTP datagram drops.
-func UnknownContextHTTPDatagramDropTotal() uint64 {
-	return unknownContextHTTPDatagramDropTotal.Load()
-}
-
-// MalformedHTTPDatagramDropTotal returns malformed HTTP datagram drops.
-func MalformedHTTPDatagramDropTotal() uint64 {
-	return malformedHTTPDatagramDropTotal.Load()
-}
 
 type udpPayloadExtractResult uint8
 
@@ -877,7 +825,7 @@ func (s *Proxy) proxyConnSend(conn *net.UDPConn, str proxyDatagramReceiveStream)
 		forwardable := 0
 		written := 0
 		sendPressureNoProgress := false
-		for i := 0; i < proxiedConnPrefetchMax; i++ {
+		for i := 0; i < proxyConnTryDrainMax; i++ {
 			raw, ok := drainer.TryReceiveDatagram()
 			if !ok {
 				break

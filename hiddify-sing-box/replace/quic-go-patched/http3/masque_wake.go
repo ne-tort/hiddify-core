@@ -21,6 +21,10 @@ func masqueWakeSendOnReceiveRead() bool {
 	return masqueHTTP3WakeSendOnReceiveReadEnabled
 }
 
+func masqueWakeBidiConnOnReceiveRead() bool {
+	return strings.TrimSpace(os.Getenv(envBidiConnWake)) == "1"
+}
+
 func masqueWakeSendAfterReceiveRead(str *Stream, n int) {
 	masqueWakeSendAfterBidiProgress(str, n)
 }

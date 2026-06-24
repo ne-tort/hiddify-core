@@ -1,22 +1,51 @@
+//go:build masque_ref
+
 package masque
 
-// R1 masque-go (quic-go official CONNECT-UDP) reference benches.
-// Same in-process harness, same client (DialH3Production), only server relay differs.
-// Primary leg: S2C fountain download (UDP flood after prime).
+// R1 masque-go (third_party fork Proxy) reference benches — require -tags masque_ref.
 
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"testing"
 	"time"
 
+	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
+	"github.com/yosida95/uritemplate/v3"
 )
+
+// registerMasqueGoRefUDPProxyHandler wires third_party masque-go Proxy (per-packet SendDatagram S2C).
+func registerMasqueGoRefUDPProxyHandler(t testing.TB, mux *http.ServeMux, proxyPort int) {
+	t.Helper()
+	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
+	udpTemplate, err := uritemplate.New(templateRaw)
+	if err != nil {
+		t.Fatalf("udp template: %v", err)
+	}
+	var udpProxy qmasque.Proxy
+	t.Cleanup(func() { _ = udpProxy.Close() })
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+		req, err := qmasque.ParseRequest(r, udpTemplate)
+		if err != nil {
+			if pe, ok := err.(*qmasque.RequestParseError); ok {
+				w.WriteHeader(pe.HTTPStatus)
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := udpProxy.Proxy(w, req); err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	})
+}
 
 type connectUDPH3FountainBenchRow struct {
 	label    string
@@ -24,7 +53,6 @@ type connectUDPH3FountainBenchRow struct {
 }
 
 // TestBenchConnectUDPH3FountainMasqueGoRefMatrix compares our connectudp/relay vs third_party masque-go Proxy (R1).
-// Each variant runs in its own subtest so in-process proxies shut down before the next row (~4s total).
 func TestBenchConnectUDPH3FountainMasqueGoRefMatrix(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	payload := connectudp.DefaultBenchUDPPayloadLen
@@ -115,4 +143,18 @@ func TestBenchConnectUDPH3EchoRelayVsRef(t *testing.T) {
 	ours := runEcho(registerMasqueUDPProxyHandler)
 	ref := runEcho(registerMasqueGoRefUDPProxyHandler)
 	t.Logf("BENCH h3 echo ours-relay=%.1f ref-masque-go=%.1f ratio=%.2f", ours, ref, ours/ref)
+}
+
+// TestLocalizeConnectUDPH3FountainRelayVsRef compares our relay S2C path vs masque-go ref proxy.
+func TestLocalizeConnectUDPH3FountainRelayVsRef(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	_, ours, err := benchConnectUDPH3DirectDownloadFountainWithProxy(t, registerMasqueUDPProxyHandler, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("ours fountain: %v", err)
+	}
+	_, ref, err := benchConnectUDPH3DirectDownloadFountainWithProxy(t, registerMasqueGoRefUDPProxyHandler, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("ref fountain: %v", err)
+	}
+	t.Logf("LOCALIZE h3 fountain relay ours=%.1f ref=%.1f ratio=%.2f", ours, ref, ours/ref)
 }

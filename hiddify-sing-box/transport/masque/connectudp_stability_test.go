@@ -123,7 +123,7 @@ func TestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
 	dropsBefore := connectudp.SnapshotDataplaneDrops()
 
 	var probeN uint32
-	probe := func(targetMbit float64) connectudp.SequencedStats {
+	probe := func(targetMbit float64) (connectudp.SequencedStats, float64) {
 		probeN++
 		runID := baseRunID | probeN
 		seqSink.Reset(runID)
@@ -143,9 +143,18 @@ func TestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
 				connectudp.PaceSleepUntil(&paceSlot, payloadLen, targetMbit)
 			}
 		}
+		sendSec := time.Since(wallStart).Seconds()
+		if sendSec <= 0 {
+			sendSec = connectUDPSynthProdBenchDuration.Seconds()
+		}
 		connectudp.FlushPacketConnWrites(pkt)
+		if err := connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout); err != nil {
+			t.Fatalf("burst probe %.1f Mbit/s upload drain: %v", targetMbit, err)
+		}
 		time.Sleep(500 * time.Millisecond)
-		return seqSink.Analyze(sent, payloadLen)
+		st := seqSink.Analyze(sent, payloadLen)
+		achieved := connectudp.BurstSinkGoodputMbit(st.RxPkts, payloadLen, sendSec)
+		return st, achieved
 	}
 
 	pass := func(st connectudp.SequencedStats) bool {
@@ -157,13 +166,15 @@ func TestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
 	var bestMbps float64
 	for step := 0; step < 9; step++ {
 		mid := (lo + hi) / 2
-		st := probe(mid)
-		t.Logf("burst zero-loss search %d: target=%.1f Mbps loss=%.2f%% dup=%.2f%% rx=%d/%d excess=%d",
-			step+1, mid, st.LossPct, st.DupPct, st.RxPkts, st.SentPkts, st.ExcessPkts)
+		st, achieved := probe(mid)
+		t.Logf("burst zero-loss search %d: target=%.1f achieved=%.1f Mbps loss=%.2f%% dup=%.2f%% rx=%d/%d excess=%d",
+			step+1, mid, achieved, st.LossPct, st.DupPct, st.RxPkts, st.SentPkts, st.ExcessPkts)
 		if pass(st) {
 			lo = mid
-			best = st
-			bestMbps = mid
+			if achieved > bestMbps {
+				bestMbps = achieved
+				best = st
+			}
 		} else {
 			hi = mid
 		}
@@ -194,31 +205,21 @@ func TestGATEConnectUDPH3SynthStabilityUploadSustained(t *testing.T) {
 		Port: uint16(sinkAddr.Port),
 	})
 
-	payload := make([]byte, payloadLen)
-	for i := range payload {
-		payload[i] = byte(i % 251)
-	}
-
 	wallStart := time.Now()
 	benchDur := connectUDPSynthProdBenchDuration
-	deadline := time.Now().Add(benchDur)
-	var sent int
-	for time.Now().Before(deadline) {
-		if err := writeToWithStallGuard(t, pkt, payload, sinkAddr, connectUDPSynthUploadWriteStall); err != nil {
-			t.Fatalf("sustained upload stalled after %d pkts in %v: %v",
-				sent, time.Since(wallStart), err)
-		}
-		sent++
+	bytes, mbps, err := benchConnectUDPPacketUpload(t, pkt, sinkAddr, benchDur, 0, payloadLen)
+	if err != nil {
+		t.Fatalf("sustained upload failed after %v: %v", time.Since(wallStart), err)
 	}
 	wall := time.Since(wallStart)
 	if wall > benchDur+connectUDPSynthStabilityWallSlack {
 		t.Fatalf("sustained upload wall %v > bench %v + slack %v", wall, benchDur, connectUDPSynthStabilityWallSlack)
 	}
-	if sent == 0 {
-		t.Fatal("sustained upload sent 0 packets")
+	if bytes == 0 {
+		t.Fatal("sustained upload sent 0 bytes")
 	}
 	time.Sleep(50 * time.Millisecond)
-	t.Logf("sustained upload: sent=%d pkts rx_bytes=%d (discard sink, hang check only)", sent, rxBytes.Load())
+	t.Logf("sustained upload: bytes=%d mbps=%.1f rx_bytes=%d (discard sink, hang check only)", bytes, mbps, rxBytes.Load())
 }
 
 // TestGATEConnectUDPH3SynthIntegrityEcho verifies sequenced round-trip on echo path (no loss at single-packet scale).

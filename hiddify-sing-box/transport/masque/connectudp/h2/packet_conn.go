@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,8 +33,11 @@ const (
 	h2UploadWriteInterruptDeadline = 100 * time.Millisecond
 	// h2UploadCoalesceDuplexBytes batches less on C2S when S2C ReadFrom is active (H2 bidi interleave).
 	h2UploadCoalesceDuplexBytes = 32 * 1024
+	// h2UploadCoalesceBulkBytesDefault is prod upload-leg / bulk coalesce ceiling (Docker KPI parity).
+	h2UploadCoalesceBulkBytesDefault = 64 * 1024
 	// h2UploadCoalesceThreshold is the upload-only coalesce ceiling (128 KiB — balance pipe block vs flush rate).
 	h2UploadCoalesceThreshold = 128 * 1024
+	envH2UploadCoalesceBulkBytes = "MASQUE_H2_UPLOAD_COALESCE_BULK_BYTES"
 	// h2UploadBulkEnterGap: WriteTo closer than this counts toward bulk coalesce (echo flood / upload-only).
 	h2UploadBulkEnterGap = 50 * time.Microsecond
 	// h2UploadBulkExitGap: spaced WriteTo in duplex leaves bulk (pipeline-1 / TUN RTT).
@@ -43,18 +48,39 @@ const (
 	// h2UploadBulkEnterHits: consecutive rapid WriteTo before bulk coalesce arms.
 	h2UploadBulkEnterHits = 4
 )
+
+var (
+	h2UploadCoalesceBulkBytes     = h2UploadCoalesceBulkBytesDefault
+	h2UploadCoalesceBulkBytesInit sync.Once
+)
+
+func h2UploadCoalesceBulkBytesConfigured() int {
+	h2UploadCoalesceBulkBytesInit.Do(func() {
+		if v := strings.TrimSpace(os.Getenv(envH2UploadCoalesceBulkBytes)); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= h2UploadCoalesceDuplexBytes {
+				h2UploadCoalesceBulkBytes = n
+			}
+		}
+	})
+	return h2UploadCoalesceBulkBytes
+}
+
 type PacketConnConfig struct {
-	ReqPipeR      *io.PipeReader
+	ReqPipeR      io.Closer
 	ReqBody       io.WriteCloser
 	Resp          *http.Response
 	LocalAddr     net.Addr
 	RemoteAddr    net.Addr
 	AsyncDownlink bool // background body reader; caller may RunDownlinkPump
+	UploadOnly    bool // C2S leg; drain response body (asymmetric upload pool)
+	LegProfile    LegProfile
+	UploadWireAck h2c.ConnectUploadWireAck
+	OnClose       func()
 }
 
 // PacketConn is the client CONNECT-UDP net.PacketConn over HTTP/2 DATAGRAM capsules.
 type PacketConn struct {
-	reqPipeR *io.PipeReader
+	reqPipeR io.Closer
 	reqBody  io.WriteCloser
 	resp     *http.Response
 
@@ -72,6 +98,8 @@ type PacketConn struct {
 	downlinkReady sync.Cond
 
 	asyncDownlink   bool
+	uploadOnly      bool
+	legProfile      LegProfile
 	downlinkPumpErr error
 	downlinkPumpDone bool
 
@@ -88,6 +116,7 @@ type PacketConn struct {
 
 	deadlines    split.ConnDeadlines
 	closed       atomic.Bool
+	closeOnce    sync.Once
 	duplexActive atomic.Bool
 	// payloadWritePending: last WriteTo carried UDP payload — next ReadFrom uses sync S2C (echo/interactive).
 	payloadWritePending atomic.Bool
@@ -101,8 +130,12 @@ type PacketConn struct {
 	primeOnce sync.Once
 	primeErr  error
 
+	uploadWireAck       h2c.ConnectUploadWireAck
+	uploadWireCommitted atomic.Int64
+
 	localAddr  net.Addr
 	remoteAddr net.Addr
+	onClose    func()
 }
 
 // NewPacketConn builds a CONNECT-UDP packet conn. When AsyncDownlink is set, call RunDownlinkPump.
@@ -114,6 +147,10 @@ func NewPacketConn(cfg PacketConnConfig) *PacketConn {
 		localAddr:     cfg.LocalAddr,
 		remoteAddr:    cfg.RemoteAddr,
 		asyncDownlink: cfg.AsyncDownlink,
+		uploadOnly:    cfg.UploadOnly,
+		legProfile:    cfg.LegProfile,
+		uploadWireAck: cfg.UploadWireAck,
+		onClose:       cfg.OnClose,
 	}
 	c.downlinkReady.L = &c.readMu
 	return c
@@ -143,21 +180,32 @@ func (c *PacketConn) SetWriteDeadline(t time.Time) error {
 }
 
 func (c *PacketConn) Close() error {
-	if !c.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-	c.downlinkReady.Broadcast()
-	c.FlushC2SWrites()
-	if c.reqBody != nil {
-		_ = c.reqBody.Close()
-	}
-	if c.reqPipeR != nil {
-		_ = c.reqPipeR.Close()
-		c.reqPipeR = nil
-	}
-	if c.resp != nil && c.resp.Body != nil {
-		_ = c.resp.Body.Close()
-	}
+	c.closeOnce.Do(func() {
+		if c == nil {
+			return
+		}
+		c.closed.Store(true)
+		c.downlinkReady.Broadcast()
+		c.writeMu.Lock()
+		c.stopUploadFlushTimerLocked()
+		c.writeMu.Unlock()
+		c.FlushC2SWrites()
+		// Upload half: close writer then pipe reader (Extended CONNECT duplex teardown).
+		if c.reqBody != nil {
+			_ = c.reqBody.Close()
+		}
+		if c.reqPipeR != nil {
+			_ = c.reqPipeR.Close()
+			c.reqPipeR = nil
+		}
+		if c.resp != nil && c.resp.Body != nil {
+			_ = c.resp.Body.Close()
+		}
+		c.downlinkReady.Broadcast()
+		if c.onClose != nil {
+			c.onClose()
+		}
+	})
 	return nil
 }
 
@@ -174,6 +222,27 @@ func (c *PacketConn) FlushC2SWrites() {
 	}
 }
 
+func (c *PacketConn) AwaitUploadDrain(timeout time.Duration) error {
+	if c == nil || c.closed.Load() {
+		return nil
+	}
+	c.FlushC2SWrites()
+	if c.uploadWireAck == nil {
+		return nil
+	}
+	n := c.uploadWireCommitted.Load()
+	if n <= 0 {
+		return nil
+	}
+	return c.uploadWireAck.AwaitUploadWireSent(n, timeout)
+}
+
+func (c *PacketConn) noteUploadWireCommitted(n int) {
+	if c != nil && n > 0 {
+		c.uploadWireCommitted.Add(int64(n))
+	}
+}
+
 // RunDownlinkPump starts the background body reader (explicit / tests).
 func (c *PacketConn) RunDownlinkPump() {
 	c.startDownlinkPump()
@@ -184,6 +253,31 @@ func (c *PacketConn) ensureDownlinkPump() {
 		return
 	}
 	c.startDownlinkPump()
+}
+
+func (c *PacketConn) startUploadOnlyDrain() {
+	if c == nil || !c.uploadOnly {
+		return
+	}
+	c.pumpOnce.Do(func() {
+		go c.runUploadOnlyDrain()
+	})
+}
+
+func (c *PacketConn) runUploadOnlyDrain() {
+	readBuf := c.downlinkReadScratch()
+	for {
+		if c.closed.Load() {
+			return
+		}
+		nr, err := c.readResponseBodyChunk(context.Background(), readBuf)
+		if nr > 0 {
+			continue
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 func (c *PacketConn) startDownlinkPump() {
@@ -447,7 +541,7 @@ func (c *PacketConn) readResponseBodyChunk(ctx context.Context, p []byte) (int, 
 	}()
 	select {
 	case <-ctx.Done():
-		_ = c.Close()
+		// Do not Close() the whole PacketConn on read deadline — asymmetric upload leg survives.
 		got := <-ch
 		_ = got
 		if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
@@ -569,6 +663,22 @@ func (c *PacketConn) writeDeadlineContext() (context.Context, context.CancelFunc
 	return context.Background(), func() {}
 }
 
+func (c *PacketConn) uploadCoalesceThreshold() int {
+	if c != nil && c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() && c.bulkUpload {
+		return h2UploadCoalesceThreshold
+	}
+	if c != nil && c.duplexActive.Load() {
+		if c.bulkUpload {
+			return h2UploadCoalesceBulkBytesConfigured()
+		}
+		return h2UploadCoalesceDuplexBytes
+	}
+	if c != nil && c.bulkUpload {
+		return h2UploadCoalesceBulkBytesConfigured()
+	}
+	return h2UploadCoalesceBulkBytesConfigured()
+}
+
 func (c *PacketConn) writeUploadWireUnlocked(wire []byte) error {
 	if c == nil || c.reqBody == nil || len(wire) == 0 {
 		return nil
@@ -576,14 +686,20 @@ func (c *PacketConn) writeUploadWireUnlocked(wire []byte) error {
 	if c.deadlines.WriteTimeoutExceeded() {
 		return os.ErrDeadlineExceeded
 	}
+	var err error
 	if !c.uploadWriteNeedsInterrupt() {
-		return c.writeUploadWireSync(wire)
+		err = c.writeUploadWireSync(wire)
+	} else {
+		ctx, cancel := c.writeDeadlineContext()
+		defer cancel()
+		err = c.awaitWriteReqBody(ctx, func() error {
+			return c.writeUploadWireSync(wire)
+		})
 	}
-	ctx, cancel := c.writeDeadlineContext()
-	defer cancel()
-	return c.awaitWriteReqBody(ctx, func() error {
-		return c.writeUploadWireSync(wire)
-	})
+	if err == nil {
+		c.noteUploadWireCommitted(len(wire))
+	}
+	return err
 }
 
 func (c *PacketConn) awaitWriteReqBody(ctx context.Context, writeFn func() error) error {
@@ -607,23 +723,17 @@ func (c *PacketConn) awaitWriteReqBody(ctx context.Context, writeFn func() error
 	}
 }
 
-func (c *PacketConn) uploadCoalesceThreshold() int {
-	if c != nil && c.duplexActive.Load() {
-		return h2UploadCoalesceDuplexBytes
-	}
-	if c != nil && c.bulkUpload && !c.duplexActive.Load() {
-		return h2UploadCoalesceDuplexBytes
-	}
-	return h2UploadCoalesceThreshold
-}
-
 func (c *PacketConn) noteUploadArrivalLocked(now time.Time) {
+	enterHits := h2UploadBulkEnterHits
+	if c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() {
+		enterHits = 2 // sustained upload leg: arm 128 KiB coalesce soon after prime flush
+	}
 	if !c.lastUploadAt.IsZero() {
 		gap := now.Sub(c.lastUploadAt)
 		switch {
 		case gap <= h2UploadBulkEnterGap:
 			c.rapidUploadHits++
-			if c.rapidUploadHits >= h2UploadBulkEnterHits {
+			if c.rapidUploadHits >= enterHits {
 				c.bulkUpload = true
 			}
 		case gap >= h2UploadBulkExitGap:
@@ -657,12 +767,30 @@ func (c *PacketConn) flushUploadPendingForRead() error {
 	return nil
 }
 
+// markDuplexPeerActive arms upload coalesce when the peer leg is active (asymmetric echo).
+func (c *PacketConn) markDuplexPeerActive() {
+	if c == nil || c.closed.Load() {
+		return
+	}
+	c.duplexActive.Store(true)
+}
+
+func (c *AsymmetricPacketConn) wakeDownloadPumpForUpload() {
+	if pc, ok := c.download.(*PacketConn); ok && pc != nil && !pc.closed.Load() && pc.asyncDownlink {
+		pc.ensureDownlinkPump()
+	}
+}
+
 func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if c.uploadOnly {
+		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: upload-only stream")
+	}
 	if c.resp == nil || c.resp.Body == nil {
 		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
 	}
+	hadPayloadWrite := c.payloadWritePending.Load()
 	if c.asyncDownlink {
-		if c.payloadWritePending.Load() {
+		if hadPayloadWrite {
 			c.payloadWritePending.Store(false)
 		} else {
 			c.ensureDownlinkPump()
@@ -670,14 +798,17 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	} else if c.downlinkNeedsAsyncPump() {
 		c.ensureDownlinkPump()
 	}
-	c.duplexActive.Store(true)
-	c.writeMu.Lock()
-	c.bulkUpload = false
-	c.rapidUploadHits = 0
-	c.writesSinceRead = 0
-	c.writeMu.Unlock()
-	if err := c.flushUploadPendingForRead(); err != nil {
-		return 0, nil, err
+	// SOCKS UDP ASSOCIATE may block in ReadFrom before any downlink; do not arm duplex coalesce yet.
+	if hadPayloadWrite {
+		c.duplexActive.Store(true)
+		c.writeMu.Lock()
+		c.bulkUpload = false
+		c.rapidUploadHits = 0
+		c.writesSinceRead = 0
+		c.writeMu.Unlock()
+		if err := c.flushUploadPendingForRead(); err != nil {
+			return 0, nil, err
+		}
 	}
 	if c.closed.Load() {
 		return 0, nil, net.ErrClosed
@@ -703,6 +834,14 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			_ = c.Close()
 		}
 		return 0, nil, err
+	}
+	if n > 0 {
+		c.duplexActive.Store(true)
+		c.writeMu.Lock()
+		c.bulkUpload = false
+		c.rapidUploadHits = 0
+		c.writesSinceRead = 0
+		c.writeMu.Unlock()
 	}
 	return n, c.remoteAddr, nil
 }
@@ -766,6 +905,8 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	c.writesSinceRead++
 	var wire []byte
 	switch {
+	case c.uploadOnly && ((c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load()) || ThinClientConfigured()):
+		wire = c.takeUploadPendingLocked()
 	case c.uploadFlushInteractiveLocked():
 		wire = c.takeUploadPendingLocked()
 	case c.uploadPending.Len() >= c.uploadCoalesceThreshold():
@@ -774,8 +915,8 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		// First C2S datagram before ReadFrom (pipeline-1 / roundtrip @512B): never defer into ReadFrom flush.
 		wire = c.takeUploadPendingLocked()
 	default:
-		// Bulk coalesce timer: duplex interactive and upload-only bulk (HTTP/2 window + sink pacing).
-		if c.duplexActive.Load() || c.bulkUpload {
+		// Bulk coalesce timer: skip on upload leg profile (sync threshold flush only).
+		if !c.legProfile.uploadNoCoalesceTimer() && (c.duplexActive.Load() || c.bulkUpload) {
 			c.armUploadFlushTimerLocked()
 		}
 	}

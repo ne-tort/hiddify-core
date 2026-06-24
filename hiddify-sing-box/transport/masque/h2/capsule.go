@@ -283,6 +283,20 @@ var datagramCapsule512Prefix = func() []byte {
 // DatagramCapsule512WireLen is the on-wire byte length of one 512 B UDP DATAGRAM capsule (synth bench shape).
 var DatagramCapsule512WireLen = len(datagramCapsule512Prefix) + 512
 
+// CountLeadingDatagramCapsule512Wire counts consecutive synth-shape 512 B capsules at the start of wire.
+func CountLeadingDatagramCapsule512Wire(wire []byte) int {
+	n := 0
+	for {
+		_, consumed, ok := TryConsumeDatagramCapsule512Wire(wire)
+		if !ok || consumed == 0 {
+			break
+		}
+		n++
+		wire = wire[consumed:]
+	}
+	return n
+}
+
 // TryConsumeDatagramCapsule512Wire fast-parses a fixed-size 512 B UDP DATAGRAM capsule (ctx 0).
 // Returns consumed=0 when wire does not match the synth bench shape — caller falls back to generic parse.
 func TryConsumeDatagramCapsule512Wire(wire []byte) (udpPayload []byte, consumed int, ok bool) {

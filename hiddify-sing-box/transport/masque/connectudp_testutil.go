@@ -1,6 +1,47 @@
 package masque
 
-import "context"
+import (
+	"context"
+	"runtime"
+	"runtime/pprof"
+	"testing"
+	"time"
+)
+
+// trackConnectUDPGoroutines fails the test if goroutines remain after cleanup (selector/outbound close contract).
+func trackConnectUDPGoroutines(t *testing.T) {
+	t.Helper()
+	runtime.GC()
+	start := goroutineCount()
+	t.Cleanup(func() {
+		if t.Failed() {
+			return
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			runtime.GC()
+			if goroutineCount() <= start {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		end := goroutineCount()
+		if end > start {
+			t.Fatalf("connect-udp goroutine leak: start=%d end=%d\n%s", start, end, goroutineStacks())
+		}
+	})
+}
+
+func goroutineCount() int {
+	return pprof.Lookup("goroutine").Count()
+}
+
+func goroutineStacks() string {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return string(buf[:n])
+}
+
 
 // ConnectUDPTestFactory is the exported session factory for connectudp integration tests.
 type ConnectUDPTestFactory = CoreClientFactory

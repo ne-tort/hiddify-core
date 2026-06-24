@@ -15,26 +15,35 @@ import (
 
 const (
 	h3WriteQueueCap       = 2048
-	h3WriteHTTPBatchFlush = 8
+	h3WriteHTTPBatchFlush = 32
 	h3WriteCloseDrainWait = 2 * time.Second
+	h3WriteQueueWait      = 700 * time.Millisecond
 )
+
+var h3WriteBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 2048)
+		return &b
+	},
+}
 
 type h3DatagramFlushSender interface {
 	SendDatagramNoWake([]byte) error
 	FlushProxiedIPDatagramSend()
 }
 
-// h3C2SWriter async writeCh + NoWake batch N=8 + idle tail flush (kept stack 3cl+3ct).
+// h3C2SWriter mirrors third_party/masque-go proxiedConn C2S: async writeCh + NoWake batch + buf pool.
 type h3C2SWriter struct {
-	str          interface{ SendDatagram([]byte) error }
-	flushSender  h3DatagramFlushSender
-	writeCh      chan []byte
-	writeDone    chan struct{}
+	str         interface{ SendDatagram([]byte) error }
+	flushSender h3DatagramFlushSender
+	writeCh     chan []byte
+	writeDone   chan struct{}
 	writeOnce      sync.Once
 	writeCloseOnce sync.Once
+	pumpBusy       sync.WaitGroup
 	writeMu        sync.Mutex
-	pendingBatch int
-	writeErr     atomic.Pointer[error]
+	pendingBatch   int
+	writeErr       atomic.Pointer[error]
 }
 
 func newH3C2SWriter(str interface{ SendDatagram([]byte) error }) *h3C2SWriter {
@@ -63,102 +72,158 @@ func (w *h3C2SWriter) pump() {
 		if !ok {
 			break
 		}
-		w.writeMu.Lock()
-		if err := w.sendLocked(data); err != nil {
-			w.storeErr(err)
+		w.pumpBusy.Add(1)
+		batch := [][]byte{data}
+		for len(w.writeCh) > 0 && len(batch) < h3WriteHTTPBatchFlush {
+			batch = append(batch, <-w.writeCh)
 		}
-		for len(w.writeCh) > 0 {
-			data = <-w.writeCh
-			if err := w.sendLocked(data); err != nil {
+		for _, d := range batch {
+			if err := w.sendDatagramUnlocked(d); err != nil {
 				w.storeErr(err)
 			}
+			releaseH3WriteBuf(d)
 		}
-		w.flushLocked()
-		w.writeMu.Unlock()
+		w.flushPendingWriteBatch()
+		w.pumpBusy.Done()
 	}
-	w.writeMu.Lock()
-	w.flushLocked()
-	w.writeMu.Unlock()
+	w.flushPendingWriteBatch()
 }
 
-func (w *h3C2SWriter) sendLocked(data []byte) error {
+func (w *h3C2SWriter) sendDatagramUnlocked(data []byte) error {
 	if w.flushSender == nil {
 		return w.str.SendDatagram(data)
 	}
 	if err := w.flushSender.SendDatagramNoWake(data); err != nil {
 		return err
 	}
+	w.writeMu.Lock()
 	w.pendingBatch++
-	if w.pendingBatch >= h3WriteHTTPBatchFlush {
+	shouldFlush := w.pendingBatch >= h3WriteHTTPBatchFlush
+	if shouldFlush {
 		w.pendingBatch = 0
+	}
+	w.writeMu.Unlock()
+	if shouldFlush {
 		w.flushSender.FlushProxiedIPDatagramSend()
 	}
 	return nil
 }
 
-func (w *h3C2SWriter) flushLocked() {
-	if w.flushSender == nil || w.pendingBatch == 0 {
-		return
-	}
-	w.pendingBatch = 0
-	w.flushSender.FlushProxiedIPDatagramSend()
-}
-
-func (w *h3C2SWriter) flushPending() {
+func (w *h3C2SWriter) flushPendingWriteBatch() {
 	if w.flushSender == nil {
 		return
 	}
-	w.writeMu.Lock()
-	w.flushLocked()
+	if !w.writeMu.TryLock() {
+		return
+	}
+	pending := w.pendingBatch
+	w.pendingBatch = 0
 	w.writeMu.Unlock()
+	if pending > 0 {
+		w.flushSender.FlushProxiedIPDatagramSend()
+	}
 }
 
 func (w *h3C2SWriter) drainQueue() {
-	w.flushPending()
+	w.awaitPumpIdle()
+}
+
+func (w *h3C2SWriter) awaitPumpIdle() {
+	w.flushPendingWriteBatch()
 	if w.writeCh == nil {
 		return
 	}
 	deadline := time.Now().Add(h3WriteCloseDrainWait)
 	for time.Now().Before(deadline) {
 		if len(w.writeCh) == 0 {
-			return
+			w.pumpBusy.Wait()
+			w.flushPendingWriteBatch()
+			if len(w.writeCh) == 0 {
+				return
+			}
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
 }
 
-func (w *h3C2SWriter) enqueue(ctx context.Context, p []byte) error {
+func releaseH3WriteBuf(data []byte) {
+	if cap(data) < 256 || cap(data) > h3WriteQueueCap*2 {
+		return
+	}
+	b := data[:0]
+	h3WriteBufPool.Put(&b)
+}
+
+func (w *h3C2SWriter) shutdown() {
+	if w.writeCh != nil {
+		w.writeCloseOnce.Do(func() {
+			close(w.writeCh)
+		})
+		select {
+		case <-w.writeDone:
+		case <-time.After(h3WriteCloseDrainWait):
+		}
+	}
+	w.flushPendingWriteBatch()
+}
+
+func (w *h3C2SWriter) writeBytes(ctx context.Context, closed *atomic.Bool, p []byte) error {
 	if err := w.takeErr(); err != nil {
 		return err
 	}
-	data := make([]byte, len(contextIDZero)+len(p))
-	copy(data, contextIDZero)
-	copy(data[len(contextIDZero):], p)
-	if w.flushSender == nil {
-		return w.str.SendDatagram(data)
+	minCap := len(contextIDZero) + len(p)
+	if w.flushSender != nil {
+		w.start()
+		bufPtr := h3WriteBufPool.Get().(*[]byte)
+		data := *bufPtr
+		if cap(data) < minCap {
+			*bufPtr = data[:0]
+			h3WriteBufPool.Put(bufPtr)
+			data = make([]byte, minCap)
+		} else {
+			data = data[:minCap]
+		}
+		copy(data, contextIDZero)
+		copy(data[len(contextIDZero):], p)
+		w.writeMu.Lock()
+		if closed != nil && closed.Load() {
+			w.writeMu.Unlock()
+			return net.ErrClosed
+		}
+		ch := w.writeCh
+		w.writeMu.Unlock()
+		if ch == nil {
+			err := w.sendDatagramUnlocked(data)
+			*bufPtr = data[:0]
+			h3WriteBufPool.Put(bufPtr)
+			return err
+		}
+		select {
+		case ch <- data:
+			return nil
+		case <-ctx.Done():
+			return net.ErrClosed
+		case <-time.After(h3WriteQueueWait):
+			return fmt.Errorf("masque connect-udp: write queue blocked >%v", h3WriteQueueWait)
+		}
 	}
-	w.start()
-	select {
-	case w.writeCh <- data:
-		return nil
-	case <-ctx.Done():
-		return net.ErrClosed
+	bufPtr := h3WriteBufPool.Get().(*[]byte)
+	data := *bufPtr
+	if cap(data) >= minCap {
+		data = data[:minCap]
+		copy(data, contextIDZero)
+		copy(data[len(contextIDZero):], p)
+		err := w.sendDatagramUnlocked(data)
+		*bufPtr = data[:0]
+		h3WriteBufPool.Put(bufPtr)
+		return err
 	}
-}
-
-func (w *h3C2SWriter) close(ctx context.Context) {
-	w.flushPending()
-	if w.writeCh == nil {
-		return
-	}
-	w.writeCloseOnce.Do(func() {
-		close(w.writeCh)
-	})
-	select {
-	case <-w.writeDone:
-	case <-ctx.Done():
-	case <-time.After(h3WriteCloseDrainWait):
-	}
+	*bufPtr = data[:0]
+	h3WriteBufPool.Put(bufPtr)
+	b := make([]byte, minCap)
+	copy(b, contextIDZero)
+	copy(b[len(contextIDZero):], p)
+	return w.sendDatagramUnlocked(b)
 }
 
 func (w *h3C2SWriter) storeErr(err error) {

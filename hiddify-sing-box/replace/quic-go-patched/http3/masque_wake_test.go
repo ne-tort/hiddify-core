@@ -59,7 +59,7 @@ func TestMasqueWakeOncePerStreamRead(t *testing.T) {
 
 	clientStr, serverStr := newStreamPair(t)
 	clientStr.SetReadDeadline(time.Time{})
-	sts := newStateTrackingStream(clientStr, nil, func([]byte) error { return nil })
+	sts := newStateTrackingStream(clientStr, nil, func([]byte) error { return nil }, nil)
 
 	var eventRecorder events.Recorder
 	clientConn, _ := newConnPair(t, withClientRecorder(&eventRecorder))
@@ -102,7 +102,7 @@ func TestMasqueWakeBidiConnWakeUsesDuplex(t *testing.T) {
 
 	clientStr, serverStr := newStreamPair(t)
 	clientStr.SetReadDeadline(time.Time{})
-	sts := newStateTrackingStream(clientStr, nil, func([]byte) error { return nil })
+	sts := newStateTrackingStream(clientStr, nil, func([]byte) error { return nil }, nil)
 
 	var eventRecorder events.Recorder
 	clientConn, _ := newConnPair(t, withClientRecorder(&eventRecorder))
@@ -140,7 +140,7 @@ func TestMasqueWakeAfterDownloadWriteOnActiveStream(t *testing.T) {
 	defer quic.MasqueSetBidiDownloadActive(serverStr, false)
 	streamWakes, connWakes = 0, 0 // activation wake tested separately
 
-	sts := newStateTrackingStream(serverStr, nil, func([]byte) error { return nil })
+	sts := newStateTrackingStream(serverStr, nil, func([]byte) error { return nil }, nil)
 	var eventRecorder events.Recorder
 	serverConn, _ := newConnPair(t, withClientRecorder(&eventRecorder))
 	str := newStream(

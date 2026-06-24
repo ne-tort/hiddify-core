@@ -17,14 +17,6 @@ func (m *mockH3Stream) Write([]byte) (int, error) { return 0, nil }
 func (m *mockH3Stream) Close() error              { return nil }
 func (m *mockH3Stream) CancelRead(quic.StreamErrorCode) {}
 func (m *mockH3Stream) SendDatagram([]byte) error { return nil }
-func (m *mockH3Stream) TryReceiveDatagram() ([]byte, bool) {
-	select {
-	case b := <-m.ch:
-		return b, true
-	default:
-		return nil, false
-	}
-}
 func (m *mockH3Stream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	select {
 	case <-ctx.Done():

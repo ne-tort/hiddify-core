@@ -18,6 +18,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
+
+	cudpconn "github.com/sagernet/sing-box/transport/masque/connectudp/conn"
 )
 
 // defaultInitialPacketSize is an increased packet size used for the connection to the proxy.
@@ -176,7 +178,7 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 	if err != nil {
 		return nil, rsp, err
 	}
-	return newProxiedConn(rstr, local, remote), rsp, nil
+	return cudpconn.NewH3Conn(rstr, local, remote), rsp, nil
 }
 
 // Extract the Proxy-Status next-hop value as a UDPAddr.

@@ -29,6 +29,8 @@ func TestTier1BridgesRemoved(t *testing.T) {
 		"h2_bulk_config_bridge.go",
 		"stream_bridge.go",
 		"errors_bridge.go",
+		"connectudp_dial_bridge.go",
+		"connectudp_listen_bridge.go",
 		"connectudp_icmp_bridge.go",
 		"authority_listen_bridge.go",
 		"obs_bridge.go",

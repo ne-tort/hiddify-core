@@ -50,6 +50,28 @@ func writeToWithStallGuard(tb testing.TB, pkt net.PacketConn, p []byte, addr net
 	}
 }
 
+// writeToBenchUpload sends on unlimited synth benches without per-packet goroutine overhead.
+// Stall guard stays on paced/stability paths; sustained GATE uses direct WriteTo (parity parallel scaling).
+func writeToBenchUpload(pkt net.PacketConn, p []byte, addr net.Addr) error {
+	if pw, ok := pkt.(interface {
+		WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error
+	}); ok {
+		headroom := connectudp.ProbePacketHeadroom(pkt, M.SocksaddrFromNet(addr))
+		packetBuf := buf.NewSize(headroom + len(p))
+		packetBuf.Resize(headroom, len(p))
+		copy(packetBuf.Bytes(), p)
+		return pw.WritePacket(packetBuf, M.SocksaddrFromNet(addr))
+	}
+	n, err := pkt.WriteTo(p, addr)
+	if err != nil {
+		return err
+	}
+	if n == 0 && len(p) > 0 {
+		return fmt.Errorf("WriteTo returned 0 bytes")
+	}
+	return nil
+}
+
 func writePacketWithStallGuard(tb testing.TB, pkt net.PacketConn, pw interface {
 	WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error
 }, p []byte, dest M.Socksaddr, stall time.Duration) error {

@@ -15,12 +15,21 @@ func ExpectedPacedGoodputMbit(targetMbit float64) float64 {
 	return targetMbit * pacedGoodputEfficiency
 }
 
-// MinPacedGoodputMbit returns the KPI floor (target × 0.75) for paced UDP probe gates.
+// MinPacedGoodputMbit returns the KPI floor (target × 0.90) for paced UDP probe gates.
 func MinPacedGoodputMbit(targetMbit float64) float64 {
 	if targetMbit <= 0 {
 		return 0
 	}
 	return targetMbit * pacedGoodputFloorRatio
+}
+
+// BurstSinkGoodputMbit returns sink goodput (Mbit/s) from sequenced rx count and wall seconds.
+// Parity docker/masque-perf-lab _direct_burst.py: rx_pkts × payload × 8 / send_sec.
+func BurstSinkGoodputMbit(rxPkts, payloadLen int, wallSec float64) float64 {
+	if wallSec <= 0 || rxPkts <= 0 || payloadLen <= 0 {
+		return 0
+	}
+	return float64(rxPkts*payloadLen*8) / wallSec / 1e6
 }
 
 // Observed max burst ceiling (informational; docker @ netem 35 ms, docs/masque/benchmark-matrix.md).

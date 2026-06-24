@@ -80,20 +80,6 @@ func benchConnectUDPH3DirectDownloadFountain(
 	return benchConnectUDPH3DirectDownloadFountainWithProxy(tb, registerMasqueUDPProxyHandler, duration, payloadLen)
 }
 
-// TestLocalizeConnectUDPH3FountainRelayVsRef compares our relay S2C path vs masque-go ref proxy.
-func TestLocalizeConnectUDPH3FountainRelayVsRef(t *testing.T) {
-	dur := connectUDPSynthProdBenchDuration
-	_, ours, err := benchConnectUDPH3DirectDownloadFountainWithProxy(t, registerMasqueUDPProxyHandler, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("ours fountain: %v", err)
-	}
-	_, ref, err := benchConnectUDPH3DirectDownloadFountainWithProxy(t, registerMasqueGoRefUDPProxyHandler, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("ref fountain: %v", err)
-	}
-	t.Logf("LOCALIZE h3 fountain relay ours=%.1f ref=%.1f ratio=%.2f", ours, ref, ours/ref)
-}
-
 // TestBenchConnectUDPH3FountainDirect is B2: full QUIC/datagram stack without CoreSession (~2s).
 func TestBenchConnectUDPH3FountainDirect(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
+	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -24,6 +25,34 @@ func FlushPacketConnWrites(conn net.PacketConn) {
 		}
 		conn = next
 	}
+}
+
+// DrainPacketConnUpload flushes coalesced upload and awaits HTTP/2 TLS flush (H2 burst/docker parity).
+func DrainPacketConnUpload(conn net.PacketConn, timeout time.Duration) error {
+	var drainer interface {
+		AwaitUploadDrain(time.Duration) error
+	}
+	for cur := conn; cur != nil; {
+		if d, ok := cur.(interface {
+			AwaitUploadDrain(time.Duration) error
+		}); ok {
+			drainer = d
+		}
+		up, ok := cur.(interface{ Upstream() any })
+		if !ok {
+			break
+		}
+		next, ok := up.Upstream().(net.PacketConn)
+		if !ok {
+			break
+		}
+		cur = next
+	}
+	FlushPacketConnWrites(conn)
+	if drainer != nil {
+		return drainer.AwaitUploadDrain(timeout)
+	}
+	return nil
 }
 func BuildProbePayload(seq uint64, runID uint32, payloadLen int) []byte {
 	if payloadLen < UDPProbeHeaderLen {

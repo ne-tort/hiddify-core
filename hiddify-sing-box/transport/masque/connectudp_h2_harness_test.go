@@ -30,6 +30,34 @@ type instantH2Link struct{}
 
 func (instantH2Link) wrapTCP(c net.Conn) net.Conn { return c }
 
+// tlsFlushTaxH2Link adds per-TCP-write delay (models docker TLS flush tax on HTTP/2 upload).
+type tlsFlushTaxH2Link struct {
+	Tax time.Duration
+}
+
+func (l tlsFlushTaxH2Link) wrapTCP(c net.Conn) net.Conn {
+	if l.Tax <= 0 {
+		return c
+	}
+	return &tlsFlushTaxConn{Conn: c, tax: l.Tax}
+}
+
+type tlsFlushTaxConn struct {
+	net.Conn
+	tax time.Duration
+}
+
+func (c *tlsFlushTaxConn) Write(p []byte) (int, error) {
+	if c.tax > 0 && len(p) > 0 {
+		time.Sleep(c.tax)
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *tlsFlushTaxConn) Read(p []byte) (int, error) {
+	return c.Conn.Read(p)
+}
+
 func newH2ConnectUDPSession(t *testing.T, proxyPort int, link h2TransportLink) (ClientSession, context.Context) {
 	t.Helper()
 	if link == nil {
@@ -92,6 +120,79 @@ func newH2OverlayDirectDialConfig(tb testing.TB, proxyPort int, link h2Transport
 			return net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort))
 		},
 	}
+}
+
+// newH2ProdShapedOverlayDialConfig mirrors core_session_h2_udp dialUDPOverHTTP2 (EnsureTransport + NewTransport).
+func newH2ProdShapedOverlayDialConfig(tb testing.TB, proxyPort int, link h2TransportLink) cudph2.H2OverlayDialConfig {
+	tb.Helper()
+	if link == nil {
+		link = instantH2Link{}
+	}
+	clientTLS := connectUDPTestTLS.Clone()
+	clientTLS.InsecureSkipVerify = true
+	clientTLS.ServerName = "127.0.0.1"
+	dialCfg := h2c.ClientDialConfig{
+		TLSConfig:          clientTLS,
+		DialHostCandidates: []string{""},
+		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			conn, err := d.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return link.wrapTCP(conn), nil
+		},
+	}
+	tr, err := h2c.NewClientTransport(dialCfg)
+	if err != nil {
+		tb.Fatalf("h2 overlay transport: %v", err)
+	}
+	return cudph2.H2OverlayDialConfig{
+		EnsureTransport: func(context.Context) (*http2.Transport, error) {
+			return tr, nil
+		},
+		NewTransport: func() (*http2.Transport, error) {
+			return h2c.NewClientTransport(dialCfg)
+		},
+		ResolveDialAddr: func() string {
+			return net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort))
+		},
+	}
+}
+
+func dialH2OverlayWithConfig(tb testing.TB, proxyPort int, cfg cudph2.H2OverlayDialConfig, target string) net.PacketConn {
+	tb.Helper()
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	tpl, err := uritemplate.New(rawTpl)
+	if err != nil {
+		tb.Fatalf("template: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	tb.Cleanup(cancel)
+	pc, err := cudph2.DialH2Overlay(ctx, cfg, tpl, target)
+	if err != nil {
+		tb.Fatalf("DialH2Overlay: %v", err)
+	}
+	tb.Cleanup(func() { _ = pc.Close() })
+	return pc
+}
+
+func benchConnectUDPH2OverlayProdShapedUpload(
+	tb testing.TB,
+	link h2TransportLink,
+	duration time.Duration,
+	payloadLen int,
+) (int64, float64, error) {
+	tb.Helper()
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sink, _ := runUDPSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
+	proxyPort := startInProcessH2UDPConnectProxy(tb)
+	cfg := newH2ProdShapedOverlayDialConfig(tb, proxyPort, link)
+	pkt := dialH2OverlayWithConfig(tb, proxyPort, cfg, net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port)))
+	return benchConnectUDPPacketUpload(tb, pkt, sinkAddr, duration, 0, payloadLen)
 }
 
 func dialH2OverlayDirect(tb testing.TB, proxyPort int, link h2TransportLink, target string) net.PacketConn {
@@ -296,5 +397,26 @@ func TestCoreSessionConnectUDPH2PortUnreachableListenPacket(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ReadFrom blocked past upload (TUN order deadlock)")
+	}
+}
+
+// TestLocalizeConnectUDPH2UploadSharedTransportVsNewTransport verifies prod core_session NewTransport wiring (UDP-AUDIT-10).
+func TestLocalizeConnectUDPH2UploadSharedTransportVsNewTransport(t *testing.T) {
+	t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "1")
+	dur := connectUDPSynthProdBenchDuration
+	_, sharedMbps, err := benchConnectUDPH2OverlayDirectUpload(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("shared EnsureTransport upload: %v", err)
+	}
+	_, prodMbps, err := benchConnectUDPH2OverlayProdShapedUpload(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("prod NewTransport upload: %v", err)
+	}
+	ratio := prodMbps / sharedMbps
+	t.Logf("LOCALIZE h2 upload shared=%.1f prod_NewTransport=%.1f ratio=%.2f (want 0.85–1.15 when shared>=300)",
+		sharedMbps, prodMbps, ratio)
+	if sharedMbps >= 300 && (ratio < 0.85 || ratio > 1.15) {
+		t.Fatalf("NewTransport vs EnsureTransport upload gap (shared=%.1f prod=%.1f ratio=%.2f)",
+			sharedMbps, prodMbps, ratio)
 	}
 }

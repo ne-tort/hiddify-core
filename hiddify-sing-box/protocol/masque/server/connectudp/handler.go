@@ -14,6 +14,11 @@ import (
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 )
 
+// tuneH2OnwardUDP sets kernel snd/rcv buffers on server CONNECT-UDP onward UDP (relay H3 parity).
+func tuneH2OnwardUDP(conn *net.UDPConn) {
+	cudprelay.TuneMasqueUDPSocketBuffers(conn)
+}
+
 const RequestProtocol = cudpframe.RequestProtocol
 
 // TargetPolicy mirrors CONNECT-stream / CONNECT-IP onward ACL for CONNECT-UDP (H2+H3).
@@ -34,6 +39,15 @@ type Hooks struct {
 // Handler serves CONNECT-UDP over HTTP/3 (relay) or HTTP/2 (capsule relay).
 type Handler struct {
 	Hooks Hooks
+	// H2SessionRegistry scopes asymmetric H2 CONNECT-UDP sessions (nil → package default).
+	H2SessionRegistry *cudph2.SessionRegistry
+}
+
+func (h Handler) h2Sessions() *cudph2.SessionRegistry {
+	if h.H2SessionRegistry != nil {
+		return h.H2SessionRegistry
+	}
+	return cudph2.DefaultSessionRegistry
 }
 
 var errTargetPortDenied = errors.New("connect-udp: port policy denied")
@@ -152,12 +166,37 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 	}
 	proxyStatus.Params.Add("next-hop", addr.String())
 
-	conn, err := net.DialUDP("udp", nil, addr)
-	if err != nil {
-		proxyStatus.Params.Add("error", "destination_ip_unroutable")
-		_ = writeProxyStatus(err)
-		w.WriteHeader(ResolveDialToHTTPStatus(err))
-		return
+	role := cudph2.StreamRoleFromRequest(r)
+	if role != "" {
+		sessKey, keyErr := cudph2.RequireSessionKey(r, addr.String())
+		if keyErr != nil {
+			if cudph2.IsMissingMuxKey(keyErr) {
+				_ = writeProxyStatus(keyErr)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = writeProxyStatus(keyErr)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if role == cudph2.StreamRoleDownload && h.h2Sessions().HasActiveDownload(sessKey) {
+			_ = writeProxyStatus(cudph2.ErrDuplicateDownloadSession)
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+	}
+
+	var conn *net.UDPConn
+	if role != cudph2.StreamRoleUpload {
+		var dialErr error
+		conn, dialErr = net.DialUDP("udp", nil, addr)
+		if dialErr != nil {
+			proxyStatus.Params.Add("error", "destination_ip_unroutable")
+			_ = writeProxyStatus(dialErr)
+			w.WriteHeader(ResolveDialToHTTPStatus(dialErr))
+			return
+		}
+		tuneH2OnwardUDP(conn)
 	}
 
 	if err := writeProxyStatus(nil); err != nil {
@@ -175,7 +214,11 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	_ = cudph2.ServeH2(w, r, conn)
+	if err := cudph2.ServeH2FromRequest(w, r, conn, addr.String(), h.h2Sessions()); err != nil {
+		if cudph2.IsDuplicateDownloadSession(err) {
+			return
+		}
+	}
 }
 
 func defaultExtendedMasqueTunnelProtocol(r *http.Request) string {

@@ -84,9 +84,11 @@ func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplat
 	}
 	opts := s.Options
 	return cudph2.DialH2Overlay(ctx, cudph2.H2OverlayDialConfig{
-		Hook: s.h2UDPConnectHook,
 		EnsureTransport: func(ctx context.Context) (*http2.Transport, error) {
 			return s.ensureH2UDPTransport(ctx)
+		},
+		NewTransport: func() (*http2.Transport, error) {
+			return s.newMasqueClientH2Transport()
 		},
 		SetAuthHeader: func(h http.Header) {
 			setMasqueAuthorizationHeader(h, opts)

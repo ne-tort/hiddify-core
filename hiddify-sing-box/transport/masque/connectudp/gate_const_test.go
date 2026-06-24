@@ -1,11 +1,58 @@
 package connectudp_test
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 )
+
+const connectUDPPathMaxLOC = 900
+
+// TestConnectUDPPathPackageLOCGate locks W-UDP-1 path package size (max single non-test file ≤ 900 LOC).
+func TestConnectUDPPathPackageLOCGate(t *testing.T) {
+	t.Parallel()
+	var worst struct {
+		path string
+		loc  int
+	}
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		loc := 0
+		for _, line := range strings.Split(string(b), "\n") {
+			trim := strings.TrimSpace(line)
+			if trim == "" || strings.HasPrefix(trim, "//") {
+				continue
+			}
+			loc++
+		}
+		if loc > worst.loc {
+			worst.path = path
+			worst.loc = loc
+		}
+		if loc > connectUDPPathMaxLOC {
+			t.Fatalf("%s: %d LOC exceeds gate %d", path, loc, connectUDPPathMaxLOC)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk connectudp tree: %v", err)
+	}
+	t.Logf("connectudp path LOC gate ok (largest %s %d LOC, max %d)", worst.path, worst.loc, connectUDPPathMaxLOC)
+}
 
 func TestDefaultBenchUDPPayloadLen(t *testing.T) {
 	if connectudp.DefaultBenchUDPPayloadLen != 512 {

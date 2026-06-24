@@ -15,8 +15,10 @@ func init() {
 }
 
 func ensureHTTP2ExtendedConnectEnabled() {
+	// x/net/http2 masque_extended_connect.go enables Extended CONNECT at compile time.
+	// Keep GODEBUG setter for net/http paths that read env before x/net init (legacy compat).
 	e := os.Getenv("GODEBUG")
-	if strings.Contains(e, "http2xconnect=1") {
+	if strings.Contains(e, "http2xconnect=1") || strings.Contains(e, "http2xconnect=0") {
 		return
 	}
 	if e == "" {

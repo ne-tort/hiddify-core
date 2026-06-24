@@ -524,6 +524,9 @@ const packetRelayMuxHeadroom = 32
 // packetRelayC2SFlushInterval drains async CONNECT-UDP write queues during SOCKS→MASQUE upload relay.
 const packetRelayC2SFlushInterval = 32
 
+// packetRelayUploadDrainTimeout bounds masque upload drain when SOCKS upload relay ends (sharded H2 async workers).
+const packetRelayUploadDrainTimeout = 5 * time.Second
+
 func flushC2SWritesChain(conn any) {
 	for conn != nil {
 		if f, ok := conn.(interface{ FlushC2SWrites() }); ok {
@@ -537,13 +540,37 @@ func flushC2SWritesChain(conn any) {
 	}
 }
 
+func drainUploadChain(conn any, timeout time.Duration) {
+	var drainer interface {
+		AwaitUploadDrain(time.Duration) error
+	}
+	for cur := conn; cur != nil; {
+		if d, ok := cur.(interface {
+			AwaitUploadDrain(time.Duration) error
+		}); ok {
+			drainer = d
+		}
+		if f, ok := cur.(interface{ FlushC2SWrites() }); ok {
+			f.FlushC2SWrites()
+		}
+		up, ok := cur.(interface{ Upstream() any })
+		if !ok {
+			break
+		}
+		cur = up.Upstream()
+	}
+	if drainer != nil {
+		_ = drainer.AwaitUploadDrain(timeout)
+	}
+}
+
 // copyPacketUpload relays inbound UDP (e.g. SOCKS5 ASSOCIATE) to masque/outbound. Periodic C2S flush
 // prevents server-side async writeCh backpressure from stalling SOCKS recv and dropping bursts.
 func copyPacketUpload(ctx context.Context, source N.PacketReader, destination N.PacketWriter) error {
 	buffer := buf.NewPacket()
 	defer buffer.Release()
 	packetsSinceFlush := 0
-	defer flushC2SWritesChain(destination)
+	defer drainUploadChain(destination, packetRelayUploadDrainTimeout)
 	for {
 		select {
 		case <-ctx.Done():

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 
 	"io"
@@ -13,8 +14,6 @@ import (
 
 	"sync"
 
-	"sync/atomic"
-
 	"github.com/dunglas/httpsfv"
 
 	"github.com/quic-go/quic-go"
@@ -22,8 +21,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/quic-go/quic-go/quicvarint"
-
-	qmasque "github.com/quic-go/masque-go"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
@@ -44,13 +41,7 @@ func (e proxyEntry) Close() error {
 
 type h3DatagramSender interface {
 	SendDatagram([]byte) error
-
-	SendDatagramNoWake([]byte) error
-
-	FlushProxiedIPDatagramSend()
 }
-
-const h3S2CDatagramBatchSize = 8
 
 // Proxy is an RFC 9298 CONNECT-UDP proxy over HTTP/3.
 
@@ -256,12 +247,6 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 	w.WriteHeader(http.StatusOK)
 
-	http3.PrepareMasqueRelayDownloadPrimary(str)
-
-	var s2cBatchAllowed atomic.Bool
-
-	s2cBatchAllowed.Store(true)
-
 	var wg sync.WaitGroup
 
 	wg.Add(2)
@@ -270,7 +255,7 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 		defer wg.Done()
 
-		if err := s.proxyConnSend(conn, str, &s2cBatchAllowed); err != nil {
+		if err := s.proxyConnSend(conn, str); err != nil {
 
 			log.Printf("proxying send side to %s failed: %v", conn.RemoteAddr(), err)
 
@@ -284,7 +269,7 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 		defer wg.Done()
 
-		if err := proxyConnReceive(conn, str, &s2cBatchAllowed); err != nil {
+		if err := proxyConnReceive(conn, str); err != nil {
 
 			s.mx.Lock()
 
@@ -336,61 +321,42 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 }
 
-func (s *Proxy) proxyConnSend(conn *net.UDPConn, str *http3.Stream, _ *atomic.Bool) error {
-	return qmasque.RelayH3ClientToUDP(conn, str)
+func (s *Proxy) proxyConnSend(conn *net.UDPConn, str *http3.Stream) error {
+	for {
+		data, err := str.ReceiveDatagram(context.Background())
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		udpPayload, ok, perr := frame.ParseHTTPDatagramUDP(data)
+		quic.ReleaseMasqueDatagramReceiveBuffer(data)
+		if perr != nil {
+			if errors.Is(perr, io.EOF) {
+				continue
+			}
+			log.Printf("dropping malformed HTTP datagram on C2S relay: %v", perr)
+			continue
+		}
+		if !ok || len(udpPayload) == 0 {
+			continue
+		}
+		if len(udpPayload) > maxUDPPayloadSize {
+			log.Printf("dropping UDP packet larger than MTU")
+			continue
+		}
+		if _, err := conn.Write(udpPayload); err != nil {
+			return err
+		}
+	}
 }
 
-// proxyConnReceive: fountain uses NoWake batch; echo-duplex uses per-packet wake after 2nd C2S.
-
-func proxyConnReceive(conn *net.UDPConn, str h3DatagramSender, s2cBatchAllowed *atomic.Bool) error {
+func proxyConnReceive(conn *net.UDPConn, str h3DatagramSender) error {
 
 	b := make([]byte, len(contextIDZero)+maxUDPPayloadSize+1)
 
 	copy(b, contextIDZero)
-
-	pending := 0
-
-	flush := func() {
-
-		if pending > 0 {
-
-			str.FlushProxiedIPDatagramSend()
-
-			pending = 0
-
-		}
-
-	}
-
-	defer flush()
-
-	sendS2C := func(payload []byte) error {
-
-		if s2cBatchAllowed != nil && s2cBatchAllowed.Load() {
-
-			if err := str.SendDatagramNoWake(payload); err != nil {
-
-				return err
-
-			}
-
-			pending++
-
-			if pending >= h3S2CDatagramBatchSize {
-
-				flush()
-
-			}
-
-			return nil
-
-		}
-
-		flush()
-
-		return str.SendDatagram(payload)
-
-	}
 
 	for {
 
@@ -406,7 +372,7 @@ func proxyConnReceive(conn *net.UDPConn, str h3DatagramSender, s2cBatchAllowed *
 
 			if isICMPPortUnreachableUDPRead(n, err) {
 
-				if sendErr := sendS2C(b[:len(contextIDZero)]); sendErr != nil {
+				if sendErr := str.SendDatagram(b[:len(contextIDZero)]); sendErr != nil {
 
 					return sendErr
 
@@ -428,7 +394,7 @@ func proxyConnReceive(conn *net.UDPConn, str h3DatagramSender, s2cBatchAllowed *
 
 		}
 
-		if err := sendS2C(b[:len(contextIDZero)+n]); err != nil {
+		if err := str.SendDatagram(b[:len(contextIDZero)+n]); err != nil {
 
 			return err
 

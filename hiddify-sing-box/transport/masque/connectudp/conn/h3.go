@@ -39,24 +39,15 @@ var (
 // H3Conn is a CONNECT-UDP net.PacketConn over HTTP/3 QUIC DATAGRAMs.
 type H3Conn struct {
 	str        http3Stream
-	drain      tryDrainHTTPDatagrams
 	localAddr  net.Addr
 	remoteAddr net.Addr
 
-	closed   atomic.Bool
-	readDone chan struct{}
+	closed    atomic.Bool
+	closeOnce sync.Once
+	readDone  chan struct{}
 
-	pumpOnce       sync.Once
-	pumpCtx        context.Context
-	pumpCancel     context.CancelFunc
-	prefetchNotify chan struct{}
-
-	prefetchMu          sync.Mutex
-	prefetchSlots       [][]byte
-	prefetchHead        int
-	prefetchCount       int
-	prefetchCountAtomic atomic.Int32
-	prefetchGate        adaptiveTryDrainGate
+	pumpCtx    context.Context
+	pumpCancel context.CancelFunc
 
 	deadlineMx        sync.Mutex
 	readCtx           context.Context
@@ -72,18 +63,13 @@ var _ net.PacketConn = (*H3Conn)(nil)
 // NewH3Conn wraps an established HTTP/3 CONNECT-UDP request stream as net.PacketConn.
 func NewH3Conn(str http3Stream, local, remote net.Addr) *H3Conn {
 	c := &H3Conn{
-		str:           str,
-		localAddr:     local,
-		remoteAddr:    remote,
-		readDone:      make(chan struct{}),
-		prefetchSlots: make([][]byte, h3PrefetchMax),
+		str:       str,
+		localAddr: local,
+		remoteAddr: remote,
+		readDone:  make(chan struct{}),
 	}
-	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
-		c.drain = dr
-	}
-	c.prefetchNotify = make(chan struct{}, 256)
-	c.pumpCtx, c.pumpCancel = context.WithCancel(context.Background())
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
+	c.pumpCtx, c.pumpCancel = context.WithCancel(context.Background())
 	c.write = newH3C2SWriter(str)
 	go func() {
 		defer close(c.readDone)
@@ -96,85 +82,66 @@ func NewH3Conn(str http3Stream, local, remote net.Addr) *H3Conn {
 }
 
 func (c *H3Conn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	c.startDatagramPump()
-	expiredPrefetchDrops := 0
-start:
-	c.deadlineMx.Lock()
-	ctx := c.readCtx
-	c.deadlineMx.Unlock()
+	if c.closed.Load() {
+		return 0, nil, net.ErrClosed
+	}
+	for {
+		if c.closed.Load() {
+			return 0, nil, net.ErrClosed
+		}
+		c.deadlineMx.Lock()
+		ctx := c.readCtx
+		c.deadlineMx.Unlock()
 
-	var data []byte
-	fromPrefetch := false
-	hasBufferedPrefetch := false
-	if raw, ok, hasMore := c.takePrefetched(); ok {
-		data = raw
-		fromPrefetch = true
-		hasBufferedPrefetch = hasMore
-	} else {
-		c.extendPrefetchFromTry(true)
-		if raw, ok, hasMore := c.takePrefetched(); ok {
-			data = raw
-			fromPrefetch = true
-			hasBufferedPrefetch = hasMore
-		} else {
-			data, err = c.waitPrefetched(ctx)
-			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					return 0, nil, err
-				}
+		data, err := c.str.ReceiveDatagram(ctx)
+		if err != nil {
+			if c.closed.Load() {
+				return 0, nil, net.ErrClosed
+			}
+			if errors.Is(err, context.Canceled) {
 				c.deadlineMx.Lock()
-				restart := time.Now().Before(c.deadline)
+				restart := !c.deadline.IsZero() && time.Now().Before(c.deadline)
 				c.deadlineMx.Unlock()
 				if restart {
-					goto start
+					continue
 				}
 				return 0, nil, os.ErrDeadlineExceeded
 			}
+			return 0, nil, err
 		}
-	}
-	payload, ok, parseErr := frame.ParseHTTPDatagramUDP(data)
-	if parseErr != nil {
-		goto dropAndContinue
-	}
-	if !ok {
-		goto dropAndContinue
-	}
-	if len(payload) == 0 {
-		return 0, c.remoteAddr, ErrICMPPortUnreachable
-	}
-	n = copy(b, payload)
-	if !fromPrefetch || !hasBufferedPrefetch {
-		c.extendPrefetchFromTry(true)
-	}
-	http3.WakeMasqueClientAfterDatagramReceiveFrom(c.str)
-	return n, c.remoteAddr, nil
-
-dropAndContinue:
-	c.deadlineMx.Lock()
-	deadlineExceeded := !c.deadline.IsZero() && !time.Now().Before(c.deadline)
-	c.deadlineMx.Unlock()
-	if deadlineExceeded {
-		expiredPrefetchDrops++
-		if expiredPrefetchDrops >= h3PrefetchExpiredDropBudget {
-			return 0, nil, os.ErrDeadlineExceeded
+		payload, ok, parseErr := frame.ParseHTTPDatagramUDP(data)
+		if parseErr != nil {
+			if errors.Is(parseErr, io.EOF) {
+				return 0, nil, parseErr
+			}
+			continue
 		}
+		if !ok {
+			continue
+		}
+		if len(payload) == 0 {
+			quic.ReleaseMasqueDatagramReceiveBuffer(data)
+			return 0, c.remoteAddr, ErrICMPPortUnreachable
+		}
+		n = copy(b, payload)
+		quic.ReleaseMasqueDatagramReceiveBuffer(data)
+		http3.WakeMasqueClientAfterDatagramReceiveFrom(c.str)
+		return n, c.remoteAddr, nil
 	}
-	if !fromPrefetch || !hasBufferedPrefetch {
-		c.extendPrefetchFromTry(true)
-	}
-	goto start
 }
 
 func (c *H3Conn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
-	c.startDatagramPump()
 	if err := c.write.takeErr(); err != nil {
 		return 0, err
 	}
 	n := len(p)
-	if err := c.write.enqueue(c.pumpCtx, p); err != nil {
+	if err := c.write.writeBytes(c.pumpCtx, &c.closed, p); err != nil {
+		if c.closed.Load() {
+			return 0, net.ErrClosed
+		}
 		return 0, err
 	}
 	return n, nil
@@ -187,20 +154,23 @@ func (c *H3Conn) FlushC2SWrites() {
 }
 
 func (c *H3Conn) Close() error {
-	c.closed.Store(true)
-	c.pumpCancel()
-	c.signalPrefetchReady()
-	c.FlushC2SWrites()
-	c.write.close(c.pumpCtx)
-	c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
-	err := c.str.Close()
-	<-c.readDone
-	c.readCtxCancel()
-	c.deadlineMx.Lock()
-	if c.readDeadlineTimer != nil {
-		c.readDeadlineTimer.Stop()
-	}
-	c.deadlineMx.Unlock()
+	var err error
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		c.pumpCancel()
+		c.readCtxCancel()
+		if c.write != nil {
+			c.write.shutdown()
+		}
+		c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
+		err = c.str.Close()
+		<-c.readDone
+		c.deadlineMx.Lock()
+		if c.readDeadlineTimer != nil {
+			c.readDeadlineTimer.Stop()
+		}
+		c.deadlineMx.Unlock()
+	})
 	return err
 }
 

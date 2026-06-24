@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
@@ -87,7 +88,31 @@ func isH2ServeTerminalConnErr(err error) bool {
 		strings.Contains(s, "pipe is being closed")
 }
 
-// H2ResponseWriter serializes downlink capsule writes with bulk coalesce (P0 KEEP).
+func isH2ServeICMPUnreachableWrite(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
+}
+
+// writeOnwardUDPPayload retries transient kernel UDP send errors; dropping on ENOBUFS loses bulk upload.
+func writeOnwardUDPPayload(conn *net.UDPConn, payload []byte) (icmpUnreachable bool, err error) {
+	for {
+		_, werr := conn.Write(payload)
+		if werr == nil {
+			return false, nil
+		}
+		if isH2ServeICMPUnreachableWrite(werr) {
+			return true, werr
+		}
+		if isH2ServeTransientWriteErr(werr) {
+			time.Sleep(5 * time.Microsecond)
+			continue
+		}
+		return false, werr
+	}
+}
+
+// H2ResponseWriter serializes downlink capsule writes (immediate flush default — h2o/R4 thin path).
 type H2ResponseWriter struct {
 	http.ResponseWriter
 	mu                sync.Mutex
@@ -97,6 +122,8 @@ type H2ResponseWriter struct {
 	lastDownlinkAt    time.Time
 	rapidDownlinkHits int
 	bulkDownlink      bool
+	immediateFlush    bool
+	bulkImmediateFlush bool
 }
 
 func (w *H2ResponseWriter) noteDownlinkArrivalLocked(now time.Time) {
@@ -138,17 +165,28 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	if encErr != nil {
 		return encErr
 	}
+	if w.immediateFlush {
+		return w.flushPendingLocked()
+	}
+	if w.bulkDownlink && w.bulkImmediateFlush {
+		if w.pending.Len() >= H2DownlinkCoalesceThreshold {
+			return w.flushPendingLocked()
+		}
+		if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
+			return nil // bulk without debounce timer until threshold
+		}
+		return w.flushPendingLocked()
+	}
 	if !w.bulkDownlink {
 		return w.flushPendingLocked()
 	}
 	if w.pending.Len() >= H2DownlinkCoalesceThreshold {
 		return w.flushPendingLocked()
 	}
-	// Active fountain flood (rapid hits armed): threshold-only coalesce.
 	if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
+		w.armFlushTimerLocked()
 		return nil
 	}
-	// Bulk latched but spaced arrivals (roundtrip / pipeline-1): per-packet flush.
 	return w.flushPendingLocked()
 }
 
@@ -205,7 +243,7 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	if w == nil || r == nil || conn == nil {
 		return errors.New("masque h2: connect-udp relay: nil argument")
 	}
-	downlinkW := &H2ResponseWriter{ResponseWriter: w}
+	downlinkW := newH2DownlinkWriter(w, LegProfileEchoBidi)
 	var wg sync.WaitGroup
 	var closeUDP sync.Once
 	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
@@ -233,27 +271,45 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		br := bufio.NewReaderSize(r.Body, H2ResponseBodyBufSize)
 		readBuf := make([]byte, H2ResponseBodyBufSize)
 		var pending []byte
+		onwardW := cudprelay.NewOnwardUDPWriter(conn)
+		relayOnward := func(payload []byte) error {
+			icmp, err := onwardW.Queue(payload)
+			if icmp {
+				if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
+					return fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after write: %w", werr)
+				}
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("masque h2 dataplane connect-udp server udp write: %w", err)
+			}
+			signalDownlinkReady()
+			return nil
+		}
 		for {
 			for len(pending) > 0 {
-				if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
-					pending = pending[consumed:]
-					if _, err := conn.Write(udpPayload); err != nil {
-						if errors.Is(err, syscall.ECONNREFUSED) ||
-							errors.Is(err, syscall.EHOSTUNREACH) ||
-							errors.Is(err, syscall.ENETUNREACH) {
-							if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
-								downErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after write: %w", werr)
-								return
-							}
-							continue
+				if n512 := h2c.CountLeadingDatagramCapsule512Wire(pending); n512 > 0 {
+					wireLen := h2c.DatagramCapsule512WireLen
+					icmp, err := onwardW.SendBurstViews(pending, n512, wireLen, wireLen-512)
+					pending = pending[n512*wireLen:]
+					if icmp {
+						if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
+							upErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after burst: %w", werr)
+							return
 						}
-						if isH2ServeTransientWriteErr(err) {
-							continue
-						}
-						upErr = fmt.Errorf("masque h2 dataplane connect-udp server udp write: %w", err)
+					} else if err != nil {
+						upErr = fmt.Errorf("masque h2 dataplane connect-udp server udp burst: %w", err)
 						return
 					}
 					signalDownlinkReady()
+					continue
+				}
+				if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
+					pending = pending[consumed:]
+					if err := relayOnward(udpPayload); err != nil {
+						upErr = err
+						return
+					}
 					continue
 				}
 				inner, consumed, perr := h2c.ParseNextDatagramCapsuleWire(pending)
@@ -276,23 +332,19 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 					signalDownlinkReady()
 					continue
 				}
-				if _, err := conn.Write(udpPayload); err != nil {
-					if errors.Is(err, syscall.ECONNREFUSED) ||
-						errors.Is(err, syscall.EHOSTUNREACH) ||
-						errors.Is(err, syscall.ENETUNREACH) {
-						if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
-							downErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after write: %w", werr)
-							return
-						}
-						continue
-					}
-					if isH2ServeTransientWriteErr(err) {
-						continue
-					}
-					upErr = fmt.Errorf("masque h2 dataplane connect-udp server udp write: %w", err)
+				if err := relayOnward(udpPayload); err != nil {
+					upErr = err
 					return
 				}
-				signalDownlinkReady()
+			}
+			if icmp, err := onwardW.Flush(); err != nil {
+				upErr = fmt.Errorf("masque h2 dataplane connect-udp server udp flush: %w", err)
+				return
+			} else if icmp {
+				if werr := downlinkW.WriteUDPPayloadAsCapsules(nil); werr != nil {
+					downErr = fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after flush: %w", werr)
+					return
+				}
 			}
 			if len(pending) == 0 && cap(pending) > H2ResponseBodyBufSize*2 {
 				pending = nil

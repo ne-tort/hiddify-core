@@ -1870,7 +1870,11 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	cc.mu.Unlock()
 
 	// Scratch buffer for reading into & writing from.
+	bulkFlush := masqueUploadBodyUsesBulkFlush(body)
 	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
+	if bulkFlush {
+		scratchLen = masqueUploadReadBufferLen(scratchLen, maxFrameSize)
+	}
 	var buf []byte
 	index := bufPoolIndex(scratchLen)
 	if bp, ok := bufPools[index].Get().(*[]byte); ok && len(*bp) >= scratchLen {
@@ -1882,6 +1886,8 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	}
 
 	var sawEOF bool
+	var pendingAck int
+	var firstPendingAt time.Time
 	for !sawEOF {
 		n, err := body.Read(buf)
 		if hasContentLen {
@@ -1932,18 +1938,39 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
 			err = cc.fr.WriteData(cs.ID, sentEnd, data)
 			if err == nil {
-				// TODO(bradfitz): this flush is for latency, not bandwidth.
-				// Most requests won't need this. Make this opt-in or
-				// opt-out?  Use some heuristic on the body type? Nagel-like
-				// timers?  Based on 'n'? Only last chunk of this for loop,
-				// unless flow control tokens are low? For now, always.
-				// If we change this, see comment below.
-				err = cc.bw.Flush()
-				if err == nil {
-					masqueAckUploadWireSent(body, len(data))
+				if bulkFlush && !sentEnd {
+					pendingAck += len(data)
+				} else {
+					ack := pendingAck + len(data)
+					pendingAck = 0
+					// TODO(bradfitz): per-DATA flush is for latency; MASQUE bulk upload batches.
+					err = cc.bw.Flush()
+					if err == nil {
+						masqueAckUploadWireSent(body, ack)
+					}
 				}
 			}
 			cc.wmu.Unlock()
+		}
+		if bulkFlush && err == nil {
+			if pendingAck > 0 && firstPendingAt.IsZero() {
+				firstPendingAt = time.Now()
+			}
+			interactiveFlush := n > 0 && n < 4096 && pendingAck > 0
+			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
+				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt) ||
+				interactiveFlush
+			if flush {
+				cc.wmu.Lock()
+				ack := pendingAck
+				pendingAck = 0
+				err = cc.bw.Flush()
+				if err == nil {
+					masqueAckUploadWireSent(body, ack)
+					firstPendingAt = time.Time{}
+				}
+				cc.wmu.Unlock()
+			}
 		}
 		if err != nil {
 			return err

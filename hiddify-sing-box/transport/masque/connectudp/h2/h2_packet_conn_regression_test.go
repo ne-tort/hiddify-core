@@ -351,3 +351,41 @@ func TestPeelUploadPendingCompleteCapsulesNeverSplits(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, n, 0)
 }
+
+// TestH2PacketConnAdaptiveUploadInteractiveFlush verifies duplex interactive upload flushes each
+// WriteTo immediately (no coalesce timer deferral) when bulk mode is not armed.
+func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
+	var downlink bytes.Buffer
+	dgram := []byte{0, 'z'}
+	require.NoError(t, http3.WriteCapsule(&downlink, http3.CapsuleType(h2c.CapsuleTypeDatagram), dgram))
+
+	capWC := &udpCapsuleCaptureWriteCloser{}
+	c := NewPacketConn(PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(downlink.Bytes()))},
+		ReqBody:    capWC,
+		RemoteAddr: NewUDPAddr("127.0.0.1:53"),
+		LegProfile: LegProfileEchoBidi,
+	})
+	buf := make([]byte, 8)
+	n, _, err := c.ReadFrom(buf)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, byte('z'), buf[0])
+
+	capWC.buf.Reset()
+	payload := bytes.Repeat([]byte{'u'}, 512)
+	wn, err := c.WriteTo(payload, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(payload), wn)
+	require.NotEmpty(t, capWC.buf.Bytes(), "interactive duplex upload must flush without coalesce timer")
+
+	ct, cr, err := h2c.ParseCapsule(quicvarint.NewReader(bytes.NewReader(capWC.buf.Bytes())))
+	require.NoError(t, err)
+	require.Equal(t, h2c.CapsuleTypeDatagram, ct)
+	raw, err := io.ReadAll(cr)
+	require.NoError(t, err)
+	got, ok, perr := frame.ParseHTTPDatagramUDP(raw)
+	require.NoError(t, perr)
+	require.True(t, ok)
+	require.Equal(t, payload, got)
+}

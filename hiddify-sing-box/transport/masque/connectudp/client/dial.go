@@ -82,7 +82,7 @@ func dialH3(ctx context.Context, host DialHost, obs ObservabilityInput, client *
 	return pc, err
 }
 
-// DialH3Production dials CONNECT-UDP via masque-go proxiedConn (golden ref stack) unless hook is set.
+// DialH3Production dials CONNECT-UDP via connectudp/conn H3Conn (W-UDP-1 client path).
 func DialH3Production(
 	ctx context.Context,
 	hook func(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error),

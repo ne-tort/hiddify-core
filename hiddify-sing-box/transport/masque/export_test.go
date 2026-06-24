@@ -35,7 +35,6 @@ var (
 	ExportBenchWindowedBidiLinkH3Prod                = benchWindowedBidiLinkH3Prod
 	ExportLocalizeBenchDuration                     = localizeBenchDuration
 	ExportConnectStreamVPSKPITargetDown             = connectStreamVPSKPITargetDownMbps
-	ExportConnectStreamSynthProdMinMbps             = connectStreamSynthProdMinMbps
 	ExportConnectStreamStrictL256Ceiling35msMbps    = connectStreamStrictL256Ceiling35msMbps
 	ExportConnectStreamStrictL256CeilingBandMbps    = connectStreamStrictL256CeilingBandMbps
 	ExportConnectStreamDocker35msSeqDownFloorMbps   = connectStreamDocker35msSeqDownFloorMbps

@@ -14,6 +14,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"golang.org/x/net/http2"
 )
@@ -45,13 +46,14 @@ func startInProcessH2UDPConnectProxy(t testing.TB) int {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
+		cudprelay.TuneMasqueUDPSocketBuffers(conn)
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		w.Header().Set(http3.CapsuleProtocolHeader, CapsuleProtocolHeaderValueH2())
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_ = cudph2.ServeH2(w, r, conn)
+		_ = cudph2.ServeH2FromRequest(w, r, conn, net.JoinHostPort(host, port), cudph2.DefaultSessionRegistry)
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

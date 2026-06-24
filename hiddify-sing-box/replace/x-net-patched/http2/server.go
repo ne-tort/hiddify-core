@@ -1922,6 +1922,9 @@ func (sc *serverConn) processData(f *DataFrame) error {
 			if wrote != len(data) {
 				panic("internal error: bad Writer")
 			}
+			if masqueUploadEagerWindowEnabled() {
+				sc.noteBodyRead(st, wrote)
+			}
 		}
 
 		// Return any padded flow control now, since we won't
@@ -2567,7 +2570,9 @@ func (b *requestBody) Read(p []byte) (n int, err error) {
 	if b.conn == nil {
 		return
 	}
-	b.conn.noteBodyReadFromHandler(b.stream, n, err)
+	if !masqueUploadEagerWindowEnabled() {
+		b.conn.noteBodyReadFromHandler(b.stream, n, err)
+	}
 	return
 }
 

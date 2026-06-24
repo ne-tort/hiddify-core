@@ -99,6 +99,22 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 	}
 }
 
+func TestH2ResponseWriterFountainProfileNoDebounceTimer(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	payload := []byte("x")
+	for i := 0; i < h2DownlinkBulkEnterHits+2; i++ {
+		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(H2DownlinkCoalesceMaxDelay / 4)
+	}
+	// Fountain bulkImmediateFlush: never arm debounce timer (W-UDP-2 Phase C).
+	if w.flushTimer != nil {
+		t.Fatal("fountain profile must not arm downlink debounce timer")
+	}
+}
+
 // TestH2ResponseWriterTimerArmsOnce verifies prod timer on interactive downlink: armed on first
 // sub-threshold append, not reset on each append (debounced reset capped fountain ~400 Mbit/s).
 func TestH2ResponseWriterTimerArmsOnce(t *testing.T) {

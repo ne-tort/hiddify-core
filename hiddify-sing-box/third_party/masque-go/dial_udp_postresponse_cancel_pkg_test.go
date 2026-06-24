@@ -1,3 +1,5 @@
+//go:build masque_ref
+
 package masque
 
 import (

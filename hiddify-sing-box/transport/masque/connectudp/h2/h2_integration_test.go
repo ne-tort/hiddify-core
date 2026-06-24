@@ -110,6 +110,7 @@ func startInProcessH2UDPConnectProxy(t *testing.T) int {
 	serverTLS.NextProtos = []string{http2.NextProtoTLS, "http/1.1"}
 
 	mux := http.NewServeMux()
+	reg := NewSessionRegistry()
 	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -126,10 +127,27 @@ func startInProcessH2UDPConnectProxy(t *testing.T) int {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		conn, err := net.DialUDP("udp", nil, addr)
-		if err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-			return
+		target := addr.String()
+		role := StreamRoleFromRequest(r)
+		if role != "" {
+			sessKey, keyErr := RequireSessionKey(r, target)
+			if keyErr != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if role == StreamRoleDownload && reg.HasActiveDownload(sessKey) {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+		}
+		var conn *net.UDPConn
+		if role != StreamRoleUpload {
+			var dialErr error
+			conn, dialErr = net.DialUDP("udp", nil, addr)
+			if dialErr != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
 		}
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		w.Header().Set(http3.CapsuleProtocolHeader, h2c.CapsuleProtocolHeaderValue())
@@ -137,7 +155,7 @@ func startInProcessH2UDPConnectProxy(t *testing.T) int {
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_ = ServeH2(w, r, conn)
+		_ = ServeH2FromRequest(w, r, conn, target, reg)
 	})
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -183,7 +201,28 @@ func newH2IntegrationDialConfig(t *testing.T, proxyPort int) H2OverlayDialConfig
 	}
 }
 
-func dialH2IntegrationUDP(t *testing.T, proxyPort int, target string) net.PacketConn {
+// newH2ProdShapedIntegrationDialConfig adds NewTransport like core_session.dialUDPOverHTTP2 (UDP-AUDIT-10).
+func newH2ProdShapedIntegrationDialConfig(t *testing.T, proxyPort int) H2OverlayDialConfig {
+	t.Helper()
+	cfg := newH2IntegrationDialConfig(t, proxyPort)
+	clientTLS := h2IntegrationTestTLS.Clone()
+	clientTLS.InsecureSkipVerify = true
+	clientTLS.ServerName = "127.0.0.1"
+	dialCfg := h2c.ClientDialConfig{
+		TLSConfig:          clientTLS,
+		DialHostCandidates: []string{""},
+		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+	}
+	cfg.NewTransport = func() (*http2.Transport, error) {
+		return h2c.NewClientTransport(dialCfg)
+	}
+	return cfg
+}
+
+func dialH2IntegrationUDPWithConfig(t *testing.T, proxyPort int, cfg H2OverlayDialConfig, target string) net.PacketConn {
 	t.Helper()
 	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
 	tpl, err := uritemplate.New(rawTpl)
@@ -192,10 +231,14 @@ func dialH2IntegrationUDP(t *testing.T, proxyPort int, target string) net.Packet
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)
 
-	pc, err := DialH2Overlay(ctx, newH2IntegrationDialConfig(t, proxyPort), tpl, target)
+	pc, err := DialH2Overlay(ctx, cfg, tpl, target)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pc.Close() })
 	return pc
+}
+
+func dialH2IntegrationUDP(t *testing.T, proxyPort int, target string) net.PacketConn {
+	return dialH2IntegrationUDPWithConfig(t, proxyPort, newH2IntegrationDialConfig(t, proxyPort), target)
 }
 
 func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
@@ -206,6 +249,27 @@ func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
 	pc := dialH2IntegrationUDP(t, proxyPort, net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)))
 
 	payload := []byte("ping-h2-udp-echo")
+	nw, err := pc.WriteTo(payload, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(payload), nw)
+
+	buf := make([]byte, 256)
+	nr, _, err := pc.ReadFrom(buf)
+	require.NoError(t, err)
+	require.Equal(t, payload, buf[:nr])
+}
+
+// TestH2ConnectUDPEchoProdShapedNewTransport exercises asymmetric dial with NewTransport (prod core_session parity).
+func TestH2ConnectUDPEchoProdShapedNewTransport(t *testing.T) {
+	t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "1")
+	echo := runH2IntegrationUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	echoPort := echo.LocalAddr().(*net.UDPAddr).Port
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	cfg := newH2ProdShapedIntegrationDialConfig(t, proxyPort)
+	pc := dialH2IntegrationUDPWithConfig(t, proxyPort, cfg, net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)))
+
+	payload := []byte("ping-h2-udp-echo-prod-shaped")
 	nw, err := pc.WriteTo(payload, nil)
 	require.NoError(t, err)
 	require.Equal(t, len(payload), nw)

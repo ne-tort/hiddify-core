@@ -5,6 +5,9 @@ import "time"
 // DefaultBenchUDPPayloadLen is the standard synth/localize bench UDP write size (512 B).
 const DefaultBenchUDPPayloadLen = 512
 
+// DefaultUploadDrainTimeout bounds H2 upload wire drain after burst probes (docker TLS path).
+const DefaultUploadDrainTimeout = 30 * time.Second
+
 // PaceInterval returns the per-packet spacing for a target Mbit/s bench (0 = burst/unlimited).
 func PaceInterval(payloadLen int, targetMbit float64) time.Duration {
 	if targetMbit <= 0 || payloadLen <= 0 {

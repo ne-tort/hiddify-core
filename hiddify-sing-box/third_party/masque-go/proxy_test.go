@@ -1,3 +1,5 @@
+//go:build masque_ref
+
 package masque_test
 
 import (
@@ -6,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -16,21 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yosida95/uritemplate/v3"
 )
-
-func scaleDuration(d time.Duration) time.Duration {
-	if os.Getenv("CI") != "" {
-		return 5 * d
-	}
-	return d
-}
-
-func newRequest(target string) *http.Request {
-	req := httptest.NewRequest(http.MethodGet, target, nil)
-	req.Method = http.MethodConnect
-	req.Proto = "connect-udp"
-	req.Header.Add("Capsule-Protocol", "?1")
-	return req
-}
 
 func TestProxyCloseProxiedConn(t *testing.T) {
 	clientConn, serverConn := newConnPair(t)

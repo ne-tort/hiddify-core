@@ -15,6 +15,11 @@ import (
 
 const requestProtocol = "connect-udp"
 
+const (
+	uriTemplateTargetHost = "target_host"
+	uriTemplateTargetPort = "target_port"
+)
+
 // extendedConnectProtocol returns the RFC 8441 Extended CONNECT protocol name (:protocol pseudo-header).
 // net/http on HTTP/2 sets req.Proto to the wire HTTP version ("HTTP/2.0"); the tunnel protocol appears
 // in Header[":protocol"]. HTTP/3 clients often set Req.Proto alone (without :protocol header).
