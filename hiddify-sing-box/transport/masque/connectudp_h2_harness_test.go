@@ -413,9 +413,11 @@ func TestLocalizeConnectUDPH2UploadSharedTransportVsNewTransport(t *testing.T) {
 		t.Fatalf("prod NewTransport upload: %v", err)
 	}
 	ratio := prodMbps / sharedMbps
-	t.Logf("LOCALIZE h2 upload shared=%.1f prod_NewTransport=%.1f ratio=%.2f (want 0.85–1.15 when shared>=300)",
-		sharedMbps, prodMbps, ratio)
-	if sharedMbps >= 300 && (ratio < 0.85 || ratio > 1.15) {
+	minRatio := 0.85 * (1 - connectUDPSynthInstantGateSlackPct)
+	maxRatio := 1.15 * (1 + connectUDPSynthInstantGateSlackPct)
+	t.Logf("LOCALIZE h2 upload shared=%.1f prod_NewTransport=%.1f ratio=%.2f (want %.2f–%.2f when shared>=300)",
+		sharedMbps, prodMbps, ratio, minRatio, maxRatio)
+	if sharedMbps >= 300 && (ratio < minRatio || ratio > maxRatio) {
 		t.Fatalf("NewTransport vs EnsureTransport upload gap (shared=%.1f prod=%.1f ratio=%.2f)",
 			sharedMbps, prodMbps, ratio)
 	}

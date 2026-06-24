@@ -1,4 +1,4 @@
-﻿package h2
+package h2
 
 import (
 	"bufio"
@@ -10,8 +10,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,7 +35,6 @@ const (
 	h2UploadCoalesceBulkBytesDefault = 64 * 1024
 	// h2UploadCoalesceThreshold is the upload-only coalesce ceiling (128 KiB — balance pipe block vs flush rate).
 	h2UploadCoalesceThreshold = 128 * 1024
-	envH2UploadCoalesceBulkBytes = "MASQUE_H2_UPLOAD_COALESCE_BULK_BYTES"
 	// h2UploadBulkEnterGap: WriteTo closer than this counts toward bulk coalesce (echo flood / upload-only).
 	h2UploadBulkEnterGap = 50 * time.Microsecond
 	// h2UploadBulkExitGap: spaced WriteTo in duplex leaves bulk (pipeline-1 / TUN RTT).
@@ -49,20 +46,8 @@ const (
 	h2UploadBulkEnterHits = 4
 )
 
-var (
-	h2UploadCoalesceBulkBytes     = h2UploadCoalesceBulkBytesDefault
-	h2UploadCoalesceBulkBytesInit sync.Once
-)
-
 func h2UploadCoalesceBulkBytesConfigured() int {
-	h2UploadCoalesceBulkBytesInit.Do(func() {
-		if v := strings.TrimSpace(os.Getenv(envH2UploadCoalesceBulkBytes)); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n >= h2UploadCoalesceDuplexBytes {
-				h2UploadCoalesceBulkBytes = n
-			}
-		}
-	})
-	return h2UploadCoalesceBulkBytes
+	return h2UploadCoalesceBulkBytesDefault
 }
 
 type PacketConnConfig struct {
@@ -914,7 +899,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	c.writesSinceRead++
 	var wire []byte
 	switch {
-	case c.uploadOnly && ((c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load()) || ThinClientConfigured()):
+	case c.uploadOnly && c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load():
 		wire = c.takeUploadPendingLocked()
 	case c.uploadFlushInteractiveLocked():
 		wire = c.takeUploadPendingLocked()
