@@ -50,8 +50,8 @@ func TestPacketConnReadDeadlineInterruptsBlockedBodyRead(t *testing.T) {
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded after blocked read, got %v", err)
 	}
-	if !c.IsClosed() {
-		t.Fatal("expected PacketConn closed after deadline interrupt teardown")
+	if c.IsClosed() {
+		t.Fatal("PacketConn must stay open after read deadline (upload leg survives)")
 	}
 }
 

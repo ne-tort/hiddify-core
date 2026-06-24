@@ -49,11 +49,13 @@ type H3Conn struct {
 	pumpCtx    context.Context
 	pumpCancel context.CancelFunc
 
-	deadlineMx        sync.Mutex
+	drainer tryDrainHTTPDatagrams
+	prefetch *h3S2CPrefetchRing
+
+	deadlineMx sync.Mutex
 	readCtx           context.Context
 	readCtxCancel     context.CancelFunc
 	deadline          time.Time
-	readDeadlineTimer *time.Timer
 
 	write *h3C2SWriter
 }
@@ -70,6 +72,10 @@ func NewH3Conn(str http3Stream, local, remote net.Addr) *H3Conn {
 	}
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 	c.pumpCtx, c.pumpCancel = context.WithCancel(context.Background())
+	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
+		c.drainer = dr
+	}
+	c.prefetch = newH3S2CPrefetchRing()
 	c.write = newH3C2SWriter(str)
 	go func() {
 		defer close(c.readDone)
@@ -85,38 +91,63 @@ func (c *H3Conn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	if c.closed.Load() {
 		return 0, nil, net.ErrClosed
 	}
+	if c.write != nil {
+		c.write.flushPendingWriteBatch()
+	}
 	for {
 		if c.closed.Load() {
 			return 0, nil, net.ErrClosed
 		}
 		c.deadlineMx.Lock()
-		ctx := c.readCtx
+		d := c.deadline
+		base := c.readCtx
 		c.deadlineMx.Unlock()
 
-		data, err := c.str.ReceiveDatagram(ctx)
-		if err != nil {
-			if c.closed.Load() {
-				return 0, nil, net.ErrClosed
-			}
-			if errors.Is(err, context.Canceled) {
-				c.deadlineMx.Lock()
-				restart := !c.deadline.IsZero() && time.Now().Before(c.deadline)
-				c.deadlineMx.Unlock()
-				if restart {
-					continue
-				}
+		ctx := base
+		var cancel context.CancelFunc
+		if !d.IsZero() {
+			if !time.Now().Before(d) {
 				return 0, nil, os.ErrDeadlineExceeded
 			}
-			return 0, nil, err
+			ctx, cancel = context.WithDeadline(base, d)
+		}
+		if cancel != nil {
+			defer cancel()
+		}
+
+		var data []byte
+		if pref, ok := c.prefetch.take(); ok {
+			data = pref
+		} else {
+			var err error
+			data, err = c.str.ReceiveDatagram(ctx)
+			if err != nil {
+				if c.closed.Load() {
+					return 0, nil, net.ErrClosed
+				}
+				if errors.Is(err, context.DeadlineExceeded) {
+					return 0, nil, os.ErrDeadlineExceeded
+				}
+				if errors.Is(err, context.Canceled) {
+					if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+						return 0, nil, os.ErrDeadlineExceeded
+					}
+					return 0, nil, net.ErrClosed
+				}
+				return 0, nil, err
+			}
+			c.drainTryReceiveIntoPrefetch()
 		}
 		payload, ok, parseErr := frame.ParseHTTPDatagramUDP(data)
 		if parseErr != nil {
+			quic.ReleaseMasqueDatagramReceiveBuffer(data)
 			if errors.Is(parseErr, io.EOF) {
 				return 0, nil, parseErr
 			}
 			continue
 		}
 		if !ok {
+			quic.ReleaseMasqueDatagramReceiveBuffer(data)
 			continue
 		}
 		if len(payload) == 0 {
@@ -165,11 +196,6 @@ func (c *H3Conn) Close() error {
 		c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
 		err = c.str.Close()
 		<-c.readDone
-		c.deadlineMx.Lock()
-		if c.readDeadlineTimer != nil {
-			c.readDeadlineTimer.Stop()
-		}
-		c.deadlineMx.Unlock()
 	})
 	return err
 }
@@ -183,47 +209,9 @@ func (c *H3Conn) SetDeadline(t time.Time) error {
 }
 
 func (c *H3Conn) SetReadDeadline(t time.Time) error {
-	var cancelOutside context.CancelFunc
-
 	c.deadlineMx.Lock()
-	oldDeadline := c.deadline
 	c.deadline = t
-	now := time.Now()
-	if t.IsZero() {
-		if c.readDeadlineTimer != nil && !c.readDeadlineTimer.Stop() {
-			<-c.readDeadlineTimer.C
-		}
-		c.deadlineMx.Unlock()
-		return nil
-	}
-	if !t.After(now) {
-		cancelOutside = c.readCtxCancel
-		c.deadlineMx.Unlock()
-		cancelOutside()
-		return nil
-	}
-	deadline := t.Sub(now)
-	if c.readDeadlineTimer != nil {
-		if now.Before(oldDeadline) {
-			cancelOutside = c.readCtxCancel
-			c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
-		}
-		c.readDeadlineTimer.Reset(deadline)
-	} else {
-		c.readDeadlineTimer = time.AfterFunc(deadline, func() {
-			c.deadlineMx.Lock()
-			shouldCancel := !c.deadline.IsZero() && c.deadline.Before(time.Now())
-			cancelFn := c.readCtxCancel
-			c.deadlineMx.Unlock()
-			if shouldCancel && cancelFn != nil {
-				cancelFn()
-			}
-		})
-	}
 	c.deadlineMx.Unlock()
-	if cancelOutside != nil {
-		cancelOutside()
-	}
 	return nil
 }
 

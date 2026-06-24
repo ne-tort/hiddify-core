@@ -30,6 +30,9 @@ func init() {
 	if strings.TrimSpace(os.Getenv(envWakeSendOnReceiveRead)) == "0" {
 		masqueWakeSendOnReceiveReadEnabled = false
 	}
+	if strings.TrimSpace(os.Getenv(envBidiConnWake)) == "0" {
+		masqueWakeBidiConnOnReceiveReadEnabled = false
+	}
 }
 
 func masqueWakeSendOnReceiveRead() bool {
@@ -522,6 +525,9 @@ func masqueWakeConnFromStream(s *Stream) {
 // download read. Default on; disable conn-level half with MASQUE_QUIC_BIDI_CONN_WAKE=0.
 func MasqueWakeBidiDuplex(s *Stream) {
 	MasqueWakeStreamSend(s)
+	if !masqueWakeBidiConnOnReceiveRead() {
+		return
+	}
 	if s == nil || s.sendStr == nil || s.sendStr.sender == nil {
 		return
 	}

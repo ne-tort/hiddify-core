@@ -7,8 +7,6 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const envBidiConnWake = "MASQUE_QUIC_BIDI_CONN_WAKE"
-
 var masqueHTTP3WakeSendOnReceiveReadEnabled = true
 
 func init() {
@@ -19,10 +17,6 @@ func init() {
 
 func masqueWakeSendOnReceiveRead() bool {
 	return masqueHTTP3WakeSendOnReceiveReadEnabled
-}
-
-func masqueWakeBidiConnOnReceiveRead() bool {
-	return strings.TrimSpace(os.Getenv(envBidiConnWake)) == "1"
 }
 
 func masqueWakeSendAfterReceiveRead(str *Stream, n int) {

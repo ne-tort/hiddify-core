@@ -14,6 +14,8 @@ import (
 
 	"sync"
 
+	"time"
+
 	"github.com/dunglas/httpsfv"
 
 	"github.com/quic-go/quic-go"
@@ -41,6 +43,11 @@ func (e proxyEntry) Close() error {
 
 type h3DatagramSender interface {
 	SendDatagram([]byte) error
+}
+
+// h3C2SStream is the HTTP/3 client→UDP relay ingress (ReceiveDatagram + optional try-drain).
+type h3C2SStream interface {
+	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
 // Proxy is an RFC 9298 CONNECT-UDP proxy over HTTP/3.
@@ -313,7 +320,11 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 	s.mx.Lock()
 
-	delete(s.closers, entry)
+	if s.closers != nil {
+
+		delete(s.closers, entry)
+
+	}
 
 	s.mx.Unlock()
 
@@ -321,87 +332,132 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 }
 
-func (s *Proxy) proxyConnSend(conn *net.UDPConn, str *http3.Stream) error {
+func (s *Proxy) proxyConnSend(conn *net.UDPConn, str h3C2SStream) error {
+	var drainer tryDrainHTTPDatagrams
+	if dr, ok := any(str).(tryDrainHTTPDatagrams); ok {
+		drainer = dr
+	}
+	var icmpRelay func() error
+	if sender, ok := any(str).(h3DatagramSender); ok {
+		icmpRelay = func() error { return sender.SendDatagram(contextIDZero) }
+	}
+	var recvBackoff transientPressureBackoff
+	forwardC2SDatagram := func(data []byte) error {
+		defer quic.ReleaseMasqueDatagramReceiveBuffer(data)
+		udpPayload, ok, perr := frame.ParseHTTPDatagramUDP(data)
+		if perr != nil {
+			if errors.Is(perr, io.EOF) {
+				return nil
+			}
+			log.Printf("dropping malformed HTTP datagram on C2S relay: %v", perr)
+			return nil
+		}
+		if !ok || len(udpPayload) == 0 {
+			return nil
+		}
+		if len(udpPayload) > maxUDPPayloadSize {
+			log.Printf("dropping UDP packet larger than MTU")
+			return nil
+		}
+		return c2sRelayUDPWrite(conn, udpPayload, icmpRelay)
+	}
+	drainQueued := func() (int, error) {
+		if drainer == nil {
+			return 0, nil
+		}
+		forwarded := 0
+		for i := 0; i < proxyConnTryDrainMax; i++ {
+			data, ok := drainer.TryReceiveDatagram()
+			if !ok {
+				break
+			}
+			if err := forwardC2SDatagram(data); err != nil {
+				return forwarded, err
+			}
+			forwarded++
+		}
+		return forwarded, nil
+	}
 	for {
 		data, err := str.ReceiveDatagram(context.Background())
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
-			return err
-		}
-		udpPayload, ok, perr := frame.ParseHTTPDatagramUDP(data)
-		quic.ReleaseMasqueDatagramReceiveBuffer(data)
-		if perr != nil {
-			if errors.Is(perr, io.EOF) {
+			if isTransientHTTPDatagramReceiveError(err) {
+				forwarded, drainErr := drainQueued()
+				if drainErr != nil {
+					return drainErr
+				}
+				if forwarded > 0 {
+					recvBackoff.onProgress()
+					continue
+				}
+				if backoff := recvBackoff.onTransientError(); backoff > 0 {
+					time.Sleep(backoff)
+				}
 				continue
 			}
-			log.Printf("dropping malformed HTTP datagram on C2S relay: %v", perr)
-			continue
-		}
-		if !ok || len(udpPayload) == 0 {
-			continue
-		}
-		if len(udpPayload) > maxUDPPayloadSize {
-			log.Printf("dropping UDP packet larger than MTU")
-			continue
-		}
-		if _, err := conn.Write(udpPayload); err != nil {
 			return err
+		}
+		if err := forwardC2SDatagram(data); err != nil {
+			return err
+		}
+		recvBackoff.onProgress()
+		if forwarded, err := drainQueued(); err != nil {
+			return err
+		} else if forwarded > 0 {
+			recvBackoff.onProgress()
 		}
 	}
 }
 
 func proxyConnReceive(conn *net.UDPConn, str h3DatagramSender) error {
-
 	b := make([]byte, len(contextIDZero)+maxUDPPayloadSize+1)
-
 	copy(b, contextIDZero)
-
+	var sendBackoff transientPressureBackoff
 	for {
-
 		n, err := conn.Read(b[len(contextIDZero):])
-
 		if err != nil {
-
 			if errors.Is(err, io.EOF) {
-
 				return nil
-
 			}
-
 			if isICMPPortUnreachableUDPRead(n, err) {
-
-				if sendErr := str.SendDatagram(b[:len(contextIDZero)]); sendErr != nil {
-
+				if sendErr := str.SendDatagram(b[:len(contextIDZero)]); sendErr != nil && !isTransientHTTPDatagramSendError(sendErr) {
 					return sendErr
-
 				}
-
+				sendBackoff.onProgress()
 				continue
-
 			}
-
 			return err
-
 		}
-
 		if n > maxUDPPayloadSize {
-
 			log.Printf("dropping UDP packet larger than MTU")
-
 			continue
-
 		}
-
 		if err := str.SendDatagram(b[:len(contextIDZero)+n]); err != nil {
-
+			if isTransientHTTPDatagramSendError(err) {
+				if backoff := sendBackoff.onTransientError(); backoff > 0 {
+					time.Sleep(backoff)
+				}
+				continue
+			}
+			if isHTTPDatagramTooLargeError(err) {
+				log.Printf("dropping UDP packet on S2C relay: datagram too large")
+				continue
+			}
 			return err
-
 		}
-
+		sendBackoff.onProgress()
 	}
+}
 
+func isHTTPDatagramTooLargeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errDTL *quic.DatagramTooLargeError
+	return errors.As(err, &errDTL)
 }
 
 // Close closes the proxy and all proxied flows.
@@ -424,7 +480,11 @@ func (s *Proxy) Close() error {
 
 	s.refCount.Wait()
 
+	s.mx.Lock()
+
 	s.closers = nil
+
+	s.mx.Unlock()
 
 	return errors.Join(errs...)
 

@@ -155,7 +155,9 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 		}
 		return h2c.WriteDatagramCapsule(w.ResponseWriter, nil)
 	}
+	wasBulk := w.bulkDownlink
 	w.noteDownlinkArrivalLocked(time.Now())
+	exitedBulk := wasBulk && !w.bulkDownlink
 	var encErr error
 	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
 		h2c.AppendDatagramCapsuleBuffer(&w.pending, udpPayload)
@@ -164,6 +166,9 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	}
 	if encErr != nil {
 		return encErr
+	}
+	if exitedBulk && w.bulkImmediateFlush {
+		return w.flushPendingLocked()
 	}
 	if w.immediateFlush {
 		return w.flushPendingLocked()

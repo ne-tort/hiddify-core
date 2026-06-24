@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"io"
 	"testing"
 
 	"github.com/quic-go/quic-go"
@@ -12,7 +13,7 @@ type mockH3Stream struct {
 	ch chan []byte
 }
 
-func (m *mockH3Stream) Read([]byte) (int, error)  { return 0, nil }
+func (m *mockH3Stream) Read([]byte) (int, error)  { return 0, io.EOF }
 func (m *mockH3Stream) Write([]byte) (int, error) { return 0, nil }
 func (m *mockH3Stream) Close() error              { return nil }
 func (m *mockH3Stream) CancelRead(quic.StreamErrorCode) {}

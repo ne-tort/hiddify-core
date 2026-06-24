@@ -19,6 +19,12 @@ func tuneH2OnwardUDP(conn *net.UDPConn) {
 	cudprelay.TuneMasqueUDPSocketBuffers(conn)
 }
 
+func closeH2OnwardConn(conn *net.UDPConn) {
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
 const RequestProtocol = cudpframe.RequestProtocol
 
 // TargetPolicy mirrors CONNECT-stream / CONNECT-IP onward ACL for CONNECT-UDP (H2+H3).
@@ -200,7 +206,7 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 	}
 
 	if err := writeProxyStatus(nil); err != nil {
-		_ = conn.Close()
+		closeH2OnwardConn(conn)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}

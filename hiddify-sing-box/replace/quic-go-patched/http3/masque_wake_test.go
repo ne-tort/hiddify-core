@@ -12,41 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMasqueWakeSendOnReceiveReadEnv(t *testing.T) {
-	tests := []struct {
-		env  string
-		want bool
-	}{
-		{"", false},
-		{"0", false},
-		{"1", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ", tc.env)
-			if got := masqueWakeSendOnReceiveRead(); got != tc.want {
-				t.Fatalf("masqueWakeSendOnReceiveRead() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestMasqueWakeBidiConnOnReceiveReadEnv(t *testing.T) {
-	tests := []struct {
-		env  string
-		want bool
-	}{
-		{"", false},
-		{"0", false},
-		{"1", true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv(envBidiConnWake, tc.env)
-			if got := masqueWakeBidiConnOnReceiveRead(); got != tc.want {
-				t.Fatalf("masqueWakeBidiConnOnReceiveRead() = %v, want %v", got, tc.want)
-			}
-		})
+func TestMasqueWakeSendOnReceiveReadProdDefault(t *testing.T) {
+	if !masqueWakeSendOnReceiveRead() {
+		t.Fatal("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ: prod default is enabled when unset")
 	}
 }
 
@@ -92,7 +60,6 @@ func TestMasqueWakeOncePerStreamRead(t *testing.T) {
 
 func TestMasqueWakeBidiConnWakeUsesDuplex(t *testing.T) {
 	t.Setenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ", "1")
-	t.Setenv(envBidiConnWake, "1")
 
 	var streamWakes, connWakes int
 	restoreStream := quic.SetMasqueWakeStreamSendHook(func() { streamWakes++ })
@@ -127,7 +94,6 @@ func TestMasqueWakeBidiConnWakeUsesDuplex(t *testing.T) {
 
 func TestMasqueWakeAfterDownloadWriteOnActiveStream(t *testing.T) {
 	t.Setenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ", "1")
-	t.Setenv(envBidiConnWake, "1")
 
 	var streamWakes, connWakes int
 	restoreStream := quic.SetMasqueWakeStreamSendHook(func() { streamWakes++ })
@@ -169,7 +135,6 @@ func TestMasqueWakeAfterDownloadWriteOnActiveStream(t *testing.T) {
 
 func TestMasqueSetBidiDownloadActiveEagerActivationWake(t *testing.T) {
 	t.Setenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ", "1")
-	t.Setenv(envBidiConnWake, "0")
 	t.Setenv("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW", "1")
 
 	var streamWakes int

@@ -2,6 +2,7 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -154,6 +155,11 @@ func releaseH3WriteBuf(data []byte) {
 	h3WriteBufPool.Put(&b)
 }
 
+func putH3WriteBuf(bufPtr *[]byte, data []byte) {
+	*bufPtr = data[:0]
+	h3WriteBufPool.Put(bufPtr)
+}
+
 func (w *h3C2SWriter) shutdown() {
 	if w.writeCh != nil {
 		w.writeCloseOnce.Do(func() {
@@ -188,22 +194,27 @@ func (w *h3C2SWriter) writeBytes(ctx context.Context, closed *atomic.Bool, p []b
 		w.writeMu.Lock()
 		if closed != nil && closed.Load() {
 			w.writeMu.Unlock()
+			putH3WriteBuf(bufPtr, data)
 			return net.ErrClosed
 		}
 		ch := w.writeCh
 		w.writeMu.Unlock()
 		if ch == nil {
 			err := w.sendDatagramUnlocked(data)
-			*bufPtr = data[:0]
-			h3WriteBufPool.Put(bufPtr)
+			putH3WriteBuf(bufPtr, data)
 			return err
 		}
 		select {
 		case ch <- data:
 			return nil
 		case <-ctx.Done():
+			putH3WriteBuf(bufPtr, data)
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return ctx.Err()
+			}
 			return net.ErrClosed
 		case <-time.After(h3WriteQueueWait):
+			putH3WriteBuf(bufPtr, data)
 			return fmt.Errorf("masque connect-udp: write queue blocked >%v", h3WriteQueueWait)
 		}
 	}

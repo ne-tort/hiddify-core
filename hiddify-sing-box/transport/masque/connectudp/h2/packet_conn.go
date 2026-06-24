@@ -474,7 +474,6 @@ func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (in
 			}
 			select {
 			case <-deadlineC:
-				_ = c.Close()
 				if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
 					return 0, ce
 				}
@@ -503,6 +502,14 @@ func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (in
 			_ = c.Close()
 			return 0, err
 		}
+	}
+}
+
+// interruptBlockedBodyRead closes only the response body to unblock a stuck downlink read
+// without tearing down the upload half (C4 / asymmetric CONNECT-UDP).
+func (c *PacketConn) interruptBlockedBodyRead() {
+	if c.resp != nil && c.resp.Body != nil {
+		_ = c.resp.Body.Close()
 	}
 }
 
@@ -541,7 +548,8 @@ func (c *PacketConn) readResponseBodyChunk(ctx context.Context, p []byte) (int, 
 	}()
 	select {
 	case <-ctx.Done():
-		// Do not Close() the whole PacketConn on read deadline — asymmetric upload leg survives.
+		// Unblock stuck body read without closing upload (C4 / asymmetric leg).
+		c.interruptBlockedBodyRead()
 		got := <-ch
 		_ = got
 		if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
@@ -768,8 +776,12 @@ func (c *PacketConn) flushUploadPendingForRead() error {
 }
 
 // markDuplexPeerActive arms upload coalesce when the peer leg is active (asymmetric echo).
+// LegProfileUpload asymmetric C2S legs stay thin — ignore peer activity (H2-1).
 func (c *PacketConn) markDuplexPeerActive() {
 	if c == nil || c.closed.Load() {
+		return
+	}
+	if c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() {
 		return
 	}
 	c.duplexActive.Store(true)
@@ -829,9 +841,6 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if err != nil {
 		if errors.Is(err, split.ErrPortUnreachable) {
 			return 0, c.remoteAddr, split.NewPortUnreachableError(c.remoteAddr)
-		}
-		if c.deadlines.Read.Load() != 0 && (errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled)) {
-			_ = c.Close()
 		}
 		return 0, nil, err
 	}

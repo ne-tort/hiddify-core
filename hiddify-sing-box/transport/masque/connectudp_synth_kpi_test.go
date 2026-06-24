@@ -1060,6 +1060,7 @@ func TestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 
 // TestLocalizeConnectUDPH3EchoDuplexGap compares echo-duplex vs fountain S2C on H3.
 // Separate sessions per leg — reuse after Close() yields false echo=0 gap.
+// Echo runs before fountain so duplex is measured before S2C-only thermal load (3cj protocol).
 func TestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	fountain := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -1086,6 +1087,20 @@ func TestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
 		return session, waitCtx
 	}
 
+	echoSession, echoCtx := openSession()
+	echoPkt, err := echoSession.ListenPacket(echoCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr(echoAddr.IP.String()),
+		Port: uint16(echoAddr.Port),
+	})
+	if err != nil {
+		t.Fatalf("ListenPacket echo: %v", err)
+	}
+	_, echoMbps, err := benchConnectUDPPacketDownloadViaEcho(t, echoPkt, echoAddr, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_ = echoPkt.Close()
+	if err != nil {
+		t.Fatalf("echo-duplex download: %v", err)
+	}
+
 	fountainSession, fountainCtx := openSession()
 	fountainPkt, err := fountainSession.ListenPacket(fountainCtx, M.Socksaddr{
 		Addr: netip.MustParseAddr(fountainAddr.IP.String()),
@@ -1096,23 +1111,8 @@ func TestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
 	}
 	primeUDPBench(t, fountainPkt, fountainAddr)
 	_, fountainMbps, err := benchConnectUDPPacketReceiveOnly(t, fountainPkt, dur, connectudp.DefaultBenchUDPPayloadLen)
-	_ = fountainPkt.Close()
 	if err != nil {
 		t.Fatalf("fountain receive: %v", err)
-	}
-
-	echoSession, echoCtx := openSession()
-	echoPkt, err := echoSession.ListenPacket(echoCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(echoAddr.IP.String()),
-		Port: uint16(echoAddr.Port),
-	})
-	if err != nil {
-		t.Fatalf("ListenPacket echo: %v", err)
-	}
-	defer func() { _ = echoPkt.Close() }()
-	_, echoMbps, err := benchConnectUDPPacketDownloadViaEcho(t, echoPkt, echoAddr, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("echo-duplex download: %v", err)
 	}
 
 	ratio := echoMbps / fountainMbps
@@ -1429,12 +1429,28 @@ func TestLocalizeConnectUDPH2DownloadFountainMaxCapsule(t *testing.T) {
 
 // TestLocalizeConnectUDPH2EchoDuplexGapWithFountain compares echo-duplex vs fountain S2C on H2.
 // Each leg uses a fresh session — reusing one session after Close() yields echo=0 (false gap).
+// Echo runs before fountain so duplex is measured before S2C-only thermal load (3cj / T-KPI-03 parity H3).
 func TestLocalizeConnectUDPH2EchoDuplexGapWithFountain(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	fountain := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	fountainAddr := fountain.LocalAddr().(*net.UDPAddr)
 	echo := runUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	echoAddr := echo.LocalAddr().(*net.UDPAddr)
+
+	echoProxy := startInProcessH2UDPConnectProxy(t)
+	echoSession, echoCtx := newConnectUDPProdProfileH2SessionWithLink(t, echoProxy, instantH2Link{})
+	echoPkt, err := echoSession.ListenPacket(echoCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr(echoAddr.IP.String()),
+		Port: uint16(echoAddr.Port),
+	})
+	if err != nil {
+		t.Fatalf("ListenPacket echo: %v", err)
+	}
+	_, echoMbps, err := benchConnectUDPPacketDownloadViaEcho(t, echoPkt, echoAddr, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_ = echoPkt.Close()
+	if err != nil {
+		t.Fatalf("echo-duplex: %v", err)
+	}
 
 	fountainProxy := startInProcessH2UDPConnectProxy(t)
 	fountainSession, fountainCtx := newConnectUDPProdProfileH2SessionWithLink(t, fountainProxy, instantH2Link{})
@@ -1452,20 +1468,6 @@ func TestLocalizeConnectUDPH2EchoDuplexGapWithFountain(t *testing.T) {
 		t.Fatalf("fountain receive: %v", err)
 	}
 
-	echoProxy := startInProcessH2UDPConnectProxy(t)
-	echoSession, echoCtx := newConnectUDPProdProfileH2SessionWithLink(t, echoProxy, instantH2Link{})
-	echoPkt, err := echoSession.ListenPacket(echoCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(echoAddr.IP.String()),
-		Port: uint16(echoAddr.Port),
-	})
-	if err != nil {
-		t.Fatalf("ListenPacket echo: %v", err)
-	}
-	defer func() { _ = echoPkt.Close() }()
-	_, echoMbps, err := benchConnectUDPPacketDownloadViaEcho(t, echoPkt, echoAddr, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("echo-duplex: %v", err)
-	}
 	ratio := echoMbps / fountainMbps
 	t.Logf("LOCALIZE h2 echo-duplex gap: fountain=%.1f echo=%.1f ratio=%.2f (want ratio>=0.75 when fountain>=400)",
 		fountainMbps, echoMbps, ratio)
