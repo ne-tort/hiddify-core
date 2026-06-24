@@ -63,9 +63,9 @@ const (
 	connectUDPSynthStabilityWallSlack = 1 * time.Second
 	// connectUDPEchoDownloadPrimeDepth: in-flight cap for unlimited bg WriteTo + prime depth (pipeline localize shape).
 	connectUDPEchoDownloadPrimeDepth = 128
-	// connectUDPEchoBoundedPipelineDepth: prod-shaped echo bench (P2 / 3ck fallback if unlimited echo plateaus).
+	// connectUDPEchoBoundedPipelineDepth: primary prod-shaped echo gate (3ck ACTIVATED 2026-06-24).
 	connectUDPEchoBoundedPipelineDepth = 64
-	// connectUDPEchoBoundedPipelineMinMbps: interim gate for bounded echo — below unlimited fountain DoD.
+	// connectUDPEchoBoundedPipelineMinMbps: primary H3 echo floor (cold ~497, hot ~380-483).
 	connectUDPEchoBoundedPipelineMinMbps = 400.0
 	// connectUDPDockerEchoAbsoluteFloorMbps matches run_local.py echo_floor for SOCKS connect-udp profiles.
 	connectUDPDockerEchoAbsoluteFloorMbps = 200.0

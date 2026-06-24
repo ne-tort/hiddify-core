@@ -24,21 +24,11 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// localizeEchoDuplexGateFail logs OPEN by default; Fatalf only when HIDDIFY_LOCALIZE_ECHO_GATE=1 (P0 3cj).
+// localizeEchoDuplexGateFail logs OPEN by default; Fatalf only when HIDDIFY_LOCALIZE_ECHO_GATE=1 (P0 3cj research).
 func localizeEchoDuplexGateFail(t *testing.T, format string, args ...any) {
 	t.Helper()
 	if os.Getenv("HIDDIFY_LOCALIZE_ECHO_GATE") != "1" {
 		t.Logf("OPEN (HIDDIFY_LOCALIZE_ECHO_GATE off): "+format, args...)
-		return
-	}
-	t.Fatalf(format, args...)
-}
-
-// localizeBoundedPipelineGateFail logs OPEN by default; Fatalf when HIDDIFY_LOCALIZE_BOUNDED_ECHO_GATE=1 (P0 3ck).
-func localizeBoundedPipelineGateFail(t *testing.T, format string, args ...any) {
-	t.Helper()
-	if os.Getenv("HIDDIFY_LOCALIZE_BOUNDED_ECHO_GATE") != "1" {
-		t.Logf("OPEN (HIDDIFY_LOCALIZE_BOUNDED_ECHO_GATE off): "+format, args...)
 		return
 	}
 	t.Fatalf(format, args...)
@@ -1286,8 +1276,8 @@ func TestLocalizeConnectUDPH3Pipeline1ProdShape(t *testing.T) {
 	}
 }
 
-// TestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape gates prod-shaped echo (bounded in-flight C2S).
-// Fallback KPI if unlimited echo plateaus <480 on cold (P0 3ck); does not replace unlimited echo GATE 3f.
+// TestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape is the primary H3 echo KPI (P0 3ck ACTIVATED).
+// Prod-shaped echo: bounded in-flight C2S depth 64; floor connectUDPEchoBoundedPipelineMinMbps.
 func TestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	echo := runUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
@@ -1323,7 +1313,7 @@ func TestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape(t *testing.T) {
 	floor := connectUDPEchoBoundedPipelineMinMbps * (1 - connectUDPSynthInstantGateSlackPct)
 	t.Logf("LOCALIZE h3 pipeline=%d prod-shape: %.1f Mbit/s (3ck floor %.0f)", depth, mbps, connectUDPEchoBoundedPipelineMinMbps)
 	if mbps < floor {
-		localizeBoundedPipelineGateFail(t, "h3 pipeline=%d prod-shape %.1f Mbit/s < %.0f — bounded echo path OPEN (3ck)", depth, mbps, connectUDPEchoBoundedPipelineMinMbps)
+		t.Fatalf("h3 pipeline=%d prod-shape %.1f Mbit/s < %.0f (3ck primary echo gate)", depth, mbps, connectUDPEchoBoundedPipelineMinMbps)
 	}
 }
 
