@@ -8,8 +8,7 @@ import (
 )
 
 // TestArchREFSRCUsqueAudit (REF-SRC-USQUE-1/2/3): frozen usque CONNECT-IP scope vs connect-stream KPI path.
-func TestArchREFSRCUsqueAudit(t *testing.T) {
-	if len(ArchREFSRCUsqueAudit) < 6 {
+func TestArchREFSRCUsqueAudit(t *testing.T) {	if len(ArchREFSRCUsqueAudit) < 6 {
 		t.Fatalf("ArchREFSRCUsqueAudit: %d rows want >= 6", len(ArchREFSRCUsqueAudit))
 	}
 	byID := map[string]ArchREFSRCUsqueRow{}
@@ -50,7 +49,7 @@ func TestArchREFSRCUsqueAudit(t *testing.T) {
 	if ArchREFSRCUsqueRelayBufLen() != strm.RelayTunnelBufLen || strm.RelayTunnelBufLen != 65536 {
 		t.Fatalf("relay buffer drift: audit=%d stream=%d", ArchREFSRCUsqueRelayBufLen(), strm.RelayTunnelBufLen)
 	}
-	src := strm.RelayGoAuditSource()
+	src := archRelayGoAuditSource()
 	for _, sym := range []string{"relayTunnelBufPool", "relayTunnelCopyBuffer", "RelayTCPTunnel"} {
 		if !strings.Contains(src, sym) {
 			t.Fatalf("stream/relay.go embed missing %s (REF-SRC-USQUE-3)", sym)

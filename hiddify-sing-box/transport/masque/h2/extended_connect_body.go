@@ -29,6 +29,17 @@ func (b *ExtendedConnectUploadBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// MasqueUploadBuffered implements golang.org/x/net/http2 masqueUploadBuffered (upload pipe depth).
+func (b *ExtendedConnectUploadBody) MasqueUploadBuffered() int {
+	if b == nil || b.Pipe == nil {
+		return 0
+	}
+	if u, ok := b.Pipe.(interface{ MasqueUploadBuffered() int }); ok {
+		return u.MasqueUploadBuffered()
+	}
+	return -1
+}
+
 // MasqueUploadWireAck implements golang.org/x/net/http2 masqueUploadWireAck (post-Flush DATA ack).
 func (b *ExtendedConnectUploadBody) MasqueUploadWireAck(n int) {
 	if b != nil && n > 0 {

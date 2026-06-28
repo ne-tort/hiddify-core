@@ -53,6 +53,7 @@ func TestBootstrapCoreSessionConnectIPDatagramCeilingClamp(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			mcip.ResetDatagramCeilingMaxEnvCache()
 			t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", tc.envCeilingMax)
 			cs, _ := BootstrapCoreSession(ClientOptions{
 				Server:                   "example.com",
@@ -63,6 +64,23 @@ func TestBootstrapCoreSessionConnectIPDatagramCeilingClamp(t *testing.T) {
 				t.Fatalf("unexpected connect ip datagram ceiling: got=%d want=%d", cs.ConnectIPDatagramCeiling, tc.expectedCeiling)
 			}
 		})
+	}
+}
+
+func TestBootstrapCoreSessionMasqueUDPWriteMaxRFC9298(t *testing.T) {
+	mcip.ResetDatagramCeilingMaxEnvCache()
+	cs, _ := BootstrapCoreSession(ClientOptions{
+		Server:     "example.com",
+		ServerPort: 443,
+	}, nil, nil, nil)
+	if cs.MasqueUDPWriteMax <= 0 {
+		t.Fatalf("MasqueUDPWriteMax=%d want >0", cs.MasqueUDPWriteMax)
+	}
+	if cs.MasqueUDPWriteMax > 65527 {
+		t.Fatalf("MasqueUDPWriteMax=%d exceeds RFC 9298 per-datagram max", cs.MasqueUDPWriteMax)
+	}
+	if cs.MasqueUDPWriteMax >= cs.ConnectIPDatagramCeiling {
+		t.Fatalf("MasqueUDPWriteMax=%d must stay below ceiling %d", cs.MasqueUDPWriteMax, cs.ConnectIPDatagramCeiling)
 	}
 }
 

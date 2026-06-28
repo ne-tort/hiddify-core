@@ -6,23 +6,35 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
 
 type dialTCPFakeNetstack struct {
-	dial func(ctx context.Context, dest M.Socksaddr) (net.Conn, error)
+	dial          func(ctx context.Context, dest M.Socksaddr) (net.Conn, error)
+	terminalErr   error
+	closeCalled   atomic.Bool
 }
 
 func (f *dialTCPFakeNetstack) DialContext(ctx context.Context, dest M.Socksaddr) (net.Conn, error) {
+	if f.terminalErr != nil {
+		return nil, errors.Join(Errs.Dial, f.terminalErr)
+	}
 	if f.dial != nil {
 		return f.dial(ctx, dest)
 	}
 	return nil, errors.New("stub dial")
 }
 
-func (f *dialTCPFakeNetstack) Close() error { return nil }
+func (f *dialTCPFakeNetstack) TerminalError() error { return f.terminalErr }
+
+func (f *dialTCPFakeNetstack) Close() error {
+	f.closeCalled.Store(true)
+	return nil
+}
 
 type dialTCPFakePacketSession struct{}
 
@@ -44,6 +56,7 @@ type dialTCPFakeHost struct {
 	attachCount           atomic.Int32
 	flushCount            atomic.Int32
 	ingressStartCount     atomic.Int32
+	resetStalePlaneCount  atomic.Int32
 	cancelAfterFactory    func()
 }
 
@@ -108,6 +121,10 @@ func (h *dialTCPFakeHost) RecordTCPNetstackReady(ready bool) {
 
 func (h *dialTCPFakeHost) ReleaseAbandonedIPSession() {
 	h.releaseAbandoned.Add(1)
+}
+
+func (h *dialTCPFakeHost) ResetStaleConnectIPPlaneLocked() {
+	h.resetStalePlaneCount.Add(1)
 }
 
 func TestDialTCPCanceledBeforeNormalizeClearsFallback(t *testing.T) {
@@ -186,8 +203,39 @@ func TestDialTCPReusesExistingNetstack(t *testing.T) {
 	if host.attachCount.Load() != 0 {
 		t.Fatalf("attachCount=%d want 0 when netstack already present", host.attachCount.Load())
 	}
-	if host.ingressStartCount.Load() != 0 {
-		t.Fatalf("ingressStartCount=%d want 0 when netstack already present", host.ingressStartCount.Load())
+	if host.ingressStartCount.Load() != 1 {
+		t.Fatalf("ingressStartCount=%d want 1 when reusing netstack (ingress poke)", host.ingressStartCount.Load())
+	}
+	if host.flushCount.Load() != 1 {
+		t.Fatalf("flushCount=%d want 1 when reusing netstack", host.flushCount.Load())
+	}
+}
+
+func TestDialTCPRetriesAfterConnectionRefused(t *testing.T) {
+	var dials atomic.Int32
+	dialFn := func(context.Context, M.Socksaddr) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, syscall.ECONNREFUSED
+		}
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	stack := &dialTCPFakeNetstack{dial: dialFn}
+	host := &dialTCPFakeHost{
+		tcpNetstack:  stack,
+		factoryStack: stack,
+	}
+	conn, err := DialTCP(context.Background(), host, M.ParseSocksaddrHostPort("127.0.0.1", 443))
+	if err != nil {
+		t.Fatalf("expected retry success, got %v (dials=%d)", err, dials.Load())
+	}
+	_ = conn.Close()
+	if dials.Load() != 2 {
+		t.Fatalf("dials=%d want 2 (refused then success)", dials.Load())
+	}
+	if host.attachCount.Load() != 2 {
+		t.Fatalf("attachCount=%d want 2 (nil reset + reattach on retry)", host.attachCount.Load())
 	}
 }
 
@@ -195,15 +243,76 @@ func TestDialTCPNetstackDialFailureClearsFallback(t *testing.T) {
 	host := &dialTCPFakeHost{
 		tcpNetstack: &dialTCPFakeNetstack{
 			dial: func(context.Context, M.Socksaddr) (net.Conn, error) {
-				return nil, errors.New("netstack dial refused")
+				return nil, errors.New("netstack dial permanent")
 			},
 		},
 	}
 	_, err := DialTCP(context.Background(), host, M.ParseSocksaddrHostPort("127.0.0.1", 443))
-	if err == nil || err.Error() != "netstack dial refused" {
+	if err == nil || err.Error() != "netstack dial permanent" {
 		t.Fatalf("expected netstack dial error, got %v", err)
 	}
 	if !host.fallbackCleared.Load() {
 		t.Fatal("expected fallback latch cleared on netstack dial failure")
+	}
+}
+
+func TestDialTCPResetsTerminalNetstackBeforeDial(t *testing.T) {
+	var dials atomic.Int32
+	stale := &dialTCPFakeNetstack{terminalErr: errors.New("stale plane")}
+	fresh := &dialTCPFakeNetstack{
+		dial: func(context.Context, M.Socksaddr) (net.Conn, error) {
+			if dials.Add(1) == 1 {
+				client, server := net.Pipe()
+				_ = server.Close()
+				return client, nil
+			}
+			return nil, errors.New("unexpected second dial on same stack")
+		},
+	}
+	host := &dialTCPFakeHost{
+		tcpNetstack:  stale,
+		factoryStack: fresh,
+	}
+	conn, err := DialTCP(context.Background(), host, M.ParseSocksaddrHostPort("127.0.0.1", 443))
+	if err != nil {
+		t.Fatalf("expected retry success after terminal reset, got %v", err)
+	}
+	_ = conn.Close()
+	if !stale.closeCalled.Load() {
+		t.Fatal("expected stale netstack closed")
+	}
+	if host.resetStalePlaneCount.Load() != 1 {
+		t.Fatalf("resetStalePlaneCount=%d want 1", host.resetStalePlaneCount.Load())
+	}
+	if dials.Load() != 1 {
+		t.Fatalf("dials=%d want 1 on fresh stack", dials.Load())
+	}
+}
+
+func TestDialTCPAppliesDefaultTimeoutWithoutDeadline(t *testing.T) {
+	started := make(chan struct{})
+	host := &dialTCPFakeHost{
+		tcpNetstack: &dialTCPFakeNetstack{
+			dial: func(ctx context.Context, _ M.Socksaddr) (net.Conn, error) {
+				close(started)
+				<-ctx.Done()
+				return nil, context.Cause(ctx)
+			},
+		},
+	}
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := DialTCP(context.Background(), host, M.ParseSocksaddrHostPort("127.0.0.1", 443))
+		done <- err
+	}()
+	<-started
+	err := <-done
+	elapsed := time.Since(start)
+	if elapsed < 19*time.Second || elapsed > 26*time.Second {
+		t.Fatalf("elapsed %v want ~%v default dial timeout", elapsed, connectIPTCPDialDefaultTimeout)
+	}
+	if err == nil {
+		t.Fatal("expected dial error after default timeout")
 	}
 }

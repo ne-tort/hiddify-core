@@ -5,9 +5,14 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strings"
+	"syscall"
+	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
+
+const connectIPTCPDialDefaultTimeout = 20 * time.Second
 
 // DialTCPHost wires production CONNECT-IP TCP netstack dial from package masque (phase 17 bridge).
 type DialTCPHost interface {
@@ -24,6 +29,8 @@ type DialTCPHost interface {
 	OnTCPNetstackFactoryError()
 	RecordTCPNetstackReady(ready bool)
 	ReleaseAbandonedIPSession()
+	// ResetStaleConnectIPPlaneLocked drops cached IPConn/overlay after dial timeout (remote restart).
+	ResetStaleConnectIPPlaneLocked()
 }
 
 // DialTCP dials TCP over the CONNECT-IP userspace netstack (tcp_transport=connect_ip).
@@ -89,6 +96,22 @@ func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, all
 		host.BumpTCPInstallInflight(-1)
 	} else {
 		ns = host.TCPNetstack()
+		if allowRetry {
+			if err := tcpNetstackTerminalError(ns); err != nil {
+				if NetstackDebugEnabled() {
+					log.Printf("masque connect_ip tcp: resetting terminal netstack before dial err=%v", err)
+				}
+				old := ns
+				host.AttachTCPNetstack(nil)
+				host.RecordTCPNetstackReady(false)
+				host.ResetStaleConnectIPPlaneLocked()
+				host.UnlockSession()
+				_ = old.Close()
+				return dialTCP(ctx, host, destination, false)
+			}
+		}
+		host.MaybeStartConnectIPIngressLocked()
+		host.FlushTCPNetstackIngress(ns)
 	}
 	host.UnlockSession()
 	select {
@@ -97,9 +120,20 @@ func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, all
 		return nil, errors.Join(Errs.Dial, context.Cause(ctx))
 	default:
 	}
-	conn, dialErr := ns.DialContext(ctx, dest)
+	dialCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, connectIPTCPDialDefaultTimeout)
+		defer cancel()
+	}
+	conn, dialErr := ns.DialContext(dialCtx, dest)
 	if NetstackDebugEnabled() {
-		log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), dialErr)
+		if dialErr != nil {
+			log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), dialErr)
+		} else if conn != nil {
+			log.Printf("masque connect_ip tcp: dial ok destination=%s local=%s remote=%s",
+				dest.String(), conn.LocalAddr(), conn.RemoteAddr())
+		}
 	}
 	if dialErr != nil {
 		if allowRetry && shouldRetryDialAfterNetstackReset(dialErr) {
@@ -111,6 +145,7 @@ func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, all
 				host.AttachTCPNetstack(nil)
 				host.RecordTCPNetstackReady(false)
 			}
+			host.ResetStaleConnectIPPlaneLocked()
 			host.UnlockSession()
 			_ = ns.Close()
 			return dialTCP(ctx, host, destination, false)
@@ -127,6 +162,30 @@ func shouldRetryDialAfterNetstackReset(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return true
 	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "endpoint not connected") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "tcp dial failed") {
+		return true
+	}
+	if errors.Is(err, Errs.Dial) || errors.Is(err, Errs.Closed) {
+		return true
+	}
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func tcpNetstackTerminalError(ns TCPNetstack) error {
+	if ns == nil {
+		return nil
+	}
+	te, ok := ns.(interface{ TerminalError() error })
+	if !ok {
+		return nil
+	}
+	return te.TerminalError()
 }

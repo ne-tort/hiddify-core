@@ -70,18 +70,22 @@ func resolveMasqueEntryServerPort(chain []CM.ChainHop, fallbackServer string, fa
 }
 
 func (e *Endpoint) Start(stage adapter.StartStage) error {
-	if stage != adapter.StartStatePostStart {
+	switch stage {
+	case adapter.StartStateInitialize:
+		e.startOnce.Do(func() {
+			base := e.baseCtx
+			if base == nil {
+				base = context.Background()
+			}
+			e.startCtx, e.startCancel = context.WithCancel(base)
+			go e.startRuntime()
+		})
+		return nil
+	case adapter.StartStatePostStart:
+		return nil
+	default:
 		return nil
 	}
-	e.startOnce.Do(func() {
-		base := e.baseCtx
-		if base == nil {
-			base = context.Background()
-		}
-		e.startCtx, e.startCancel = context.WithCancel(base)
-		go e.startRuntime()
-	})
-	return nil
 }
 
 func (e *Endpoint) IsReady() bool {
@@ -224,6 +228,8 @@ func (e *Endpoint) startRuntime() {
 		TemplateIP:               e.options.TemplateIP,
 		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
 		ConnectIPScopeIPProto:    e.options.ConnectIPScopeIPProto,
+		ProfileLocalIPv4:         strings.TrimSpace(e.options.ProfileLocalIPv4),
+		ProfileLocalIPv6:         strings.TrimSpace(e.options.ProfileLocalIPv6),
 		TemplateTCP:              e.options.TemplateTCP,
 		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
 		TCPMode:                  normalizeTCPMode(e.options.TCPMode),

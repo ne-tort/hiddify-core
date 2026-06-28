@@ -7,23 +7,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 )
-
-// tuneH2OnwardUDP sets kernel snd/rcv buffers on server CONNECT-UDP onward UDP (relay H3 parity).
-func tuneH2OnwardUDP(conn *net.UDPConn) {
-	cudprelay.TuneMasqueUDPSocketBuffers(conn)
-}
-
-func closeH2OnwardConn(conn *net.UDPConn) {
-	if conn != nil {
-		_ = conn.Close()
-	}
-}
 
 const RequestProtocol = cudpframe.RequestProtocol
 
@@ -92,19 +80,6 @@ func targetPolicyHTTPStatus(err error) int {
 	return http.StatusBadRequest
 }
 
-func dnsErrorToMasqueProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
-	if dnsError.Timeout() {
-		proxyStatus.Params.Add("error", "dns_timeout")
-		return
-	}
-	proxyStatus.Params.Add("error", "dns_error")
-	if dnsError.IsNotFound {
-		proxyStatus.Params.Add("rcode", "Negative response")
-	} else {
-		proxyStatus.Params.Add("rcode", "SERVFAIL")
-	}
-}
-
 // ResolveDialToHTTPStatus maps UDP resolve/dial failures to HTTP status codes.
 func ResolveDialToHTTPStatus(err error) int {
 	if err == nil {
@@ -128,106 +103,34 @@ func ResolveDialToHTTPStatus(err error) int {
 
 // HandleConnectUDP serves RFC 9298 CONNECT-UDP over HTTP/3 or HTTP/2.
 func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *cudpframe.Request, udpProxy *cudprelay.Proxy, policy TargetPolicy) {
+	if h.Hooks.ResolveTCPTarget == nil || h.Hooks.AllowTCPPort == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	if polErr := h.checkTargetPolicy(r.Context(), parsed.Target, policy); polErr != nil {
 		w.WriteHeader(targetPolicyHTTPStatus(polErr))
 		return
 	}
 	if _, ok := w.(http3.HTTPStreamer); ok {
-		if err := udpProxy.Proxy(w, parsed); err != nil {
-			w.WriteHeader(http.StatusBadGateway)
-		}
+		_ = udpProxy.Proxy(w, parsed)
 		return
 	}
 	protoFn := h.Hooks.ExtendedMasqueTunnelProtocol
 	if protoFn == nil {
-		protoFn = defaultExtendedMasqueTunnelProtocol
+		protoFn = DefaultExtendedMasqueTunnelProtocol
 	}
 	if !strings.EqualFold(protoFn(r), RequestProtocol) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-
-	proxyStatus := httpsfv.NewItem(parsed.Host)
-	writeProxyStatus := func(err error) error {
-		if err != nil {
-			proxyStatus.Params.Add("details", err.Error())
-		}
-		val, marshalErr := httpsfv.Marshal(proxyStatus)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		w.Header().Add("Proxy-Status", val)
-		return err
-	}
-
-	addr, err := net.ResolveUDPAddr("udp", parsed.Target)
-	if err != nil {
-		var dnsError *net.DNSError
-		if errors.As(err, &dnsError) {
-			dnsErrorToMasqueProxyStatus(&proxyStatus, dnsError)
-		}
-		_ = writeProxyStatus(err)
-		w.WriteHeader(ResolveDialToHTTPStatus(err))
-		return
-	}
-	proxyStatus.Params.Add("next-hop", addr.String())
-
-	role := cudph2.StreamRoleFromRequest(r)
-	if role != "" {
-		sessKey, keyErr := cudph2.RequireSessionKey(r, addr.String())
-		if keyErr != nil {
-			if cudph2.IsMissingMuxKey(keyErr) {
-				_ = writeProxyStatus(keyErr)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			_ = writeProxyStatus(keyErr)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if role == cudph2.StreamRoleDownload && h.h2Sessions().HasActiveDownload(sessKey) {
-			_ = writeProxyStatus(cudph2.ErrDuplicateDownloadSession)
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-	}
-
-	var conn *net.UDPConn
-	if role != cudph2.StreamRoleUpload {
-		var dialErr error
-		conn, dialErr = net.DialUDP("udp", nil, addr)
-		if dialErr != nil {
-			proxyStatus.Params.Add("error", "destination_ip_unroutable")
-			_ = writeProxyStatus(dialErr)
-			w.WriteHeader(ResolveDialToHTTPStatus(dialErr))
-			return
-		}
-		tuneH2OnwardUDP(conn)
-	}
-
-	if err := writeProxyStatus(nil); err != nil {
-		closeH2OnwardConn(conn)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	_ = http.NewResponseController(w).EnableFullDuplex()
-	capsuleVal := ""
-	if h.Hooks.CapsuleProtocolHeaderValue != nil {
-		capsuleVal = h.Hooks.CapsuleProtocolHeaderValue()
-	}
-	w.Header().Set(http3.CapsuleProtocolHeader, capsuleVal)
-	w.WriteHeader(http.StatusOK)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	if err := cudph2.ServeH2FromRequest(w, r, conn, addr.String(), h.h2Sessions()); err != nil {
-		if cudph2.IsDuplicateDownloadSession(err) {
-			return
-		}
-	}
+	cudph2.ServeConnectUDP(w, r, parsed.Target, parsed.Host, cudph2.ServeConnectUDPConfig{
+		CapsuleProtocolHeaderValue: h.Hooks.CapsuleProtocolHeaderValue,
+		Sessions:                   h.h2Sessions(),
+	})
 }
 
-func defaultExtendedMasqueTunnelProtocol(r *http.Request) string {
+// DefaultExtendedMasqueTunnelProtocol reads :protocol (H2) or Proto (H3 compat) from a CONNECT request.
+func DefaultExtendedMasqueTunnelProtocol(r *http.Request) string {
 	if r == nil {
 		return ""
 	}

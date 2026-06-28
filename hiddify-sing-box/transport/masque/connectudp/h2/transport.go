@@ -11,20 +11,33 @@ import (
 	"sync"
 
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
-	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
 
-// OverlayDialConfig wires CONNECT-UDP HTTP/2 overlay dial from a masque core session.
-type OverlayDialConfig struct {
-	Hook              func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error)
-	EnsureTransport     func(ctx context.Context) (*http2.Transport, error)
-	SetAuthHeader     func(h http.Header)
-	Tag                   string
-	WarpConnectIPProtocol string
-	QUICDialCandidateHost string
-	ResolveDialAddr       func() string
+// OverlaySessionCallbacks supplies session wiring for CONNECT-UDP HTTP/2 overlay dial.
+type OverlaySessionCallbacks struct {
+	EnsureTransport          func(ctx context.Context) (*http2.Transport, error)
+	NewTransport             func() (*http2.Transport, error)
+	SetAuthHeader            func(h http.Header)
+	Tag                      string
+	WarpConnectIPProtocol    string
+	QUICDialCandidateHost    string
+	ResolveDialAddr          func() string
 	ErrTemplateNotConfigured error
+}
+
+// H2OverlayDialConfigFromSession maps session callbacks into overlay dial config.
+func H2OverlayDialConfigFromSession(cb OverlaySessionCallbacks) H2OverlayDialConfig {
+	return H2OverlayDialConfig{
+		EnsureTransport:          cb.EnsureTransport,
+		NewTransport:             cb.NewTransport,
+		SetAuthHeader:            cb.SetAuthHeader,
+		Tag:                      cb.Tag,
+		WarpConnectIPProtocol:    cb.WarpConnectIPProtocol,
+		QUICDialCandidateHost:    cb.QUICDialCandidateHost,
+		ResolveDialAddr:          cb.ResolveDialAddr,
+		ErrTemplateNotConfigured: cb.ErrTemplateNotConfigured,
+	}
 }
 
 // ClientTransportConfig builds a shared HTTP/2 MASQUE client transport (CONNECT-UDP/IP pool).

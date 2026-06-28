@@ -4,10 +4,12 @@ package tun
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"runtime"
 	"time"
 
+	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/adapters/gonet"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -26,6 +28,8 @@ const WithGVisor = true
 
 const DefaultNIC tcpip.NICID = 1
 
+var errGVisorIngressNotReady = errors.New("gvisor ingress dispatcher not ready")
+
 type GVisor struct {
 	ctx                  context.Context
 	tun                  GVisorTun
@@ -39,6 +43,7 @@ type GVisor struct {
 	logger               logger.Logger
 	stack                *stack.Stack
 	endpoint             stack.LinkEndpoint
+	ingressDispatcher    stack.NetworkDispatcher
 	l3OverlayPrefixes    []netip.Prefix
 	l3OverlaySend        func([]byte) error
 	l3OverlaySendError   func(error)
@@ -88,9 +93,22 @@ func NewGVisor(
 }
 
 func (t *GVisor) Start() error {
+	kernelHostRelay := false
+	if len(t.l3OverlayPrefixes) > 0 {
+		if nt, ok := t.tun.(*NativeTun); ok {
+			nt.SetL3OverlayKernelRelay(true)
+			kernelHostRelay = true
+		}
+	}
 	linkEndpoint, nicOptions, err := t.tun.NewEndpoint()
 	if err != nil {
 		return err
+	}
+	linkEndpoint = &linkEndpointAttachCapture{
+		LinkEndpoint: linkEndpoint,
+		onAttach: func(d stack.NetworkDispatcher) {
+			t.ingressDispatcher = d
+		},
 	}
 	linkEndpoint = &LinkEndpointFilter{
 		LinkEndpoint:       linkEndpoint,
@@ -99,12 +117,13 @@ func (t *GVisor) Start() error {
 		L3OverlayPrefixes:  t.l3OverlayPrefixes,
 		L3OverlaySend:      t.l3OverlaySend,
 		L3OverlaySendError: t.l3OverlaySendError,
+		KernelHostRelay:    kernelHostRelay,
 	}
 	ipStack, err := NewGVisorStackWithOptions(linkEndpoint, nicOptions, false)
 	if err != nil {
 		return err
 	}
-	ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, NewTCPForwarderWithLoopback(t.ctx, ipStack, t.handler, t.inet4LoopbackAddress, t.inet6LoopbackAddress, t.tun).HandlePacket)
+	ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, NewTCPForwarderWithLoopback(t.ctx, ipStack, t.handler, t.inet4LoopbackAddress, t.inet6LoopbackAddress, t.tun, t.l3OverlayPrefixes).HandlePacket)
 	ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, NewUDPForwarder(t.ctx, ipStack, t.handler, t.udpTimeout).HandlePacket)
 	icmpForwarder := NewICMPForwarder(t.ctx, ipStack, t.handler, t.udpTimeout)
 	icmpForwarder.SetLocalAddresses(t.inet4Address, t.inet6Address)
@@ -126,6 +145,33 @@ func (t *GVisor) Close() error {
 	}
 	return nil
 }
+
+func (t *GVisor) InjectIngressPacket(packet []byte) error {
+	if t == nil || len(packet) == 0 {
+		return nil
+	}
+	if t.ingressDispatcher == nil {
+		return errGVisorIngressNotReady
+	}
+	var protocol tcpip.NetworkProtocolNumber
+	switch header.IPVersion(packet) {
+	case header.IPv4Version:
+		protocol = ipv4.ProtocolNumber
+	case header.IPv6Version:
+		protocol = ipv6.ProtocolNumber
+	default:
+		return nil
+	}
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(append([]byte(nil), packet...)),
+	})
+	pkt.RXChecksumValidated = true
+	t.ingressDispatcher.DeliverNetworkPacket(protocol, pkt)
+	pkt.DecRef()
+	return nil
+}
+
+var _ IngressInjector = (*GVisor)(nil)
 
 func AddressFromAddr(destination netip.Addr) tcpip.Address {
 	if destination.Is6() {

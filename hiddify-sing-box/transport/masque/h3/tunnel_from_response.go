@@ -1,7 +1,6 @@
 package h3
 
 import (
-	_ "embed"
 	"context"
 	"errors"
 	"fmt"
@@ -13,12 +12,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
-
-//go:embed tunnel_from_response.go
-var tunnelFromResponseAuditSource string
-
-// TunnelFromResponseAuditSource returns tunnel_from_response.go for REF-SRC HTTPStreamer audits.
-func TunnelFromResponseAuditSource() string { return tunnelFromResponseAuditSource }
 
 // ErrHTTPStreamerMissing is returned when the CONNECT response cannot expose *http3.Stream.
 var ErrHTTPStreamerMissing = errors.New("h3: response body is not http3.HTTPStreamer (need quic-go-patched)")

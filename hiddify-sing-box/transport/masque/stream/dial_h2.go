@@ -34,13 +34,14 @@ type DialH2Host interface {
 
 // DialH2Hooks supplies masque-layer CONNECT-stream H2 dependencies (wired from transport/masque).
 type DialH2Hooks struct {
-	NewRequestContext   func(parent context.Context) (ctx context.Context, stop func(success bool))
-	NewConnectUploadBody func(pipe *io.PipeReader) io.Reader
-	SetAuthHeader       func(h http.Header)
-	RequestURL          func(u *url.URL) string
-	TunnelFromResponse  func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error)
-	ClassifyError       func(err error) string
-	AuthFailed          error
+	NewRequestContext    func(parent context.Context) (ctx context.Context, stop func(success bool))
+	NewConnectUploadPipe func() (uploadR io.ReadCloser, uploadW io.WriteCloser)
+	NewConnectUploadBody func(uploadR io.Reader) io.Reader
+	SetAuthHeader        func(h http.Header)
+	RequestURL           func(u *url.URL) string
+	TunnelFromResponse   func(ctx context.Context, resp *http.Response, upload io.WriteCloser, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error)
+	ClassifyError        func(err error) string
+	AuthFailed           error
 }
 
 // DialHTTP2ConnectStream performs one HTTP/2 Extended CONNECT-stream dial with retry on transport faults.
@@ -91,14 +92,21 @@ func DialHTTP2ConnectStream(
 		}
 		TraceTCPf("masque tcp connect_stream h2 host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
 
-		pr, pw := io.Pipe()
+		var uploadR io.ReadCloser
+		var uploadW io.WriteCloser
+		if hooks.NewConnectUploadPipe != nil {
+			uploadR, uploadW = hooks.NewConnectUploadPipe()
+		} else {
+			pr, pw := io.Pipe()
+			uploadR, uploadW = pr, pw
+		}
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
-		uploadBody := hooks.NewConnectUploadBody(pr)
+		uploadBody := hooks.NewConnectUploadBody(uploadR)
 		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, hooks.RequestURL(tcpURL), uploadBody)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
-			_ = pr.Close()
-			_ = pw.Close()
+			_ = uploadR.Close()
+			_ = uploadW.Close()
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, fmt.Errorf("masque h2: tcp connect-stream build request: %w", reqErr))
 		}
 		req.Host = serverHost
@@ -114,8 +122,8 @@ func DialHTTP2ConnectStream(
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
-			_ = pr.Close()
-			_ = pw.Close()
+			_ = uploadR.Close()
+			_ = uploadW.Close()
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
 				TraceTCPf("masque tcp connect_stream h2 cancelled host=%s port=%d attempt=%d error_class=%s err=%v",
 					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
@@ -139,8 +147,8 @@ func DialHTTP2ConnectStream(
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
-			_ = pr.Close()
-			_ = pw.Close()
+			_ = uploadR.Close()
+			_ = uploadW.Close()
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				TraceTCPf("masque tcp connect_stream h2 denied host=%s port=%d status=%d error_class=%s",
@@ -153,14 +161,14 @@ func DialHTTP2ConnectStream(
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
-			_ = pr.Close()
-			_ = pw.Close()
+			_ = uploadR.Close()
+			_ = uploadW.Close()
 			_ = resp.Body.Close()
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
 		stopReqCtxRelay(true)
 		TraceTCPf("masque tcp connect_stream h2 success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
-		return hooks.TunnelFromResponse(streamCtx, resp, pw, uploadBody, targetHost, targetPort)
+		return hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
 	}
 	if lastRoundTripErr != nil {
 		if IsRetryableTCPStreamError(lastRoundTripErr) {

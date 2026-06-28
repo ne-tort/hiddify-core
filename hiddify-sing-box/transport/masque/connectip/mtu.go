@@ -4,6 +4,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -13,9 +14,13 @@ const (
 	DatagramSlack = 80
 )
 
-// DatagramCeilingMax returns the configured CONNECT-IP datagram ceiling max.
-// Override with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535]; invalid values fall back to DefaultDatagramCeilingMax.
-func DatagramCeilingMax() int {
+var datagramCeilingMaxEnvCache struct {
+	mu    sync.Mutex
+	done  bool
+	value int
+}
+
+func parseDatagramCeilingMaxFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX"))
 	if raw == "" {
 		return DefaultDatagramCeilingMax
@@ -25,6 +30,25 @@ func DatagramCeilingMax() int {
 		return DefaultDatagramCeilingMax
 	}
 	return n
+}
+
+// DatagramCeilingMax returns the configured CONNECT-IP datagram ceiling max.
+// Env is read once per process (HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535]).
+func DatagramCeilingMax() int {
+	datagramCeilingMaxEnvCache.mu.Lock()
+	defer datagramCeilingMaxEnvCache.mu.Unlock()
+	if !datagramCeilingMaxEnvCache.done {
+		datagramCeilingMaxEnvCache.value = parseDatagramCeilingMaxFromEnv()
+		datagramCeilingMaxEnvCache.done = true
+	}
+	return datagramCeilingMaxEnvCache.value
+}
+
+// ResetDatagramCeilingMaxEnvCache clears the env cache (tests only).
+func ResetDatagramCeilingMaxEnvCache() {
+	datagramCeilingMaxEnvCache.mu.Lock()
+	defer datagramCeilingMaxEnvCache.mu.Unlock()
+	datagramCeilingMaxEnvCache.done = false
 }
 
 // H3NetstackMTU returns gVisor link MTU for H3 overlay (ceiling minus slack).

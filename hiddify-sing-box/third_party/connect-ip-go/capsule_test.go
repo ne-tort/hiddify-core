@@ -347,6 +347,69 @@ func TestParseRouteAdvertisementCapsuleInvalid(t *testing.T) {
 		require.ErrorContains(t, err, "route ranges must not overlap")
 	})
 
+	t.Run("route ranges must be ordered by IP version", func(t *testing.T) {
+		v6 := []byte{6}
+		v6 = append(v6, netip.MustParseAddr("2001:db8::1").AsSlice()...)
+		v6 = append(v6, netip.MustParseAddr("2001:db8::10").AsSlice()...)
+		v6 = append(v6, 0)
+		v4 := []byte{4}
+		v4 = append(v4, netip.AddrFrom4([4]byte{10, 0, 0, 1}).AsSlice()...)
+		v4 = append(v4, netip.AddrFrom4([4]byte{10, 0, 0, 10}).AsSlice()...)
+		v4 = append(v4, 0)
+
+		data := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+		data = quicvarint.Append(data, uint64(len(v6)+len(v4)))
+		data = append(data, v6...)
+		data = append(data, v4...)
+
+		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
+		require.NoError(t, err)
+		_, err = parseRouteAdvertisementCapsule(cr)
+		require.ErrorContains(t, err, "route ranges must be ordered by IP version")
+	})
+
+	t.Run("route ranges must be ordered by IP protocol", func(t *testing.T) {
+		tcp := []byte{4}
+		tcp = append(tcp, netip.AddrFrom4([4]byte{10, 0, 0, 20}).AsSlice()...)
+		tcp = append(tcp, netip.AddrFrom4([4]byte{10, 0, 0, 30}).AsSlice()...)
+		tcp = append(tcp, 6)
+		all := []byte{4}
+		all = append(all, netip.AddrFrom4([4]byte{10, 0, 0, 1}).AsSlice()...)
+		all = append(all, netip.AddrFrom4([4]byte{10, 0, 0, 10}).AsSlice()...)
+		all = append(all, 0)
+
+		data := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+		data = quicvarint.Append(data, uint64(len(tcp)+len(all)))
+		data = append(data, tcp...)
+		data = append(data, all...)
+
+		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
+		require.NoError(t, err)
+		_, err = parseRouteAdvertisementCapsule(cr)
+		require.ErrorContains(t, err, "route ranges must be ordered by IP protocol")
+	})
+
+	t.Run("protocol 0 must not overlap specific protocol", func(t *testing.T) {
+		all := []byte{4}
+		all = append(all, netip.AddrFrom4([4]byte{10, 0, 0, 1}).AsSlice()...)
+		all = append(all, netip.AddrFrom4([4]byte{10, 0, 0, 20}).AsSlice()...)
+		all = append(all, 0)
+		tcp := []byte{4}
+		tcp = append(tcp, netip.AddrFrom4([4]byte{10, 0, 0, 5}).AsSlice()...)
+		tcp = append(tcp, netip.AddrFrom4([4]byte{10, 0, 0, 15}).AsSlice()...)
+		tcp = append(tcp, 6)
+
+		data := quicvarint.Append(nil, uint64(capsuleTypeRouteAdvertisement))
+		data = quicvarint.Append(data, uint64(len(all)+len(tcp)))
+		data = append(data, all...)
+		data = append(data, tcp...)
+
+		_, cr, err := http3.ParseCapsule(bytes.NewReader(data))
+		require.NoError(t, err)
+		_, err = parseRouteAdvertisementCapsule(cr)
+		require.ErrorContains(t, err, "protocol 0 and specific protocol")
+	})
+
 	t.Run("incomplete capsule", func(t *testing.T) {
 		iprange1 := []byte{4}                                                          // IPv4
 		iprange1 = append(iprange1, netip.AddrFrom4([4]byte{1, 1, 1, 1}).AsSlice()...) // Start IP

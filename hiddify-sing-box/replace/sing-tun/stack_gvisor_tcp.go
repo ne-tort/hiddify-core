@@ -24,14 +24,15 @@ type TCPForwarder struct {
 	inet4LoopbackAddress []tcpip.Address
 	inet6LoopbackAddress []tcpip.Address
 	tun                  GVisorTun
+	l3OverlayPrefixes    []netip.Prefix
 	forwarder            *tcp.Forwarder
 }
 
 func NewTCPForwarder(ctx context.Context, stack *stack.Stack, handler Handler) *TCPForwarder {
-	return NewTCPForwarderWithLoopback(ctx, stack, handler, nil, nil, nil)
+	return NewTCPForwarderWithLoopback(ctx, stack, handler, nil, nil, nil, nil)
 }
 
-func NewTCPForwarderWithLoopback(ctx context.Context, stack *stack.Stack, handler Handler, inet4LoopbackAddress []netip.Addr, inet6LoopbackAddress []netip.Addr, tun GVisorTun) *TCPForwarder {
+func NewTCPForwarderWithLoopback(ctx context.Context, stack *stack.Stack, handler Handler, inet4LoopbackAddress []netip.Addr, inet6LoopbackAddress []netip.Addr, tun GVisorTun, l3OverlayPrefixes []netip.Prefix) *TCPForwarder {
 	forwarder := &TCPForwarder{
 		ctx:                  ctx,
 		stack:                stack,
@@ -39,9 +40,19 @@ func NewTCPForwarderWithLoopback(ctx context.Context, stack *stack.Stack, handle
 		inet4LoopbackAddress: common.Map(inet4LoopbackAddress, AddressFromAddr),
 		inet6LoopbackAddress: common.Map(inet6LoopbackAddress, AddressFromAddr),
 		tun:                  tun,
+		l3OverlayPrefixes:    l3OverlayPrefixes,
 	}
 	forwarder.forwarder = tcp.NewForwarder(stack, 0, 1024, forwarder.Forward)
 	return forwarder
+}
+
+func (f *TCPForwarder) overlayTCPRoute(id stack.TransportEndpointID) bool {
+	if len(f.l3OverlayPrefixes) == 0 {
+		return false
+	}
+	local := AddrFromAddress(id.LocalAddress)
+	remote := AddrFromAddress(id.RemoteAddress)
+	return prefixListContains(f.l3OverlayPrefixes, local) || prefixListContains(f.l3OverlayPrefixes, remote)
 }
 
 func (f *TCPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
@@ -72,6 +83,10 @@ func (f *TCPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pac
 			f.tun.WritePacket(pkt)
 			return true
 		}
+	}
+	// Native L3 overlay: kernel egress stolen at IP ingress (stack_gvisor_filter); do not proxy to Handler.
+	if f.overlayTCPRoute(id) {
+		return true
 	}
 	return f.forwarder.HandlePacket(id, pkt)
 }

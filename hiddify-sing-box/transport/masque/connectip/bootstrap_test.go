@@ -140,10 +140,33 @@ func TestWarpConsumerBootstrapRequestAddressesErrorClosesConn(t *testing.T) {
 
 func TestGenericServerBootstrapSkipsWarpProtocol(t *testing.T) {
 	conn := &fakeBootstrapConn{}
-	if err := GenericServerBootstrap(conn, SessionBootstrapParams{
+	if err := GenericServerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		WarpConnectIPProtocol: "cf-connect-ip",
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGenericServerBootstrapDoesNotSendEmptyRequest(t *testing.T) {
+	conn := &fakeBootstrapConn{controlCapsules: true}
+	if err := GenericServerBootstrap(context.Background(), conn, SessionBootstrapParams{Tag: "t1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn.requestCalls != 0 {
+		t.Fatalf("generic server must not send empty ADDRESS_REQUEST, got %d calls", conn.requestCalls)
+	}
+}
+
+func TestGenericServerBootstrapSkipsRequestWhenPrefixesPresent(t *testing.T) {
+	conn := &fakeBootstrapConn{
+		controlCapsules: true,
+		current:         []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")},
+	}
+	if err := GenericServerBootstrap(context.Background(), conn, SessionBootstrapParams{Tag: "t1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn.requestCalls != 0 {
+		t.Fatalf("expected no RequestAddresses when prefixes already assigned, got %d", conn.requestCalls)
 	}
 }
 

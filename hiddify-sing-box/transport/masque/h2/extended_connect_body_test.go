@@ -14,8 +14,12 @@ func TestExtendedConnectUploadBodyAwaitConsumed(t *testing.T) {
 	})
 	body := &ExtendedConnectUploadBody{Pipe: pr}
 	go func() {
+		buf := make([]byte, 4096)
+		_, _ = body.Read(buf)
+	}()
+	go func() {
 		time.Sleep(20 * time.Millisecond)
-		body.MasqueUploadWireAck(4096)
+		_, _ = pw.Write(make([]byte, 4096))
 	}()
 	if err := body.AwaitUploadConsumed(4096, time.Second); err != nil {
 		t.Fatalf("AwaitUploadConsumed: %v", err)

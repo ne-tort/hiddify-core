@@ -303,7 +303,11 @@ func runIngressRelay(sess PacketSession, ns *Netstack) func() {
 			if n <= 0 {
 				continue
 			}
-			ns.InjectInboundClone(readBuffer[:n])
+			pkt := readBuffer[:n]
+			ns.InjectInboundClone(pkt)
+			if IPv4TCPIngressWakeCandidate(pkt) {
+				ns.ScheduleOutboundDrain()
+			}
 		}
 	}()
 	return wg.Wait
@@ -397,6 +401,129 @@ func TestConnectIPTCPNetstackRecycleDialAfterBenign0x100(t *testing.T) {
 	defer downConn.Close()
 	if err := clientStack.TerminalError(); err != nil {
 		t.Fatalf("unexpected terminal netstack error: %v", err)
+	}
+}
+
+func TestConnectIPTCPNetstackProbeThenBulk(t *testing.T) {
+	rawClient, serverSession := newPacketPipePair()
+	clientSession := &benignOnceWriteSession{inner: rawClient}
+	clientStack, err := NewNetstack(context.Background(), clientSession, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.2"),
+		LocalIPv6: netip.MustParseAddr("fd00::2"),
+	})
+	if err != nil {
+		t.Fatalf("create client stack: %v", err)
+	}
+	serverStack, err := NewNetstack(context.Background(), serverSession, NetstackOptions{
+		LocalIPv4: netip.MustParseAddr("198.18.0.1"),
+		LocalIPv6: netip.MustParseAddr("fd00::1"),
+	})
+	if err != nil {
+		t.Fatalf("create server stack: %v", err)
+	}
+	waitClientIngress := runIngressRelay(clientSession, clientStack)
+	waitServerIngress := runIngressRelay(serverSession, serverStack)
+	defer func() {
+		_ = clientStack.Close()
+		_ = serverStack.Close()
+		_ = rawClient.Close()
+		_ = serverSession.Close()
+		waitClientIngress()
+		waitServerIngress()
+	}()
+
+	serverAddr := netip.MustParseAddrPort("198.18.0.1:18082")
+	listener, err := gonet.ListenTCP(serverStack.GStack(), tcpipFullAddress(serverAddr), ipv4Protocol(serverAddr))
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				go func() { _, _ = io.Copy(io.Discard, c) }()
+				buf := make([]byte, 256*1024)
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, err := c.Write(buf); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	// Upload
+	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	upConn, err := clientStack.DialContext(uploadCtx, socksaddrFromAddrPort(serverAddr))
+	uploadCancel()
+	if err != nil {
+		t.Fatalf("dial upload: %v", err)
+	}
+	payload := make([]byte, 256*1024)
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_, _ = upConn.Write(payload)
+	}
+	clientSession.ArmTeardown0x100()
+	_ = upConn.Close()
+	readyDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(readyDeadline) {
+		clientStack.ScheduleOutboundDrain()
+		if clientSession.fired.Load() {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !clientSession.fired.Load() {
+		t.Fatal("expected benign 0x100 during upload teardown")
+	}
+
+	// Probe (nc analog)
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	probeConn, err := clientStack.DialContext(probeCtx, socksaddrFromAddrPort(serverAddr))
+	probeCancel()
+	if err != nil {
+		t.Fatalf("probe dial: %v", err)
+	}
+	if _, err := probeConn.Write([]byte{0x42}); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	_ = probeConn.Close()
+	for i := 0; i < 64; i++ {
+		clientStack.ScheduleOutboundDrain()
+		if clientStack.OutboundQueueDepth() == 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Bulk download
+	bulkCtx, bulkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	bulkConn, err := clientStack.DialContext(bulkCtx, socksaddrFromAddrPort(serverAddr))
+	bulkCancel()
+	if err != nil {
+		t.Fatalf("bulk dial: %v (queue=%d)", err, clientStack.OutboundQueueDepth())
+	}
+	defer bulkConn.Close()
+	buf := make([]byte, 64*1024)
+	readDeadline := time.Now().Add(2 * time.Second)
+	_ = bulkConn.SetReadDeadline(readDeadline)
+	var total int
+	for total < 256*1024 {
+		n, err := bulkConn.Read(buf)
+		total += n
+		if err != nil {
+			t.Fatalf("bulk read after probe: %v (got %d bytes queue=%d)", err, total, clientStack.OutboundQueueDepth())
+		}
+		if time.Now().After(readDeadline) {
+			t.Fatalf("bulk read deadline (got %d bytes queue=%d)", total, clientStack.OutboundQueueDepth())
+		}
 	}
 }
 
@@ -607,6 +734,7 @@ func TestConnectIPTCPNetstackDialFailsAfterWriteNotifyFatalError(t *testing.T) {
 
 func TestConnectIPNetstackLocalPrefixWaitForSession(t *testing.T) {
 	t.Run("caps_long_env_when_profile_v4", func(t *testing.T) {
+		ResetLocalPrefixWaitEnvCache()
 		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
 		v4 := netip.MustParseAddr("172.16.0.2")
 		if d := LocalPrefixWaitForSession(v4, netip.Addr{}); d != 2*time.Second {
@@ -614,6 +742,7 @@ func TestConnectIPNetstackLocalPrefixWaitForSession(t *testing.T) {
 		}
 	})
 	t.Run("caps_long_env_when_profile_v6", func(t *testing.T) {
+		ResetLocalPrefixWaitEnvCache()
 		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
 		v6 := netip.MustParseAddr("fd12::1")
 		if d := LocalPrefixWaitForSession(netip.Addr{}, v6); d != 2*time.Second {
@@ -621,12 +750,14 @@ func TestConnectIPNetstackLocalPrefixWaitForSession(t *testing.T) {
 		}
 	})
 	t.Run("full_wait_without_profile", func(t *testing.T) {
+		ResetLocalPrefixWaitEnvCache()
 		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "9")
 		if d := LocalPrefixWaitForSession(netip.Addr{}, netip.Addr{}); d != 9*time.Second {
 			t.Fatalf("expected 9s from env, got %v", d)
 		}
 	})
 	t.Run("respects_shorter_env_with_profile", func(t *testing.T) {
+		ResetLocalPrefixWaitEnvCache()
 		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "1")
 		v4 := netip.MustParseAddr("172.16.0.2")
 		if d := LocalPrefixWaitForSession(v4, netip.Addr{}); d != 1*time.Second {

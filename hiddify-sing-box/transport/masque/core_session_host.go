@@ -2,23 +2,23 @@ package masque
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	qmasque "github.com/quic-go/masque-go"
-	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	cipclient "github.com/sagernet/sing-box/transport/masque/connectip/client"
+	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
 	cudpclient "github.com/sagernet/sing-box/transport/masque/connectudp/client"
-	"github.com/sagernet/sing-box/transport/masque/connectudp/split"
+	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
+	"github.com/sagernet/sing-box/transport/masque/httpx"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
+	"golang.org/x/net/http2"
 	"sync/atomic"
 )
 
@@ -39,9 +39,17 @@ type coreSession struct {
 	dialTCPStreamPreAdvanceHopHook func()
 	// connectIPAckWakeSender substitutes *http3.ClientConn for CONNECT-IP ingress ACK wake in tests (nil in production).
 	connectIPAckWakeSender h3t.MasqueWakeSender
-	ipIngressPacketReader  atomic.Pointer[mcip.ClientPacketSession]
+	connectIPServerRecycled atomic.Bool
+	connectIPNativeL3Active    atomic.Bool
+	connectIPNativeL3Reopening atomic.Bool
+	connectIPNativeL3Plane     atomic.Pointer[ciptun.NativeL3PlaneSession]
+	connectIPNativeL3Netstack  atomic.Pointer[mcip.Netstack]
+	connectIPNativeL3EgressSess  atomic.Pointer[l3BridgeEgressSession]
+	ipIngressPacketReader      atomic.Pointer[mcip.ClientPacketSession]
 	udpPlaneOnce           sync.Once
 	udpPlane               *cudpclient.Plane
+	ipPlaneOnce            sync.Once
+	ipPlane                *cipclient.Plane
 }
 
 func (s *coreSession) currentUDPHTTPLayer() string {
@@ -96,197 +104,83 @@ func (s *coreSession) getTCPRoundTripper(defaultTransport http.RoundTripper) htt
 	return defaultTransport
 }
 
-type connectUDPPlaneHost struct {
+// BindHTTPLayerHooks wires cross-path HTTP layer hooks (UDP dial, CONNECT-IP attempt, TCP round tripper).
+func (s *coreSession) BindHTTPLayerHooks(layerName string, hooks httpx.HookFuncs) {
+	httpx.ApplyHookFuncs(
+		func(layer string) { s.UDPHTTPLayer.Store(layer) },
+		func(hook func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error)) {
+			s.dialConnectIPAttemptHook = hook
+		},
+		func(hook func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error)) {
+			s.udpDial = hook
+		},
+		func(rt http.RoundTripper) { s.TCPRoundTripper = rt },
+		layerName,
+		hooks,
+	)
+}
+
+// lifecycleHost implements session.LifecycleHost / ConnectIPTeardownHost for coreSession (W-IP-3 PR4).
+type lifecycleHost struct {
 	s *coreSession
 }
 
-func (s *coreSession) connectUDPPlane() *cudpclient.Plane {
-	s.udpPlaneOnce.Do(func() {
-		s.udpPlane = cudpclient.NewPlane(connectUDPPlaneHost{s: s})
-	})
-	return s.udpPlane
+func (s *coreSession) lifecycleHost() lifecycleHost {
+	return lifecycleHost{s: s}
 }
 
-func (h connectUDPPlaneHost) Tag() string {
-	return cudpclient.TrimTag(h.s.Options.Tag)
+func (h lifecycleHost) CancelConnectIPIngress() {
+	h.s.ipPlaneHost().CancelConnectIPIngress()
 }
 
-func (h connectUDPPlaneHost) CurrentHTTPLayer() string {
-	return h.s.currentUDPHTTPLayer()
+func (h lifecycleHost) JoinConnectIPIngress() {
+	h.s.ipPlaneHost().JoinConnectIPIngress()
 }
 
-func (h connectUDPPlaneHost) DialOverHTTP2(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	return h.s.dialUDPOverHTTP2(ctx, template, target)
+func (h lifecycleHost) ClearPreTCPNetstackIngress() {
+	h.s.ipPlaneHost().ClearPreTCPNetstackIngress()
 }
 
-func (h connectUDPPlaneHost) DialH3(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	return cudpclient.DialH3Production(ctx, h.s.udpDial, client, template, target)
+func (h lifecycleHost) ClearIPIngressPacketReader() {
+	h.s.ipPlaneHost().ClearIPIngressPacketReader()
 }
 
-func (h connectUDPPlaneHost) RecordHTTPLayerSuccess(layer string) {
-	h.s.maybeRecordHTTPLayerCacheSuccess(layer)
+func (h lifecycleHost) EmitObservabilityEvent(name string) {
+	h.s.ipPlaneHost().EmitObservabilityEvent(name)
 }
 
-func (h connectUDPPlaneHost) ResetHTTPFallbackBudgetAfterSuccess() {
-	h.s.resetHTTPFallbackBudgetAfterSuccess()
+func (h lifecycleHost) IncConnectIPSessionReset(reason string) {
+	h.s.ipPlaneHost().IncConnectIPSessionReset(reason)
 }
 
-func (h connectUDPPlaneHost) ErrTemplateNotConfigured() error {
-	return session.ErrConnectUDPTemplateNotConfigured
+func (h lifecycleHost) BuildHopTemplates() (udp, ip, tcp *uritemplate.Template, err error) {
+	return buildTemplates(h.s.Options)
 }
 
-func (h connectUDPPlaneHost) ObservabilityInput(template *uritemplate.Template, target string) cudpclient.ObservabilityInput {
-	opts := h.s.Options
-	return cudpclient.ObservabilityInput{
-		Template: template,
-		Target:   target,
-		ResolveDialAddr: func() string {
-			portNum := int(opts.ServerPort)
-			if portNum <= 0 {
-				portNum = 443
-			}
-			return masqueDialTarget(masqueQuicDialCandidateHost(opts), portNum)
-		},
-	}
+func (h lifecycleHost) CloseUDPClient() {
+	h.s.udpPlaneHost().CloseUDPClient()
 }
 
-func (h connectUDPPlaneHost) ClearHTTPFallbackAfterGiveUp() {
-	h.s.clearHTTPFallbackConsumedAfterGivingUp()
+func (h lifecycleHost) ResetIPH3TransportLockedAssumeMu() {
+	h.s.ipPlaneHost().ResetIPH3TransportLockedAssumeMu()
 }
 
-func (h connectUDPPlaneHost) PreResolveDestinationHook() {
-	if hook := h.s.listenPacketPreResolveDestinationHook; hook != nil {
-		hook()
-	}
+func (h lifecycleHost) ResetH2UDPTransportLockedAssumeMu() {
+	h.s.udpPlaneHost().ResetH2UDPTransportLockedAssumeMu()
 }
 
-func (h connectUDPPlaneHost) PreChainEndReturnHook() {
-	if hook := h.s.listenPacketPreChainEndReturnHook; hook != nil {
-		hook()
-	}
+func (h lifecycleHost) CloseAllH2ClientTransports() {
+	h.s.closeAllH2ClientTransports()
 }
 
-func (h connectUDPPlaneHost) CtxErr(ctx context.Context) error {
-	if ctx.Err() != nil {
-		return context.Cause(ctx)
-	}
-	return nil
+func (h lifecycleHost) CloseH2MasqueClientTransport(tr *http2.Transport) {
+	cudph2.CloseClientTransport(tr)
 }
 
-func (h connectUDPPlaneHost) JoinCtxCancel(err error, ctx context.Context) error {
-	if ctx.Err() != nil {
-		return errors.Join(err, context.Cause(ctx))
-	}
-	return err
+func (s *coreSession) Close() error {
+	return session.LifecycleClose(&s.CoreSession, s.lifecycleHost())
 }
 
-func (h connectUDPPlaneHost) ResolveDestination(destination M.Socksaddr) (string, error) {
-	return resolveDestinationHost(destination)
-}
-
-func (h connectUDPPlaneHost) PrepareUDP() (*qmasque.Client, *uritemplate.Template, int, string, error) {
-	h.s.Mu.Lock()
-	defer h.s.Mu.Unlock()
-	if !h.s.Caps.ConnectUDP {
-		return nil, nil, 0, "", cudpclient.ErrConnectUDPNotSupported
-	}
-	if h.s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
-		if h.s.UDPClient == nil {
-			h.s.UDPClient = h.NewQUICClient()
-		}
-	}
-	return h.s.UDPClient, h.s.TemplateUDP, h.s.MasqueUDPWriteMax, h.s.currentUDPHTTPLayer(), nil
-}
-
-func (h connectUDPPlaneHost) DialUDP(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	return h.s.dialUDPAddr(ctx, client, template, target)
-}
-
-func (h connectUDPPlaneHost) TryHTTPFallbackSwitch(err error) bool {
-	return h.s.tryHTTPFallbackSwitch(err)
-}
-
-func (h connectUDPPlaneHost) RewireUDPAfterFallback() (*qmasque.Client, *uritemplate.Template) {
-	h.s.Mu.Lock()
-	defer h.s.Mu.Unlock()
-	return h.s.wireMasqueUDPClientForOverlayLocked()
-}
-
-func (h connectUDPPlaneHost) RefreshUDPAfterDialFailure(prevClient *qmasque.Client) (*qmasque.Client, *uritemplate.Template) {
-	h.s.Mu.Lock()
-	defer h.s.Mu.Unlock()
-	if h.s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
-		if h.s.UDPClient == prevClient && h.s.UDPClient != nil {
-			_ = h.s.UDPClient.Close()
-			h.s.UDPClient = h.NewQUICClient()
-		} else if h.s.UDPClient == nil {
-			h.s.UDPClient = h.NewQUICClient()
-		}
-	} else {
-		h.s.resetH2UDPTransportLockedAssumeMu()
-	}
-	return h.s.UDPClient, h.s.TemplateUDP
-}
-
-func (h connectUDPPlaneHost) AdvanceHopAndPrepare() (*qmasque.Client, *uritemplate.Template, bool, error) {
-	h.s.Mu.Lock()
-	defer h.s.Mu.Unlock()
-	if !session.AdvanceHop(&h.s.CoreSession) {
-		return nil, nil, false, nil
-	}
-	if resetErr := h.s.resetHopTemplates(); resetErr != nil {
-		return nil, nil, true, resetErr
-	}
-	if h.s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
-		if h.s.UDPClient == nil {
-			h.s.UDPClient = h.NewQUICClient()
-		}
-	}
-	return h.s.UDPClient, h.s.TemplateUDP, true, nil
-}
-
-func (h connectUDPPlaneHost) WrapDatagramSplit(pc net.PacketConn, writeMax int, httpLayer string) net.PacketConn {
-	// H2 PacketConn splits RFC9297 capsules in WriteTo; DatagramSplitConn is redundant overhead on bulk upload.
-	if httpLayer == option.MasqueHTTPLayerH2 {
-		return pc
-	}
-	return split.NewDatagramSplitConn(pc, split.DatagramSplitOptions{
-		MaxPayload: writeMax,
-		HTTPLayer:  httpLayer,
-		MapICMP: func(addr net.Addr, err error) error {
-			return split.NewPortUnreachableError(addr)
-		},
-		MapDataplaneErr: func(op string, err error) error {
-			if err == nil || httpLayer != option.MasqueHTTPLayerH3 {
-				return err
-			}
-			return fmt.Errorf("masque h3 dataplane connect-udp %s: %w", op, err)
-		},
-	})
-}
-
-func (h connectUDPPlaneHost) NewQUICClient() *qmasque.Client {
-	return cudpclient.NewQUICClient(cudpclient.QUICClientConfig{
-		TLSClientConfig: masqueClientTLSConfig(h.s.Options),
-		QUICConfig: session.ApplyQUICExperimentalOptions(
-			masqueQUICConfigForDial(h.s.Options),
-			h.s.Options.QUICExperimental,
-		),
-		QUICDial:       h.s.quicDialWithPolicy("client_connect_udp"),
-		BearerToken:    strings.TrimSpace(h.s.Options.ServerToken),
-		LegacyH3Extras: h.s.Options.WarpMasqueLegacyH3Extras,
-	})
-}
-
-func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	host := connectUDPPlaneHost{s: s}
-	return cudpclient.DialAddr(ctx, host, host.ObservabilityInput(template, target), client, template, target)
-}
-
-func (s *coreSession) listenPacketConnectUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	return s.connectUDPPlane().ListenPacket(ctx, destination)
-}
-
-func (s *coreSession) newUDPClient() *qmasque.Client {
-	return connectUDPPlaneHost{s: s}.NewQUICClient()
+func (s *coreSession) resetHopTemplates() error {
+	return session.ResetHopTemplates(&s.CoreSession, s.lifecycleHost())
 }

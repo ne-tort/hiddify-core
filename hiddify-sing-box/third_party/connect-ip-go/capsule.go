@@ -357,6 +357,21 @@ func parseIPAddressRange(r io.Reader) (IPRoute, error) {
 	}, nil
 }
 
+func ipRouteIPVersion(route IPRoute) int {
+	if route.StartIP.Is4() {
+		return 4
+	}
+	return 6
+}
+
+func ipRouteRangesOverlap(a, b IPRoute) bool {
+	if a.StartIP.BitLen() != b.StartIP.BitLen() {
+		return false
+	}
+	return a.EndIP.Compare(b.StartIP) >= 0 && b.EndIP.Compare(a.StartIP) >= 0
+}
+
+// validateRouteAdvertisementRanges enforces RFC 9484 §4.7.3 ordering and overlap rules.
 func validateRouteAdvertisementRanges(ranges []IPRoute) error {
 	for i, route := range ranges {
 		if route.StartIP.BitLen() != route.EndIP.BitLen() {
@@ -369,14 +384,30 @@ func validateRouteAdvertisementRanges(ranges []IPRoute) error {
 			continue
 		}
 		prev := ranges[i-1]
-		if prev.StartIP.BitLen() != route.StartIP.BitLen() {
+		prevVer := ipRouteIPVersion(prev)
+		curVer := ipRouteIPVersion(route)
+		if prevVer > curVer {
+			return fmt.Errorf("route ranges must be ordered by IP version: range %d precedes higher version", i)
+		}
+		if prevVer != curVer {
 			continue
 		}
-		if prev.StartIP.Compare(route.StartIP) > 0 {
-			return fmt.Errorf("route ranges must be ordered by start address: range %d starts before previous range", i)
+		if prev.IPProtocol > route.IPProtocol {
+			return fmt.Errorf("route ranges must be ordered by IP protocol: range %d precedes higher protocol", i)
 		}
-		if prev.EndIP.Compare(route.StartIP) >= 0 {
-			return fmt.Errorf("route ranges must not overlap: range %d intersects previous range", i)
+		if prev.IPProtocol == route.IPProtocol {
+			if prev.StartIP.Compare(route.StartIP) > 0 {
+				return fmt.Errorf("route ranges must be ordered by start address: range %d starts before previous range", i)
+			}
+			if prev.EndIP.Compare(route.StartIP) >= 0 {
+				return fmt.Errorf("route ranges must not overlap: range %d intersects previous range", i)
+			}
+			continue
+		}
+		// RFC 9484 §4.7.3: protocol 0 (all) must not overlap a specific protocol on the same addresses.
+		if ipRouteRangesOverlap(prev, route) &&
+			((prev.IPProtocol == 0 && route.IPProtocol != 0) || (prev.IPProtocol != 0 && route.IPProtocol == 0)) {
+			return fmt.Errorf("route ranges must not overlap across protocol 0 and specific protocol: range %d", i)
 		}
 	}
 	return nil

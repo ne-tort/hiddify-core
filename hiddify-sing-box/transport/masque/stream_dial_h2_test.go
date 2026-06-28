@@ -48,9 +48,9 @@ func testStreamDialH2Hooks() strm.DialH2Hooks {
 		NewRequestContext: func(parent context.Context) (context.Context, func(bool)) {
 			return parent, func(bool) {}
 		},
-		NewConnectUploadBody: func(pr *io.PipeReader) io.Reader { return pr },
+		NewConnectUploadBody: func(uploadR io.Reader) io.Reader { return uploadR },
 		RequestURL:           func(u *url.URL) string { return u.String() },
-		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload *io.PipeWriter, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error) {
+		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload io.WriteCloser, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error) {
 			return nil, session.ErrTCPConnectStreamFailed
 		},
 		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },

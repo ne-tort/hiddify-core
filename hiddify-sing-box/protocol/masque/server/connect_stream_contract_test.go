@@ -2,26 +2,24 @@ package server
 
 import (
 	_ "embed"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-//go:embed connect_stream.go
+//go:embed connectstream/handler.go
 var connectStreamGoSource string
 
 // TestConnectStreamServerWireContract (S74) locks CLIENT-SERVER-CONTRACTS § CONNECT-stream server invariants.
 func TestConnectStreamServerWireContract(t *testing.T) {
 	t.Parallel()
-	contracts := readConnectStreamContractsDoc(t)
+	contracts := readMasqueContractsDoc(t)
 
-	requireContractSubstrings(t, connectStreamGoSource, "connect_stream.go",
+	requireContractSubstrings(t, connectStreamGoSource, "connectstream/handler.go",
 		`r.Method != http.MethodConnect`,
 		`r.Header.Get(":protocol")`,
 		`ParseTCPTargetFromRequest`,
-		`ResolveTCPTargetForDial`,
-		`AllowTCPPort`,
+		`Hooks.ResolveTCPTarget`,
+		`Hooks.AllowTCPPort`,
 		`relay.TuneTCPOutbound`,
 		`EnableFullDuplex()`,
 		`WriteHeader(http.StatusOK)`,
@@ -38,7 +36,7 @@ func TestConnectStreamServerWireContract(t *testing.T) {
 	idxHeader := strings.Index(connectStreamGoSource, "WriteHeader(http.StatusOK)")
 	idxRelay := strings.Index(connectStreamGoSource, "relay.TCPForward")
 	if idxDuplex < 0 || idxHeader < 0 || idxRelay < 0 {
-		t.Fatal("connect_stream.go: missing full-duplex / WriteHeader / relay ordering anchors")
+		t.Fatal("connectstream/handler.go: missing full-duplex / WriteHeader / relay ordering anchors")
 	}
 	if idxDuplex > idxHeader || idxHeader > idxRelay {
 		t.Fatalf("wire order want EnableFullDuplex < WriteHeader < relay.TCPForward; got %d %d %d",
@@ -47,7 +45,7 @@ func TestConnectStreamServerWireContract(t *testing.T) {
 
 	requireContractSubstrings(t, contracts, "CLIENT-SERVER-CONTRACTS CONNECT-stream",
 		"## CONNECT-stream (L2)",
-		"`server/connect_stream.go`",
+		"`server/connectstream/handler.go`",
 		"`relay.TCPTunnel`",
 		"full-duplex",
 		"TestConnectStreamServerWireContract",
@@ -63,31 +61,10 @@ func TestConnectStreamServerUsesRelayNotForwarder(t *testing.T) {
 	if strings.Contains(connectStreamGoSource, "fwd.") {
 		t.Fatal("CONNECT-stream template handler must not import transport/masque/forwarder")
 	}
-	requireContractSubstrings(t, connectStreamGoSource, "connect_stream.go",
+	requireContractSubstrings(t, connectStreamGoSource, "connectstream/handler.go",
 		`"github.com/sagernet/sing-box/protocol/masque/relay"`,
 		`relay.TuneTCPOutbound`,
 		`relay.TCPForward`,
 	)
 }
 
-func readConnectStreamContractsDoc(t *testing.T) string {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	dir := wd
-	for range 10 {
-		path := filepath.Join(dir, "docs", "masque", "layers", "CLIENT-SERVER-CONTRACTS.md")
-		if data, err := os.ReadFile(path); err == nil {
-			return string(data)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	t.Fatal("CLIENT-SERVER-CONTRACTS.md not found (run from hiddify-app checkout)")
-	return ""
-}

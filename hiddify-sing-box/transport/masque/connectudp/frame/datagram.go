@@ -1,6 +1,26 @@
 package frame
 
-import "io"
+import (
+	"errors"
+	"fmt"
+	"io"
+)
+
+const (
+	// MaxProxiedUDPPayloadBytes is the RFC 9298 §4 maximum UDP proxying payload (Context ID 0).
+	MaxProxiedUDPPayloadBytes = 65527
+)
+
+// ErrProxiedUDPPayloadTooLarge is returned when a proxied UDP payload exceeds RFC 9298 §4.
+var ErrProxiedUDPPayloadTooLarge = errors.New("connect-udp: proxied UDP payload exceeds RFC 9298 maximum (65527 bytes)")
+
+// ValidateProxiedUDPPayloadLen rejects single-datagram UDP payloads longer than RFC 9298 allows.
+func ValidateProxiedUDPPayloadLen(n int) error {
+	if n > MaxProxiedUDPPayloadBytes {
+		return fmt.Errorf("%w: got %d", ErrProxiedUDPPayloadTooLarge, n)
+	}
+	return nil
+}
 
 // ParseHTTPDatagramUDP interprets CONNECT-UDP HTTP Datagram payload (RFC 9297 / MASQUE).
 // Return convention matches masque-go parseProxiedDatagramPayload for H3 parity:

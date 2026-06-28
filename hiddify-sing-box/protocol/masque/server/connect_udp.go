@@ -2,53 +2,35 @@ package server
 
 import (
 	"net/http"
-	"strings"
 
-	TM "github.com/sagernet/sing-box/transport/masque"
+	cudp "github.com/sagernet/sing-box/protocol/masque/server/connectudp"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
-	cudpsrv "github.com/sagernet/sing-box/protocol/masque/server/connectudp"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
-const masqueRequestProtocolConnectUDP = cudpsrv.RequestProtocol
+// ConnectUDPTargetPolicy mirrors endpoint onward ACL knobs for CONNECT-UDP (H2+H3).
+type ConnectUDPTargetPolicy = cudp.TargetPolicy
 
-// ConnectUDPTargetPolicy mirrors CONNECT-stream / CONNECT-IP onward ACL for CONNECT-UDP (H2+H3).
-type ConnectUDPTargetPolicy = cudpsrv.TargetPolicy
-
-// ExtendedMasqueTunnelProtocol returns the CONNECT tunnel pseudo-protocol
-// (:protocol header on H2 or Proto on H3).
-func ExtendedMasqueTunnelProtocol(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if v := strings.TrimSpace(r.Header.Get(":protocol")); v != "" {
-		return v
-	}
-	p := strings.TrimSpace(r.Proto)
-	if p == "" {
-		return ""
-	}
-	if len(p) >= 5 && strings.EqualFold(p[:5], "http/") {
-		return ""
-	}
-	return p
+var defaultConnectUDPHandler = cudp.Handler{
+	Hooks: cudp.Hooks{
+		ResolveTCPTarget:           ResolveTCPTargetForDial,
+		AllowTCPPort:               AllowTCPPort,
+		CapsuleProtocolHeaderValue: h2c.CapsuleProtocolHeaderValue,
+	},
 }
 
-var connectUDPHandler = cudpsrv.Handler{
-	Hooks: cudpsrv.Hooks{
-		ResolveTCPTarget:             ResolveTCPTargetForDial,
-		AllowTCPPort:                 AllowTCPPort,
-		CapsuleProtocolHeaderValue:   TM.CapsuleProtocolHeaderValueH2,
-		ExtendedMasqueTunnelProtocol: ExtendedMasqueTunnelProtocol,
-	},
+// HandleConnectUDP serves RFC 9297/9298 CONNECT-UDP over HTTP/3 (relay) or HTTP/2 (capsules).
+func HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *cudpframe.Request, udpProxy *cudprelay.Proxy, policy ConnectUDPTargetPolicy) {
+	defaultConnectUDPHandler.HandleConnectUDP(w, r, parsed, udpProxy, policy)
+}
+
+// ExtendedMasqueTunnelProtocol reads :protocol (H2) or Proto (H3 compat) from a CONNECT request.
+func ExtendedMasqueTunnelProtocol(r *http.Request) string {
+	return cudp.DefaultExtendedMasqueTunnelProtocol(r)
 }
 
 // ConnectUDPResolveDialToHTTPStatus maps UDP resolve/dial failures to HTTP status codes.
 func ConnectUDPResolveDialToHTTPStatus(err error) int {
-	return cudpsrv.ResolveDialToHTTPStatus(err)
-}
-
-// HandleConnectUDP serves RFC 9298 CONNECT-UDP over HTTP/3 (connectudp/relay) or HTTP/2 capsule relay.
-func HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed *cudpframe.Request, udpProxy *cudprelay.Proxy, policy ConnectUDPTargetPolicy) {
-	connectUDPHandler.HandleConnectUDP(w, r, parsed, udpProxy, policy)
+	return cudp.ResolveDialToHTTPStatus(err)
 }

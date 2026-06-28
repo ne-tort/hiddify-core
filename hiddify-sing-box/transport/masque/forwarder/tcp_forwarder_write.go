@@ -1,0 +1,259 @@
+package forwarder
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net"
+	"net/netip"
+	"os"
+	"strings"
+	"time"
+
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+)
+
+func (f *packetForwarder) egressStopped() bool {
+	select {
+	case <-f.writeStopped:
+		return true
+	case <-f.downloadStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
+	f.o.WriteQueueMetrics.noteDequeued()
+	pkt = f.coalesceQueuedAckOnly(pkt)
+	err := f.sendPacketNow(pkt)
+	if err != nil {
+		if mcip.IsBenignEgressTeardownError(err) {
+			returnPacket(pkt)
+			return
+		}
+		if mcip.IsRetryablePacketWriteError(err) {
+			select {
+			case <-f.writeStopped:
+				returnPacket(pkt)
+			case f.writeCh <- pkt:
+			}
+			return
+		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: write loop err=%v", err)
+		}
+	}
+	returnPacket(pkt)
+}
+
+func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
+	f.o.DownloadQueueMetrics.noteDequeued()
+	err := f.sendPacketNow(pkt)
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: download send len=%d err=%v", len(pkt), err)
+	}
+	if err != nil {
+		if mcip.IsBenignEgressTeardownError(err) {
+			returnPacket(pkt)
+			return
+		}
+		if mcip.IsRetryablePacketWriteError(err) {
+			select {
+			case <-f.downloadStopped:
+				returnPacket(pkt)
+			case f.downloadCh <- pkt:
+			}
+			return
+		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: download write err=%v", err)
+		}
+	}
+	returnPacket(pkt)
+}
+
+// runEgressLoop drains writeCh (control) before downloadCh (bulk DATA). Parallel loops
+// previously raced on sendMu and could deliver iperf -R bulk before params ACK on wire.
+func (f *packetForwarder) runEgressLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
+	for {
+		if f.egressStopped() {
+			return
+		}
+		for f.tryDrainWriteCh() {
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-f.writeStopped:
+			return
+		case <-f.downloadStopped:
+			return
+		case pkt, ok := <-f.writeCh:
+			if !ok {
+				return
+			}
+			f.sendWriteChPkt(pkt)
+		case pkt, ok := <-f.downloadCh:
+			if !ok {
+				return
+			}
+			f.sendDownloadChPkt(pkt)
+		}
+	}
+}
+
+func (f *packetForwarder) tryDrainWriteCh() bool {
+	select {
+	case pkt, ok := <-f.writeCh:
+		if !ok {
+			return false
+		}
+		f.sendWriteChPkt(pkt)
+		return true
+	default:
+		return false
+	}
+}
+
+// runDownloadWriteLoop is deprecated; use runEgressLoop (single writer, control-first).
+func (f *packetForwarder) runDownloadWriteLoop(ctx context.Context, done chan struct{}) {
+	f.runEgressLoop(ctx, done)
+}
+
+func (f *packetForwarder) writeLoopStopped() bool {
+	select {
+	case <-f.writeStopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// runWriteLoop is deprecated; use runEgressLoop (single writer, control-first).
+func (f *packetForwarder) runWriteLoop(ctx context.Context, done chan struct{}) {
+	f.runEgressLoop(ctx, done)
+}
+
+func (f *packetForwarder) enqueueWrite(pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	if f.writeCh == nil {
+		err := f.sendPacketNow(pkt)
+		returnPacket(pkt)
+		return err
+	}
+	if f.writeLoopStopped() {
+		returnPacket(pkt)
+		return net.ErrClosed
+	}
+	select {
+	case f.writeCh <- pkt:
+		f.o.WriteQueueMetrics.noteEnqueued()
+		return nil
+	default:
+		select {
+		case f.writeCh <- pkt:
+			f.o.WriteQueueMetrics.noteEnqueued()
+			return nil
+		case <-f.writeStopped:
+			returnPacket(pkt)
+			return net.ErrClosed
+		}
+	}
+}
+
+func (f *packetForwarder) writeRaw(pkt []byte) error {
+	return f.enqueueWrite(pkt)
+}
+
+// enqueueDownload pipelines download DATA without blocking pumpRemoteToClient on WritePacket.
+// Control segments (ACK, FIN) use writeCh with coalesceQueuedAckOnly.
+func (f *packetForwarder) enqueueDownload(pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	if f.downloadCh == nil {
+		err := f.sendPacketNow(pkt)
+		returnPacket(pkt)
+		return err
+	}
+	select {
+	case <-f.downloadStopped:
+		returnPacket(pkt)
+		return net.ErrClosed
+	case f.downloadCh <- pkt:
+		f.o.DownloadQueueMetrics.noteEnqueued()
+		return nil
+	default:
+		select {
+		case <-f.downloadStopped:
+			returnPacket(pkt)
+			return net.ErrClosed
+		case f.downloadCh <- pkt:
+			f.o.DownloadQueueMetrics.noteEnqueued()
+			return nil
+		}
+	}
+}
+
+// writeDownloadDirect sends one download DATA segment synchronously (unit tests).
+func (f *packetForwarder) writeDownloadDirect(pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	err := f.sendPacketNow(pkt)
+	returnPacket(pkt)
+	return err
+}
+
+func (f *packetForwarder) peerPrefixesCached() []netip.Prefix {
+	if v := f.peerPrefixes.Load(); v != nil {
+		if p, ok := v.([]netip.Prefix); ok {
+			return p
+		}
+	}
+	p := f.conn.CurrentPeerPrefixes()
+	f.peerPrefixes.Store(p)
+	return p
+}
+
+// sendPacketNow writes one packet to the CONNECT-IP plane with retry/backoff.
+// Must be serialized: runEgressLoop owns the sole PacketPlaneConn writer.
+func (f *packetForwarder) sendPacketNow(pkt []byte) error {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	p := RewriteOutgoingPeerDst(pkt, f.peerPrefixesCached())
+	for i := 0; i < icmpRelayMax; i++ {
+		var icmp []byte
+		var err error
+		for attempt := 0; attempt < writePacketMaxPersist; attempt++ {
+			icmp, err = f.conn.WritePacket(p)
+			if err == nil {
+				break
+			}
+			if mcip.IsBenignEgressTeardownError(err) {
+				return nil
+			}
+			if !mcip.IsRetryablePacketWriteError(err) {
+				return err
+			}
+			backoff := attempt
+			if backoff > 15 {
+				backoff = 15
+			}
+			time.Sleep(time.Duration(1+backoff) * time.Millisecond)
+		}
+		if err != nil {
+			return err
+		}
+		if len(icmp) == 0 {
+			return nil
+		}
+		p = icmp
+	}
+	return errors.New("masque: connect-ip forwarder: ICMP relay exceeded")
+}

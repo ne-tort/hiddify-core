@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/transport/masque/connectip"
-	"github.com/sagernet/sing-box/transport/masque/h3"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 func auditSourceContains(t *testing.T, name, source string, needles []string) {
@@ -20,13 +18,13 @@ func auditSourceContains(t *testing.T, name, source string, needles []string) {
 
 // TestArchREFSRCEmbedInvisvSource verifies frozen Invisv needles in h3 prod sources.
 func TestArchREFSRCEmbedInvisvSource(t *testing.T) {
-	src := h3.ConnectRequestAuditSource() + h3.TunnelConnAuditSource() + h3.TunnelFromResponseAuditSource()
+	src := archH3InvisvAuditSource()
 	auditSourceContains(t, "Invisv", src, ArchREFSRCInvisvSourceNeedles)
 }
 
 // TestArchREFSRCEmbedH2oSource verifies frozen h2o relay needles in stream/relay.go.
 func TestArchREFSRCEmbedH2oSource(t *testing.T) {
-	auditSourceContains(t, "h2o", strm.RelayGoAuditSource(), ArchREFSRCH2oAudit)
+	auditSourceContains(t, "h2o", archRelayGoAuditSource(), ArchREFSRCH2oAudit)
 }
 
 // TestArchREFSRCEmbedUsqueSource verifies frozen usque needles in connectip/netstack.go.

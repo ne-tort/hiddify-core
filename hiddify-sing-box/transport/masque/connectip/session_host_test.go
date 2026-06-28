@@ -30,7 +30,7 @@ func TestWireTCPIngressDeliverActiveNetstack(t *testing.T) {
 	defer ns.Close()
 
 	var afterDeliver int
-	hooks := WireTCPIngressDeliver(
+	hooks := WireTCPIngressDeliverFromStruct(
 		func() *Netstack { return ns },
 		func() bool { return false },
 		func() *Netstack { return nil },
@@ -50,7 +50,7 @@ func TestWireTCPIngressDeliverEnqueuePreTCP(t *testing.T) {
 
 	pkt := []byte{0x45, 0x00, 0x00, 0x14}
 	var enqueued []byte
-	hooks := WireTCPIngressDeliver(
+	hooks := WireTCPIngressDeliverFromStruct(
 		func() *Netstack { return nil },
 		func() bool { return true },
 		func() *Netstack { return nil },

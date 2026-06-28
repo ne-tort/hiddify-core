@@ -81,6 +81,25 @@ func LegacyH2BootstrapPolicy(requirePrefix bool, profileLocalIPv4 string, profil
 	return policy
 }
 
+// genericServerBootstrapPolicy builds ADDRESS_ASSIGN waits for non-WARP CONNECT-IP servers.
+// Self-hosted servers (connectip/handler.go) call AssignAddresses unprompted on CONNECT;
+// sending an empty ADDRESS_REQUEST makes a strict RFC peer abort the stream (IP-25 §4.7.2).
+func genericServerBootstrapPolicy(profileLocalIPv4, profileLocalIPv6 string, controlCapsules bool) BootstrapWaitPolicy {
+	if !controlCapsules {
+		return LegacyH2BootstrapPolicy(false, profileLocalIPv4, profileLocalIPv6)
+	}
+	policy := NewBootstrapWaitPolicy(false, profileLocalIPv4, profileLocalIPv6, LocalPrefixWait())
+	policy.SendRequestAddresses = false
+	policy.RequestAddressesTimeout = 0
+	if !HasBootstrapProfileLocal(profileLocalIPv4, profileLocalIPv6) {
+		const genericPassiveWait = 500 * time.Millisecond
+		if policy.FirstWait > genericPassiveWait {
+			policy.FirstWait = genericPassiveWait
+		}
+	}
+	return policy
+}
+
 // PrefixWaitLogValue formats a wait duration for bootstrap logs.
 func PrefixWaitLogValue(d time.Duration) string {
 	if d <= 0 {

@@ -21,9 +21,9 @@ func allowDestIP(addr netip.Addr, allowPrivate bool) error {
 	return nil
 }
 
-// DialAddr maps the proxied IPv4 destination to a host TCP/UDP dial target.
+// DialAddr maps the proxied destination to a host TCP/UDP dial target.
 // When the client targets this host's own public/local address (bench iperf on the MASQUE VPS),
-// hairpin via 127.0.0.1 avoids broken same-IP egress that often RSTs CONNECT-IP TCP.
+// hairpin via loopback avoids broken same-IP egress that often RSTs CONNECT-IP TCP.
 func DialAddr(dstIP netip.Addr, port uint16) string {
 	if dstIP.IsValid() {
 		ifaces, err := net.Interfaces()
@@ -42,9 +42,13 @@ func DialAddr(dstIP netip.Addr, port uint16) string {
 						ip, _ = netip.AddrFromSlice(v.IP)
 					}
 					ip = ip.Unmap()
-					if ip.IsValid() && ip == dstIP {
-						return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+					if !ip.IsValid() || ip != dstIP {
+						continue
 					}
+					if dstIP.Is6() && !dstIP.Is4In6() {
+						return net.JoinHostPort("::1", strconv.Itoa(int(port)))
+					}
+					return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
 				}
 			}
 		}

@@ -23,6 +23,21 @@ type Stack interface {
 	Close() error
 }
 
+// IngressInjector delivers raw IP frames into a gVisor stack without a tun fd round-trip.
+type IngressInjector interface {
+	InjectIngressPacket(packet []byte) error
+}
+
+// HostIngressWriter injects inbound IP frames into the OS stack (CONNECT-IP L3 wire→kernel).
+type HostIngressWriter interface {
+	WriteIngress(p []byte) (n int, err error)
+}
+
+// HostEgressReader reads kernel egress from the tun fd (CONNECT-IP L3 LoopIn / usque Device.ReadPacket).
+type HostEgressReader interface {
+	ReadHostEgress(ctx context.Context, p []byte) (int, error)
+}
+
 type StackOptions struct {
 	Context                context.Context
 	Tun                    Tun

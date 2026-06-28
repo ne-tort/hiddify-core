@@ -82,9 +82,36 @@ func TestBootstrapWaitPolicy(t *testing.T) {
 			t.Fatal("expected profile-local advertise fallback on legacy h2")
 		}
 	})
+
+	t.Run("generic_server_without_profile_local_passive_only", func(t *testing.T) {
+		policy := genericServerBootstrapPolicy("", "", true)
+		if policy.ProfileLocal {
+			t.Fatal("did not expect profile local")
+		}
+		if policy.FirstWait != 500*time.Millisecond {
+			t.Fatalf("expected 500ms passive wait, got %v", policy.FirstWait)
+		}
+		if policy.SendRequestAddresses {
+			t.Fatal("generic server must not send empty ADDRESS_REQUEST (RFC server abort)")
+		}
+		if policy.SecondWait != 6*time.Second {
+			t.Fatalf("expected relaxed 6s second wait, got %v", policy.SecondWait)
+		}
+	})
+
+	t.Run("generic_server_with_profile_local_passive_only", func(t *testing.T) {
+		policy := genericServerBootstrapPolicy("198.18.0.1", "", true)
+		if !policy.ProfileLocal {
+			t.Fatal("expected profile local")
+		}
+		if policy.SendRequestAddresses {
+			t.Fatal("self-hosted server assigns unprompted; empty REQUEST aborts peer")
+		}
+	})
 }
 
 func TestSessionPrefixWaitMatchesNetstack(t *testing.T) {
+	ResetLocalPrefixWaitEnvCache()
 	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
 	profileV4 := ParseProfileInterfaceAddress("172.16.0.2")
 	sessionWait := SessionPrefixWait("172.16.0.2", "")
@@ -96,6 +123,7 @@ func TestSessionPrefixWaitMatchesNetstack(t *testing.T) {
 		t.Fatalf("expected 2s profile cap, got %v", sessionWait)
 	}
 
+	ResetLocalPrefixWaitEnvCache()
 	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "1")
 	sessionWait = SessionPrefixWait("172.16.0.2", "")
 	if sessionWait != time.Second {

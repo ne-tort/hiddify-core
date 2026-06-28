@@ -33,15 +33,51 @@ type tcpForwardSession struct {
 
 	clientMSS uint16
 
-	tsOK     bool
-	tsRecent uint32
+	tsOK       bool
+	tsRecent   uint32
+	tsSendNext uint32 // monotonic server TS (SYN-ACK seed); PAWS on client requires TS to increase
 
 	synAckOpts []byte
 
+	pendingRemote [][]byte // C2S payload before backend dial completes (SYN-ACK before dial race)
+	preClientS2C  []byte   // S2C from remote before client payload seen (do not discard)
+	s2cWake         chan struct{}
+
 	remoteReaderOnce sync.Once
 	remoteFinSent    bool
+	remotePumpDone   atomic.Bool
+	clientPayloadSeen atomic.Bool
 	closed           atomic.Bool
-	ackPending       atomic.Bool
+	handshakeIdleOnce sync.Once
+
+	peerAck         uint32 // client ack (snd_una): bytes client received from forwarder
+	peerRwnd        uint32 // scaled receive window advertised by client
+	peerRwndValid   bool
+	clientWSScale   uint8
+}
+
+const (
+	tcpForwarderHandshakeIdle     = 15 * time.Second
+	tcpForwarderSyncAckMaxPayload = 512
+)
+
+// trimPayloadAtRcvNxt accepts overlapping TCP retransmissions (RFC 793): deliver bytes at rcvNxt only.
+func trimPayloadAtRcvNxt(seq, rcvNxt uint32, payload []byte) ([]byte, bool) {
+	if len(payload) == 0 {
+		return payload, true
+	}
+	if seq < rcvNxt {
+		end := seq + uint32(len(payload))
+		if end <= rcvNxt {
+			return nil, true // duplicate
+		}
+		drop := int(rcvNxt - seq)
+		payload = payload[drop:]
+	}
+	if seq > rcvNxt {
+		return nil, false // gap
+	}
+	return payload, true
 }
 
 func (s *tcpForwardSession) add() {
@@ -52,10 +88,22 @@ func (s *tcpForwardSession) close() {
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
+	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		log.Printf("masque connect_ip forwarder: session close %s:%d -> %s:%d",
+			s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+	}
 	if s.outbound != nil {
 		_ = s.outbound.Flush()
 	}
-	_ = s.remote.Close()
+	if s.remote != nil {
+		_ = s.remote.Close()
+	}
+	s.mu.Lock()
+	for _, pay := range s.pendingRemote {
+		returnPacket(pay)
+	}
+	s.pendingRemote = nil
+	s.mu.Unlock()
 	s.f.dropFlow(s.flow)
 }
 
@@ -68,19 +116,18 @@ func (s *tcpForwardSession) onRetransmittedSyn(tc header.TCP) {
 	if tc.SequenceNumber() != s.irs {
 		return
 	}
-	pkt := buildIPv4TCPPacket(s.flow.dstAddr, s.flow.srcAddr, s.flow.dstPort, s.flow.srcPort,
+	pkt := buildIPTCPPacket(s.flow.dstAddr, s.flow.srcAddr, s.flow.dstPort, s.flow.srcPort,
 		s.iss, s.irs+1, header.TCPFlagSyn|header.TCPFlagAck, 65535, nil, s.synAckOpts)
 	if err := s.f.writeRaw(pkt); err != nil {
 		return
 	}
 	s.synAckSent = true
-	s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(context.Background()) })
 }
 
-func (s *tcpForwardSession) sendSynAck(ctx context.Context, iph header.IPv4, tc header.TCP) error {
-	pkt := buildIPv4TCPPacket(
-		iph.DestinationAddress(), iph.SourceAddress(),
-		tc.DestinationPort(), tc.SourcePort(),
+func (s *tcpForwardSession) sendSynAck(ctx context.Context) error {
+	pkt := buildIPTCPPacket(
+		s.flow.dstAddr, s.flow.srcAddr,
+		s.flow.dstPort, s.flow.srcPort,
 		s.iss, s.irs+1,
 		header.TCPFlagSyn|header.TCPFlagAck,
 		65535,
@@ -93,11 +140,10 @@ func (s *tcpForwardSession) sendSynAck(ctx context.Context, iph header.IPv4, tc 
 	s.mu.Lock()
 	s.synAckSent = true
 	s.mu.Unlock()
-	s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(ctx) })
 	return nil
 }
 
-func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph header.IPv4, tc header.TCP, ipHdrLen, tcpHdrLen int) {
+func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc header.TCP, ipHdrLen, tcpHdrLen int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,13 +157,16 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 		}
 	}
 
-	if !s.established {
-		if flags&header.TCPFlagAck != 0 && ack >= s.iss+1 && flags&header.TCPFlagSyn == 0 {
+	if flags&header.TCPFlagAck != 0 && ack >= s.iss+1 {
+		if !s.established && flags&header.TCPFlagSyn == 0 {
 			s.established = true
 			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
 				log.Printf("masque connect_ip forwarder: handshake established %s:%d -> %s:%d",
 					s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
+		}
+		if s.established {
+			s.notePeerSendWindowLocked(ack, tc.WindowSize())
 		}
 	}
 
@@ -126,12 +175,28 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 		if !s.established && !s.synAckSent {
 			return
 		}
-		if seq != s.rcvNxt {
+		payload, ok := trimPayloadAtRcvNxt(seq, s.rcvNxt, payload)
+		if !ok {
+			_ = s.sendAckOnly()
+			return
+		}
+		if len(payload) == 0 {
 			_ = s.sendAckOnly()
 			return
 		}
 		s.rcvNxt += uint32(len(payload))
-		_ = s.scheduleAckOnly()
+		// Before remote flush: stop pump pretest discard so early iperf -R bytes are not dropped.
+		s.clientPayloadSeen.Store(true)
+		s.signalS2CPump()
+		// usque order: ACK client before backend forward and before S2C pump (iperf -R params stall).
+		if len(payload) <= tcpForwarderSyncAckMaxPayload {
+			if err := s.sendAckNowSync(); err != nil {
+				go s.close()
+				return
+			}
+		} else {
+			_ = s.scheduleAckOnly()
+		}
 		// Inline remote write: per-segment goroutines capped upload at ~150 Mbit/s in-proc
 		// (goroutine + copy churn at gVisor MSS PPS). pkt is reused by the read loop after return.
 		payCopy := borrowPacket(len(payload))
@@ -140,22 +205,38 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 			returnPacket(payCopy)
 			return
 		}
+		if s.outbound == nil {
+			s.pendingRemote = append(s.pendingRemote, payCopy)
+			s.ensureRemotePump(ctx)
+			return
+		}
 		if _, err := s.outbound.Write(payCopy); err != nil {
 			returnPacket(payCopy)
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: remote write err=%v %s:%d -> %s:%d",
+					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+			}
 			go s.close()
 			return
 		}
 		returnPacket(payCopy)
 		if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: remote flush err=%v %s:%d -> %s:%d",
+					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+			}
 			go s.close()
+			return
 		}
+		s.ensureRemotePump(ctx)
 	}
 
 	if flags&header.TCPFlagFin != 0 {
 		if !s.established {
 			return
 		}
-		finSeq := seq + uint32(len(payload))
+		wirePayloadLen := len(pkt[ipHdrLen+tcpHdrLen:])
+		finSeq := seq + uint32(wirePayloadLen)
 		if finSeq != s.rcvNxt {
 			_ = s.sendAckOnly()
 			return
@@ -168,6 +249,57 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, iph h
 	}
 }
 
+func (s *tcpForwardSession) bindRemote(remote net.Conn) {
+	s.mu.Lock()
+	s.remote = remote
+	s.outbound = bufio.NewWriterSize(remote, remoteWriteBuf)
+	s.mu.Unlock()
+	s.flushPendingRemote(true)
+}
+
+// flushPendingRemote delivers payload queued before backend dial completed.
+func (s *tcpForwardSession) flushPendingRemote(immediate bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outbound == nil || len(s.pendingRemote) == 0 {
+		return
+	}
+	for _, pay := range s.pendingRemote {
+		if s.closed.Load() {
+			for _, p := range s.pendingRemote {
+				returnPacket(p)
+			}
+			s.pendingRemote = nil
+			return
+		}
+		if _, err := s.outbound.Write(pay); err != nil {
+			for _, p := range s.pendingRemote {
+				returnPacket(p)
+			}
+			s.pendingRemote = nil
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: pending remote write err=%v %s:%d -> %s:%d",
+					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+			}
+			go s.close()
+			return
+		}
+		returnPacket(pay)
+	}
+	s.pendingRemote = nil
+	if err := s.maybeFlushRemote(immediate); err != nil {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: pending remote flush err=%v %s:%d -> %s:%d",
+				err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+		}
+		go s.close()
+	}
+}
+
+func (s *tcpForwardSession) ensureRemotePump(ctx context.Context) {
+	s.remoteReaderOnce.Do(func() { go s.pumpRemoteToClient(ctx) })
+}
+
 func (s *tcpForwardSession) sendFinOnRemoteClose() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,8 +307,8 @@ func (s *tcpForwardSession) sendFinOnRemoteClose() error {
 		return nil
 	}
 	s.remoteFinSent = true
-	opts := s.buildTimestampOption()
-	pkt := buildIPv4TCPPacket(
+	opts := s.buildTimestampOptionLocked()
+	pkt := buildIPTCPPacket(
 		s.flow.dstAddr, s.flow.srcAddr,
 		s.flow.dstPort, s.flow.srcPort,
 		s.sndNxt, s.rcvNxt,
@@ -190,8 +322,8 @@ func (s *tcpForwardSession) sendFinOnRemoteClose() error {
 }
 
 func (s *tcpForwardSession) buildAckOnlyPacket() []byte {
-	opts := s.buildTimestampOption()
-	return buildIPv4TCPPacket(
+	opts := s.buildTimestampOptionLocked()
+	return buildIPTCPPacket(
 		s.flow.dstAddr, s.flow.srcAddr,
 		s.flow.dstPort, s.flow.srcPort,
 		s.sndNxt, s.rcvNxt,
@@ -216,6 +348,18 @@ func (s *tcpForwardSession) sendAckOnly() error {
 	return s.f.enqueueWrite(pkt)
 }
 
+// sendAckNowSync delivers ACK before short-payload remote write so downloadCh DATA cannot
+// win the writeCh ACK queue (iperf -R: 89B params then 53B header).
+func (s *tcpForwardSession) sendAckNowSync() error {
+	pkt := s.buildAckOnlyPacket()
+	if len(pkt) == 0 {
+		return nil
+	}
+	err := s.f.sendPacketNow(pkt)
+	returnPacket(pkt)
+	return err
+}
+
 func (s *tcpForwardSession) maybeFlushRemote(immediate bool) error {
 	if s.outbound == nil {
 		return nil
@@ -226,74 +370,215 @@ func (s *tcpForwardSession) maybeFlushRemote(immediate bool) error {
 	return nil
 }
 
-func (s *tcpForwardSession) buildTimestampOption() []byte {
+// buildTimestampOptionLocked builds TS option; caller must hold s.mu.
+func (s *tcpForwardSession) buildTimestampOptionLocked() []byte {
 	if !s.tsOK {
 		return nil
 	}
+	if s.tsSendNext == 0 {
+		s.tsSendNext = newForwarderSendTimestamp()
+	}
+	s.tsSendNext++
+	ts := s.tsSendNext
+	recent := s.tsRecent
 	var b [12]byte
 	b[0] = header.TCPOptionNOP
 	b[1] = header.TCPOptionNOP
 	b[2] = header.TCPOptionTS
 	b[3] = header.TCPOptionTSLength
-	ts := s.f.ackTSTick.Add(1)
 	binary.BigEndian.PutUint32(b[4:], ts)
-	binary.BigEndian.PutUint32(b[8:], s.tsRecent)
+	binary.BigEndian.PutUint32(b[8:], recent)
 	return b[:]
 }
 
+func (s *tcpForwardSession) maybeCloseAfterPump() {
+	if s.remotePumpDone.Load() {
+		s.close()
+	}
+}
+
+func (s *tcpForwardSession) ensureHandshakeIdleWatchdog(ctx context.Context) {
+	s.handshakeIdleOnce.Do(func() {
+		go s.handshakeIdleWatchdog(ctx)
+	})
+}
+
+func (s *tcpForwardSession) handshakeIdleWatchdog(ctx context.Context) {
+	timer := time.NewTimer(tcpForwarderHandshakeIdle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	s.mu.Lock()
+	established := s.established
+	s.mu.Unlock()
+	if !established && !s.closed.Load() {
+		s.close()
+	}
+}
+
+func (s *tcpForwardSession) signalS2CPump() {
+	if s == nil || s.s2cWake == nil {
+		return
+	}
+	select {
+	case s.s2cWake <- struct{}{}:
+	default:
+	}
+}
+
+// notePeerSendWindowLocked records client ACK/window for S2C pacing (host-kernel tun needs this).
+func (s *tcpForwardSession) notePeerSendWindowLocked(ack uint32, win uint16) {
+	woke := false
+	if ack > s.peerAck {
+		s.peerAck = ack
+		woke = true
+	}
+	wnd := uint32(win) << uint32(s.clientWSScale)
+	if wnd == 0 {
+		wnd = 1
+	}
+	if !s.peerRwndValid || wnd != s.peerRwnd {
+		s.peerRwnd = wnd
+		s.peerRwndValid = true
+		woke = true
+	}
+	if woke {
+		s.signalS2CPump()
+	}
+}
+
+func (s *tcpForwardSession) s2cSendBudgetLocked() uint32 {
+	if !s.peerRwndValid {
+		return ^uint32(0)
+	}
+	inflight := s.sndNxt - s.peerAck
+	if inflight >= s.peerRwnd {
+		return 0
+	}
+	return s.peerRwnd - inflight
+}
+
 func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
-	defer s.close()
+	defer func() {
+		s.remotePumpDone.Store(true)
+		s.maybeCloseAfterPump()
+	}()
+	if s.s2cWake == nil {
+		s.s2cWake = make(chan struct{}, 1)
+	}
 	readSz := remoteReadBuf
-	if mss := int(s.clientMSS); mss > 0 && readSz < 32*mss {
-		readSz = 32 * mss
+	if mss := int(s.clientMSS); mss > 0 {
+		if readSz < 32*mss {
+			readSz = 32 * mss
+		}
+		// Cap S2C burst so client ACKs can drain before kernel/gVisor recv window fills.
+		if cap := 16 * mss; readSz > cap {
+			readSz = cap
+		}
 	}
 	buf := make([]byte, readSz)
-	maxSeg := MaxSegmentPayload(s.clientMSS)
+	maxSeg := maxSegmentPayloadForFlow(s.clientMSS, s.flow)
 	for {
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			return
-		default:
 		}
-		_ = s.remote.SetReadDeadline(time.Now().Add(30 * time.Second))
-		n, err := s.remote.Read(buf)
-		if n > 0 {
-			off := 0
-			for off < n {
-				if err := ctx.Err(); err != nil {
+		var data []byte
+		if len(s.preClientS2C) > 0 {
+			data = s.preClientS2C
+			s.preClientS2C = nil
+		} else {
+			_ = s.remote.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := s.remote.Read(buf)
+			if n > 0 {
+				data = append([]byte(nil), buf[:n]...)
+			}
+			if err != nil {
+				if len(data) == 0 {
+					if errors.Is(err, io.EOF) {
+						_ = s.sendFinOnRemoteClose()
+						return
+					}
+					if ne, ok := err.(net.Error); ok && ne.Timeout() {
+						if s.closed.Load() || ctx.Err() != nil {
+							return
+						}
+						continue
+					}
+					if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+						log.Printf("masque connect_ip forwarder: remote read err=%v %s:%d -> %s:%d",
+							err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
+					}
+					go s.close()
 					return
 				}
-				chunk := n - off
-				if chunk > maxSeg {
-					chunk = maxSeg
-				}
-				payload := buf[off : off+chunk]
+			}
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if !s.clientPayloadSeen.Load() {
+			s.preClientS2C = append(s.preClientS2C, data...)
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.s2cWake:
+			default:
+			}
+			continue
+		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: pump s2c n=%d %s:%d -> %s:%d",
+				len(data), s.flow.dstAddr, s.flow.dstPort, s.flow.srcAddr, s.flow.srcPort)
+		}
+		off := 0
+		for off < len(data) {
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			chunk := len(data) - off
+			if chunk > maxSeg {
+				chunk = maxSeg
+			}
+			for {
 				s.mu.Lock()
-				seq := s.sndNxt
-				s.sndNxt += uint32(chunk)
-				rcvNxt := s.rcvNxt
-				opts := s.buildTimestampOption()
+				budget := s.s2cSendBudgetLocked()
 				s.mu.Unlock()
-				pkt := buildIPv4TCPPacket(
-					s.flow.dstAddr, s.flow.srcAddr,
-					s.flow.dstPort, s.flow.srcPort,
-					seq, rcvNxt,
-					header.TCPFlagPsh|header.TCPFlagAck,
-					65535,
-					payload,
-					opts,
-				)
-				if err := s.f.enqueueDownload(pkt); err != nil {
-					return
+				if budget > 0 {
+					if uint32(chunk) > budget {
+						chunk = int(budget)
+					}
+					break
 				}
-				off += chunk
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.s2cWake:
+				case <-time.After(2 * time.Millisecond):
+				}
 			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				_ = s.sendFinOnRemoteClose()
+			payload := data[off : off+chunk]
+			s.mu.Lock()
+			seq := s.sndNxt
+			s.sndNxt += uint32(chunk)
+			rcvNxt := s.rcvNxt
+			opts := s.buildTimestampOptionLocked()
+			s.mu.Unlock()
+			pkt := buildIPTCPPacket(
+				s.flow.dstAddr, s.flow.srcAddr,
+				s.flow.dstPort, s.flow.srcPort,
+				seq, rcvNxt,
+				header.TCPFlagPsh|header.TCPFlagAck,
+				65535,
+				payload,
+				opts,
+			)
+			if err := s.f.enqueueDownload(pkt); err != nil {
+				return
 			}
-			return
+			off += chunk
 		}
 	}
 }

@@ -34,7 +34,7 @@ func (d *blockingDownloadInner) Close() error { return nil }
 // serialize drain vs Read vs WriteTo on one H2 CONNECT response body.
 func TestDownloadPathAdapterSerializesConcurrentRead(t *testing.T) {
 	inner := &blockingDownloadInner{release: make(chan struct{})}
-	adapter := &downloadPathAdapter{inner: inner}
+	adapter := NewDownloadPathAdapter(inner)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

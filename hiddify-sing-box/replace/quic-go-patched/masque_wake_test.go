@@ -122,9 +122,9 @@ func TestMasqueWakeAfterDownloadWriteEnvAndActive(t *testing.T) {
 	t.Setenv(envWakeSendOnReceiveRead, "1")
 	t.Setenv(envBidiConnWake, "1")
 	var streamWakes, connWakes int
-	restoreStream := quic.SetMasqueWakeStreamSendHook(func() { streamWakes++ })
+	restoreStream := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
 	defer restoreStream()
-	restoreConn := quic.SetMasqueWakeConnSendHook(func() { connWakes++ })
+	restoreConn := SetMasqueWakeConnSendHook(func() { connWakes++ })
 	defer restoreConn()
 
 	masqueWakeAfterDownloadWrite(nil, 64)

@@ -32,7 +32,7 @@ func masqueBulkFlushThreshold() int {
 			return n
 		}
 	}
-	return 64 << 10
+	return 256 << 10
 }
 
 func masqueBulkFlushMinPending() int {
@@ -50,7 +50,7 @@ func masqueBulkFlushMaxDelay() time.Duration {
 			return time.Duration(n) * time.Millisecond
 		}
 	}
-	return 2 * time.Millisecond
+	return 8 * time.Millisecond
 }
 
 func masqueShouldBulkFlushNow(pendingAck int, sawEOF bool) bool {

@@ -290,3 +290,9 @@ func (c *AsymmetricPacketConn) Read(p []byte) (int, error) {
 func (c *AsymmetricPacketConn) Write(p []byte) (int, error) {
 	return c.WriteTo(p, c.remoteAddr)
 }
+
+func (c *AsymmetricPacketConn) wakeDownloadPumpForUpload() {
+	if pc, ok := c.download.(*PacketConn); ok && pc != nil && !pc.closed.Load() && pc.asyncDownlink {
+		pc.ensureDownlinkPump()
+	}
+}

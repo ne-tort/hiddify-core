@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
+
+const iperfReverseSetupLen = 53 // iperf3 server setup header (test fixture)
 
 type recordingPacketPlaneConn struct {
 	mu     sync.Mutex
@@ -48,16 +51,13 @@ func newTestPacketForwarder(conn PacketPlaneConn) *packetForwarder {
 		conn:            conn,
 		writeCh:         make(chan []byte, WriteQueueDepth),
 		downloadCh:      make(chan []byte, downloadQueueDepth),
-		ackCh:           make(chan *tcpForwardSession, 64),
 		writeStopped:    make(chan struct{}),
 		downloadStopped: make(chan struct{}),
 		sessions:        make(map[tcp4Tuple]*tcpForwardSession),
 		udpSessions:     make(map[udp4Tuple]*udpForwardSession),
 	}
-	writeDone := make(chan struct{})
-	downloadDone := make(chan struct{})
-	go f.runWriteLoop(context.Background(), writeDone)
-	go f.runDownloadWriteLoop(context.Background(), downloadDone)
+	egressDone := make(chan struct{})
+	go f.runEgressLoop(context.Background(), egressDone)
 	return f
 }
 
@@ -82,9 +82,6 @@ func stopTestPacketForwarder(f *packetForwarder) {
 	}
 	if f.downloadCh != nil {
 		close(f.downloadCh)
-	}
-	if f.ackCh != nil {
-		close(f.ackCh)
 	}
 }
 
@@ -247,6 +244,16 @@ func buildClientDataSegment(flow tcp4Tuple, seq uint32, payload []byte) []byte {
 	)
 }
 
+func buildClientAckSegment(flow tcp4Tuple, ack uint32) []byte {
+	return BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr,
+		flow.srcPort, flow.dstPort,
+		1001, ack,
+		header.TCPFlagAck,
+		65535, nil, nil,
+	)
+}
+
 func TestTCPForwardSessionRemoteEOFSendsFin(t *testing.T) {
 	t.Parallel()
 	conn := &recordingPacketPlaneConn{}
@@ -266,6 +273,7 @@ func TestTCPForwardSessionRemoteEOFSendsFin(t *testing.T) {
 		sndNxt:      101,
 		established: true,
 	}
+	sess.clientPayloadSeen.Store(true)
 	sess.add()
 
 	go sess.pumpRemoteToClient(context.Background())
@@ -450,6 +458,7 @@ func TestForwarderPumpRemoteOneMiBSegmentCount(t *testing.T) {
 		established: true,
 		clientMSS:   1460,
 	}
+	sess.clientPayloadSeen.Store(true)
 	sess.add()
 
 	go sess.pumpRemoteToClient(context.Background())
@@ -509,6 +518,7 @@ func TestForwarderDownloadDataBypassesWriteQueue(t *testing.T) {
 		established: true,
 		clientMSS:   1460,
 	}
+	sess.clientPayloadSeen.Store(true)
 	sess.add()
 
 	go sess.pumpRemoteToClient(context.Background())
@@ -582,9 +592,8 @@ func TestForwarderUploadAckImmediate(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < segs; i++ {
 		pkt := buildClientDataSegment(flow, seq, payload)
-		iph := header.IPv4(pkt)
 		tc := header.TCP(pkt[header.IPv4MinimumSize:])
-		sess.handleSegment(ctx, pkt, iph, tc, header.IPv4MinimumSize, header.TCPMinimumSize)
+		sess.handleSegment(ctx, pkt, tc, header.IPv4MinimumSize, header.TCPMinimumSize)
 		seq += segLen
 	}
 
@@ -643,12 +652,12 @@ func TestForwarderHandleSegmentOutOfOrderDoesNotDeadlock(t *testing.T) {
 
 	ctx := context.Background()
 	late := buildClientDataSegment(flow, 5000, []byte("late"))
-	sess.handleSegment(ctx, late, header.IPv4(late), header.TCP(late[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+	sess.handleSegment(ctx, late, header.TCP(late[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
 
 	done := make(chan struct{})
 	go func() {
 		ok := buildClientDataSegment(flow, sess.rcvNxt, []byte("ok"))
-		sess.handleSegment(ctx, ok, header.IPv4(ok), header.TCP(ok[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+		sess.handleSegment(ctx, ok, header.TCP(ok[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
 		close(done)
 	}()
 	select {
@@ -664,7 +673,6 @@ func TestForwarderWriteLoopCoalesceConsecutiveAckOnly(t *testing.T) {
 	f := &packetForwarder{
 		conn:         conn,
 		writeCh:      make(chan []byte, WriteQueueDepth),
-		ackCh:        make(chan *tcpForwardSession, 64),
 		writeStopped: make(chan struct{}),
 	}
 	t.Cleanup(func() { stopTestPacketForwarder(f) })
@@ -686,7 +694,7 @@ func TestForwarderWriteLoopCoalesceConsecutiveAckOnly(t *testing.T) {
 		}
 	}
 	done := make(chan struct{})
-	go f.runWriteLoop(context.Background(), done)
+	go f.runEgressLoop(context.Background(), done)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -703,39 +711,6 @@ func TestForwarderWriteLoopCoalesceConsecutiveAckOnly(t *testing.T) {
 	if ack, ok := conn.lastAckNumber(); !ok || ack != 108 {
 		t.Fatalf("coalesced ACK number=%v (ok=%v) want 108", ack, ok)
 	}
-}
-
-func TestForwarderAckFlushReschedulesOnRetryableWriteError(t *testing.T) {
-	t.Parallel()
-	rec := &recordingPacketPlaneConn{}
-	wrap := &retryableThenOKWriteConn{inner: rec}
-	wrap.failLeft.Store(int32(writePacketMaxPersist + 1))
-
-	f := newTestPacketForwarder(wrap)
-	t.Cleanup(func() { stopTestPacketForwarder(f) })
-	done := make(chan struct{})
-	go f.runWriteLoop(context.Background(), done)
-
-	sess := &tcpForwardSession{
-		f:           f,
-		flow:        tcp4Tuple{srcPort: 52001, dstPort: 443},
-		irs:         1,
-		iss:         100,
-		rcvNxt:      2,
-		sndNxt:      101,
-		established: true,
-	}
-	sess.ackPending.Store(true)
-	f.flushCoalescedAcks(sess)
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if rec.ackOnlyCount() >= 1 {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("ACK flush reschedule: write count=%d want >= 1 after retryable exhaustion", rec.ackOnlyCount())
 }
 
 type lockYieldWriteConn struct {
@@ -809,6 +784,673 @@ func TestForwarderSendPacketNowYieldsLockDuringRetry(t *testing.T) {
 	t.Fatal("sendPacketNow did not enter retry sleep")
 }
 
+func TestForwarderSyncAckBeforeShortPayload(t *testing.T) {
+	t.Parallel()
+	conn := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(conn)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 19, 100, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 99}),
+		srcPort: 40000,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+	}
+	sess.add()
+
+	params := make([]byte, 89)
+	pkt := buildClientDataSegment(flow, sess.rcvNxt, params)
+	sess.handleSegment(context.Background(), pkt, header.TCP(pkt[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	if n := conn.writeCount(); n < 1 {
+		t.Fatalf("writes=%d want >= 1 sync ACK before remote forward", n)
+	}
+	tcp := header.TCP(conn.writes[0][header.IPv4MinimumSize:])
+	if tcp.Flags()&header.TCPFlagAck == 0 {
+		t.Fatal("first wire segment should be ACK")
+	}
+	if tcp.Flags()&(header.TCPFlagPsh|header.TCPFlagSyn) != 0 {
+		t.Fatalf("first wire segment should be ack-only flags=0x%x", tcp.Flags())
+	}
+	wantAck := uint32(1001 + len(params))
+	if got := tcp.AckNumber(); got != wantAck {
+		t.Fatalf("sync ACK number=%d want %d (89B iperf params)", got, wantAck)
+	}
+}
+
+// TestForwarderRemoteWriteBeforePumpStart verifies usque order: ACK → backend params → then S2C pump.
+func TestForwarderRemoteWriteBeforePumpStart(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	paramsReceived := make(chan struct{}, 1)
+	go func() {
+		buf := make([]byte, 256)
+		var acc []byte
+		for len(acc) < 89 {
+			n, err := server.Read(buf)
+			if err != nil {
+				return
+			}
+			acc = append(acc, buf[:n]...)
+		}
+		paramsReceived <- struct{}{}
+		// iperf -R: header then bulk
+		hdr := make([]byte, 53)
+		hdr[0] = 0x49
+		_, _ = server.Write(hdr)
+		bulk := make([]byte, 1400)
+		_, _ = server.Write(bulk)
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 19, 100, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 99}),
+		srcPort: 40000,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+	}
+	sess.add()
+
+	params := make([]byte, 89)
+	pkt := buildClientDataSegment(flow, sess.rcvNxt, params)
+	sess.handleSegment(context.Background(), pkt, header.TCP(pkt[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	select {
+	case <-paramsReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backend did not receive 89B params before pump deadline")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for rec.writeCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.writes) < 2 {
+		t.Fatalf("writes=%d want >= 2 (ACK then S2C)", len(rec.writes))
+	}
+	first := rec.writes[0]
+	second := rec.writes[1]
+	if len(first) >= len(second) {
+		t.Fatalf("egress order: first len=%d second len=%d want params ACK before S2C DATA", len(first), len(second))
+	}
+	tcp0 := header.TCP(first[header.IPv4MinimumSize:])
+	if tcp0.Flags()&header.TCPFlagAck == 0 {
+		t.Fatalf("first segment flags=0x%x want ACK", tcp0.Flags())
+	}
+}
+
+// partialReadConn returns fixed chunks per Read (Docker iperf3 may split 53B header).
+type partialReadConn struct {
+	net.Conn
+	chunks [][]byte
+	idx    int
+}
+
+func (c *partialReadConn) Read(b []byte) (int, error) {
+	if c.idx >= len(c.chunks) {
+		return 0, io.EOF
+	}
+	n := copy(b, c.chunks[c.idx])
+	c.idx++
+	return n, nil
+}
+
+func TestForwarderPumpForwardsPartialS2CSegments(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	downloadDone := make(chan struct{})
+	go f.runEgressLoop(ctx, downloadDone)
+	defer func() {
+		cancel()
+		<-downloadDone
+	}()
+
+	iperfHdr := make([]byte, 53)
+	iperfHdr[0] = 0x49
+	client, server := net.Pipe()
+	remote := &partialReadConn{
+		Conn:   client,
+		chunks: [][]byte{{iperfHdr[0]}, iperfHdr[1:]},
+	}
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{172, 30, 99, 2}),
+		srcPort: 52058,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:                 f,
+		flow:              flow,
+		remote:            remote,
+		outbound:          bufio.NewWriter(client),
+		irs:               1000,
+		iss:               5000,
+		rcvNxt:            1001,
+		sndNxt:            5001,
+		established:       true,
+		synAckSent:        true,
+		clientMSS:         1460,
+		clientPayloadSeen: atomic.Bool{},
+	}
+	sess.add()
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+
+	sess.ensureRemotePump(ctx)
+	params := make([]byte, 89)
+	pkt := buildClientDataSegment(flow, sess.rcvNxt, params)
+	sess.handleSegment(context.Background(), pkt, header.TCP(pkt[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		dataSegs, total, _ := rec.dataSegmentStats()
+		if dataSegs >= 2 && total >= iperfReverseSetupLen {
+			break
+		}
+		runtime.Gosched()
+	}
+	cancel()
+	_ = server.Close()
+
+	dataSegs, totalPayload, maxPayload := rec.dataSegmentStats()
+	if dataSegs < 2 {
+		t.Fatalf("download data segments=%d want >= 2 partial forwards (totalPayload=%d maxPayload=%d)", dataSegs, totalPayload, maxPayload)
+	}
+	if totalPayload != iperfReverseSetupLen {
+		t.Fatalf("forwarded payload=%d want %d", totalPayload, iperfReverseSetupLen)
+	}
+}
+
+// TestForwarderIperfParamsPartialThenRetransmit reproduces Docker: first C2S segment <89B IP packet,
+// full 89B params retransmit must forward tail to iperf server (ReadFull).
+func TestForwarderIperfParamsPartialThenRetransmit(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	downloadDone := make(chan struct{})
+	go f.runEgressLoop(ctx, downloadDone)
+	defer func() {
+		cancel()
+		<-downloadDone
+	}()
+
+	client, server := net.Pipe()
+	paramsReceived := make(chan []byte, 1)
+	go func() {
+		defer close(paramsReceived)
+		buf := make([]byte, 256)
+		var acc []byte
+		for len(acc) < 89 {
+			n, err := server.Read(buf)
+			if n > 0 {
+				acc = append(acc, buf[:n]...)
+			}
+			if err != nil {
+				return
+			}
+		}
+		paramsReceived <- append([]byte(nil), acc[:89]...)
+		hdr := make([]byte, 53)
+		hdr[0] = 0x49
+		_, _ = server.Write(hdr[:1])
+		_, _ = server.Write(hdr[1:])
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{172, 30, 99, 2}),
+		srcPort: 52058,
+		dstPort: 5201,
+	}
+	const seqBase = uint32(1001)
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      seqBase,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+		clientMSS:   1460,
+	}
+	sess.add()
+	sess.ensureRemotePump(ctx)
+
+	params := make([]byte, 89)
+	for i := range params {
+		params[i] = byte('P')
+	}
+	partial := params[:37]
+	sess.handleSegment(context.Background(),
+		buildClientDataSegment(flow, seqBase, partial),
+		header.TCP(buildClientDataSegment(flow, seqBase, partial)[header.IPv4MinimumSize:]),
+		header.IPv4MinimumSize, header.TCPMinimumSize)
+	sess.handleSegment(context.Background(),
+		buildClientDataSegment(flow, seqBase, params),
+		header.TCP(buildClientDataSegment(flow, seqBase, params)[header.IPv4MinimumSize:]),
+		header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	select {
+	case got := <-paramsReceived:
+		if len(got) != 89 {
+			t.Fatalf("remote iperf params len=%d want 89", len(got))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("iperf server did not receive 89B params (overlap retransmit failed)")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if n, _, max := rec.dataSegmentStats(); n >= 1 && max >= iperfReverseSetupLen {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dataSegs, totalPayload, maxPayload := rec.dataSegmentStats()
+	if dataSegs < 1 || totalPayload < iperfReverseSetupLen {
+		t.Fatalf("download after partial params: segs=%d total=%d max=%d", dataSegs, totalPayload, maxPayload)
+	}
+	_ = server.Close()
+}
+
+func TestForwarderIperfParamsTwoSegments(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	downloadDone := make(chan struct{})
+	go f.runEgressLoop(ctx, downloadDone)
+	defer func() {
+		cancel()
+		<-downloadDone
+	}()
+
+	client, server := net.Pipe()
+	paramsReceived := make(chan int, 1)
+	go func() {
+		buf := make([]byte, 256)
+		var acc []byte
+		for len(acc) < 89 {
+			n, err := server.Read(buf)
+			if n > 0 {
+				acc = append(acc, buf[:n]...)
+			}
+			if err != nil {
+				return
+			}
+		}
+		paramsReceived <- len(acc)
+		hdr := make([]byte, 53)
+		hdr[0] = 0x49
+		_, _ = server.Write(hdr)
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{172, 30, 99, 2}),
+		srcPort: 52058,
+		dstPort: 5201,
+	}
+	const seqBase = uint32(1001)
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      seqBase,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+		clientMSS:   1460,
+	}
+	sess.add()
+	sess.ensureRemotePump(ctx)
+
+	params := make([]byte, 89)
+	first := buildClientDataSegment(flow, seqBase, params[:37])
+	second := buildClientDataSegment(flow, seqBase+37, params[37:])
+	sess.handleSegment(context.Background(), first, header.TCP(first[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+	sess.handleSegment(context.Background(), second, header.TCP(second[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	select {
+	case n := <-paramsReceived:
+		if n != 89 {
+			t.Fatalf("remote got %d bytes want 89", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remote did not receive 89B from two segments")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, total, _ := rec.dataSegmentStats(); total >= iperfReverseSetupLen {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, total, max := rec.dataSegmentStats()
+	t.Fatalf("no download after two segments: total=%d max=%d", total, max)
+}
+
+func tcpOptionTSVal(pkt []byte) (uint32, bool) {
+	if len(pkt) < header.IPv4MinimumSize+header.TCPMinimumSize {
+		return 0, false
+	}
+	ihl := int(header.IPv4(pkt).HeaderLength())
+	tcp := header.TCP(pkt[ihl:])
+	po := tcp.ParsedOptions()
+	if !po.TS {
+		return 0, false
+	}
+	return po.TSVal, true
+}
+
+// TestForwarderAckTimestampMonotonicAfterSynAck guards RFC 7323 PAWS: data ACK TS must exceed SYN-ACK TS.
+func TestForwarderAckTimestampMonotonicAfterSynAck(t *testing.T) {
+	t.Parallel()
+	conn := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(conn)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	go func() {
+		buf := make([]byte, 256)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	const synAckTS = uint32(40102677)
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 19, 100, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 99}),
+		srcPort: 40000,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+		tsOK:        true,
+		tsRecent:    1438476293,
+		tsSendNext:  synAckTS,
+	}
+	sess.add()
+
+	params := make([]byte, 37)
+	pkt := buildClientDataSegment(flow, sess.rcvNxt, params)
+	sess.handleSegment(context.Background(), pkt, header.TCP(pkt[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	if n := conn.writeCount(); n < 1 {
+		t.Fatalf("writes=%d want >= 1", n)
+	}
+	got, ok := tcpOptionTSVal(conn.writes[0])
+	if !ok {
+		t.Fatal("data ACK missing TS option")
+	}
+	if got <= synAckTS {
+		t.Fatalf("data ACK TS=%d want > SYN-ACK TS=%d (PAWS drop on Linux host)", got, synAckTS)
+	}
+}
+
+// TestForwarderPayloadQueuedUntilRemoteReady guards SYN-ACK-before-dial: client ACK+params must reach backend after dial.
+func TestForwarderPayloadQueuedUntilRemoteReady(t *testing.T) {
+	t.Parallel()
+	conn := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(conn)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	var remoteReads [][]byte
+	var remoteMu sync.Mutex
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, err := server.Read(buf)
+			if n > 0 {
+				remoteMu.Lock()
+				remoteReads = append(remoteReads, append([]byte(nil), buf[:n]...))
+				remoteMu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 19, 100, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 99}),
+		srcPort: 40000,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+		tsOK:        true,
+		tsSendNext:  1000,
+	}
+	sess.add()
+
+	params := make([]byte, 37)
+	pkt := buildClientDataSegment(flow, sess.rcvNxt, params)
+	sess.handleSegment(context.Background(), pkt, header.TCP(pkt[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	remoteMu.Lock()
+	early := len(remoteReads)
+	remoteMu.Unlock()
+	if early != 0 {
+		t.Fatalf("remote reads before dial=%d want 0 (payload must queue)", early)
+	}
+	if n := conn.writeCount(); n < 1 {
+		t.Fatalf("writes=%d want >= 1 (ACK before queue flush)", n)
+	}
+
+	sess.bindRemote(client)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		remoteMu.Lock()
+		n := len(remoteReads)
+		remoteMu.Unlock()
+		if n > 0 {
+			if len(remoteReads[0]) != 37 {
+				t.Fatalf("remote payload=%d want 37 (iperf params)", len(remoteReads[0]))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("remote did not receive queued payload after bindRemote")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestForwarderNcZHandshakeNoRemotePumpBeforePayload(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	downloadDone := make(chan struct{})
+	go f.runEgressLoop(ctx, downloadDone)
+	defer func() {
+		cancel()
+		<-downloadDone
+	}()
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := server.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{172, 30, 99, 2}),
+		srcPort: 52058,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: false,
+		synAckSent:  true,
+		clientMSS:   1460,
+	}
+	sess.add()
+
+	// nc -z parity: ACK completes handshake without payload — must not start S2C pump yet.
+	ackOnly := buildClientAckSegment(flow, 5001)
+	sess.handleSegment(context.Background(), ackOnly, header.TCP(ackOnly[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+	if !sess.established {
+		t.Fatal("handshake not established after ACK")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if segs, _, _ := rec.dataSegmentStats(); segs > 0 {
+		t.Fatalf("S2C download segments=%d before client payload (nc -z orphan pump)", segs)
+	}
+
+	params := make([]byte, 89)
+	data := buildClientDataSegment(flow, 1001, params)
+	sess.handleSegment(context.Background(), data, header.TCP(data[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+	if !sess.clientPayloadSeen.Load() {
+		t.Fatal("client payload not seen")
+	}
+}
+
+func TestForwarderEgressControlBeforeDownload(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	defer stopTestPacketForwarder(f)
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 30, 99, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		srcPort: 5201,
+		dstPort: 40000,
+	}
+	ack := BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr, flow.srcPort, flow.dstPort,
+		5000, 1089, header.TCPFlagAck, 65535, nil, nil,
+	)
+	bulkPayload := make([]byte, 1400)
+	for i := range bulkPayload {
+		bulkPayload[i] = byte('D')
+	}
+	bulk := BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr, flow.srcPort, flow.dstPort,
+		5000, 1089, header.TCPFlagAck|header.TCPFlagPsh, 65535, bulkPayload, nil,
+	)
+
+	if err := f.enqueueWrite(ack); err != nil {
+		t.Fatalf("enqueueWrite: %v", err)
+	}
+	if err := f.enqueueDownload(bulk); err != nil {
+		t.Fatalf("enqueueDownload: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec.mu.Lock()
+		n := len(rec.writes)
+		rec.mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.writes) < 2 {
+		t.Fatalf("writes=%d want >= 2", len(rec.writes))
+	}
+	if len(rec.writes[0]) >= len(rec.writes[1]) {
+		t.Fatalf("egress order: first len=%d second len=%d want control ACK before bulk DATA",
+			len(rec.writes[0]), len(rec.writes[1]))
+	}
+}
+
 func TestForwarderReadPacketBenign0x100ExitsCleanly(t *testing.T) {
 	t.Parallel()
 	rec := &recordingPacketPlaneConn{}
@@ -820,4 +1462,87 @@ func TestForwarderReadPacketBenign0x100ExitsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("forwarder exit: %v want nil on benign 0x100", err)
 	}
+}
+
+// TestForwarderSynDialStartsRemotePumpReadOnlyDownload verifies usque parity: S2C pump starts
+// on backend dial so read-only clients (PrimeNativeTCPDownload) receive bulk without C2S payload.
+func TestForwarderSynDialStartsRemotePumpReadOnlyDownload(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	downloadDone := make(chan struct{})
+	go f.runEgressLoop(ctx, downloadDone)
+	defer func() {
+		cancel()
+		<-downloadDone
+	}()
+
+	remoteLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer remoteLn.Close()
+	payload := make([]byte, 128)
+	for i := range payload {
+		payload[i] = byte('D')
+	}
+	go func() {
+		c, err := remoteLn.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = c.Write(payload)
+		<-ctx.Done()
+	}()
+
+	f.o.AllowPrivateTargets = true
+	f.o.Dialer = net.Dialer{Timeout: 2 * time.Second}
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{127, 0, 0, 1}),
+		srcPort: 40000,
+		dstPort: uint16(remoteLn.Addr().(*net.TCPAddr).Port),
+	}
+	syn := BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr, flow.srcPort, flow.dstPort,
+		1000, 0, header.TCPFlagSyn, 65535, nil, nil,
+	)
+	tc := header.TCP(syn[header.IPv4MinimumSize:])
+	f.handleSyn(ctx, syn, tc, flow)
+
+	s := f.getSession(flow)
+	if s == nil {
+		t.Fatal("session missing after handleSyn")
+	}
+	s.mu.Lock()
+	iss := s.iss
+	s.mu.Unlock()
+
+	ack := BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr, flow.srcPort, flow.dstPort,
+		1001, iss+1, header.TCPFlagAck, 65535, nil, nil,
+	)
+	f.dispatchReadPacket(ctx, rec, ack, len(ack))
+
+	// Read-only download: forwarder S2C pump starts on first C2S payload.
+	data := BuildIPv4TCPPacket(
+		flow.srcAddr, flow.dstAddr, flow.srcPort, flow.dstPort,
+		1001, iss+1, header.TCPFlagAck|header.TCPFlagPsh, 65535, []byte{0}, nil,
+	)
+	f.dispatchReadPacket(ctx, rec, data, len(data))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		segs, total, _ := rec.dataSegmentStats()
+		if segs >= 1 && total >= len(payload) {
+			return
+		}
+		runtime.Gosched()
+	}
+	segs, total, max := rec.dataSegmentStats()
+	t.Fatalf("read-only download: segs=%d total=%d max=%d want bulk=%d after syn dial",
+		segs, total, max, len(payload))
 }

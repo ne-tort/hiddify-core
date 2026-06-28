@@ -27,6 +27,20 @@ func TestFinishSessionDialRunsWarpBootstrap(t *testing.T) {
 	}
 }
 
+func TestFinishSessionDialRunsGenericBootstrap(t *testing.T) {
+	prefix := netip.MustParsePrefix("10.0.0.2/32")
+	conn := &fakeBootstrapConn{
+		controlCapsules: true,
+		current:         []netip.Prefix{prefix},
+	}
+	if err := FinishSessionDial(conn, SessionBootstrapParams{Tag: "generic-h3"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conn.requestCalls != 0 {
+		t.Fatalf("generic FinishSessionDial must not send empty ADDRESS_REQUEST, got %d", conn.requestCalls)
+	}
+}
+
 func TestFinishSessionDialBootstrapFailureClosesConn(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{

@@ -3,48 +3,70 @@
 package tun
 
 import (
-	"github.com/sagernet/gvisor/pkg/rawfile"
+	"sync"
+
 	"github.com/sagernet/gvisor/pkg/tcpip/link/fdbased"
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
-
-	"golang.org/x/sys/unix"
 )
 
 func init() {
 	fdbased.BufConfig = []int{65535}
 }
 
+var nativeTunL3KernelRelay sync.Map // *NativeTun → struct{}
+
+// SetL3OverlayKernelRelay disables fdbased RX GRO when host kernel TCP egress is relayed via L3OverlaySend.
+// GRO holds small tail segments (iperf -R 52B after 37B) until coalesce timeout → client retransmit stall.
+func (t *NativeTun) SetL3OverlayKernelRelay(enabled bool) {
+	if t == nil {
+		return
+	}
+	if enabled {
+		nativeTunL3KernelRelay.Store(t, struct{}{})
+		return
+	}
+	nativeTunL3KernelRelay.Delete(t)
+}
+
+func (t *NativeTun) l3OverlayKernelRelay() bool {
+	if t == nil {
+		return false
+	}
+	_, ok := nativeTunL3KernelRelay.Load(t)
+	return ok
+}
+
 var _ GVisorTun = (*NativeTun)(nil)
 
 func (t *NativeTun) WritePacket(pkt *stack.PacketBuffer) (int, error) {
-	iovecs := t.iovecsOutputDefault
-	var dataLen int
-	for _, packetSlice := range pkt.AsSlices() {
-		dataLen += len(packetSlice)
-		iovec := unix.Iovec{
-			Base: &packetSlice[0],
-		}
-		iovec.SetLen(len(packetSlice))
-		iovecs = append(iovecs, iovec)
+	if pkt == nil {
+		return 0, nil
 	}
-	if cap(iovecs) > cap(t.iovecsOutputDefault) {
-		t.iovecsOutputDefault = iovecs[:0]
+	var flat []byte
+	for _, s := range pkt.AsSlices() {
+		flat = append(flat, s...)
 	}
-	errno := rawfile.NonBlockingWriteIovec(t.tunFd, iovecs)
-	if errno == 0 {
-		return dataLen, nil
-	} else {
-		return 0, errno
+	if len(flat) == 0 {
+		return 0, nil
 	}
+	// Kernel L3 relay: bypass TX GRO (same as CONNECT-IP WriteIngress / usque Device.WritePacket).
+	if t.l3OverlayKernelRelay() {
+		return t.WriteIngress(flat)
+	}
+	return t.Write(flat)
 }
 
 func (t *NativeTun) NewEndpoint() (stack.LinkEndpoint, stack.NICOptions, error) {
+	if t.l3OverlayKernelRelay() {
+		return kernelRelayStubLink{}, stack.NICOptions{}, nil
+	}
+	enableGRO := !t.l3OverlayKernelRelay()
 	if t.vnetHdr {
 		ep, err := fdbased.New(&fdbased.Options{
 			FDs:               []int{t.tunFd},
 			MTU:               t.options.MTU,
 			GSOMaxSize:        gsoMaxSize,
-			GRO:               true,
+			GRO:               enableGRO,
 			RXChecksumOffload: true,
 			TXChecksumOffload: t.txChecksumOffload,
 		})

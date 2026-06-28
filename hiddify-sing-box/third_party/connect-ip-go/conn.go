@@ -107,6 +107,7 @@ func init() {
 var ErrIPv6ExtensionChainAmbiguous = errors.New("connect-ip: IPv6 extension chain parse ambiguity")
 var ErrInvalidRouteAdvertisement = errors.New("connect-ip: invalid route advertisement")
 var ErrControlCapsulesUnsupported = errors.New("connect-ip: control capsules unsupported by this transport")
+var ErrPeerEmptyAddressRequest = errors.New("connect-ip: peer ADDRESS_REQUEST with zero requested addresses")
 
 func UnknownCapsuleTotal() uint64 {
 	return unknownCapsuleTotal.Load()
@@ -335,6 +336,10 @@ type Conn struct {
 
 	closeChan chan struct{}
 	closeErr  error
+
+	// allowEmptyPeerAddressRequest opts into ignoring peer ADDRESS_REQUEST capsules with zero
+	// requested addresses (Cloudflare cf-connect-ip). RFC 9484 §4.7.2 requires aborting otherwise.
+	allowEmptyPeerAddressRequest bool
 }
 
 // SetAssignedPrefixesListener registers a callback fired after each successful ADDRESS_ASSIGN
@@ -346,6 +351,15 @@ func (c *Conn) SetAssignedPrefixesListener(fn func([]netip.Prefix)) {
 	c.listenerMu.Lock()
 	defer c.listenerMu.Unlock()
 	c.assignedPrefixesListener = fn
+}
+
+// SetAllowEmptyPeerAddressRequest enables ignoring peer ADDRESS_REQUEST capsules with zero
+// requested addresses (cf-connect-ip interop). Generic RFC 9484 §4.7.2 requires stream abort.
+func (c *Conn) SetAllowEmptyPeerAddressRequest(allow bool) {
+	if c == nil {
+		return
+	}
+	c.allowEmptyPeerAddressRequest = allow
 }
 
 func (c *Conn) publishRouteViewLocked() {
@@ -602,22 +616,13 @@ func (c *Conn) pumpH3QUICDatagrams() {
 }
 
 func (c *Conn) enqueueH3UnifiedIngressWithBackpressure(d []byte) bool {
-	timer := time.NewTimer(connIngressBackpressureWait)
-	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
+	for {
+		select {
+		case <-c.closeChan:
+			return false
+		case c.h3UnifiedDatagramIngress <- d:
+			return true
 		}
-	}()
-	select {
-	case <-c.closeChan:
-		return false
-	case c.h3UnifiedDatagramIngress <- d:
-		return true
-	case <-timer.C:
-		return false
 	}
 }
 
@@ -940,11 +945,20 @@ func (c *Conn) readFromStream() error {
 			case c.assignedAddressNotify <- struct{}{}:
 			}
 		case capsuleTypeAddressRequest:
-			if _, err := parseAddressRequestCapsule(cr); err != nil {
+			capsule, err := parseAddressRequestCapsule(cr)
+			if err != nil {
 				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
-			// Some deployments (e.g. consumer WARP edge) may emit ADDRESS_REQUEST before assignment;
-			// tearing down the stream breaks ADDRESS_ASSIGN delivery. Ignore when parse succeeded.
+			if len(capsule.RequestedAddresses) == 0 {
+				if c.allowEmptyPeerAddressRequest {
+					if masqueConnectIPDebug() {
+						log.Printf("connect-ip: peer empty ADDRESS_REQUEST capsule observed (ignored, cf-connect-ip interop)")
+					}
+					continue
+				}
+				return c.failClosed(ErrPeerEmptyAddressRequest)
+			}
+			// Client role does not assign peer addresses; non-empty peer REQUEST is ignored.
 			if masqueConnectIPDebug() {
 				log.Printf("connect-ip: peer ADDRESS_REQUEST capsule observed (ignored)")
 			}
@@ -1417,6 +1431,7 @@ func (c *Conn) emitPolicyDropICMP(original []byte, reason string) {
 	// For source-policy violations, replying with ICMP to the untrusted source
 	// is both low-value and frequently blocked by the same peer policy.
 	// Skip emission to avoid self-inflicted compose/send pressure in noisy ingress.
+	// RFC 9484 §4.5 ICMP on policy reject is RFC-O; dst/proto paths emit below.
 	if reason == "src_not_allowed" {
 		return
 	}
@@ -1439,6 +1454,40 @@ func (c *Conn) emitPolicyDropICMP(original []byte, reason string) {
 		return
 	}
 	policyDropICMPTotal.Add(1)
+}
+
+func isOutgoingTTLExpired(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "TTL too small") || strings.Contains(msg, "Hop Limit too small")
+}
+
+func (c *Conn) emitTTLExpiredICMP(original []byte) {
+	if len(original) == 0 {
+		return
+	}
+	icmpPacket, err := composeICMPTimeExceededPacket(original)
+	if err != nil {
+		logSampledDrop(&policyDropICMPComposeFail, "connect-ip: failed to compose TTL-expired ICMP: %v", err)
+		return
+	}
+	if c.shouldValidateOutgoingPolicy() {
+		if err := c.validateOutgoingProxiedPacket(icmpPacket); err != nil {
+			logSampledDrop(&policyDropICMPSendFail, "connect-ip: skipping TTL-expired ICMP by outgoing policy: %v", err)
+			return
+		}
+	}
+	if _, err := c.WritePacket(icmpPacket); err != nil {
+		logSampledDrop(&policyDropICMPSendFail, "connect-ip: failed to send TTL-expired ICMP: %v", err)
+	}
+}
+
+func (c *Conn) maybeEmitTTLExpiredICMP(original []byte, err error) {
+	if isOutgoingTTLExpired(err) {
+		c.emitTTLExpiredICMP(original)
+	}
 }
 
 // WritePacket writes an IP packet to the stream.
@@ -1510,6 +1559,7 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 		}
 	}
 	if err := c.prepareOutgoingProxiedPacket(b, c.routeView.Load()); err != nil {
+		c.maybeEmitTTLExpiredICMP(b, err)
 		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
 		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
 		err = wrapConnectIPStreamDataplaneErr(c, err)
@@ -1554,6 +1604,7 @@ func (c *Conn) writePacketMaybeWake(b []byte, wake bool) (icmp []byte, err error
 		ip := make([]byte, len(b))
 		copy(ip, b)
 		if err := c.prepareOutgoingProxiedPacket(ip, c.routeView.Load()); err != nil {
+			c.maybeEmitTTLExpiredICMP(b, err)
 			logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
 			err = fmt.Errorf("connect-ip: compose datagram: %w", err)
 			err = wrapConnectIPStreamDataplaneErr(c, err)
@@ -1605,6 +1656,7 @@ func (c *Conn) WritePacketPrefixed(b []byte) (icmp []byte, err error) {
 	copy((*buf)[prefixLen:], packet)
 	prepared := (*buf)[prefixLen:]
 	if err := c.prepareOutgoingProxiedPacket(prepared, c.routeView.Load()); err != nil {
+		c.maybeEmitTTLExpiredICMP(packet, err)
 		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing prefixed packet (%d bytes): %v", len(packet), err)
 		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
 		err = wrapConnectIPStreamDataplaneErr(c, err)
@@ -1629,7 +1681,11 @@ func (c *Conn) composeDatagramWithView(dst *[]byte, src []byte, view *connRouteV
 	}
 	copy(*dst, contextIDZero)
 	copy((*dst)[contextIDLen:], src)
-	return c.prepareOutgoingProxiedPacket((*dst)[contextIDLen:], view)
+	err := c.prepareOutgoingProxiedPacket((*dst)[contextIDLen:], view)
+	if err != nil {
+		c.maybeEmitTTLExpiredICMP(src, err)
+	}
+	return err
 }
 
 func (c *Conn) prepareOutgoingProxiedPacket(packet []byte, view *connRouteView) error {
@@ -1755,6 +1811,17 @@ func (c *Conn) validateOutgoingPacketTupleWithView(src netip.Addr, dst netip.Add
 		assignedAddresses = view.assignedV6
 		localRoutes = view.localRoutesV6
 		peerAddresses = view.peerAddressesV6
+	}
+
+	// RFC 792 / RFC 4443 error packets swap the original tuple; outer source is not
+	// a locally assigned host address. Only restrict dst to peer or assigned space.
+	if isICMPProtocol(version, ipProto) {
+		if peerAddresses != nil &&
+			!prefixesContainAddrSameFamily(peerAddresses, dst) &&
+			!prefixesContainAddrSameFamily(assignedAddresses, dst) {
+			return fmt.Errorf("connect-ip: datagram destination address not allowed: %s", dst)
+		}
+		return nil
 	}
 
 	isAllowedSrc := false

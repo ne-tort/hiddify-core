@@ -1,0 +1,54 @@
+package relay
+
+import (
+	"context"
+	"io"
+	"net"
+	"net/http"
+)
+
+// RelayCONNECTH3Leg injects an HTTP/3 bidi relay leg for in-process tests (S37) without a live QUIC stack.
+type RelayCONNECTH3Leg interface {
+	MasqueRelayCONNECTH3Leg() io.ReadWriteCloser
+}
+
+// RelayTCPTunnel relays CONNECT tunneled TCP like h2o proxy.tunnel (plain io.CopyBuffer, full duplex).
+func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter, legRole string) error {
+	_ = legRole
+	if leg := h3StreamFromCONNECTRelay(reqBody, responseWriter); leg != nil {
+		releaseConnectRelayRequestBody(reqBody)
+		return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_ = http.NewResponseController(responseWriter).EnableFullDuplex()
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	uploadErrCh := make(chan error, 1)
+	downloadErrCh := make(chan error, 1)
+	go func() {
+		_, err := relayTunnelCopyBufferH2BidiUpload(targetConn, StripH2ClientBootstrapUpload(reqBody), responseWriter)
+		_ = reqBody.Close()
+		if cw, ok := targetConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		}
+		uploadErrCh <- err
+	}()
+	go func() {
+		out := relayTunnelDownloadWriter(responseWriter)
+		_, err := relayTunnelDownloadRelayH2(out, responseWriter, targetConn)
+		downloadErrCh <- err
+	}()
+	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+}
+
+// RelayTCPTunnelBidiStream runs the HTTP/3 hijack relay path (h2o plain io.CopyBuffer both halves).
+func RelayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
+	return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, bidi)
+}
+
+// RelayTunnelDownloadH2Style copies onward TCP → CONNECT response with batched H2 flush (fallback path).
+func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
+	return relayTunnelDownloadRelay(out, responseWriter, src)
+}

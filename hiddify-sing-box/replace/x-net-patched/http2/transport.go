@@ -1889,6 +1889,25 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	var pendingAck int
 	var firstPendingAt time.Time
 	for !sawEOF {
+		if bulkFlush && pendingAck > 0 {
+			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
+				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt) ||
+				masqueShouldFlushBeforeBlockingRead(body, pendingAck)
+			if flush {
+				cc.wmu.Lock()
+				ack := pendingAck
+				pendingAck = 0
+				err := cc.bw.Flush()
+				if err == nil {
+					masqueAckUploadWireSent(body, ack)
+					firstPendingAt = time.Time{}
+				}
+				cc.wmu.Unlock()
+				if err != nil {
+					return err
+				}
+			}
+		}
 		n, err := body.Read(buf)
 		if hasContentLen {
 			remainLen -= int64(n)
@@ -1956,10 +1975,10 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 			if pendingAck > 0 && firstPendingAt.IsZero() {
 				firstPendingAt = time.Now()
 			}
-			interactiveFlush := n > 0 && n < 4096 && pendingAck > 0
+			// Bulk upload batches to masqueBulkFlushThreshold; do not flush on every <4KiB
+			// pipe read (Linux Docker partial reads were ~3× slower than batched flush).
 			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
-				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt) ||
-				interactiveFlush
+				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt)
 			if flush {
 				cc.wmu.Lock()
 				ack := pendingAck

@@ -64,6 +64,34 @@ var (
 	ExportH3HonestGateDuration                            = h3HonestGateDuration
 )
 
+func ExportStartH2DownloadFirstTarget(t *testing.T) (uint16, string) {
+	return startH2DownloadFirstTarget(t)
+}
+
+func ExportStartH2BannerUploadTarget(t *testing.T) uint16 {
+	return startH2BannerUploadTarget(t)
+}
+
+func ExportStartInProcessH2TCPConnectStreamProxy(tb testing.TB) int {
+	return startInProcessH2TCPConnectStreamProxy(tb)
+}
+
+func ExportDialH2ConnectStreamBenchTCPWindowed(tb testing.TB, proxyPort, targetPort int) net.Conn {
+	return dialH2ConnectStreamBenchTCPWindowed(tb, proxyPort, targetPort)
+}
+
+func ExportRunH2HonestGateDuplexWriteTo(t *testing.T, conn net.Conn, duration time.Duration, minBytes int64) int64 {
+	return runH2HonestGateDuplexWriteTo(t, conn, duration, minBytes)
+}
+
+func ExportH2HonestGateMinBytes() int64 { return h2HonestGateMinBytes }
+
+func ExportH2HonestGateDuration() time.Duration { return h2HonestGateDuration }
+
+func ExportH2ConnectStreamSocksMinRead() int { return h2ConnectStreamSocksMinRead }
+
+func ExportH2ConnectStreamSocksUploadGoal() int { return h2ConnectStreamSocksUploadGoal }
+
 func ExportMeasureTCPDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
 	return measureTCPDownloadWriteToMbps(conn, duration)
 }

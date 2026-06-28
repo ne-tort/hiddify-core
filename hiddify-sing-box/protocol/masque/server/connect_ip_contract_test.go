@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-//go:embed connect_ip.go
+//go:embed connect_ip_route.go
 var connectIPGoSource string
 
 // TestConnectIPTCPTerminationUsesForwarderNotRelay locks CLIENT-SERVER-CONTRACTS:

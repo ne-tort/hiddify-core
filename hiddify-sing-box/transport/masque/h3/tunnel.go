@@ -1,7 +1,6 @@
 package h3
 
 import (
-	_ "embed"
 	"context"
 	"errors"
 	"io"
@@ -10,12 +9,6 @@ import (
 
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
-
-//go:embed tunnel.go
-var connectRequestAuditSource string
-
-// ConnectRequestAuditSource returns tunnel.go source for frozen REF-SRC Invisv audits.
-func ConnectRequestAuditSource() string { return connectRequestAuditSource }
 
 // ConnectUsePipeUpload reports pipe mode for CONNECT-stream. Prod always uses nil Body (Invisv).
 func ConnectUsePipeUpload() bool { return false }

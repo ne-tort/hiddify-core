@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"testing"
+
+	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 type pokeRecordFlusher struct {
@@ -21,6 +23,8 @@ func (p *pokeRecordFlusher) Flush() error {
 
 // TestH2ProdUploadPathPokeNotNoop (H2-T1a-01) — prod chunked upload path must reach FlushRequestBody.
 func TestH2ProdUploadPathPokeNotNoop(t *testing.T) {
+	t.Setenv(conn.EnvH2ConnectUploadChunk, "4")
+	t.Setenv("MASQUE_H2_CONNECT_UPLOAD_BULK_FLUSH", "0")
 	inner := &pokeRecordFlusher{}
 	wrapped := H2UploadFlushPolicy().Wrap(inner)
 	if _, err := wrapped.Write(bytes.Repeat([]byte("x"), 8*1024)); err != nil {

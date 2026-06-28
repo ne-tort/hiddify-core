@@ -6,7 +6,6 @@ import (
 )
 
 func TestObsTrackPacketPlaneHooks(t *testing.T) {
-	t.Parallel()
 	var rxN, txLen, ptb int
 	var readErr, writeErr error
 	var writeCeiling bool
@@ -52,12 +51,12 @@ func TestObsTrackPacketPlaneHooks(t *testing.T) {
 }
 
 func TestObsTrackServerWriteIteration(t *testing.T) {
-	t.Parallel()
 	var txLen, ptb int
 	var writeErr error
 	SetObs(Obs{
-		OnPacketTx:        func(n int) { txLen = n },
-		OnPacketWriteFail: func(err error, _ bool) { writeErr = err },
+		EventsEnabled:     func() bool { return true },
+		OnPacketTx:          func(n int) { txLen = n },
+		OnPacketWriteFail:   func(err error, _ bool) { writeErr = err },
 		OnPacketPTBRx:     func() { ptb++ },
 	})
 	t.Cleanup(func() { SetObs(Obs{}) })

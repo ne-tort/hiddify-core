@@ -35,6 +35,14 @@ func NewConnectUploadPipe() (io.ReadCloser, io.WriteCloser) {
 
 type uploadPipeReader struct{ p *uploadPipe }
 
+// MasqueUploadBuffered reports bytes waiting in the upload pipe (0 = next Read may block).
+func (r *uploadPipeReader) MasqueUploadBuffered() int {
+	up := r.p
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	return len(up.buf)
+}
+
 func (r *uploadPipeReader) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil

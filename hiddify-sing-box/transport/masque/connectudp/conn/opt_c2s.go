@@ -4,14 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/quicvarint"
 )
 
 const (
@@ -239,7 +235,8 @@ func (w *h3C2SWriter) writeBytes(ctx context.Context, closed *atomic.Bool, p []b
 
 func (w *h3C2SWriter) storeErr(err error) {
 	if err != nil {
-		w.writeErr.Store(&err)
+		e := err
+		w.writeErr.Store(&e)
 	}
 }
 
@@ -248,32 +245,6 @@ func (w *h3C2SWriter) takeErr() error {
 		return *p
 	}
 	return nil
-}
-
-// skipCapsules drains ignored capsules on the CONNECT-UDP request stream with bounded reads.
-func skipCapsules(str quicvarint.Reader) error {
-	const (
-		skipCapsuleDatagramMaxPayload    = 1500 + 128
-		skipCapsuleNondatagramMaxPayload = 65536
-		capsuleTypeDatagram              = http3.CapsuleType(0)
-	)
-	for {
-		ct, r, err := http3.ParseCapsule(str)
-		if err != nil {
-			return err
-		}
-		max := int64(skipCapsuleNondatagramMaxPayload)
-		if ct == capsuleTypeDatagram {
-			max = int64(skipCapsuleDatagramMaxPayload)
-		}
-		n, err := io.Copy(io.Discard, io.LimitReader(r, max+1))
-		if err != nil {
-			return err
-		}
-		if n > max {
-			return fmt.Errorf("masque connect-udp h3 skip-capsules: type=%d capsule exceeds %d bytes", ct, max)
-		}
-	}
 }
 
 var contextIDZero = []byte{0}

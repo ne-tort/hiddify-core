@@ -7,6 +7,39 @@ import (
 	"testing"
 )
 
+func TestAllowDestIPBlocksNonPublic(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"loopback", "127.0.0.1"},
+		{"private", "10.0.0.1"},
+		{"multicast", "224.0.0.1"},
+		{"link_local_v4", "169.254.1.1"},
+		{"link_local_v6", "fe80::1"},
+		{"multicast_v6", "ff02::1"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			addr := netip.MustParseAddr(tc.addr)
+			if err := allowDestIP(addr, false); err == nil {
+				t.Fatalf("allowDestIP(%s) want error", tc.addr)
+			}
+		})
+	}
+}
+
+func TestAllowDestIPAllowsPublicWhenPrivateDisabled(t *testing.T) {
+	t.Parallel()
+	addr := netip.MustParseAddr("203.0.113.10")
+	if err := allowDestIP(addr, false); err != nil {
+		t.Fatalf("public addr: %v", err)
+	}
+}
+
 func TestDialAddrHairpin(t *testing.T) {
 	t.Parallel()
 	ifaces, err := net.Interfaces()

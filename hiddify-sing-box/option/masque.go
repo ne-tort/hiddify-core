@@ -110,6 +110,11 @@ type MasqueEndpointOptions struct {
 	TemplateIP string `json:"template_ip,omitempty"`
 	ConnectIPScopeTarget  string `json:"connect_ip_scope_target,omitempty"`
 	ConnectIPScopeIPProto uint8  `json:"connect_ip_scope_ipproto,omitempty"`
+	// ProfileLocalIPv4 / ProfileLocalIPv6: client-only WARP-style device profile locals for CONNECT-IP
+	// bootstrap (RequestAddresses, ROUTE_ADVERTISEMENT). Generic masque servers often omit immediate
+	// ADDRESS_ASSIGN; these align gVisor source with server AssignAddresses (198.18.0.1/32).
+	ProfileLocalIPv4 string `json:"profile_local_ipv4,omitempty"`
+	ProfileLocalIPv6 string `json:"profile_local_ipv6,omitempty"`
 	// TemplateTCP is a URI template for CONNECT-stream TCP; same path-only rule. Empty defaults to /masque/tcp/{target_host}/{target_port}.
 	TemplateTCP string `json:"template_tcp,omitempty"`
 	// TCPRelay is server-only: template (default) uses template_tcp paths.

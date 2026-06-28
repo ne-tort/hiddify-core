@@ -13,6 +13,62 @@ import (
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
 
+type noopTCPHTTPHost struct{}
+
+func (noopTCPHTTPHost) ResetH2ConnectStreamTransportLockedAssumeMu() {}
+
+func TestEnsureTCPHTTPTransportDoesNotAliasIPHTTP(t *testing.T) {
+	t.Parallel()
+	ipTr := &http3.Transport{EnableDatagrams: true}
+	s := &session.CoreSession{
+		Options: session.ClientOptions{
+			Tag:        "t",
+			Server:     "127.0.0.1",
+			ServerPort: 443,
+		},
+		IPHTTP: ipTr,
+	}
+	session.StoreUDPHTTPLayer(s, option.MasqueHTTPLayerH3)
+	s.Mu.Lock()
+	session.EnsureTCPHTTPTransportLockedAssumeMu(s)
+	s.Mu.Unlock()
+	if s.TCPHTTP == nil {
+		t.Fatal("expected TCPHTTP transport")
+	}
+	if s.TCPHTTP == s.IPHTTP {
+		t.Fatal("TCPHTTP must not alias IPHTTP (X-11 / STR-10 / G7)")
+	}
+}
+
+func TestResetTCPHTTPTransportKeepsDistinctIPHTTP(t *testing.T) {
+	t.Parallel()
+	ipTr := &http3.Transport{EnableDatagrams: true}
+	s := &session.CoreSession{
+		Options: session.ClientOptions{
+			Server:     "203.0.113.7",
+			ServerPort: 8443,
+		},
+		IPHTTP:     ipTr,
+		IPHTTPConn: new(http3.ClientConn),
+	}
+	session.StoreUDPHTTPLayer(s, option.MasqueHTTPLayerH3)
+	s.TCPHTTP = session.NewTCPConnectStreamHTTP3Transport(s)
+	oldTCP := s.TCPHTTP
+	session.ResetTCPHTTPTransport(s, noopTCPHTTPHost{})
+	if s.TCPHTTP == nil || s.TCPHTTP == oldTCP {
+		t.Fatal("expected rebuilt TCPHTTP transport")
+	}
+	if s.TCPHTTP == s.IPHTTP {
+		t.Fatal("rebuilt TCPHTTP must stay distinct from IPHTTP")
+	}
+	if s.IPHTTP != ipTr {
+		t.Fatal("ResetTCPHTTPTransport must not replace distinct IPHTTP")
+	}
+	if s.IPHTTPConn == nil {
+		t.Fatal("ResetTCPHTTPTransport must not clear IPHTTPConn when transports differ")
+	}
+}
+
 func TestOpenH3ClientConnReturnsCanceledBeforeReuse(t *testing.T) {
 	s := &session.CoreSession{
 		Options: session.ClientOptions{

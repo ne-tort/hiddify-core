@@ -349,7 +349,9 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 	stopReqCtxRelay(true)
 
 	str := &h2CapsulePipeStream{body: resp.Body, pipeW: pw, pipeR: pr}
-	return newProxiedConn(str, true), resp, nil
+	conn := newProxiedConn(str, true)
+	applyDialInteroperability(conn, opts)
+	return conn, resp, nil
 }
 
 func dialHTTP2LegacyConnectIP(ctx context.Context, rt http.RoundTripper, rawURL string, u *url.URL, opts DialOptions, proto string) (*Conn, *http.Response, error) {

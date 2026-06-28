@@ -43,6 +43,9 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 
 func (c *TunnelConn) Close() error { return c.Inner.Close() }
 
+// TunnelInner exposes the wrapped tunnel for conn/ wire-barrier unwrap (stream/conn).
+func (c *TunnelConn) TunnelInner() net.Conn { return c.Inner }
+
 func (c *TunnelConn) CloseWrite() error {
 	if cw, ok := c.Inner.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()

@@ -2,6 +2,8 @@ package conn
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -181,4 +183,17 @@ func TestH3ConnC2SProdPathUsesNoWakeWhenAvailable(t *testing.T) {
 		t.Fatal("prod H3Conn must use NoWake batch path when stream supports it")
 	}
 	_ = c.Close()
+}
+
+// TestH3C2SWriterStoreErrStable keeps the stored error after the storeErr stack frame returns (UDP-BUG-07).
+func TestH3C2SWriterStoreErrStable(t *testing.T) {
+	w := newH3C2SWriter(&syncH3DatagramStream{})
+	want := errors.New("send failed")
+	w.storeErr(want)
+	for i := 0; i < 64; i++ {
+		_ = fmt.Sprintf("stack noise %d", i)
+	}
+	if err := w.takeErr(); !errors.Is(err, want) {
+		t.Fatalf("takeErr: %v want %v", err, want)
+	}
 }

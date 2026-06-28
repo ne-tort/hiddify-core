@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	maxIPv4Datagram       = DefaultDatagramCeilingMax - DatagramSlack
-	remoteReadBuf         = 8 << 20
+	maxIPv4Datagram       = MaxIPv4WireBytes
+	remoteReadBuf         = 256 << 10
 	remoteWriteBuf        = 2 << 20
 	remoteFlushBatch      = 64 * 1024
 	writeQueueDepth       = 512
@@ -51,11 +51,22 @@ func tuneRemote(c net.Conn) {
 }
 
 // BuildSynAckTCPOptions builds SYN-ACK TCP options from parsed SYN options.
-func BuildSynAckTCPOptions(so header.TCPSynOptions) []byte {
-	return buildSynAckTCPOptions(so)
+// serverTS is the forwarder send timestamp for this session (RFC 7323 PAWS parity); 0 picks random.
+func BuildSynAckTCPOptions(so header.TCPSynOptions, serverTS uint32) []byte {
+	return buildSynAckTCPOptions(so, serverTS)
 }
 
-func buildSynAckTCPOptions(so header.TCPSynOptions) []byte {
+func newForwarderSendTimestamp() uint32 {
+	var ts [4]byte
+	_, _ = rand.Read(ts[:])
+	v := binary.BigEndian.Uint32(ts[:])
+	if v == 0 {
+		v = 1
+	}
+	return v
+}
+
+func buildSynAckTCPOptions(so header.TCPSynOptions, serverTS uint32) []byte {
 	var out []byte
 	mss := so.MSS
 	if mss == 0 || mss > 1460 {
@@ -74,11 +85,13 @@ func buildSynAckTCPOptions(so header.TCPSynOptions) []byte {
 		out = append(out, header.TCPOptionSACKPermitted, header.TCPOptionSackPermittedLength)
 	}
 	if so.TS {
+		if serverTS == 0 {
+			serverTS = newForwarderSendTimestamp()
+		}
 		out = append(out, header.TCPOptionNOP, header.TCPOptionNOP)
 		out = append(out, header.TCPOptionTS, header.TCPOptionTSLength)
 		var ts [8]byte
-		_, _ = rand.Read(ts[:])
-		binary.BigEndian.PutUint32(ts[:4], binary.BigEndian.Uint32(ts[:4])|1)
+		binary.BigEndian.PutUint32(ts[:4], serverTS)
 		binary.BigEndian.PutUint32(ts[4:], so.TSVal)
 		out = append(out, ts[:]...)
 	}

@@ -4,8 +4,8 @@ import "testing"
 
 func TestMasqueUploadReadBufferLenDefault(t *testing.T) {
 	got := masqueUploadReadBufferLen(16384, 16384)
-	if got != 16384 {
-		t.Fatalf("expected unchanged minLen 16384, got %d", got)
+	if got != 256<<10 {
+		t.Fatalf("expected default 256KiB, got %d", got)
 	}
 }
 

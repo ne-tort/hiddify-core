@@ -18,7 +18,7 @@ func TestTCPStreamDialH3HostRoundTripperBypassesSessionHookForEphemeralLeg(t *te
 			return nil, nil
 		}),
 	})
-	host := tcpStreamDialH3Host{s: s}
+	host := s.streamH3Host()
 	if rt := host.RoundTripper(ephemeral); rt != ephemeral {
 		t.Fatalf("ephemeral P6 leg must bypass session hook, got %T", rt)
 	}

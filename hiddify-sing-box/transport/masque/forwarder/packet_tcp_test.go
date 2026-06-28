@@ -16,8 +16,8 @@ func TestMaxSegmentPayloadFitsDatagramCeiling(t *testing.T) {
 	if maxSeg > wantCap {
 		t.Fatalf("maxSeg=%d want <= %d (gVisor CONNECT-IP MTU)", maxSeg, wantCap)
 	}
-	if maxSeg >= 1440 {
-		t.Fatalf("maxSeg=%d still near wire MSS; expected clamp for 1372 B datagram path", maxSeg)
+	if maxSeg > 1320 {
+		t.Fatalf("maxSeg=%d still near wire MSS; expected clamp for %d B datagram path", maxSeg, MaxIPv4WireBytes)
 	}
 	if maxSeg < 512 {
 		t.Fatalf("maxSeg=%d too small", maxSeg)
@@ -26,7 +26,7 @@ func TestMaxSegmentPayloadFitsDatagramCeiling(t *testing.T) {
 
 func TestBuildIPv4TCPPacketChecksumValid(t *testing.T) {
 	t.Parallel()
-	opts := buildSynAckTCPOptions(header.TCPSynOptions{MSS: 1460, WS: 7, TS: true, TSVal: 42})
+	opts := buildSynAckTCPOptions(header.TCPSynOptions{MSS: 1460, WS: 7, TS: true, TSVal: 42}, 1000)
 	src := tcpip.AddrFrom4([4]byte{127, 0, 0, 1})
 	dst := tcpip.AddrFrom4([4]byte{198, 18, 0, 1})
 	pkt := BuildIPv4TCPPacket(src, dst, 443, 52001, 1, 2, header.TCPFlagSyn|header.TCPFlagAck, 65535, nil, opts)

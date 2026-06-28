@@ -1,7 +1,6 @@
 package h3
 
 import (
-	_ "embed"
 	"context"
 	"errors"
 	"io"
@@ -22,12 +21,6 @@ var ErrTunnelConnFailed = errors.New("masque h3 connect tunnel failed")
 var ErrDeadlineUnsupported = errors.New("deadline not supported")
 
 const tunnelWriteToBufLen = 256 * 1024
-
-//go:embed tunnel_conn.go
-var tunnelConnAuditSource string
-
-// TunnelConnAuditSource returns tunnel_conn.go source for frozen REF-SRC audits.
-func TunnelConnAuditSource() string { return tunnelConnAuditSource }
 
 // TunnelWriteToBufLen reports the prod route WriteTo drain buffer (256 KiB anchor).
 func TunnelWriteToBufLen() int { return tunnelWriteToBufLen }
@@ -336,7 +329,7 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	if c.routeBidiDuplex && !c.DownloadActive() {
+	if !c.routeBidiDuplex && !c.DownloadActive() {
 		c.ensureH3BootstrapBeforeUploadLocked()
 	}
 	if c.DownloadActive() {
@@ -455,6 +448,7 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 		n, werr := wt.WriteTo(w)
 		if n > 0 {
 			c.noteDownloadDelivered()
+			c.noteDownloadDeliveryWake(int(n))
 		}
 		return n, werr
 	}

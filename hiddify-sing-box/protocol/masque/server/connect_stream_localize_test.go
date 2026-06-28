@@ -418,7 +418,7 @@ func TestServerCONNECTStreamEnableFullDuplexBeforeRelay(t *testing.T) {
 	idxHeader := strings.Index(connectStreamGoSource, "WriteHeader(http.StatusOK)")
 	idxRelay := strings.Index(connectStreamGoSource, "relay.TCPForward")
 	if idxDuplex < 0 || idxHeader < 0 || idxRelay < 0 {
-		t.Fatal("connect_stream.go: missing full-duplex / WriteHeader / relay anchors")
+		t.Fatal("connectstream/handler.go: missing full-duplex / WriteHeader / relay anchors")
 	}
 	if idxDuplex > idxHeader || idxHeader > idxRelay {
 		t.Fatalf("EnableFullDuplex must precede WriteHeader and relay.TCPForward; got %d %d %d",

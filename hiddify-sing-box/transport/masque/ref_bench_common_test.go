@@ -5,8 +5,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // refBenchDuration is the default REF synthetic benchmark window (matches GATE synth).
@@ -75,66 +73,4 @@ func measureRefConnDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 func refDeltaDiagnosticFailMsg(id string, ref, prod, refFloor, prodFloor float64) string {
 	return fmt.Sprintf("%s: ref=%.1f prod=%.1f (ref>=%.0f prod>=%.0f) — pattern divergence",
 		id, ref, prod, refFloor, prodFloor)
-}
-
-// measureSegmentDuplexMbps runs concurrent WriteTo download + bulk upload on one bidi conn.
-func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, minLeg float64, err error) {
-	type downRes struct {
-		mbps float64
-		err  error
-	}
-	type upRes struct {
-		bytes int64
-	}
-	downDone := make(chan downRes, 1)
-	upDone := make(chan upRes, 1)
-	start := make(chan struct{})
-	downloadArmed := make(chan struct{}, 1)
-	prevArmedHook := h3.TestDuplexDownloadArmedHook
-	h3.TestDuplexDownloadArmedHook = downloadArmed
-	defer func() { h3.TestDuplexDownloadArmedHook = prevArmedHook }()
-	go func() {
-		<-start
-		n, mbps, e := measureTCPDownloadWriteToMbps(conn, duration)
-		if e != nil && n == 0 {
-			downDone <- downRes{err: e}
-			return
-		}
-		downDone <- downRes{mbps: mbps}
-	}()
-	go func() {
-		<-start
-		<-downloadArmed
-		chunk := make([]byte, 256*1024)
-		var upTotal int64
-		stop := time.Now().Add(duration)
-		for time.Now().Before(stop) {
-			n, e := conn.Write(chunk)
-			if n > 0 {
-				upTotal += int64(n)
-			}
-			if e != nil {
-				break
-			}
-		}
-		upDone <- upRes{bytes: upTotal}
-	}()
-	close(start)
-
-	dr := <-downDone
-	if dr.err != nil {
-		return 0, 0, 0, dr.err
-	}
-	ur := <-upDone
-	secs := duration.Seconds()
-	if secs <= 0 {
-		secs = 1
-	}
-	up = float64(ur.bytes*8) / secs / 1e6
-	down = dr.mbps
-	minLeg = down
-	if up < minLeg {
-		minLeg = up
-	}
-	return down, up, minLeg, nil
 }

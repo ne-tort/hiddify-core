@@ -122,6 +122,8 @@ func (h *abandonMatrixDialTCPHost) TCPNetstack() mcip.TCPNetstack { return nil }
 
 func (h *abandonMatrixDialTCPHost) AttachTCPNetstack(mcip.TCPNetstack) {}
 
+func (h *abandonMatrixDialTCPHost) ResetStaleConnectIPPlaneLocked() {}
+
 func (h *abandonMatrixDialTCPHost) FlushTCPNetstackIngress(mcip.TCPNetstack) {}
 
 func (h *abandonMatrixDialTCPHost) BumpTCPInstallInflight(int) {}

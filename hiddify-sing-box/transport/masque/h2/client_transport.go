@@ -7,7 +7,7 @@ import (
 	"net"
 	"sync"
 
-	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
+	"github.com/sagernet/sing-box/transport/masque/netutil"
 	"golang.org/x/net/http2"
 )
 
@@ -60,7 +60,7 @@ func NewClientTransport(cfg ClientDialConfig) (*http2.Transport, error) {
 				continue
 			}
 			if tc, ok := conn.(*net.TCPConn); ok {
-				cudprelay.TuneMasqueTCPSocketBuffers(tc)
+				netutil.TuneMasqueTCPSocketBuffers(tc)
 			}
 			if cfg.MasqueTCPDialTLS != nil {
 				tlsConn, err := cfg.MasqueTCPDialTLS(ctx, conn, tlsCfg.NextProtos, dialAddr)

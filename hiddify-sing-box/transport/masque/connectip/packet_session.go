@@ -2,9 +2,9 @@ package connectip
 
 import (
 	"context"
-	"errors"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	cipegress "github.com/sagernet/sing-box/transport/masque/connectip/pump/egress"
 )
 
 // ClientPacketSessionConfig wires a CONNECT-IP client packet session wrapper.
@@ -129,70 +129,32 @@ func (s *ClientPacketSession) ReadPacketWithContext(ctx context.Context, buffer 
 }
 
 func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
-	if s.datagramCeiling > 0 && len(buffer) > s.datagramCeiling {
-		TrackWriteFail(Errs.Transport, true)
-		return nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
-	}
-	pkt := borrowOutboundBuf(len(buffer))
-	copy(pkt, buffer)
-	icmp, err := s.writePacketDirectNoWake(pkt)
-	if err != nil {
-		returnOutboundBuf(pkt)
-		return icmp, err
-	}
-	returnOutboundBuf(pkt)
-	return icmp, nil
+	return cipegress.WritePacket(s.egressHost(), buffer)
+}
+
+// WritePacketNoWake enqueues without QUIC flush; caller must FlushEgressBatch once per pump iteration.
+func (s *ClientPacketSession) WritePacketNoWake(buffer []byte) ([]byte, error) {
+	return cipegress.WritePacketNoWake(s.egressHost(), buffer)
 }
 
 // WritePacketFromNetstack sends a netstack pool buffer in-place (NoWake); caller flushes the batch.
 func (s *ClientPacketSession) WritePacketFromNetstack(outbound []byte) (retained bool, icmp []byte, err error) {
-	if s.datagramCeiling > 0 && len(outbound) > s.datagramCeiling {
-		TrackWriteFail(Errs.Transport, true)
-		return false, nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
-	}
-	icmp, retained, err = s.conn.WritePacketInPlaceNoWake(outbound)
-	if err != nil {
-		TrackWriteFail(err, false)
-		return false, icmp, err
-	}
-	TrackPacketTx(len(outbound))
-	if len(icmp) > 0 {
-		TrackPTBRx()
-	}
-	return retained, icmp, nil
+	return cipegress.WritePacketFromNetstack(s.egressHost(), outbound)
 }
 
 // WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
 func (s *ClientPacketSession) WritePacketPrefixed(buffer []byte) ([]byte, error) {
-	prefixLen := connectip.DatagramContextPrefixLen()
-	if prefixLen <= 0 || len(buffer) <= prefixLen {
-		return nil, errors.Join(Errs.Transport, errors.New("connect-ip prefixed datagram too short"))
-	}
-	ipLen := len(buffer) - prefixLen
-	if s.datagramCeiling > 0 && ipLen > s.datagramCeiling {
-		TrackWriteFail(Errs.Transport, true)
-		return nil, errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
-	}
-	if s.conn == nil {
-		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
-	}
-	icmp, err := s.conn.WritePacketPrefixed(buffer)
-	return s.accountWrite(ipLen, icmp, err)
+	return cipegress.WritePacketPrefixed(s.egressHost(), buffer, connectip.DatagramContextPrefixLen())
 }
 
-func (s *ClientPacketSession) accountWrite(ipLen int, icmp []byte, err error) ([]byte, error) {
-	if err != nil {
-		TrackWriteFail(err, false)
-		return icmp, err
-	}
-	TrackPacketTx(ipLen)
-	if len(icmp) > 0 {
-		TrackPTBRx()
-	}
-	if s.wakeAfterDatagram != nil {
-		s.wakeAfterDatagram()
-	}
-	return icmp, err
+// FlushEgressBatch wakes QUIC/H2 send after batched WritePacketInPlaceNoWake calls.
+func (s *ClientPacketSession) FlushEgressBatch() {
+	cipegress.FlushEgressBatch(s.egressHost())
+}
+
+// ScheduleEgressFlush is a legacy alias for FlushEgressBatch (netstack OnEgressBatchComplete wiring).
+func (s *ClientPacketSession) ScheduleEgressFlush() {
+	cipegress.ScheduleEgressFlush(s.egressHost())
 }
 
 func (s *ClientPacketSession) Close() error {

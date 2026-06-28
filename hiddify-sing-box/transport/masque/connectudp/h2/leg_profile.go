@@ -60,8 +60,13 @@ func newH2DownlinkWriter(w http.ResponseWriter, profile LegProfile) *H2ResponseW
 	immediate := profile.serverDownlinkImmediateFlush()
 	bulkImmediate := profile.serverDownlinkBulkImmediateFlush()
 	return &H2ResponseWriter{
-		ResponseWriter:       w,
-		immediateFlush:       immediate,
-		bulkImmediateFlush:   bulkImmediate,
+		ResponseWriter:     w,
+		immediateFlush:     immediate,
+		bulkImmediateFlush: bulkImmediate,
 	}
+}
+
+// NewDownlinkResponseWriter builds the server S2C writer for asymmetric download legs.
+func NewDownlinkResponseWriter(w http.ResponseWriter) *H2ResponseWriter {
+	return newH2DownlinkWriter(w, LegProfileDownloadFountain)
 }

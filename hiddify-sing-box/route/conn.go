@@ -29,6 +29,45 @@ import (
 	"github.com/sagernet/sing/common/x/list"
 )
 
+// connectionCopyGate defers onClose until all relay copy legs finish (MASQUE probe→bulk).
+type connectionCopyGate struct {
+	remaining   atomic.Int32
+	closed      atomic.Bool
+	relayBytes  atomic.Int64
+	uploadBytes atomic.Int64
+}
+
+const connectIPShortRelayWarmThreshold = 256 * 1024
+const connectIPShortRelayUploadWarmMax = 8 * 1024
+
+func newConnectionCopyGate(legs int32) *connectionCopyGate {
+	g := &connectionCopyGate{}
+	g.remaining.Store(legs)
+	return g
+}
+
+func (g *connectionCopyGate) addRelayBytes(upload bool, n int64) {
+	if n <= 0 {
+		return
+	}
+	g.relayBytes.Add(n)
+	if upload {
+		g.uploadBytes.Add(n)
+	}
+}
+
+func (g *connectionCopyGate) finish(onClose N.CloseHandlerFunc, err error) {
+	if g.remaining.Add(-1) == 0 && !g.closed.Swap(true) {
+		onClose(err)
+	}
+}
+
+func (g *connectionCopyGate) abort(onClose N.CloseHandlerFunc, err error) {
+	if g.remaining.Swap(0) > 0 && !g.closed.Swap(true) {
+		onClose(err)
+	}
+}
+
 var _ adapter.ConnectionManager = (*ConnectionManager)(nil)
 
 type ConnectionManager struct {
@@ -101,20 +140,47 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	m.access.Lock()
 	element := m.connections.PushBack(conn)
 	m.access.Unlock()
+	dest := metadata.Destination
+	dialer := this
+	copyGate := newConnectionCopyGate(2)
 	onClose = N.AppendClose(onClose, func(it error) {
 		m.access.Lock()
 		defer m.access.Unlock()
 		m.connections.Remove(element)
+		if copyGate.relayBytes.Load() >= connectIPShortRelayWarmThreshold ||
+			copyGate.uploadBytes.Load() >= connectIPShortRelayUploadWarmMax {
+			return
+		}
+		nativeL3 := false
+		if probe, ok := dialer.(interface{ ConnectIPNativeL3Active() bool }); ok {
+			nativeL3 = probe.ConnectIPNativeL3Active()
+		}
+		if !nativeL3 {
+			if resetter, ok := dialer.(interface {
+				ResetConnectIPTCPAfterShortRelay()
+			}); ok {
+				resetter.ResetConnectIPTCPAfterShortRelay()
+			}
+			if w, ok := dialer.(interface {
+				WarmConnectIPTCPAfterShortRelay(context.Context, M.Socksaddr)
+			}); ok && dest.IsValid() {
+				go func(d M.Socksaddr) {
+					time.Sleep(200 * time.Millisecond)
+					warmCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					w.WarmConnectIPTCPAfterShortRelay(warmCtx, d)
+					cancel()
+				}(dest)
+			}
+		}
 	})
-	var done atomic.Bool
 	markConnectionCopyDuplex(conn)
 	markConnectionCopyDuplex(remoteConn)
-	m.preConnectionCopy(ctx, conn, remoteConn, false, &done, onClose)
-	m.preConnectionCopy(ctx, remoteConn, conn, true, &done, onClose)
+	m.preConnectionCopy(ctx, conn, remoteConn, false, copyGate, onClose)
+	m.preConnectionCopy(ctx, remoteConn, conn, true, copyGate, onClose)
 	// Download copy first so MASQUE CONNECT-stream WriteTo can deliver server banner
 	// before upload ReadFrom blocks on SOCKS clients waiting for that banner (iperf -R).
-	go m.connectionCopy(ctx, remoteConn, conn, true, &done, onClose)
-	go m.connectionCopy(ctx, conn, remoteConn, false, &done, onClose)
+	go m.connectionCopy(ctx, remoteConn, conn, true, copyGate, onClose)
+	go m.connectionCopy(ctx, conn, remoteConn, false, copyGate, onClose)
 }
 
 func markConnectionCopyDuplex(conn net.Conn) {
@@ -263,7 +329,7 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 	go m.packetConnectionCopy(ctx, destination, conn, true, &done, onClose)
 }
 
-func (m *ConnectionManager) preConnectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+func (m *ConnectionManager) preConnectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, gate *connectionCopyGate, onClose N.CloseHandlerFunc) {
 	readHandshake := N.NeedHandshakeForRead(source)
 	writeHandshake := N.NeedHandshakeForWrite(destination)
 	if readHandshake || writeHandshake {
@@ -278,9 +344,7 @@ func (m *ConnectionManager) preConnectionCopy(ctx context.Context, source net.Co
 			break
 		}
 		if err != nil {
-			if !done.Swap(true) {
-				onClose(err)
-			}
+			gate.abort(onClose, err)
 			common.Close(source, destination)
 			if !direction {
 				m.logger.ErrorContext(ctx, "connection upload handshake: ", err)
@@ -292,7 +356,7 @@ func (m *ConnectionManager) preConnectionCopy(ctx context.Context, source net.Co
 	}
 }
 
-func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, done *atomic.Bool, onClose N.CloseHandlerFunc) {
+func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn, destination net.Conn, direction bool, gate *connectionCopyGate, onClose N.CloseHandlerFunc) {
 	var (
 		sourceReader      io.Reader = source
 		destinationWriter io.Writer = destination
@@ -308,9 +372,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 				_, err := destination.Write(cachedBuffer.Bytes())
 				cachedBuffer.Release()
 				if err != nil {
-					if done.Swap(true) {
-						onClose(err)
-					}
+					gate.finish(onClose, err)
 					common.Close(source, destination)
 					if !direction {
 						m.logger.ErrorContext(ctx, "connection upload payload: ", err)
@@ -325,6 +387,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 				for _, counter := range writeCounters {
 					counter(int64(dataLen))
 				}
+				gate.addRelayBytes(!direction, int64(dataLen))
 			}
 			continue
 		}
@@ -354,6 +417,7 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 			for _, counter := range writeCounters {
 				counter(written)
 			}
+			gate.addRelayBytes(!direction, written)
 		}
 	case connectionCopyBranchReaderFrom:
 		rf := destinationWriter.(interface {
@@ -369,9 +433,12 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 			for _, counter := range writeCounters {
 				counter(read)
 			}
+			gate.addRelayBytes(!direction, read)
 		}
 	default:
-		_, err = bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+		var copied int64
+		copied, err = bufio.CopyWithCounters(destinationWriter, sourceReader, source, readCounters, writeCounters, bufio.DefaultIncreaseBufferAfter, bufio.DefaultBatchSize)
+		gate.addRelayBytes(!direction, copied)
 	}
 	if err != nil {
 		common.Close(source, destination)
@@ -383,8 +450,8 @@ func (m *ConnectionManager) connectionCopy(ctx context.Context, source net.Conn,
 	} else {
 		destination.Close()
 	}
-	if !done.Swap(true) {
-		onClose(err)
+	if !gate.closed.Load() {
+		gate.finish(onClose, err)
 	}
 	common.Close(source, destination)
 	if !direction {

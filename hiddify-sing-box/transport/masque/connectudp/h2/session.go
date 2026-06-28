@@ -105,7 +105,7 @@ type sessionOnwardWriter struct {
 	w  *cudprelay.OnwardUDPWriter
 }
 
-func (o *sessionOnwardWriter) queue(payload []byte) (icmp bool, err error) {
+func (o *sessionOnwardWriter) Queue(payload []byte) (icmp bool, err error) {
 	if o == nil || o.w == nil {
 		return false, errors.New("masque h2: session onward writer unavailable")
 	}
@@ -114,7 +114,7 @@ func (o *sessionOnwardWriter) queue(payload []byte) (icmp bool, err error) {
 	return o.w.Queue(payload)
 }
 
-func (o *sessionOnwardWriter) flush() (icmp bool, err error) {
+func (o *sessionOnwardWriter) Flush() (icmp bool, err error) {
 	if o == nil || o.w == nil {
 		return false, nil
 	}
@@ -123,13 +123,32 @@ func (o *sessionOnwardWriter) flush() (icmp bool, err error) {
 	return o.w.Flush()
 }
 
-func (o *sessionOnwardWriter) sendBurstViews(wire []byte, count, wireLen, payloadOff int) (icmp bool, err error) {
+func (o *sessionOnwardWriter) SendBurstViews(wire []byte, count, wireLen, payloadOff int) (icmp bool, err error) {
 	if o == nil || o.w == nil {
 		return false, errors.New("masque h2: session onward writer unavailable")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.w.SendBurstViews(wire, count, wireLen, payloadOff)
+}
+
+// lookupDownloadSession returns a pre-registered asymmetric download session (UDP-SRV-06 register-before-200).
+func (reg *SessionRegistry) lookupDownloadSession(key sessionKey) (*h2Session, *H2ResponseWriter, bool) {
+	if reg == nil {
+		reg = DefaultSessionRegistry
+	}
+	reg.mu.Lock()
+	sess := reg.sessions[key]
+	reg.mu.Unlock()
+	if sess == nil {
+		return nil, nil, false
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if !sess.downlinkOK {
+		return nil, nil, false
+	}
+	return sess, sess.downlinkW, true
 }
 
 // HasActiveDownload reports whether a download leg is already registered for key.

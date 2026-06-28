@@ -1,4 +1,4 @@
-﻿package masque
+package masque
 
 import (
 	"bytes"
@@ -24,7 +24,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
-	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	msess "github.com/sagernet/sing-box/transport/masque/session"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
@@ -1064,6 +1063,7 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			mcip.ResetDatagramCeilingMaxEnvCache()
 			t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", tc.envCeilingMax)
 			session, err := (CoreClientFactory{}).NewSession(context.Background(), ClientOptions{
 				Server:                   "example.com",
@@ -1246,8 +1246,8 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 		t.Fatalf("expected h2 transport churn then success (2 CONNECT-UDP attempts), got %d", call.Load())
 	}
 	defer pc.Close()
-	if inner, ok := pc.(*cudpsplit.DatagramSplitConn); !ok || inner.PacketConn != okPC {
-		t.Fatalf("expected masque udp split wrapper around stub PacketConn, got %T %+v", pc, pc)
+	if pc != okPC {
+		t.Fatalf("expected h2 ListenPacket to return dial PacketConn without DatagramSplitConn, got %T", pc)
 	}
 }
 
@@ -3349,43 +3349,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivity
 			}
 		})
 	}
-}
-
-func startInProcessTCPConnectProxy(tb testing.TB, handler func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter)) int {
-	tb.Helper()
-	quicConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		tb.Fatalf("listen quic udp: %v", err)
-	}
-	proxyPort := quicConn.LocalAddr().(*net.UDPAddr).Port
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/masque/tcp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		handler(r.PathValue("target_host"), r.PathValue("target_port"), r, w)
-	})
-	server := http3.Server{
-		TLSConfig:       connectUDPTestTLS,
-		QUICConfig:      &quic.Config{EnableDatagrams: true},
-		EnableDatagrams: true,
-		Handler:         mux,
-	}
-	var serveWG sync.WaitGroup
-	serveWG.Add(1)
-	go func() {
-		defer serveWG.Done()
-		_ = server.Serve(quicConn)
-	}()
-	tb.Cleanup(func() {
-		_ = server.Close()
-		serveWG.Wait()
-		_ = quicConn.Close()
-	})
-	time.Sleep(20 * time.Millisecond)
-	return proxyPort
 }
 
 func TestConnectIPObservabilitySnapshotIncludesHTTP3StreamDatagramQueueDrops(t *testing.T) {

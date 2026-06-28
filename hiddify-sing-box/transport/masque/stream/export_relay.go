@@ -1,0 +1,25 @@
+package stream
+
+import "github.com/sagernet/sing-box/transport/masque/stream/relay"
+
+type RelayCONNECTH3Leg = relay.RelayCONNECTH3Leg
+
+type RelayTCPPolicy = relay.RelayTCPPolicy
+
+const (
+	RelayTunnelBufLen          = relay.RelayTunnelBufLen
+	RelayTunnelFlushBytes      = relay.RelayTunnelFlushBytes
+	RelayTunnelUploadWakeBytes = relay.RelayTunnelUploadWakeBytes
+)
+
+var (
+	RelayTCPTunnel               = relay.RelayTCPTunnel
+	RelayTCPTunnelBidiStream     = relay.RelayTCPTunnelBidiStream
+	RelayTunnelDownloadH2Style   = relay.RelayTunnelDownloadH2Style
+	RelayUseHTTP3StreamHijack    = relay.RelayUseHTTP3StreamHijack
+	RelayUploadFromStream        = relay.RelayUploadFromStream
+	CurrentRelayTCPPolicy        = relay.CurrentRelayTCPPolicy
+	StripH2ClientBootstrapUpload = relay.StripH2ClientBootstrapUpload
+	StripH3ClientBootstrapUpload = relay.StripH3ClientBootstrapUpload
+	ReplayH2BootstrapUpload      = relay.ReplayH2BootstrapUpload
+)

@@ -101,6 +101,7 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 		})
 	})
 	mux.HandleFunc(ipPath, func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).EnableFullDuplex()
 		HandleConnectIPRequest(connectIPHandlerHost(host), w, r, ipTemplate)
 	})
 	tcpRelaxedAuthority := host.RelaxAuthority(host.Options, TemplateFieldTCP)

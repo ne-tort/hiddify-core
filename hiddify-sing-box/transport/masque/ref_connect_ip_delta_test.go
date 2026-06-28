@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque"
+	"github.com/sagernet/sing-box/transport/masque/connectip/inttest"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -25,8 +26,8 @@ func measurePureConnectStreamH3DownloadMbps(t *testing.T) float64 {
 
 func measureHybridConnectIPH3DownloadMbps(t *testing.T) float64 {
 	t.Helper()
-	downLn := startHybridConnectIPDownloadTarget(t)
-	proxyPort := startHybridConnectIPH3Server(t)
+	downLn := inttest.StartHybridConnectIPDownloadTarget(t)
+	proxyPort := inttest.StartHybridConnectIPH3Server(t)
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -54,7 +55,7 @@ func measureHybridConnectIPH3DownloadMbps(t *testing.T) float64 {
 	}
 	defer downConn.Close()
 
-	_, mbps, err := measureHybridSmokeDownloadWriteToMbps(downConn, connectIPHybridSynthBenchDur)
+	_, mbps, err := inttest.MeasureHybridSmokeDownloadWriteToMbps(downConn, inttest.HybridSynthBenchDur)
 	if err != nil {
 		t.Fatalf("hybrid WriteTo: %v", err)
 	}

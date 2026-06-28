@@ -131,7 +131,22 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 		_ = rstr.Close()
 		return nil, rsp, ctxErr
 	}
-	return newProxiedConn(rstr, false), rsp, nil
+	ipConn := newProxiedConn(rstr, false)
+	applyDialInteroperability(ipConn, opts)
+	return ipConn, rsp, nil
+}
+
+func isCFConnectIPProtocol(proto string) bool {
+	return strings.EqualFold(strings.TrimSpace(proto), "cf-connect-ip")
+}
+
+func applyDialInteroperability(c *Conn, opts DialOptions) {
+	if c == nil {
+		return
+	}
+	if isCFConnectIPProtocol(opts.ExtendedConnectProtocol) {
+		c.allowEmptyPeerAddressRequest = true
+	}
 }
 
 func buildConnectIPRequestURL(template *uritemplate.Template) (string, error) {

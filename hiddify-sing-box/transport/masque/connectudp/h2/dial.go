@@ -42,14 +42,15 @@ func DialH2Overlay(ctx context.Context, cfg H2OverlayDialConfig, template *urite
 	if cfg.Hook != nil {
 		return cfg.Hook(ctx, template, target)
 	}
-	if AsymmetricDuplexConfigured() {
-		uploads := UploadStreamsConfigured()
+	policy := ConnectUDPDialPolicyFromEnv()
+	if policy.AsymmetricDuplex {
+		uploads := policy.UploadStreams
 		if uploads < 1 {
 			uploads = 1
 		}
 		return dialH2OverlayAsymmetric(ctx, cfg, template, target, uploads)
 	}
-	streams := UploadStreamsConfigured()
+	streams := policy.UploadStreams
 	if streams <= 1 {
 		return dialH2OverlaySingle(ctx, cfg, template, target, streamRoleBidi, "")
 	}

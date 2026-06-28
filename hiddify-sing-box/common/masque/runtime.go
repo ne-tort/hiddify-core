@@ -356,6 +356,46 @@ func (r *runtimeImpl) OpenIPSession(ctx context.Context) (T.IPPacketSession, err
 	return session.OpenIPSession(ctx)
 }
 
+// ResetConnectIPTCPAfterShortRelay resets cached TCP netstack after short CM/tun probe relay.
+func (r *runtimeImpl) ResetConnectIPTCPAfterShortRelay() {
+	r.mu.RLock()
+	sess := r.session
+	r.mu.RUnlock()
+	if s, ok := sess.(interface{ ResetConnectIPTCPAfterShortRelay() }); ok {
+		s.ResetConnectIPTCPAfterShortRelay()
+	}
+}
+
+// WarmConnectIPTCPAfterShortRelay primes TCP ingress after short CM/tun probe relay.
+func (r *runtimeImpl) WarmConnectIPTCPAfterShortRelay(ctx context.Context, dest M.Socksaddr) {
+	r.mu.RLock()
+	sess := r.session
+	r.mu.RUnlock()
+	if w, ok := sess.(interface {
+		WarmConnectIPTCPAfterShortRelay(context.Context, M.Socksaddr)
+	}); ok {
+		w.WarmConnectIPTCPAfterShortRelay(ctx, dest)
+	}
+}
+
+// ConnectIPNativeL3Active reports whether tun L3 overlay owns the packet plane.
+func (r *runtimeImpl) ConnectIPNativeL3Active() bool {
+	r.mu.RLock()
+	sess := r.session
+	r.mu.RUnlock()
+	if s, ok := sess.(interface{ ConnectIPNativeL3Active() bool }); ok {
+		return s.ConnectIPNativeL3Active()
+	}
+	return false
+}
+
+// MasqueClientSession returns the live transport session (connect_ip native L3 wiring).
+func (r *runtimeImpl) MasqueClientSession() T.ClientSession {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.session
+}
+
 func (r *runtimeImpl) Close() error {
 	r.mu.Lock()
 	if State(r.state.Load()) == StateClosed {

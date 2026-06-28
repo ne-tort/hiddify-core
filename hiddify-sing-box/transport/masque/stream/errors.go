@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // Errors holds sentinel errors joined into CONNECT-stream operational failures.
@@ -31,6 +33,7 @@ func SetErrors(e Errors) {
 	if e.Capability != nil {
 		Errs.Capability = e.Capability
 	}
+	conn.SetTunnelErrors(Errs.TCPConnectStreamFailed)
 }
 
 // WrapDataplaneErr tags post-handshake CONNECT-stream faults so nested library

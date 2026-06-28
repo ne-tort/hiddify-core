@@ -24,6 +24,9 @@ const (
 	connectStreamDocker35msSeqDownFloorMbps = 150.0 // stale perf-lab ~224
 	connectStreamDocker35msSeqUpFloorMbps   = 50.0  // stale perf-lab ~68
 	connectStreamDocker35msSeqMaxRatio      = 4.0
+	// connectStreamH2SeqSymmetry* — H2 sequential legs (download-first → fresh upload), parity Docker @0ms.
+	// Root cause fixed: upload chunk 4→64 KiB (STR-MS6-P0); ratio was ~7–8× before fix.
+	connectStreamH2SeqSymmetryMaxRatio = 2.0 // max(down,up)/min(down,up) after chunk fix
 )
 
 // GATE-CONNECT-IP — packet plane (tcp_transport=connect_ip); DoD @ Docker 0ms matches connect-stream (1000+ each leg).
@@ -74,6 +77,7 @@ const (
 // Legacy docker paced probe band (BENCH_UDP_TARGET_MBIT=8) — localize/regression only, not GATE DoD.
 // Compensated pacing (PaceSleepUntil) targets sink goodput ≈ target; floor uses MinPacedGoodputMbit.
 const (
+	dockerBenchUDPTargetMbit       = 8.0 // docker/masque-perf-lab BENCH_UDP_TARGET_MBIT
 	connectUDPLegacyPacedMinMbps = 7.0
 	connectUDPLegacyPacedMaxMbps = 8.5
 )

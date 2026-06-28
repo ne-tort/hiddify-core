@@ -12,6 +12,60 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestICMPPolicyDropIPv4(t *testing.T) {
+	src := netip.MustParseAddr("192.168.1.1")
+	dst := netip.MustParseAddr("8.8.8.8")
+	origHdr := &ipv4.Header{
+		Version:  4,
+		Len:      ipv4.HeaderLen,
+		TotalLen: 60,
+		TTL:      64,
+		Protocol: 6,
+		Src:      src.AsSlice(),
+		Dst:      dst.AsSlice(),
+	}
+	origBytes, err := origHdr.Marshal()
+	require.NoError(t, err)
+	data, err := composeICMPPolicyDropPacket(origBytes)
+	require.NoError(t, err)
+
+	hdr, err := ipv4.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, ipProtoICMP, hdr.Protocol)
+	require.Equal(t, dst.String(), hdr.Src.String())
+	require.Equal(t, src.String(), hdr.Dst.String())
+
+	icmpMsg, err := icmp.ParseMessage(ipProtoICMP, data[ipv4.HeaderLen:])
+	require.NoError(t, err)
+	require.Equal(t, ipv4.ICMPTypeDestinationUnreachable, icmpMsg.Type)
+	require.Equal(t, 13, icmpMsg.Code)
+}
+
+func TestICMPPolicyDropIPv6(t *testing.T) {
+	src := netip.MustParseAddr("2001:db8::1")
+	dst := netip.MustParseAddr("2001:db8::2")
+	orig := []byte{
+		0x60, 0x00, 0x00, 0x00,
+		0x00, 0x00,
+		0x06, 0x40,
+	}
+	orig = append(orig, src.AsSlice()...)
+	orig = append(orig, dst.AsSlice()...)
+	data, err := composeICMPPolicyDropPacket(orig)
+	require.NoError(t, err)
+
+	hdr, err := ipv6.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, ipProtoICMPv6, hdr.NextHeader)
+	require.Equal(t, dst.String(), hdr.Src.String())
+	require.Equal(t, src.String(), hdr.Dst.String())
+
+	icmpMsg, err := icmp.ParseMessage(ipProtoICMPv6, data[ipv6.HeaderLen:])
+	require.NoError(t, err)
+	require.Equal(t, ipv6.ICMPTypeDestinationUnreachable, icmpMsg.Type)
+	require.Equal(t, 1, icmpMsg.Code)
+}
+
 func TestICMPTooLargeIPv4(t *testing.T) {
 	src := netip.MustParseAddr("192.168.1.1")
 	dst := netip.MustParseAddr("8.8.8.8")
@@ -116,4 +170,33 @@ func TestICMPFailures(t *testing.T) {
 		_, err := composeICMPTooLargePacket(data, 1)
 		require.EqualError(t, err, "connect-ip: unknown IP version: 3")
 	})
+}
+
+func TestICMPTimeExceededIPv4(t *testing.T) {
+	src := netip.MustParseAddr("192.168.1.1")
+	dst := netip.MustParseAddr("8.8.8.8")
+	origHdr := &ipv4.Header{
+		Version:  4,
+		Len:      ipv4.HeaderLen,
+		TotalLen: 60,
+		TTL:      1,
+		Protocol: 17,
+		Src:      src.AsSlice(),
+		Dst:      dst.AsSlice(),
+	}
+	origBytes, err := origHdr.Marshal()
+	require.NoError(t, err)
+	data, err := composeICMPTimeExceededPacket(origBytes)
+	require.NoError(t, err)
+
+	hdr, err := ipv4.ParseHeader(data)
+	require.NoError(t, err)
+	require.Equal(t, ipProtoICMP, hdr.Protocol)
+	require.Equal(t, dst.String(), hdr.Src.String())
+	require.Equal(t, src.String(), hdr.Dst.String())
+
+	icmpMsg, err := icmp.ParseMessage(ipProtoICMP, data[ipv4.HeaderLen:])
+	require.NoError(t, err)
+	require.Equal(t, ipv4.ICMPTypeTimeExceeded, icmpMsg.Type)
+	require.Equal(t, 0, icmpMsg.Code)
 }

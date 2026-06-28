@@ -6,18 +6,17 @@ import (
 )
 
 func TestDatagramCeilingMaxEnvContract(t *testing.T) {
-	t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", "")
-	if got := DatagramCeilingMax(); got != DefaultDatagramCeilingMax {
-		t.Fatalf("unset: got %d want %d", got, DefaultDatagramCeilingMax)
+	run := func(env string, want int) {
+		t.Helper()
+		ResetDatagramCeilingMaxEnvCache()
+		t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", env)
+		if got := DatagramCeilingMax(); got != want {
+			t.Fatalf("env=%q: got %d want %d", env, got, want)
+		}
 	}
-	t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", "4096")
-	if got := DatagramCeilingMax(); got != 4096 {
-		t.Fatalf("valid override: got %d want 4096", got)
-	}
-	t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", "not-a-number")
-	if got := DatagramCeilingMax(); got != DefaultDatagramCeilingMax {
-		t.Fatalf("invalid text: got %d want %d", got, DefaultDatagramCeilingMax)
-	}
+	run("", DefaultDatagramCeilingMax)
+	run("4096", 4096)
+	run("not-a-number", DefaultDatagramCeilingMax)
 }
 
 func TestH3H2NetstackMTUParity(t *testing.T) {

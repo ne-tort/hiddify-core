@@ -8,8 +8,10 @@ import (
 const (
 	// DefaultDatagramCeilingMax is the CONNECT-IP IPv4 datagram ceiling before H3 slack.
 	DefaultDatagramCeilingMax = 1500
+	// MaxIPv4WireBytes caps forwarder S2C IPv4 datagram size (H3 CONNECT-IP return path ~1372 B).
+	MaxIPv4WireBytes = 1372
 	// DatagramSlack is subtracted from the ceiling when sizing forwarder segments (H3 overhead).
-	DatagramSlack = 80
+	DatagramSlack = DefaultDatagramCeilingMax - MaxIPv4WireBytes
 )
 
 // PacketPlaneConn is the CONNECT-IP session packet I/O surface used by the S2 forwarder.
@@ -31,4 +33,6 @@ type ConnectIPTCPForwarderOptions struct {
 	WriteQueueMetrics *WriteQueueMetrics
 	// DownloadQueueMetrics optionally records downloadCh depth under S2C DATA pressure.
 	DownloadQueueMetrics *DownloadQueueMetrics
+	// LeaveConnOpenOnCancel keeps PacketPlaneConn open when ctx is canceled (in-proc forwarder restart synth).
+	LeaveConnOpenOnCancel bool
 }

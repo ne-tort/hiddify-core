@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/transport/masque/h3"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 // TestArchREFSRCMasqueradeAudit (REF-SRC-MASQ-1/2/3): frozen masquerade quiche vs sb/quic-go differential.
@@ -55,7 +54,7 @@ func TestArchREFSRCMasqueradeAudit(t *testing.T) {
 	if !strings.Contains(verdict, "no-port") {
 		t.Fatalf("MASQ-3 verdict want no-port: %q", verdict)
 	}
-	if !strings.Contains(strm.RelayGoAuditSource(), "relayTCPTunnelBidiStream") {
+	if !strings.Contains(archRelayGoAuditSource(), "relayTCPTunnelBidiStream") {
 		t.Fatal("stream/relay.go missing relayTCPTunnelBidiStream anchor for MASQ-2 parity")
 	}
 	if h3.ConnectUsePipeUpload() || h3.BidiDuplexCoordEnabled() {

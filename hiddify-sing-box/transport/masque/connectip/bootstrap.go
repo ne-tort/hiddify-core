@@ -47,7 +47,7 @@ func RunPostDialBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionBo
 	if err := WarpConsumerBootstrap(dpCtx, conn, p); err != nil {
 		return err
 	}
-	return GenericServerBootstrap(conn, p)
+	return GenericServerBootstrap(dpCtx, conn, p)
 }
 
 // BootstrapRequireAssignedPrefix reports MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX (default relaxed).
@@ -226,23 +226,46 @@ func runLegacyH2ConsumerBootstrap(_ context.Context, conn BootstrapConn, p Sessi
 	return nil
 }
 
-// GenericServerBootstrap waits briefly for ADDRESS_ASSIGN from a generic MASQUE server
+// GenericServerBootstrap waits for ADDRESS_ASSIGN from a generic MASQUE server
 // (AssignAddresses on the server side) so CONNECT-IP TCP netstack uses the same local as the wire.
-func GenericServerBootstrap(conn BootstrapConn, p SessionBootstrapParams) error {
+func GenericServerBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionBootstrapParams) error {
+	if dpCtx == nil {
+		dpCtx = context.Background()
+	}
 	if conn == nil || strings.TrimSpace(p.WarpConnectIPProtocol) != "" {
 		return nil
 	}
 	tag := strings.TrimSpace(p.Tag)
 	profileV4 := strings.TrimSpace(p.ProfileLocalIPv4)
 	profileV6 := strings.TrimSpace(p.ProfileLocalIPv6)
-	wait := SessionPrefixWait(profileV4, profileV6)
-	if wait > 5*time.Second {
-		wait = 5 * time.Second
+	policy := genericServerBootstrapPolicy(profileV4, profileV6, conn.ControlCapsulesSupported())
+	log.Printf("masque connect_ip bootstrap: generic server wait policy profile_local=%v first_wait=%s request_addresses=%v request_timeout=%s second_wait=%s tag=%s",
+		policy.ProfileLocal,
+		PrefixWaitLogValue(policy.FirstWait),
+		policy.SendRequestAddresses,
+		PrefixWaitLogValue(policy.RequestAddressesTimeout),
+		PrefixWaitLogValue(policy.SecondWait),
+		tag,
+	)
+
+	prefixes, errLP := WaitForNonEmptyAssignedPrefixes(conn, policy.FirstWait)
+	if len(prefixes) == 0 && policy.SendRequestAddresses {
+		reqCtx, cancel := context.WithTimeout(dpCtx, policy.RequestAddressesTimeout)
+		reqErr := conn.RequestAddresses(reqCtx, nil)
+		cancel()
+		if reqErr != nil {
+			log.Printf("masque connect_ip bootstrap: generic server RequestAddresses(empty) failed tag=%s err=%v", tag, reqErr)
+		} else {
+			log.Printf("masque connect_ip bootstrap: generic server RequestAddresses(empty) ok tag=%s", tag)
+		}
+		if policy.SecondWait > 0 {
+			prefixes, errLP = WaitForNonEmptyAssignedPrefixes(conn, policy.SecondWait)
+		}
 	}
-	prefixes, err := WaitForNonEmptyAssignedPrefixes(conn, wait)
 	if len(prefixes) == 0 {
-		if err != nil {
-			log.Printf("masque connect_ip bootstrap: generic server no ADDRESS_ASSIGN within %s tag=%s err=%v", wait, tag, err)
+		if errLP != nil {
+			log.Printf("masque connect_ip bootstrap: generic server no ADDRESS_ASSIGN within %s tag=%s err=%v",
+				PrefixWaitLogValue(policy.FirstWait+policy.SecondWait), tag, errLP)
 		}
 		return nil
 	}

@@ -15,7 +15,6 @@ const (
 	dockerBenchNetemDelayMS        = 35
 	dockerBenchUDPMinRxRatio       = 0.95
 	dockerBenchUDPMaxLossPct       = 5.0
-	dockerBenchUDPTargetMbit       = 8.0
 	dockerBenchUDPMinUpMbit        = 6.0  // paced floor (bench-history 2026-05-19: ~6.66–6.75)
 	dockerBenchUDPReproUpTolerance = 0.1  // paced udp_up spread across 3× runs
 	dockerBenchConnectStreamSoftMin       = 4.0  // localize floor; soft WARN only (bidi asymmetry expected)
@@ -98,13 +97,21 @@ func TestMasqueDockerBenchRecycleContract(t *testing.T) {
 		`["restart", "masque-server-core"]`,
 		`restart_client(profile)`,
 		`wait_connect_ip_tcp_ready`,
+		`wait_connect_ip_native_l3_plane_ready`,
+		`wait_connect_ip_tun_native_ready`,
+		`warm_connect_ip_tun_before_iperf`,
 		`time.sleep(2)`,
 		`iperf_direct_in_client(True`,
 		`[bench] upload OK`,
 		`[bench] download OK`,
 	)
-	if !strings.Contains(src, "recycle race") {
-		t.Fatal("recycle: expected double TCP probe comment for forwarder-ready race")
+	if strings.Contains(src, "HIDDIFY_CONNECT_IP_TUN_POST_RECYCLE") {
+		t.Fatal("recycle: HIDDIFY_CONNECT_IP_TUN_POST_RECYCLE crutch must be CUT")
+	}
+	// nc warm-up must not restart iperf-server before bulk iperf (breaks TCP session priming).
+	if strings.Contains(src, `warm-up before download",
+                    restart_iperf=True`) {
+		t.Fatal("recycle: download warm-up must not restart iperf-server after nc")
 	}
 }
 
@@ -889,12 +896,18 @@ func TestMasqueDockerBenchConnectIPH3TunKPIContract(t *testing.T) {
 	t.Parallel()
 	runLocal := readDockerBenchSource(t, "run_local.py")
 	history := readRepoSource(t, filepath.Join("docs", "masque", "bench-history", "2026-06-13-ingress-burst-wake-coalesce.md"))
-	localizeSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_ip_localize_test.go"))
+	harnessSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connectip_localize_harness.go"))
+	uploadSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connectip", "inttest", "localize_upload_gate_test.go"))
 
 	requireSubstrings(t, runLocal, "connect-ip KPI thresholds",
 		`BENCH_CONNECT_IP_MIN_UP_MBIT", "80"`,
 		`BENCH_CONNECT_IP_MIN_DOWN_MBIT", "350"`,
 		`CONNECT_IP_MIN_DOWN = float(os.environ.get("BENCH_CONNECT_IP_MIN_DOWN_MBIT", "350"))`,
+		`BENCH_CONNECT_IP_TUN_FAST_FAIL`,
+		`run_connect_ip_tun_kpi`,
+		`connect-ip-tun download TCP probe`,
+		`connect-ip-tun download prime`,
+		`connect-ip-tun: egress settle between legs`,
 	)
 	requireSubstrings(t, history, "connect-ip-h3-tun baseline",
 		"connect-ip-h3-tun",
@@ -902,9 +915,11 @@ func TestMasqueDockerBenchConnectIPH3TunKPIContract(t *testing.T) {
 		"**786**",
 		"down ≥ 350",
 	)
-	requireSubstrings(t, localizeSrc, "in-proc docker KPI guard",
-		"TestConnectIPDockerTUNKPIInProcGuard",
+	requireSubstrings(t, harnessSrc, "in-proc docker KPI guard constants",
 		"connectIPLocalizeFastMbps",
+	)
+	requireSubstrings(t, uploadSrc, "in-proc docker KPI guard test",
+		"TestConnectIPDockerTUNKPIInProcGuard",
 	)
 	if dockerBenchConnectIPMinUpMbit != 80.0 || dockerBenchConnectIPMinDownMbit != 350.0 {
 		t.Fatalf("connect-ip docker KPI constants up=%v down=%v want 80/350",
@@ -955,7 +970,8 @@ func TestMasqueDockerBenchConnectIPH2BaselineContract(t *testing.T) {
 func TestMasqueDockerBenchConnectIPH3HybridContract(t *testing.T) {
 	t.Parallel()
 	local := readDockerBenchSource(t, "local_profiles.py")
-	hybridSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_ip_hybrid_smoke_test.go"))
+	hybridSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connectip", "inttest", "hybrid_smoke_test.go"))
+	hybridHarness := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connectip", "inttest", "harness.go"))
 	gates := readRepoSource(t, filepath.Join("hiddify-core", "scripts", "go-test-masque-gates.ps1"))
 
 	requireSubstrings(t, local, "connect-ip-h3 hybrid profile",
@@ -967,9 +983,13 @@ func TestMasqueDockerBenchConnectIPH3HybridContract(t *testing.T) {
 	)
 	requireSubstrings(t, hybridSrc, "in-proc hybrid smoke",
 		"TestConnectIPHybridConnectStreamH3Smoke",
+		"HybridConnectStreamH3ClientOptions",
+		"connect-ip-h3 hybrid",
+	)
+	requireSubstrings(t, hybridHarness, "hybrid H3 client options",
+		"HybridConnectStreamH3ClientOptions",
 		`TransportMode:       "connect_ip"`,
 		`TCPTransport:        "connect_stream"`,
-		"connect-ip-h3 hybrid",
 	)
 	requireSubstrings(t, gates, "L3 hybrid gate pattern",
 		"HybridConnectStream",

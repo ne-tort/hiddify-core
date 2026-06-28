@@ -69,6 +69,9 @@ type Inbound struct {
 	l3OverlayCancel      context.CancelFunc
 	l3OverlayPacketConn  net.PacketConn
 	l3OverlayRewriteSrc  netip.Addr
+	l3OverlayNativeStop         func()
+	l3OverlayNativeStart        func(context.Context) error
+	l3OverlayNativeBindIngress  func(func([]byte) error)
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TunInboundOptions) (adapter.Inbound, error) {
@@ -484,6 +487,19 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			}
 			pctx, cancel := context.WithCancel(t.ctx)
 			t.l3OverlayCancel = cancel
+			if err := t.waitL3OverlayOutboundReady(pctx, ob); err != nil {
+				cancel()
+				return E.Cause(err, "l3 overlay outbound ready wait")
+			}
+			if prefixes, send, sendErr, wired, wireErr := t.tryWireNativeConnectIPL3(pctx, tunInterface, ob); wireErr != nil {
+				cancel()
+				return wireErr
+			} else if wired {
+				l3Prefixes = prefixes
+				l3Send = send
+				l3SendErr = sendErr
+				t.logger.Info("tun: connect_ip native L3 overlay wired outbound=", t.l3OverlayOutboundTag)
+			} else {
 			pConn, err := ob.ListenPacket(pctx, t.l3OverlaySocksDest)
 			if err != nil {
 				cancel()
@@ -556,6 +572,7 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 				}
 			}
 			go t.l3OverlayReceiveLoop(pConn)
+			}
 		}
 		tunStack, err := tun.NewStack(t.stack, tun.StackOptions{
 			Context:                t.ctx,
@@ -584,11 +601,21 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 		if err != nil {
 			return E.Cause(err, "starting tun stack")
 		}
+		if t.l3OverlayNativeBindIngress != nil {
+			if inj, ok := t.tunStack.(tun.IngressInjector); ok {
+				t.l3OverlayNativeBindIngress(inj.InjectIngressPacket)
+			}
+		}
 		monitor.Start("starting tun interface")
 		err = t.tunIf.Start()
 		monitor.Finish()
 		if err != nil {
 			return E.Cause(err, "starting TUN interface")
+		}
+		if t.l3OverlayNativeStart != nil {
+			if err := t.l3OverlayNativeStart(t.ctx); err != nil {
+				return E.Cause(err, "connect_ip native L3 ingress start")
+			}
 		}
 		if t.autoRedirect != nil {
 			monitor.Start("initialize auto-redirect")
@@ -626,6 +653,10 @@ func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
 func (t *Inbound) Close() error {
 	if t.l3OverlayCancel != nil {
 		t.l3OverlayCancel()
+	}
+	if t.l3OverlayNativeStop != nil {
+		t.l3OverlayNativeStop()
+		t.l3OverlayNativeStop = nil
 	}
 	if t.l3OverlayPacketConn != nil {
 		t.l3OverlayPacketConn.Close()

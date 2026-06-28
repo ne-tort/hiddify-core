@@ -2,25 +2,24 @@ package h2
 
 import (
 	"io"
-	"os"
-	"strconv"
-	"strings"
-)
 
-const (
-	defaultUploadChunkBytes = 4 * 1024
-	envUploadChunkKB        = "MASQUE_H2_CONNECT_UPLOAD_CHUNK"
+	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // UploadFlushPolicy controls how bulk CONNECT-stream upload is split before hitting the wire.
 // Chunking keeps HTTP/2 DATA frames small so download ACKs advance during iperf -R duplex.
 type UploadFlushPolicy struct {
 	ChunkBytes int
+	bulkFlush  bool
 }
 
 // H2UploadFlushPolicy returns the active H2 CONNECT-stream upload flush policy.
 func H2UploadFlushPolicy() UploadFlushPolicy {
-	return UploadFlushPolicy{ChunkBytes: uploadChunkBytesFromEnv()}
+	p := conn.CurrentH2UploadPolicy()
+	return UploadFlushPolicy{
+		ChunkBytes: p.WrapChunkBytes(),
+		bulkFlush:  p.BulkFlushEnabled(),
+	}
 }
 
 func (p UploadFlushPolicy) passthrough() bool {
@@ -32,28 +31,14 @@ func (p UploadFlushPolicy) Wrap(w io.WriteCloser) io.WriteCloser {
 	if w == nil || p.passthrough() {
 		return w
 	}
-	return &chunkedUploadWriter{inner: w, chunk: p.ChunkBytes}
-}
-
-func uploadChunkBytesFromEnv() int {
-	raw := strings.TrimSpace(os.Getenv(envUploadChunkKB))
-	if raw == "" {
-		return defaultUploadChunkBytes
-	}
-	kb, err := strconv.Atoi(raw)
-	if err != nil || kb <= 0 {
-		return defaultUploadChunkBytes
-	}
-	if kb > 1024 {
-		kb = 1024
-	}
-	return kb * 1024
+	return &chunkedUploadWriter{inner: w, chunk: p.ChunkBytes, bulkFlush: p.bulkFlush}
 }
 
 // chunkedUploadWriter splits bulk upload into bounded writes (HTTP/2 DATA frame clock).
 type chunkedUploadWriter struct {
-	inner io.WriteCloser
-	chunk int
+	inner     io.WriteCloser
+	chunk     int
+	bulkFlush bool
 }
 
 func (w *chunkedUploadWriter) Write(p []byte) (int, error) {
@@ -71,7 +56,9 @@ func (w *chunkedUploadWriter) Write(p []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		FlushRequestBody(w.inner)
+		if !w.bulkFlush {
+			FlushRequestBody(w.inner)
+		}
 		p = p[wrote:]
 	}
 	return total, nil

@@ -34,6 +34,14 @@ func TestTier1BridgesRemoved(t *testing.T) {
 		"connectudp_icmp_bridge.go",
 		"authority_listen_bridge.go",
 		"obs_bridge.go",
+		"stream_dial_h2_bridge.go",
+		"stream_dial_h3_bridge.go",
+		"stream_dial_attempt_bridge.go",
+		"stream_dial_bridge.go",
+		"netstack_bridge.go",
+		"connectip_tcp_bridge.go",
+		"connectip_session_bridge.go",
+		"lifecycle_bridge.go",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			t.Fatalf("tier-1 bridge file must stay removed: %s", name)

@@ -125,6 +125,68 @@ func TestPolicyDropICMPReasonBreakdownSrcDstProto(t *testing.T) {
 	require.Equal(t, beforeProto+1, after["proto_not_allowed"])
 }
 
+func TestPolicyDropICMPEmitsForDstNotAllowed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	str := &mockStream{}
+	conn := newProxiedConn(str, false)
+	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
+	require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.1.2.3"), IPProtocol: 42},
+	}))
+
+	beforeS := PolicyDropICMPTotal()
+	dstHdr := &ipv4.Header{
+		Src:      net.IPv4(192, 168, 0, 10),
+		Dst:      net.IPv4(10, 1, 2, 4),
+		Len:      20,
+		Checksum: 89,
+		Protocol: 42,
+	}
+	dstData, err := dstHdr.Marshal()
+	require.NoError(t, err)
+	require.ErrorContains(t, conn.handleIncomingProxiedPacket(dstData), "destination address / protocol not allowed")
+	require.Equal(t, beforeS+1, PolicyDropICMPTotal())
+	require.Len(t, str.sentDatagrams, 1)
+
+	payload := str.sentDatagrams[0]
+	require.GreaterOrEqual(t, len(payload), 1+ipv4.HeaderLen)
+	hdr, err := ipv4.ParseHeader(payload[len(contextIDZero):])
+	require.NoError(t, err)
+	require.Equal(t, ipProtoICMP, hdr.Protocol)
+	icmpMsg, err := icmp.ParseMessage(ipProtoICMP, payload[len(contextIDZero)+ipv4.HeaderLen:])
+	require.NoError(t, err)
+	require.Equal(t, ipv4.ICMPTypeDestinationUnreachable, icmpMsg.Type)
+	require.Equal(t, 13, icmpMsg.Code)
+}
+
+func TestPolicyDropICMPSkipsSrcNotAllowed(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	str := &mockStream{}
+	conn := newProxiedConn(str, false)
+	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
+	require.NoError(t, conn.AdvertiseRoute(ctx, []IPRoute{
+		{StartIP: netip.MustParseAddr("10.0.0.0"), EndIP: netip.MustParseAddr("10.1.2.3"), IPProtocol: 42},
+	}))
+
+	beforeS := PolicyDropICMPTotal()
+	srcHdr := &ipv4.Header{
+		Src:      net.IPv4(192, 168, 0, 11),
+		Dst:      net.IPv4(10, 1, 2, 3),
+		Len:      20,
+		Checksum: 89,
+		Protocol: 42,
+	}
+	srcData, err := srcHdr.Marshal()
+	require.NoError(t, err)
+	require.ErrorContains(t, conn.handleIncomingProxiedPacket(srcData), "source address not allowed")
+	require.Equal(t, beforeS, PolicyDropICMPTotal())
+	require.Empty(t, str.sentDatagrams)
+}
+
 func TestAdvertiseRouteRejectsUnorderedOrOverlappingRanges(t *testing.T) {
 	conn := newProxiedConn(&mockStream{}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -232,6 +294,50 @@ func TestReadFromStreamRejectsOversizedAddressAssignDeclaredLength(t *testing.T)
 	require.ErrorContains(t, err, "exceeds max")
 }
 
+func emptyAddressRequestCapsuleFrame() []byte {
+	return (&addressRequestCapsule{}).append(nil)
+}
+
+func TestReadFromStreamAbortsOnPeerEmptyAddressRequest(t *testing.T) {
+	conn := &Conn{
+		str:                   &bytesStream{reader: bytes.NewReader(emptyAddressRequestCapsuleFrame())},
+		assignedAddressNotify: make(chan struct{}, 1),
+		closeChan:             make(chan struct{}),
+	}
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, ErrPeerEmptyAddressRequest)
+}
+
+func TestReadFromStreamIgnoresPeerEmptyAddressRequestWhenAllowed(t *testing.T) {
+	assign := (&addressAssignCapsule{
+		AssignedAddresses: []AssignedAddress{{IPPrefix: netip.MustParsePrefix("192.168.0.10/32")}},
+	}).append(nil)
+	streamBytes := append(emptyAddressRequestCapsuleFrame(), assign...)
+	conn := &Conn{
+		str:                          &bytesStream{reader: bytes.NewReader(streamBytes)},
+		assignedAddressNotify:        make(chan struct{}, 1),
+		closeChan:                    make(chan struct{}),
+		allowEmptyPeerAddressRequest: true,
+	}
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, io.EOF)
+	select {
+	case <-conn.assignedAddressNotify:
+	default:
+		t.Fatal("expected assigned address notify after ignored empty peer ADDRESS_REQUEST")
+	}
+}
+
+func TestApplyDialInteroperabilitySetsEmptyPeerAddressRequestForCFConnectIP(t *testing.T) {
+	conn := newProxiedConn(&mockStream{}, false)
+	require.False(t, conn.allowEmptyPeerAddressRequest)
+	applyDialInteroperability(conn, DialOptions{ExtendedConnectProtocol: "cf-connect-ip"})
+	require.True(t, conn.allowEmptyPeerAddressRequest)
+	other := newProxiedConn(&mockStream{}, false)
+	applyDialInteroperability(other, DialOptions{ExtendedConnectProtocol: "connect-ip"})
+	require.False(t, other.allowEmptyPeerAddressRequest)
+}
+
 func httpDatagramCapsuleFrame(payload []byte) []byte {
 	frame := quicvarint.Append(nil, uint64(capsuleTypeHTTPDatagram))
 	frame = quicvarint.Append(frame, uint64(len(payload)))
@@ -312,6 +418,7 @@ type mockStream struct {
 	toRead          <-chan []byte
 	sendDatagramErr error
 	writeErr        error
+	sentDatagrams   [][]byte
 }
 
 var _ http3Stream = &mockStream{}
@@ -338,7 +445,12 @@ func (m *mockStream) Context() context.Context         { return context.Backgrou
 func (m *mockStream) SetWriteDeadline(time.Time) error { return nil }
 func (m *mockStream) SetReadDeadline(time.Time) error  { return nil }
 func (m *mockStream) SetDeadline(time.Time) error      { return nil }
-func (m *mockStream) SendDatagram(data []byte) error   { return m.sendDatagramErr }
+func (m *mockStream) SendDatagram(data []byte) error {
+	if m.sendDatagramErr == nil {
+		m.sentDatagrams = append(m.sentDatagrams, append([]byte(nil), data...))
+	}
+	return m.sendDatagramErr
+}
 func (m *mockStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -827,6 +939,32 @@ func TestWritePacketFailures(t *testing.T) {
 		require.ErrorContains(t, err, "masque connect-ip h3 dataplane:")
 		require.ErrorContains(t, err, "compose datagram")
 		require.Nil(t, icmp)
+	})
+
+	t.Run("TTL too small emits ICMP time exceeded", func(t *testing.T) {
+		str := &mockStream{}
+		conn := newProxiedConn(str, false)
+		data, err := (&ipv4.Header{
+			Version:  4,
+			Len:      20,
+			TTL:      1,
+			Src:      net.IPv4(1, 2, 3, 4),
+			Dst:      net.IPv4(5, 6, 7, 8),
+			Protocol: 17,
+		}).Marshal()
+		require.NoError(t, err)
+		_, err = conn.WritePacket(data)
+		require.Error(t, err)
+		require.Len(t, str.sentDatagrams, 1)
+		payload := str.sentDatagrams[0]
+		require.GreaterOrEqual(t, len(payload), ipv4.HeaderLen+1)
+		hdr, err := ipv4.ParseHeader(payload[len(contextIDZero):])
+		require.NoError(t, err)
+		require.Equal(t, ipProtoICMP, hdr.Protocol)
+		icmpMsg, err := icmp.ParseMessage(ipProtoICMP, payload[len(contextIDZero)+ipv4.HeaderLen:])
+		require.NoError(t, err)
+		require.Equal(t, ipv4.ICMPTypeTimeExceeded, icmpMsg.Type)
+		require.Equal(t, 0, icmpMsg.Code)
 	})
 
 	t.Run("HTTP/3 SendDatagram failure wraps dataplane", func(t *testing.T) {
