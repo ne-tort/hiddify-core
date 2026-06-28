@@ -8,12 +8,8 @@ import (
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
 
-// PERF-2 localization only — not wired in RunPump (Docker 524 unchanged; download regressed when enabled).
-const (
-	hostKernelEgressPipeDepth     = 512
-	hostKernelEgressPipeFlushMin  = 8
-	hostKernelEgressPipeFlushWait = 200 * time.Microsecond
-)
+// PERF-5 localization: overlap read‖write when wire is slow (GATE-UP-4). Not wired in RunPump — Docker 524 unchanged; prod wire is not justified until iter-budget proof shows write-bound.
+const hostKernelEgressPipeDepth = 512
 
 type hostKernelEgressPipeline struct {
 	ctx     context.Context
@@ -73,6 +69,7 @@ func (p *hostKernelEgressPipeline) submit(pkt []byte) (retained bool, err error)
 	}
 }
 
+// beforeSync drains bulk queue before hybrid sync ACK/control writes (PERF-1b).
 func (p *hostKernelEgressPipeline) beforeSync() {
 	if p == nil {
 		return
@@ -86,18 +83,7 @@ func (p *hostKernelEgressPipeline) beforeSync() {
 
 func (p *hostKernelEgressPipeline) run() {
 	defer p.wg.Done()
-	pending := 0
-	lastFlush := time.Now()
-	flush := func() {
-		if pending == 0 {
-			return
-		}
-		p.flushFn()
-		pending = 0
-		lastFlush = time.Now()
-	}
-	ticker := time.NewTicker(hostKernelEgressPipeFlushWait / 2)
-	defer ticker.Stop()
+	flush := func() { p.flushFn() }
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -105,7 +91,6 @@ func (p *hostKernelEgressPipeline) run() {
 				select {
 				case pkt := <-p.ch:
 					p.writeOne(pkt)
-					pending++
 				default:
 					flush()
 					return
@@ -113,14 +98,16 @@ func (p *hostKernelEgressPipeline) run() {
 			}
 		case pkt := <-p.ch:
 			p.writeOne(pkt)
-			pending++
-			if pending >= hostKernelEgressPipeFlushMin || time.Since(lastFlush) >= hostKernelEgressPipeFlushWait {
-				flush()
+			for {
+				select {
+				case pkt2 := <-p.ch:
+					p.writeOne(pkt2)
+				default:
+					flush()
+					goto nextIter
+				}
 			}
-		case <-ticker.C:
-			if pending > 0 && time.Since(lastFlush) >= hostKernelEgressPipeFlushWait {
-				flush()
-			}
+		nextIter:
 		}
 	}
 }

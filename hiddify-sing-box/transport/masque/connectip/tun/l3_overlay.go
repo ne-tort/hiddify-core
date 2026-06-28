@@ -446,9 +446,6 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 
 func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 	hostKernel := b.hostKernelRelay()
-	b.mu.Lock()
-	pipe := b.hostEgressPipe
-	b.mu.Unlock()
 	pc := &NativePumpPacketConn{
 		Read: func(ctx context.Context, buf []byte) (int, error) {
 			b.mu.Lock()
@@ -464,6 +461,7 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 			b.mu.Lock()
 			closed := b.closed
 			writer := b.writer
+			pipe := b.hostEgressPipe
 			b.mu.Unlock()
 			if closed || writer == nil {
 				return nil, net.ErrClosed
@@ -475,11 +473,11 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 					}
 					return nil, nil
 				}
-			if pipe != nil {
-				pipe.beforeSync()
+				if pipe != nil {
+					pipe.beforeSync()
+				}
+				return writeHostKernelEgressWire(writer, p)
 			}
-			return writeHostKernelEgressWire(writer, p)
-		}
 			return writeWirePacketNoWake(writer, p)
 		},
 	}
@@ -488,6 +486,7 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 			b.mu.Lock()
 			closed := b.closed
 			writer := b.writer
+			pipe := b.hostEgressPipe
 			b.mu.Unlock()
 			if closed || writer == nil {
 				return false, nil, net.ErrClosed
