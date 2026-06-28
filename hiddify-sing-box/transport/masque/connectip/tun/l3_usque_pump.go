@@ -1,8 +1,6 @@
 package tun
 
 import (
-	"time"
-
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
 
@@ -12,9 +10,8 @@ func (b *L3OverlayBridge) usquePumpOptions(onLoopInEnd func()) cippump.TunnelOpt
 		NetBuffer: b.loopInNetBuffer(),
 	})
 	if b.hostKernelRelay() {
+		opts.LoopInDrainOnly = true
 		opts.LoopInUsqueImmediate = false
-		opts.LoopInCoalescePoll = 100 * time.Microsecond
-		opts.LoopOutYieldAfterWrite = true
 	}
 	if onLoopInEnd != nil && !b.hostKernelRelay() {
 		opts.OnLoopInEnd = onLoopInEnd

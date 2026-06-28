@@ -3,7 +3,6 @@ package tun
 import (
 	"context"
 	"testing"
-	"time"
 
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
@@ -15,14 +14,14 @@ func TestUsquePumpOptionsHostKernelCoalescesLoopIn(t *testing.T) {
 	if opts.LoopInUsqueImmediate {
 		t.Fatal("LoopInUsqueImmediate want false for host-kernel bulk coalesce")
 	}
-	if !opts.LoopOutYieldAfterWrite {
-		t.Fatal("LoopOutYieldAfterWrite want true for host-kernel")
+	if !opts.LoopInDrainOnly {
+		t.Fatal("LoopInDrainOnly want true for host-kernel (zero-timeout prefetch drain)")
 	}
-	if !opts.LoopOutYieldAfterWrite {
-		t.Fatal("LoopOutYieldAfterWrite want true for host-kernel")
+	if opts.LoopOutYieldAfterWrite {
+		t.Fatal("LoopOutYieldAfterWrite want false for host-kernel bulk upload")
 	}
-	if opts.LoopInCoalescePoll != 100*time.Microsecond {
-		t.Fatalf("LoopInCoalescePoll=%v want 100µs", opts.LoopInCoalescePoll)
+	if opts.LoopInCoalescePoll != 0 {
+		t.Fatalf("LoopInCoalescePoll=%v want 0 (drain-only, no blocking poll)", opts.LoopInCoalescePoll)
 	}
 }
 

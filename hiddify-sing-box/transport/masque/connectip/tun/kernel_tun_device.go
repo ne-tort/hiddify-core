@@ -70,9 +70,6 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 	}
 	tunHost := d.nat.TunHost
 	for {
-		if ctx.Err() != nil {
-			return 0, context.Cause(ctx)
-		}
 		d.readMu.Lock()
 		readStart := time.Now()
 		n, err := d.read(ctx, buf)
@@ -83,6 +80,9 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 			return 0, err
 		}
 		if n <= 0 {
+			if ctx.Err() != nil {
+				return 0, context.Cause(ctx)
+			}
 			return 0, nil
 		}
 		if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {

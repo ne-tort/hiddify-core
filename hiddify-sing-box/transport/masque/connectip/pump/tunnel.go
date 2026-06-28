@@ -35,6 +35,8 @@ type TunnelOptions struct {
 	LoopInUsqueImmediate bool
 	// LoopInCoalescePoll waits up to this duration for extra tun reads before OnLoopInEnd flush (host-kernel bulk).
 	LoopInCoalescePoll time.Duration
+	// LoopInDrainOnly drains already-buffered tun/prefetch reads with zero timeout (no poll sleep).
+	LoopInDrainOnly bool
 	// LoopOutYieldAfterWrite yields the scheduler after each WritePacket (host-kernel tun coupling ADAPT).
 	LoopOutYieldAfterWrite bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
@@ -61,7 +63,9 @@ func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
 		return opts
 	}
 	opts.LoopOutUsqueImmediate = true
-	if opts.LoopInCoalescePoll <= 0 {
+	if opts.LoopInDrainOnly {
+		opts.LoopInUsqueImmediate = false
+	} else if opts.LoopInCoalescePoll <= 0 {
 		opts.LoopInUsqueImmediate = true
 	} else {
 		opts.LoopInUsqueImmediate = false
@@ -192,7 +196,9 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 				}
 				coalesceCtx := ctx
 				var coalesceCancel context.CancelFunc
-				if poll > 0 {
+				if opts.LoopInDrainOnly {
+					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, 0)
+				} else if poll > 0 {
 					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, poll)
 				} else {
 					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, 0)
