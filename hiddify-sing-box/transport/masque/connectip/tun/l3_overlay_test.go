@@ -15,15 +15,30 @@ import (
 )
 
 type mockL3Writer struct {
-	writes  atomic.Int32
-	flushes atomic.Int32
-	lastPkt atomic.Value // []byte
+	writes       atomic.Int32
+	noWakeWrites atomic.Int32
+	inPlace      atomic.Int32
+	flushes      atomic.Int32
+	retainNext   atomic.Bool
+	lastPkt      atomic.Value // []byte
 }
 
 func (m *mockL3Writer) WritePacket(p []byte) ([]byte, error) {
 	m.writes.Add(1)
 	m.lastPkt.Store(append([]byte(nil), p...))
 	return nil, nil
+}
+
+func (m *mockL3Writer) WritePacketNoWake(p []byte) ([]byte, error) {
+	m.noWakeWrites.Add(1)
+	m.lastPkt.Store(append([]byte(nil), p...))
+	return nil, nil
+}
+
+func (m *mockL3Writer) WritePacketInPlaceNoWake(p []byte) (retained bool, icmp []byte, err error) {
+	m.inPlace.Add(1)
+	m.lastPkt.Store(append([]byte(nil), p...))
+	return m.retainNext.Load(), nil, nil
 }
 
 func (m *mockL3Writer) lastPacket() []byte {
@@ -37,6 +52,10 @@ func (m *mockL3Writer) lastPacket() []byte {
 
 func (m *mockL3Writer) FlushEgressBatch() {
 	m.flushes.Add(1)
+}
+
+func (m *mockL3Writer) wireWrites() int32 {
+	return m.writes.Load() + m.inPlace.Load() + m.noWakeWrites.Load()
 }
 
 func TestL3OverlaySendEnqueuesForLoopIn(t *testing.T) {
@@ -60,14 +79,14 @@ func TestL3OverlaySendEnqueuesForLoopIn(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+	for w.wireWrites() < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if w.writes.Load() != 1 {
-		t.Fatalf("writes=%d want 1 after LoopIn drain", w.writes.Load())
+	if w.wireWrites() != 1 {
+		t.Fatalf("wireWrites=%d want 1 after LoopIn drain", w.wireWrites())
 	}
 	if w.flushes.Load() != 1 {
 		t.Fatalf("flushes=%d want 1 (R2 batch flush after LoopIn batch)", w.flushes.Load())
@@ -116,7 +135,7 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+	for w.wireWrites() < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
@@ -125,8 +144,8 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	if hostReads.Load() < 1 {
 		t.Fatalf("hostReads=%d want >= 1", hostReads.Load())
 	}
-	if w.writes.Load() != 1 {
-		t.Fatalf("writes=%d want 1 after LoopIn host read", w.writes.Load())
+	if w.wireWrites() != 1 {
+		t.Fatalf("wireWrites=%d want 1 after LoopIn host read", w.wireWrites())
 	}
 	wirePkt := w.lastPacket()
 	if src, ok := ipv4Source(wirePkt); !ok || src != wireLocal {
@@ -507,6 +526,36 @@ func TestL3OverlayWireIngressBulk1420ToTunHost(t *testing.T) {
 	}
 }
 
+func TestL3BridgePumpLoopInUsesInPlaceNoWakeBatchFlush(t *testing.T) {
+	w := &mockL3Writer{}
+	reader := &mockL3Reader{}
+	b := NewL3OverlayBridge(nil, w, reader, OverlayNAT{})
+	b.SetStackIngressInject(func([]byte) error { return nil })
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	reader.packets = [][]byte{{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 0, 0, 0, 127, 0, 0, 1, 127, 0, 0, 2}}
+	if err := b.Send([]byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for w.inPlace.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if w.inPlace.Load() < 1 {
+		t.Fatalf("inPlace=%d want >=1 (LoopIn must use in-place/no-wake wire path)", w.inPlace.Load())
+	}
+	if w.writes.Load() != 0 {
+		t.Fatalf("WritePacket=%d want 0 (no per-packet flush path)", w.writes.Load())
+	}
+	if w.flushes.Load() < 1 {
+		t.Fatalf("FlushEgressBatch=%d want >=1 via OnLoopInEnd", w.flushes.Load())
+	}
+}
+
 func TestL3BridgePumpRestartAfterCancel(t *testing.T) {
 	w := &mockL3Writer{}
 	reader := &mockL3Reader{}
@@ -521,7 +570,7 @@ func TestL3BridgePumpRestartAfterCancel(t *testing.T) {
 	pkt := []byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 0, 0, 0, 127, 0, 0, 1, 127, 0, 0, 2}
 	reader.packets = [][]byte{pkt}
 	deadline := time.Now().Add(2 * time.Second)
-	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+	for w.inPlace.Load()+w.noWakeWrites.Load() < 1 && time.Now().Before(deadline) {
 		if err := b.Send([]byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
 			t.Fatalf("Send before cancel: %v", err)
 		}
@@ -539,18 +588,18 @@ func TestL3BridgePumpRestartAfterCancel(t *testing.T) {
 	done2 := make(chan error, 1)
 	go func() { done2 <- b.RunPump(ctx2) }()
 
-	before := w.writes.Load()
+	before := w.inPlace.Load() + w.noWakeWrites.Load()
 	if err := b.Send([]byte{0x45, 0, 0, 20, 0, 0, 0, 0, 64, 0, 0, 0, 9, 9, 9, 9, 8, 8, 8, 8}); err != nil {
 		t.Fatalf("Send after restart: %v", err)
 	}
 	deadline = time.Now().Add(2 * time.Second)
-	for w.writes.Load() <= before && time.Now().Before(deadline) {
+	for w.inPlace.Load()+w.noWakeWrites.Load() <= before && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel2()
 	<-done2
 
-	if w.writes.Load() <= before {
+	if w.inPlace.Load()+w.noWakeWrites.Load() <= before {
 		t.Fatalf("LoopIn did not drain after pump restart")
 	}
 }
@@ -650,14 +699,14 @@ func TestL3WireDownloadHostACKReturnsOnWire(t *testing.T) {
 	go func() { done <- bridge.RunPump(ctx) }()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+	for w.wireWrites() < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if w.writes.Load() < 1 {
-		t.Fatalf("wire ACK writes=%d want >= 1 (host tun read → Send → LoopIn)", w.writes.Load())
+	if w.wireWrites() < 1 {
+		t.Fatalf("wire ACK wireWrites=%d want >= 1 (host tun read → Send → LoopIn)", w.wireWrites())
 	}
 	if pkt := w.lastPacket(); len(pkt) > 0 && !validIPv4TCPChecksum(pkt) {
 		t.Fatalf("wire ACK len=%d: invalid TCP checksum after SNAT", len(pkt))
@@ -709,19 +758,19 @@ func TestL3BulkUploadFINThenEgressAlive(t *testing.T) {
 		t.Fatalf("shortFlowHook egressBytes=%d want >= %d (bulk upload leg)", hookEgress, L3BulkFlowEgressThreshold)
 	}
 
-	before := w.writes.Load()
+	before := w.wireWrites()
 	post := makeIPv4TCPAck(tunHost, server, 40001, 5201, 0x10)
 	if err := bridge.Send(post); err != nil {
 		t.Fatalf("post-FIN Send: %v", err)
 	}
-	for w.writes.Load() <= before && time.Now().Before(deadline) {
+	for w.wireWrites() <= before && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if w.writes.Load() <= before {
-		t.Fatalf("post-FIN egress writes=%d did not increase (before=%d); pump dead after bulk FIN", w.writes.Load(), before)
+	if w.wireWrites() <= before {
+		t.Fatalf("post-FIN egress wireWrites=%d did not increase (before=%d); pump dead after bulk FIN", w.wireWrites(), before)
 	}
 }
 

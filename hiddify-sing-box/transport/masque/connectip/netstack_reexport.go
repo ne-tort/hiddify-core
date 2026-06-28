@@ -1,4 +1,4 @@
-package connectip
+﻿package connectip
 
 import (
 	"context"
@@ -60,9 +60,10 @@ var (
 	NetstackAuditSource = cipnet.NetstackAuditSource
 	NetstackDebugEnabled = cipnet.NetstackDebugEnabled
 
-	IsBenignEgressTeardownError = cipnet.IsBenignEgressTeardownError
-	IsRetryablePacketWriteError = cipnet.IsRetryablePacketWriteError
-	IsRetryablePacketReadError  = cipnet.IsRetryablePacketReadError
+	IsBenignEgressTeardownError      = cipnet.IsBenignEgressTeardownError
+	IsConnectIPPlaneFatalForRecycle   = cipnet.IsConnectIPPlaneFatalForRecycle
+	IsRetryablePacketWriteError       = cipnet.IsRetryablePacketWriteError
+	IsRetryablePacketReadError        = cipnet.IsRetryablePacketReadError
 
 	ProxiedIPDatagramHeadroom = cipnet.ProxiedIPDatagramHeadroom
 	IsOutboundPoolSlice         = cipnet.IsOutboundPoolSlice

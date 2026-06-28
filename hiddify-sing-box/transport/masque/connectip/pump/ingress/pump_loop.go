@@ -7,13 +7,10 @@ import (
 	"net"
 	"runtime"
 	"sync"
-	"time"
 
 	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
-
-const dynamicPumpIdlePoll = 2 * time.Millisecond
 
 type pumpNetstack interface {
 	SetPumpLoopActive(bool)
@@ -48,14 +45,9 @@ func (d *dynamicPumpDevice) ReadPacket(ctx context.Context, buf []byte) (int, er
 	if dev := d.resolveLoopInDevice(); dev != nil {
 		return dev.ReadPacket(ctx, buf)
 	}
-	timer := time.NewTimer(dynamicPumpIdlePoll)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return 0, context.Cause(ctx)
-	case <-timer.C:
-		return 0, nil
-	}
+	// usque: block until ctx cancel or netstack wired (no idle poll sleep).
+	<-ctx.Done()
+	return 0, context.Cause(ctx)
 }
 
 func (d *dynamicPumpDevice) WritePacket(pkt []byte) error {

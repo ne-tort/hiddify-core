@@ -390,6 +390,11 @@ func (s *coreSession) releaseOpenedConnectIPSessionIfAbandoned() {
 	session.ReleaseOpenedConnectIPSessionIfAbandoned(&s.CoreSession, s.ipPlaneHost())
 }
 
+// closeConnectIPPlane tears down CONNECT-IP while keeping QUIC/session alive (LIFE-3 selector deselect).
+func (s *coreSession) closeConnectIPPlane() {
+	session.CloseConnectIPPlane(&s.CoreSession, s.lifecycleHost())
+}
+
 func connectIPOverlayDialAddr(opts ClientOptions) string {
 	return cip.OverlayDialAddr(cip.OverlayDialParams{
 		Server:     opts.Server,

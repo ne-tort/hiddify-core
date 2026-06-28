@@ -161,7 +161,7 @@ func TestRunTunnelLoopInForwardsToConn(t *testing.T) {
 	}
 }
 
-func TestRunTunnelLoopOutBatchCoalescing(t *testing.T) {
+func TestRunTunnelLoopOutBatchCoalescingLegacyCM(t *testing.T) {
 	t.Parallel()
 	dev := newMockDevice()
 	conn := newMockPacketConn()
@@ -170,7 +170,7 @@ func TestRunTunnelLoopOutBatchCoalescing(t *testing.T) {
 	conn.readCh <- []byte{0x10}
 	conn.readCh <- []byte{0x20}
 	go func() {
-		_ = RunTunnel(ctx, dev, conn, TunnelOptions{})
+		_ = RunTunnel(ctx, dev, conn, TunnelOptions{LegacyCMBatchDrain: true})
 	}()
 	time.Sleep(100 * time.Millisecond)
 	dev.mu.Lock()
@@ -424,18 +424,134 @@ func TestRunTunnelLoopOutUsqueImmediateSingleDatagram(t *testing.T) {
 	}
 }
 
-func TestRunTunnelLoopOutBatchDrainCoalesces(t *testing.T) {
+func TestRunTunnelDefaultUsqueLoopOutSingleDatagram(t *testing.T) {
+	t.Parallel()
+	dev := newMockDevice()
+	conn := &queuedPacketConn{}
+	for i := 0; i < 4; i++ {
+		conn.push([]byte{byte(i)})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() {
+		_ = RunTunnel(ctx, dev, conn, TunnelOptions{})
+	}()
+	deadline := time.Now().Add(150 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		dev.mu.Lock()
+		n := len(dev.written)
+		dev.mu.Unlock()
+		if n >= 4 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	dev.mu.Lock()
+	n := len(dev.written)
+	dev.mu.Unlock()
+	if n != 4 {
+		t.Fatalf("default opts written=%d want 4 (usque one datagram per LoopOut iter)", n)
+	}
+}
+
+func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
+	t.Parallel()
+	opts := NormalizeTunnelOptions(TunnelOptions{})
+	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
+		t.Fatalf("expected usque immediate defaults: %+v", opts)
+	}
+	legacy := NormalizeTunnelOptions(TunnelOptions{LegacyCMBatchDrain: true})
+	if legacy.LoopOutUsqueImmediate || legacy.LoopInUsqueImmediate {
+		t.Fatalf("legacy CM must disable immediate: %+v", legacy)
+	}
+}
+
+func TestRunTunnelLoopOutBatchDrainCoalescesLegacyCM(t *testing.T) {
 	t.Parallel()
 	dev := newMockDevice()
 	conn := &queuedPacketConn{}
 	conn.push([]byte{1}, []byte{2}, []byte{3})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_ = RunTunnel(ctx, dev, conn, TunnelOptions{})
+	_ = RunTunnel(ctx, dev, conn, TunnelOptions{LegacyCMBatchDrain: true})
 	dev.mu.Lock()
 	n := len(dev.written)
 	dev.mu.Unlock()
 	if n != 3 {
 		t.Fatalf("written=%d want 3 with batch drain enabled", n)
+	}
+}
+
+func TestRunTunnelLoopOutWakePerPacketUsqueImmediate(t *testing.T) {
+	t.Parallel()
+	dev := newMockDevice()
+	conn := &queuedPacketConn{}
+	conn.push([]byte{1}, []byte{2}, []byte{3})
+	var loopOutEnd atomic.Int32
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = RunTunnel(ctx, dev, conn, TunnelOptions{
+		OnLoopOutEnd: func(TunnelDevice) { loopOutEnd.Add(1) },
+	})
+	if got := loopOutEnd.Load(); got != 3 {
+		t.Fatalf("loopOutEnd=%d want 3 (usque immediate: one wake per datagram)", got)
+	}
+}
+
+func TestRunTunnelLoopOutWakeCoalescesLegacyCM(t *testing.T) {
+	t.Parallel()
+	dev := newMockDevice()
+	conn := &queuedPacketConn{}
+	conn.push([]byte{1}, []byte{2}, []byte{3})
+	var loopOutEnd atomic.Int32
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_ = RunTunnel(ctx, dev, conn, TunnelOptions{
+		LegacyCMBatchDrain: true,
+		OnLoopOutEnd:       func(TunnelDevice) { loopOutEnd.Add(1) },
+	})
+	if got := loopOutEnd.Load(); got != 1 {
+		t.Fatalf("loopOutEnd=%d want 1 (legacy CM batch coalesces ACK wake)", got)
+	}
+}
+
+type inPlacePacketConn struct {
+	retainNext bool
+	writes     atomic.Int32
+}
+
+func (c *inPlacePacketConn) ReadPacket(context.Context, []byte) (int, error) {
+	return 0, nil
+}
+
+func (c *inPlacePacketConn) WritePacket([]byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *inPlacePacketConn) Close() error { return nil }
+
+func (c *inPlacePacketConn) WritePacketNoWake([]byte) ([]byte, error) {
+	c.writes.Add(1)
+	return nil, nil
+}
+
+func (c *inPlacePacketConn) WritePacketInPlaceNoWake(_ []byte) ([]byte, bool, error) {
+	c.writes.Add(1)
+	return nil, c.retainNext, nil
+}
+
+func TestRunTunnelLoopInRetainedBufferGetsFreshPoolSlice(t *testing.T) {
+	t.Parallel()
+	dev := &loopInCountDevice{}
+	conn := &inPlacePacketConn{retainNext: true}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	pool := NewNetBuffer(128)
+	_ = runLoopIn(ctx, dev, conn, TunnelOptions{}, pool)
+	if conn.writes.Load() < 1 {
+		t.Fatalf("writes=%d want >=1", conn.writes.Load())
+	}
+	if dev.readCalls.Load() < 2 {
+		t.Fatalf("readCalls=%d want >=2 (fresh buf after retained in-place write)", dev.readCalls.Load())
 	}
 }

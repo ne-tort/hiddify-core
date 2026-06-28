@@ -3,13 +3,9 @@ package ingress
 import (
 	"bytes"
 	"context"
-	"errors"
-	"io"
-	"net"
 	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
 )
@@ -135,7 +131,7 @@ func (ing *Ingress) MaybeStart(hasTCPNetstack bool) {
 	ing.running.Store(true)
 	runCtx, cancel := context.WithCancel(context.Background())
 	ing.cancel = cancel
-	go ing.runLoop(runCtx)
+	go ing.runPumpLoop(runCtx)
 	ing.loopMu.Unlock()
 }
 
@@ -221,6 +217,11 @@ func (ing *Ingress) Join() {
 	ing.host.IngressObsEvent("ingress_joined_session_close")
 }
 
+// Running reports whether the ingress pump goroutine is active (LIFE-4).
+func (ing *Ingress) Running() bool {
+	return ing.running.Load()
+}
+
 // EnqueuePreTCP buffers frames while TCP netstack construction is in flight.
 func (ing *Ingress) EnqueuePreTCP(pkt []byte) {
 	if len(pkt) == 0 {
@@ -284,82 +285,6 @@ func (ing *Ingress) DeliverIPv4UDPBridged(pkt []byte) bool {
 		}
 	}
 	return true
-}
-
-func (ing *Ingress) runLoop(ctx context.Context) {
-	defer func() {
-		ing.loopMu.Lock()
-		ing.running.Store(false)
-		ing.wg.Done()
-		ing.loopMu.Unlock()
-	}()
-	readBuffer := make([]byte, 64*1024)
-	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
-	defer tryCancel()
-	drainCtx, drainCancel := context.WithCancel(ctx)
-	defer drainCancel()
-	consecutiveRetryableFailures := 0
-	const retryableReadFailureLimit = 32
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		reader := ing.host.IngressPacketReader()
-		if reader == nil {
-			return
-		}
-		n, err := reader(ctx, readBuffer)
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				ing.host.IngressObsEvent("ingress_read_ctx_done")
-				return
-			}
-			if errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
-				ing.host.IngressObsEvent("ingress_read_closed")
-				return
-			}
-			if isRetryablePacketReadError(err) {
-				ing.host.IngressReadDrop("retryable_read_error")
-				consecutiveRetryableFailures++
-				if consecutiveRetryableFailures < retryableReadFailureLimit {
-					time.Sleep(2 * time.Millisecond)
-					continue
-				}
-				ing.host.IngressReadDrop("retryable_read_exhausted")
-				ing.host.IngressSessionReset("ingress_read_retry_exhausted")
-			} else {
-				ing.host.IngressReadDrop("fatal_read_error")
-				ing.host.IngressSessionReset("ingress_read_exit")
-			}
-			ing.host.IngressOnReadFatal(err)
-			return
-		}
-		consecutiveRetryableFailures = 0
-		if n <= 0 {
-			continue
-		}
-		ing.dispatchIngressFrame(readBuffer[:n])
-		for {
-			n2, err2 := reader(tryCtx, readBuffer)
-			if err2 != nil || n2 <= 0 {
-				break
-			}
-			ing.dispatchIngressFrame(readBuffer[:n2])
-		}
-		// Brief blocking drain pulls additional QUIC datagrams per loop iteration so
-		// native CONNECT-IP download keeps ingress ahead of h3 unified queue pressure.
-		batchDeadline, batchCancel := context.WithTimeout(drainCtx, time.Millisecond)
-		for {
-			n3, err3 := reader(batchDeadline, readBuffer)
-			if err3 != nil || n3 <= 0 {
-				break
-			}
-			ing.dispatchIngressFrame(readBuffer[:n3])
-		}
-		batchCancel()
-		ing.host.IngressFlushAckWake()
-	}
 }
 
 func (ing *Ingress) dispatchIngressFrame(pkt []byte) {

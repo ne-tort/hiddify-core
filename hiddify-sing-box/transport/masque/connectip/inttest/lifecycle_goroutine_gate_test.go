@@ -17,3 +17,7 @@ func TestGATEConnectIPLifecycleGoroutineAfterRecycle(t *testing.T) {
 func TestGATEConnectIPRelayTeardownDownloadOnly(t *testing.T) {
 	inttest.RunGATEConnectIPRelayTeardownDownloadOnly(t)
 }
+
+func TestGATEConnectIPSessionCloseMidBulkNoLeak(t *testing.T) {
+	inttest.RunGATEConnectIPSessionCloseMidBulkNoLeak(t)
+}

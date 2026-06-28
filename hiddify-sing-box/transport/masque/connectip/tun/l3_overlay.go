@@ -53,6 +53,7 @@ type L3OverlayBridge struct {
 	shortHookMu         sync.Mutex
 	shortHookLast      time.Time
 	egressCh            chan []byte
+	egressPool          *cippump.NetBuffer
 	kernel              *KernelTunDevice
 	pumpWake            cippump.WakeHooks
 	onLoopInEnd         func()
@@ -62,11 +63,12 @@ type L3OverlayBridge struct {
 // NewL3OverlayBridge returns hooks for tun.StackOptions L3OverlaySend plus a receive loop starter.
 func NewL3OverlayBridge(tunWrite func([]byte) (int, error), writer PacketWriter, reader PacketReader, nat OverlayNAT) *L3OverlayBridge {
 	return &L3OverlayBridge{
-		tunWrite: tunWrite,
-		writer:   writer,
-		reader:   reader,
-		nat:      nat,
-		egressCh: make(chan []byte, l3EgressQueueDepth),
+		tunWrite:   tunWrite,
+		writer:     writer,
+		reader:     reader,
+		nat:        nat,
+		egressCh:   make(chan []byte, l3EgressQueueDepth),
+		egressPool: cippump.NewNetBuffer(cippump.DefaultTunnelMTU),
 	}
 }
 
@@ -180,16 +182,24 @@ func (b *L3OverlayBridge) Send(packet []byte) error {
 	if closed {
 		return net.ErrClosed
 	}
-	out := b.nat.SNATEgress(packet)
-	b.accountFlowEgress(out)
-	b.noteShortFlow(out)
-	cp := append([]byte(nil), out...)
 	b.mu.Lock()
 	ch := b.egressCh
+	pool := b.egressPool
 	b.mu.Unlock()
 	if ch == nil {
 		return net.ErrClosed
 	}
+	var cp []byte
+	if pool != nil && len(packet) <= cippump.DefaultTunnelMTU {
+		buf := pool.Get()
+		n := copy(buf, packet)
+		cp = buf[:n]
+		b.nat.SNATEgressInPlace(cp)
+	} else {
+		cp = b.nat.SNATEgress(append([]byte(nil), packet...))
+	}
+	b.accountFlowEgress(cp)
+	b.noteShortFlow(cp)
 	select {
 	case ch <- cp:
 		return nil
@@ -334,7 +344,21 @@ func (b *L3OverlayBridge) ReadPacket(ctx context.Context, buf []byte) (int, erro
 		if len(pkt) > len(buf) {
 			return 0, io.ErrShortBuffer
 		}
-		return copy(buf, pkt), nil
+		n := copy(buf, pkt)
+		b.releaseEgressPoolSlice(pkt)
+		return n, nil
+	}
+}
+
+func (b *L3OverlayBridge) releaseEgressPoolSlice(pkt []byte) {
+	if b == nil || len(pkt) == 0 {
+		return
+	}
+	b.mu.Lock()
+	pool := b.egressPool
+	b.mu.Unlock()
+	if pool != nil {
+		pool.Put(pkt[:cap(pkt)])
 	}
 }
 
@@ -402,13 +426,19 @@ func (b *L3OverlayBridge) pollHostKernelEgressDrain(ctx context.Context) {
 		if err != nil || n <= 0 {
 			return
 		}
-		icmp, werr := pc.WritePacket(buf[:n])
+		icmp, werr := pc.WritePacketNoWake(buf[:n])
 		if werr != nil {
 			return
 		}
 		if len(icmp) > 0 {
 			_ = kernel.WritePacket(icmp)
 		}
+	}
+	b.mu.Lock()
+	flush := b.onLoopInEnd
+	b.mu.Unlock()
+	if flush != nil {
+		flush()
 	}
 }
 
@@ -433,9 +463,8 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 			b.flushIngressAckWake()
 		}
 	} else {
-		opts.OnLoopOutEnd = func(_ cippump.TunnelDevice) {
-			b.pollHostKernelEgressDrain(ctx)
-		}
+		// LoopIn owns ReadHostEgress; sync drain from LoopOut deadlocks on readMu
+		// (TestL3OverlayLoopOutDoesNotSyncRelayHostEgress).
 		if onLoopInEnd != nil {
 			opts.OnLoopInEnd = onLoopInEnd
 		} else {
@@ -452,7 +481,8 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 }
 
 func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
-	return &NativePumpPacketConn{
+	hostKernel := b.hostKernelRelay()
+	pc := &NativePumpPacketConn{
 		Read: func(ctx context.Context, buf []byte) (int, error) {
 			b.mu.Lock()
 			closed := b.closed
@@ -471,9 +501,27 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 			if closed || writer == nil {
 				return nil, net.ErrClosed
 			}
-			return writeWirePacket(writer, p)
+			if hostKernel {
+				// Host-kernel: sync wire write per egress datagram (usque ipConn.WritePacket parity).
+				// NoWake batching delays client ACKs → kernel TCP zero-window after upload bulk.
+				return writeWirePacket(writer, p)
+			}
+			return writeWirePacketNoWake(writer, p)
 		},
 	}
+	if !hostKernel {
+		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
+			b.mu.Lock()
+			closed := b.closed
+			writer := b.writer
+			b.mu.Unlock()
+			if closed || writer == nil {
+				return false, nil, net.ErrClosed
+			}
+			return writeWirePacketInPlaceNoWake(writer, p)
+		}
+	}
+	return pc
 }
 
 // RunReceiveLoop is deprecated; prod uses RunPump. Kept as alias for tests.
@@ -486,19 +534,26 @@ func (b *L3OverlayBridge) Close() error {
 	b.mu.Lock()
 	b.closed = true
 	ch := b.egressCh
+	pool := b.egressPool
 	b.egressCh = nil
 	b.mu.Unlock()
 	if ch != nil {
 		close(ch)
+		for pkt := range ch {
+			if pool != nil {
+				pool.Put(pkt[:cap(pkt)])
+			}
+		}
 	}
 	return nil
 }
 
 // NativePumpPacketConn adapts PacketReader/Writer for pump.RunTunnel when Device is external (TUN L3).
 type NativePumpPacketConn struct {
-	Read  func(context.Context, []byte) (int, error)
-	Write func([]byte) (icmp []byte, err error)
-	Done  func() error
+	Read         func(context.Context, []byte) (int, error)
+	Write        func([]byte) (icmp []byte, err error)
+	WriteInPlace func([]byte) (retained bool, icmp []byte, err error)
+	Done         func() error
 }
 
 func (p *NativePumpPacketConn) ReadPacket(ctx context.Context, buf []byte) (int, error) {
@@ -509,10 +564,23 @@ func (p *NativePumpPacketConn) ReadPacket(ctx context.Context, buf []byte) (int,
 }
 
 func (p *NativePumpPacketConn) WritePacket(buffer []byte) ([]byte, error) {
+	return p.WritePacketNoWake(buffer)
+}
+
+func (p *NativePumpPacketConn) WritePacketNoWake(buffer []byte) ([]byte, error) {
 	if p == nil || p.Write == nil {
 		return nil, net.ErrClosed
 	}
 	return p.Write(buffer)
+}
+
+func (p *NativePumpPacketConn) WritePacketInPlaceNoWake(buffer []byte) (icmp []byte, retained bool, err error) {
+	if p != nil && p.WriteInPlace != nil {
+		retained, icmp, err = p.WriteInPlace(buffer)
+		return icmp, retained, err
+	}
+	icmp, err = p.WritePacketNoWake(buffer)
+	return icmp, false, err
 }
 
 func (p *NativePumpPacketConn) Close() error {
@@ -526,4 +594,6 @@ var (
 	_ cippump.TunnelDevice         = (*L3OverlayBridge)(nil)
 	_ cippump.OutboundDrainDevice  = (*L3OverlayBridge)(nil)
 	_ cippump.PacketConn           = (*NativePumpPacketConn)(nil)
+	_ cippump.PacketConnNoWake     = (*NativePumpPacketConn)(nil)
+	_ cippump.PacketConnInPlaceNoWake = (*NativePumpPacketConn)(nil)
 )

@@ -395,11 +395,12 @@ func TestConnectIPClientWriteCeilingServerReadPacketParity(t *testing.T) {
 	t.Parallel()
 	ceiling := cip.DatagramCeilingMax()
 	maxDatagram := cip.MaxIPv4Datagram(ceiling)
-	if maxDatagram+cip.DatagramSlack != ceiling {
-		t.Fatalf("MaxIPv4Datagram+slack=%d want ceiling %d", maxDatagram+cip.DatagramSlack, ceiling)
+	wireSlack := cip.DefaultDatagramCeilingMax - cip.MaxIPv4WireBytes
+	if maxDatagram+wireSlack != ceiling {
+		t.Fatalf("MaxIPv4Datagram+wireSlack=%d want ceiling %d", maxDatagram+wireSlack, ceiling)
 	}
-	if maxDatagram != fwd.DefaultDatagramCeilingMax-fwd.DatagramSlack {
-		t.Fatalf("server forwarder max=%d want %d", maxDatagram, fwd.DefaultDatagramCeilingMax-fwd.DatagramSlack)
+	if maxDatagram != fwd.MaxIPv4WireBytes {
+		t.Fatalf("server forwarder max=%d want %d", maxDatagram, fwd.MaxIPv4WireBytes)
 	}
 
 	const ipv4Header = 20

@@ -46,6 +46,25 @@ func (n OverlayNAT) SNATEgress(pkt []byte) []byte {
 	return out
 }
 
+// SNATEgressInPlace applies SNATEgress on pkt without allocating (host-kernel LoopIn hot path).
+func (n OverlayNAT) SNATEgressInPlace(pkt []byte) {
+	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
+		return
+	}
+	if n.enabled() {
+		if src, ok := ipv4Source(pkt); ok && src == n.TunHost {
+			rewriteIPv4SourceInPlace(pkt, n.WireLocal)
+			fixIPv4TransportChecksum(pkt)
+		}
+	}
+	if n.hairpinEnabled() {
+		if dst, ok := ipv4Destination(pkt); ok && dst == n.VirtTarget {
+			rewriteIPv4DestinationInPlace(pkt, n.WireTarget)
+			fixIPv4TransportChecksum(pkt)
+		}
+	}
+}
+
 // DNATIngress rewrites IPv4 for tun inject: wire local → tun host; loopback → virt target on return.
 func (n OverlayNAT) DNATIngress(pkt []byte) []byte {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
@@ -145,18 +164,26 @@ func toTCPAddr(addr netip.Addr) tcpip.Address {
 
 func rewriteIPv4Source(pkt []byte, newSrc netip.Addr) []byte {
 	out := append([]byte(nil), pkt...)
-	h := header.IPv4(out)
-	h.SetSourceAddress(toTCPAddr(newSrc))
-	h.SetChecksum(0)
-	h.SetChecksum(^h.CalculateChecksum())
+	rewriteIPv4SourceInPlace(out, newSrc)
 	return out
 }
 
 func rewriteIPv4Destination(pkt []byte, newDst netip.Addr) []byte {
 	out := append([]byte(nil), pkt...)
-	h := header.IPv4(out)
+	rewriteIPv4DestinationInPlace(out, newDst)
+	return out
+}
+
+func rewriteIPv4SourceInPlace(pkt []byte, newSrc netip.Addr) {
+	h := header.IPv4(pkt)
+	h.SetSourceAddress(toTCPAddr(newSrc))
+	h.SetChecksum(0)
+	h.SetChecksum(^h.CalculateChecksum())
+}
+
+func rewriteIPv4DestinationInPlace(pkt []byte, newDst netip.Addr) {
+	h := header.IPv4(pkt)
 	h.SetDestinationAddress(toTCPAddr(newDst))
 	h.SetChecksum(0)
 	h.SetChecksum(^h.CalculateChecksum())
-	return out
 }

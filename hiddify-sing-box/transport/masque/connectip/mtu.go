@@ -10,8 +10,12 @@ import (
 const (
 	// DefaultDatagramCeilingMax is the inclusive upper bound for CONNECT-IP IPv4 datagram bytes.
 	DefaultDatagramCeilingMax = 1500
-	// DatagramSlack is QUIC/H3 HTTP DATAGRAM framing overhead reserved from the ceiling for gVisor link MTU.
-	DatagramSlack = 80
+	// H3FramingSlack is QUIC/H3 HTTP DATAGRAM framing overhead reserved from the ceiling for gVisor link MTU.
+	H3FramingSlack = 80
+	// DatagramSlack aliases H3FramingSlack (H2/H3 netstack MTU parity).
+	DatagramSlack = H3FramingSlack
+	// MaxIPv4WireBytes caps CONNECT-IP IPv4 datagram size on the H3 return path (~1372 B practical wire limit).
+	MaxIPv4WireBytes = 1372
 )
 
 var datagramCeilingMaxEnvCache struct {
@@ -75,7 +79,10 @@ func H2MaxCapsulePayload(ceilingMax int) int {
 	return ceilingMax + DatagramSlack
 }
 
-// MaxIPv4Datagram returns the forwarder max IPv4 datagram size (ceiling minus slack).
+// MaxIPv4Datagram returns the forwarder max IPv4 datagram size (H3 wire limit).
 func MaxIPv4Datagram(ceilingMax int) int {
-	return ceilingMax - DatagramSlack
+	if ceilingMax > 0 && ceilingMax < MaxIPv4WireBytes {
+		return ceilingMax - H3FramingSlack
+	}
+	return MaxIPv4WireBytes
 }

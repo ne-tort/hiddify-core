@@ -193,7 +193,9 @@ func TestFlushPreTCPUsesOwnedFrames(t *testing.T) {
 	}
 }
 
-func TestIngressBurstCoalescesAckWake(t *testing.T) {
+// TestIngressBurstUsqueImmediateOneAckWakePerPacket verifies U0-1: symmetric RunTunnel
+// flushes ingress ACK wake once per LoopOut iteration (usque immediate), not batched CM coalesce.
+func TestIngressBurstUsqueImmediateOneAckWakePerPacket(t *testing.T) {
 	sess := &packetPipeSession{
 		recvCh:  make(chan []byte, 8),
 		sendCh:  make(chan []byte, 8),
@@ -221,7 +223,7 @@ func TestIngressBurstCoalescesAckWake(t *testing.T) {
 	ing.MaybeStart(true)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if host.delivers.Load() >= 3 {
+		if host.delivers.Load() >= 3 && host.flushes.Load() >= 3 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -231,8 +233,8 @@ func TestIngressBurstCoalescesAckWake(t *testing.T) {
 	if host.delivers.Load() != 3 {
 		t.Fatalf("delivers=%d want 3", host.delivers.Load())
 	}
-	if host.flushes.Load() != 1 {
-		t.Fatalf("flushes=%d want 1 coalesced wake per burst", host.flushes.Load())
+	if host.flushes.Load() != 3 {
+		t.Fatalf("flushes=%d want 3 (one ACK wake per datagram under usque immediate)", host.flushes.Load())
 	}
 }
 

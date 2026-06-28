@@ -177,6 +177,10 @@ func (h lifecycleHost) CloseH2MasqueClientTransport(tr *http2.Transport) {
 	cudph2.CloseClientTransport(tr)
 }
 
+func (h lifecycleHost) StopConnectIPNativeL3Plane() {
+	h.s.stopConnectIPNativeL3Dataplane()
+}
+
 func (s *coreSession) Close() error {
 	return session.LifecycleClose(&s.CoreSession, s.lifecycleHost())
 }

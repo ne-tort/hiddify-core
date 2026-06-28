@@ -33,6 +33,11 @@ func (s *coreSession) ConnectIPNativeL3Active() bool {
 	return s.connectIPNativeL3Active.Load()
 }
 
+// CloseConnectIPPlane tears down CONNECT-IP packet/native L3 while keeping the session alive (LIFE-3).
+func (s *coreSession) CloseConnectIPPlane() {
+	s.closeConnectIPPlane()
+}
+
 // ClearConnectIPServerRecycled clears recycle latch after successful plane reopen.
 func (s *coreSession) ClearConnectIPServerRecycled() {
 	s.connectIPServerRecycled.Store(false)
@@ -129,17 +134,21 @@ func (s *coreSession) ReopenConnectIPNativeL3Plane(ctx context.Context) error {
 
 	s.Mu.Lock()
 	host := s.ipPlaneHost()
-	session.CloseConnectIPDataplaneLockedAssumeMu(&s.CoreSession, host)
 	host.ResetIPH3TransportLockedAssumeMu()
 	host.ResetH2UDPTransportLockedAssumeMu()
+	if s.ConnectIPServerGenerationStale() {
+		session.CloseConnectIPDataplaneLockedAssumeMu(&s.CoreSession, host)
+	}
 	s.Mu.Unlock()
 
 	ipSess, err := s.OpenIPSession(ctx)
 	if err != nil {
+		s.recoverNativeL3PlaneAfterReopenFailure(plane)
 		return err
 	}
 	writer, reader, err := connectIPNativeL3PlaneEndpoints(ipSess)
 	if err != nil {
+		s.recoverNativeL3PlaneAfterReopenFailure(plane)
 		return err
 	}
 	if plane != nil {
@@ -154,6 +163,16 @@ func (s *coreSession) ReopenConnectIPNativeL3Plane(ctx context.Context) error {
 	s.ClearConnectIPServerRecycled()
 	cip.EmitObservabilityEvent("connect_ip_native_l3_plane_recycled")
 	return nil
+}
+
+// recoverNativeL3PlaneAfterReopenFailure restarts native L3 ingress after a failed reopen dial (LIFE-2).
+// Recycle latch stays set so the next short-flow / reopen attempt can retry.
+func (s *coreSession) recoverNativeL3PlaneAfterReopenFailure(plane *ciptun.NativeL3PlaneSession) {
+	if plane == nil {
+		return
+	}
+	cip.EmitObservabilityEvent("connect_ip_native_l3_plane_reopen_failed")
+	plane.RestartIngress()
 }
 
 // WaitConnectIPNativeL3PlaneReady blocks until native L3 ingress is active.
@@ -189,12 +208,22 @@ func (s *coreSession) AfterNativeL3ShortTCP(ctx context.Context, dest netip.Addr
 	}
 }
 
+// noteConnectIPPlaneFatal marks server-recycle latch on structured datagram-plane fatals (LIFE-1).
+func (s *coreSession) noteConnectIPPlaneFatal(err error) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+	if cip.IsConnectIPPlaneFatalForRecycle(err) {
+		s.MarkConnectIPServerRecycled()
+	}
+}
+
 // noteConnectIPNativeL3IngressFatal logs pump loop exit; plane supervisor restarts (usque reconnect ADAPT).
-// Server-recycle latch is only for explicit masque-server restart (W-IP-ARCH-3), not tun write backpressure.
 func (s *coreSession) noteConnectIPNativeL3IngressFatal(err error) {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return
 	}
+	s.noteConnectIPPlaneFatal(err)
 	if cip.IsBenignEgressTeardownError(err) {
 		return
 	}

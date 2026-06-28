@@ -45,3 +45,16 @@ func ReleaseOpenedConnectIPSessionIfAbandoned(s *CoreSession, host ConnectIPAban
 	host.ResetIPH3TransportLockedAssumeMu()
 	host.ResetH2UDPTransportLockedAssumeMu()
 }
+
+// CloseConnectIPPlane tears down CONNECT-IP packet/native L3 state while keeping the MASQUE session
+// alive (LIFE-3 selector deselect). Order mirrors HTTP overlay pivot minus layer switch.
+func CloseConnectIPPlane(s *CoreSession, host LifecycleHost) {
+	host.EmitObservabilityEvent("connect_ip_plane_close")
+	host.StopConnectIPNativeL3Plane()
+	host.CancelConnectIPIngress()
+	s.Mu.Lock()
+	CloseConnectIPDataplaneLockedAssumeMu(s, host)
+	host.ResetIPH3TransportLockedAssumeMu()
+	s.Mu.Unlock()
+	host.IncConnectIPSessionReset("selector_deselect")
+}

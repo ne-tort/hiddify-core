@@ -70,3 +70,12 @@ func NewClientPacketSessionPipeShim(dest PacketSession) PacketSession {
 		read:                dest,
 	}
 }
+
+// ClientPacketSessionFromPipeShim returns the prod wrapper for masque ingress wiring (LIFE-4 synth).
+func ClientPacketSessionFromPipeShim(dest PacketSession) *ClientPacketSession {
+	shim, ok := NewClientPacketSessionPipeShim(dest).(*pipeShimPacketSession)
+	if !ok {
+		return nil
+	}
+	return shim.ClientPacketSession
+}

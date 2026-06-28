@@ -157,15 +157,93 @@ func RunGATEConnectIPTunGVisorUploadThenRecycleDownload(t *testing.T) {
 	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
 	probeConn, probeErr := envB.DialTarget(probeCtx, downPort)
 	probeCancel()
+	runTunGVisorPostRecycleDownloadLeg(t, ctx, envB, downPort, probeConn, probeErr, false)
+}
+
+// RunGATEConnectIPTunNativeL3KernelPostUploadServerRecycleDownload is Path B discriminator (TEST-3):
+// gVisor TUN upload → server restart → fresh session → kernel TCP probe + bulk download.
+func RunGATEConnectIPTunNativeL3KernelPostUploadServerRecycleDownload(t *testing.T) {
+	t.Helper()
+	masque.SkipUnlessTunGVisor(t)
+
+	uploadSink := masque.StartConnectIPTunGVisorUploadSink(t)
+	downLn := StartHybridConnectIPDownloadTarget(t)
+	srv := NewHybridConnectIPH3Server(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	if err != nil {
+		t.Fatalf("session A: %v", err)
+	}
+	envA := masque.NewConnectIPTunGVisorEnv(t, sessA)
+	masque.SkipUnlessTunHostDial(t, envA)
+	upPort := uint16(uploadSink.Addr().(*net.TCPAddr).Port)
+	upBytes := masque.RunConnectIPTunGVisorUpload(t, envA, upPort, tunRecycleUploadDur)
+	_ = envA.Close()
+	_ = sessA.Close()
+	t.Logf("gVisor TUN pre-recycle upload: %d bytes", upBytes)
+	if upBytes == 0 {
+		t.Fatal("gVisor TUN upload produced no bytes")
+	}
+	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
+
+	_ = downLn.Close()
+	downLn = StartHybridConnectIPDownloadTarget(t)
+	srv.Restart(t)
+	time.Sleep(tunRecycleRacePause)
+
+	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	if err != nil {
+		t.Fatalf("session B: %v", err)
+	}
+	defer sessB.Close()
+	envB := masque.NewConnectIPTunGVisorEnv(t, sessB)
+	masque.SkipUnlessTunHostDial(t, envB)
+	if err := masque.InttestWaitConnectIPNativeL3PlaneReady(ctx, sessB); err != nil {
+		t.Fatalf("native L3 plane ready B: %v", err)
+	}
+	downPort := uint16(downLn.Addr().(*net.TCPAddr).Port)
+
+	probeCtx, probeCancel := context.WithTimeout(ctx, 15*time.Second)
+	probeConn, probeErr := envB.DialTargetKernel(probeCtx, downPort)
+	probeCancel()
+	runTunGVisorPostRecycleDownloadLeg(t, ctx, envB, downPort, probeConn, probeErr, true)
+}
+
+func runTunGVisorPostRecycleDownloadLeg(
+	t *testing.T,
+	ctx context.Context,
+	envB *masque.ConnectIPTunGVisorEnv,
+	downPort uint16,
+	probeConn net.Conn,
+	probeErr error,
+	kernelTCP bool,
+) {
+	t.Helper()
 	if probeErr != nil {
 		t.Fatalf("gVisor TUN download probe dial after recycle: %v", probeErr)
 	}
-	_, _ = probeConn.Write([]byte{0x42})
+	if _, err := probeConn.Write([]byte{0x42}); err != nil {
+		_ = probeConn.Close()
+		t.Fatalf("gVisor TUN download probe write: %v", err)
+	}
 	_ = probeConn.Close()
-	t.Log("gVisor TUN download probe OK")
+	if kernelTCP {
+		t.Log("gVisor TUN download probe OK (kernel TCP)")
+	} else {
+		t.Log("gVisor TUN download probe OK (stackInject)")
+	}
 	masque.WaitNativeConnectIPEgressSettled(ctx, 500*time.Millisecond)
 
-	downBytes, downMbps := masque.RunConnectIPTunGVisorDownload(t, envB, downPort, tunRecycleDownloadDur)
+	var downBytes int64
+	var downMbps float64
+	if kernelTCP {
+		downBytes, downMbps = masque.RunConnectIPTunGVisorDownloadKernel(t, envB, downPort, tunRecycleDownloadDur)
+	} else {
+		downBytes, downMbps = masque.RunConnectIPTunGVisorDownload(t, envB, downPort, tunRecycleDownloadDur)
+	}
 	t.Logf("gVisor TUN post-recycle download: %.1f Mbit/s (%d bytes)", downMbps, downBytes)
 	if downMbps < tunRecyclePreflightMin {
 		t.Fatalf("gVisor TUN download dead after recycle: %.1f Mbit/s want >= %.1f (Docker iperf -R analog)",

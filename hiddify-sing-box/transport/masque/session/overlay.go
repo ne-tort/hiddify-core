@@ -100,6 +100,7 @@ func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host LifecycleHost, err
 		return false
 	}
 	log.Printf("masque_http_layer_fallback tag=%s from=%s to=%s", strings.TrimSpace(s.Options.Tag), cur, next)
+	host.StopConnectIPNativeL3Plane()
 	host.CancelConnectIPIngress()
 	CloseConnectIPDataplaneLockedAssumeMu(s, host)
 	TeardownOverlayHTTPLockedAssumeMu(s)

@@ -150,6 +150,22 @@ func (s *HybridConnectIPH3Server) launch(tb testing.TB, fixedPort int) error {
 	mux.HandleFunc("/masque/ip", func(w http.ResponseWriter, r *http.Request) {
 		server.HandleConnectIPRequest(host, w, r, ipTemplate)
 	})
+	tcpTemplate := uritemplate.MustNew(fmt.Sprintf("https://127.0.0.1:%d/masque/tcp/{target_host}/{target_port}", proxyPort))
+	mux.HandleFunc("/masque/tcp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		tcpHost := server.TCPConnectHost{
+			Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
+			Dialer:  net.Dialer{Timeout: 5 * time.Second},
+			Authorize: func(*http.Request) bool {
+				return true
+			},
+			AuthorityMatches: func(_, _ string, _ bool) bool { return true },
+		}
+		server.HandleTCPConnectRequest(tcpHost, w, r, tcpTemplate, true)
+	})
 
 	s.port = proxyPort
 	s.quicLn = quicConn
@@ -424,6 +440,10 @@ func MeasureHybridSmokeDownloadWriteToMbps(conn net.Conn, duration time.Duration
 	wt, ok := conn.(io.WriterTo)
 	if !ok {
 		return 0, 0, fmt.Errorf("masque: conn lacks io.WriterTo")
+	}
+	// Download target waits for one client byte before bulk (forwarder clientPayloadSeen parity).
+	if _, err := conn.Write([]byte{0x42}); err != nil {
+		return 0, 0, err
 	}
 	deadline := time.Now().Add(duration)
 	_ = conn.SetReadDeadline(deadline)

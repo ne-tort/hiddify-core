@@ -59,6 +59,7 @@ type Runtime interface {
 	OpenIPSession(ctx context.Context) (T.IPPacketSession, error)
 	Capabilities() T.CapabilitySet
 	Close() error
+	CloseConnectIPPlane()
 }
 
 type RuntimeOptions struct {
@@ -394,6 +395,17 @@ func (r *runtimeImpl) MasqueClientSession() T.ClientSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.session
+}
+
+// CloseConnectIPPlane tears down eager CONNECT-IP plane state without closing the MASQUE session (LIFE-3).
+func (r *runtimeImpl) CloseConnectIPPlane() {
+	r.mu.Lock()
+	r.ipPlane = nil
+	sess := r.session
+	r.mu.Unlock()
+	if c, ok := sess.(interface{ CloseConnectIPPlane() }); ok {
+		c.CloseConnectIPPlane()
+	}
 }
 
 func (r *runtimeImpl) Close() error {

@@ -99,6 +99,14 @@ func (p *NativeL3PlaneSession) StartIngress(parent context.Context) {
 	log.Printf("masque connect_ip native l3: plane ready gen=%d", gen)
 }
 
+// IngressStopped reports whether the supervised pump goroutine has exited (LIFE-4).
+func (p *NativeL3PlaneSession) IngressStopped() bool {
+	if p == nil {
+		return true
+	}
+	return !p.ingressAlive.Load()
+}
+
 // StopIngress cancels the ingress loop and waits for exit.
 func (p *NativeL3PlaneSession) StopIngress() {
 	if p == nil {

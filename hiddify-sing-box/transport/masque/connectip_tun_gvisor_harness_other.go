@@ -9,6 +9,11 @@ import (
 	"github.com/sagernet/sing-tun"
 )
 
+const tunGVisorTargetIPStub = "198.18.0.99"
+
+// ConnectIPTunGVisorEnv stub for non-gVisor builds (full type in connectip_tun_gvisor_harness.go).
+type ConnectIPTunGVisorEnv struct{}
+
 func gvisorHarnessTunOptions(name, clientCIDR string) tun.Options {
 	return tun.Options{
 		Name: name,
@@ -17,7 +22,7 @@ func gvisorHarnessTunOptions(name, clientCIDR string) tun.Options {
 			netip.MustParsePrefix(clientCIDR),
 		},
 		Inet4RouteAddress: []netip.Prefix{
-			netip.MustParsePrefix(TunGVisorTargetIP + "/32"),
+			netip.MustParsePrefix(tunGVisorTargetIPStub + "/32"),
 		},
 	}
 }

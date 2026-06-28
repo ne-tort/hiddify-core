@@ -152,14 +152,11 @@ func ConnectIPTunNativeL3(
 		return nil
 	}
 	stop = func() {
-		plane.StopIngress()
-		bridge.Close()
 		if cs, ok := sess.(*coreSession); ok {
-			cs.connectIPNativeL3Plane.Store(nil)
-			if ns := cs.connectIPNativeL3Netstack.Swap(nil); ns != nil {
-				_ = ns.Close()
-			}
-			cs.connectIPNativeL3EgressSess.Store(nil)
+			cs.stopConnectIPNativeL3Dataplane()
+		} else {
+			plane.StopIngress()
+			_ = bridge.Close()
 		}
 		if leaveL3 != nil {
 			leaveL3()

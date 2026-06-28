@@ -908,6 +908,18 @@ func TestMasqueDockerBenchConnectIPH3TunKPIContract(t *testing.T) {
 		`connect-ip-tun download TCP probe`,
 		`connect-ip-tun download prime`,
 		`connect-ip-tun: egress settle between legs`,
+		`wait_connect_ip_native_l3_wired`,
+		`connect_ip native L3 overlay wired`,
+	)
+	inboundSrc := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "protocol", "tun", "l3_overlay_native_inbound.go"))
+	tunL3Src := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "protocol", "masque", "connect_ip_tun_l3.go"))
+	requireSubstrings(t, inboundSrc, "PROD-1 native L3 resolve",
+		"resolveL3OverlayNativeOutbound",
+		"tryWireNativeConnectIPL3",
+	)
+	requireSubstrings(t, tunL3Src, "PROD-1 endpoint wire API",
+		"WireConnectIPNativeL3",
+		"L3OverlayNativeOutbound",
 	)
 	requireSubstrings(t, history, "connect-ip-h3-tun baseline",
 		"connect-ip-h3-tun",

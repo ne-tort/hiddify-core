@@ -90,9 +90,7 @@ func (h connectIPIngressHost) IngressWritePacket() func([]byte) ([]byte, error) 
 }
 
 func (h connectIPIngressHost) IngressOnReadFatal(err error) {
-	if shouldMarkConnectIPServerRecycled(err) {
-		h.s.MarkConnectIPServerRecycled()
-	}
+	h.s.noteConnectIPPlaneFatal(err)
 	if cip.IsBenignEgressTeardownError(err) {
 		return
 	}
@@ -219,18 +217,3 @@ func (s *coreSession) deliverConnectIPTCPIngressNoFlush(pkt []byte) bool {
 	))
 }
 
-func shouldMarkConnectIPServerRecycled(err error) bool {
-	if err == nil {
-		return false
-	}
-	if cip.IsBenignEgressTeardownError(err) {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "idle timeout") ||
-		strings.Contains(msg, "no recent network activity") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "application error") ||
-		strings.Contains(msg, "stateless reset") ||
-		strings.Contains(msg, "peer going away")
-}

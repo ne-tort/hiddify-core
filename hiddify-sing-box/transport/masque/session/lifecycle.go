@@ -26,11 +26,13 @@ type LifecycleHost interface {
 	ResetH2UDPTransportLockedAssumeMu()
 	CloseAllH2ClientTransports()
 	CloseH2MasqueClientTransport(tr *http2.Transport)
+	StopConnectIPNativeL3Plane()
 }
 
-// LifecycleClose tears down CONNECT-IP, ingress, QUIC/H2 overlays (ipConn → ingress → netstack order).
+// LifecycleClose tears down CONNECT-IP, ingress, QUIC/H2 overlays (native L3 → ipConn → ingress → netstack order).
 func LifecycleClose(s *CoreSession, host LifecycleHost) error {
 	host.EmitObservabilityEvent("session_close_begin")
+	host.StopConnectIPNativeL3Plane()
 	host.CancelConnectIPIngress()
 	host.ClearIPIngressPacketReader()
 	s.ConnectIPTCPInstallInflight.Store(0)
@@ -107,6 +109,7 @@ func ResetHopTemplates(s *CoreSession, host LifecycleHost) error {
 	if s.HopIndex > 0 {
 		s.Options.DialPeer = ""
 	}
+	host.StopConnectIPNativeL3Plane()
 	host.CancelConnectIPIngress()
 	s.ConnectIPTCPInstallInflight.Store(0)
 	host.ClearPreTCPNetstackIngress()

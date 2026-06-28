@@ -112,6 +112,19 @@ func (e *Endpoint) Close() error {
 	return rt.Close()
 }
 
+var _ CM.ConnectIPPlaneDeselector = (*Endpoint)(nil)
+
+// CloseConnectIPPlaneOnDeselect tears down CONNECT-IP plane when selector switches away (LIFE-3).
+func (e *Endpoint) CloseConnectIPPlaneOnDeselect() {
+	e.mu.RLock()
+	rt := e.runtime
+	e.mu.RUnlock()
+	if rt == nil {
+		return
+	}
+	rt.CloseConnectIPPlane()
+}
+
 func (e *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	e.mu.RLock()
 	runtime := e.runtime

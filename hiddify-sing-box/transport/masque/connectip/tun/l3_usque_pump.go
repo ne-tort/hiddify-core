@@ -4,13 +4,11 @@ import cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 
 // usquePumpOptions returns MaintainTunnel-shaped pump config.
 func (b *L3OverlayBridge) usquePumpOptions(onLoopInEnd func()) cippump.TunnelOptions {
-	opts := cippump.TunnelOptions{
-		LoopOutUsqueImmediate: true,
-		LoopInUsqueImmediate:  true,
-	}
+	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{})
 	if b.hostKernelRelay() {
-		// Host-kernel: yield after WriteIngress so LoopIn ReadHostEgress drains client ACKs
-		// (bulk WriteIngress flood starves tun egress → kernel TCP zero-window drop).
+		// Host-kernel: LoopIn coalesces ReadHostEgress; LoopOut yields after WriteIngress so
+		// kernel TCP ACKs drain before bulk WriteIngress floods tun ingress (iperf -R stall).
+		opts.LoopInUsqueImmediate = false
 		opts.LoopOutYieldAfterWrite = true
 	}
 	if onLoopInEnd != nil && !b.hostKernelRelay() {

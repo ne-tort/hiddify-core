@@ -142,6 +142,11 @@ func (s *ClientPacketSession) WritePacketFromNetstack(outbound []byte) (retained
 	return cipegress.WritePacketFromNetstack(s.egressHost(), outbound)
 }
 
+// WritePacketInPlaceNoWake enqueues a caller-owned buffer without copy (NoWake); caller flushes the batch.
+func (s *ClientPacketSession) WritePacketInPlaceNoWake(outbound []byte) (retained bool, icmp []byte, err error) {
+	return s.WritePacketFromNetstack(outbound)
+}
+
 // WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
 func (s *ClientPacketSession) WritePacketPrefixed(buffer []byte) ([]byte, error) {
 	return cipegress.WritePacketPrefixed(s.egressHost(), buffer, connectip.DatagramContextPrefixLen())

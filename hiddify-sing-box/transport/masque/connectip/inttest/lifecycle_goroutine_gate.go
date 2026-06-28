@@ -192,3 +192,8 @@ func RunGATEConnectIPRelayTeardownDownloadOnly(t *testing.T) {
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 	assertGoroutineDelta(t, beforeSess)
 }
+
+// RunGATEConnectIPSessionCloseMidBulkNoLeak is the LIFE-4 full-stack gate (upload mid-bulk → Close → no leak).
+func RunGATEConnectIPSessionCloseMidBulkNoLeak(t *testing.T) {
+	RunGATEConnectIPLifecycleGoroutineAfterClose(t)
+}

@@ -7,8 +7,8 @@ package inttest
 import "testing"
 
 // RunGATEConnectIPTunNativeL3PostUploadServerRecycleDownload exercises ARCH-2 L3 path:
-// gVisor TUN upload → server restart → fresh session → gVisor TUN download.
+// gVisor TUN upload → server restart → fresh session → gVisor TUN kernel download.
 func RunGATEConnectIPTunNativeL3PostUploadServerRecycleDownload(t *testing.T) {
 	t.Helper()
-	RunGATEConnectIPTunGVisorUploadThenRecycleDownload(t)
+	RunGATEConnectIPTunNativeL3KernelPostUploadServerRecycleDownload(t)
 }

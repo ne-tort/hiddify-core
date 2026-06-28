@@ -67,13 +67,9 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 		if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
 			continue
 		}
-		out := d.nat.SNATEgress(buf[:n])
-		if len(out) > len(buf) {
-			return 0, io.ErrShortBuffer
-		}
-		n = copy(buf, out)
+		d.nat.SNATEgressInPlace(buf[:n])
 		if d.onEgress != nil {
-			d.onEgress(out)
+			d.onEgress(buf[:n])
 		}
 		return n, nil
 	}

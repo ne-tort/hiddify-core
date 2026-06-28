@@ -13,7 +13,7 @@ import (
 	connectip "github.com/quic-go/connect-ip-go"
 )
 
-// loopOutBatchDrain mirrors CM ingress batch coalescing (CONNECT-IP-DATAPATH-TARGET §2.2).
+// loopOutBatchDrain is used only when LegacyCMBatchDrain opts in (CUT default — U0-1).
 const loopOutBatchDrain = 2 * time.Millisecond
 
 // TunnelOptions configures RunTunnel (usque MaintainTunnel pump + R2 flush/wake extensions).
@@ -37,6 +37,28 @@ type TunnelOptions struct {
 	LoopOutYieldAfterWrite bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
 	LoopOutSkipBatchDrain bool
+	// LegacyCMBatchDrain enables pre-U0 CM zero-timeout + 2ms batch coalesce (tests only).
+	LegacyCMBatchDrain bool
+}
+
+// UsqueTunnelOptions returns MaintainTunnel-shaped pump defaults (one read → one write both loops).
+func UsqueTunnelOptions() TunnelOptions {
+	return TunnelOptions{
+		LoopOutUsqueImmediate: true,
+		LoopInUsqueImmediate:  true,
+	}
+}
+
+// NormalizeTunnelOptions applies usque defaults unless LegacyCMBatchDrain is set (U0-1).
+func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
+	if opts.LegacyCMBatchDrain {
+		opts.LoopOutUsqueImmediate = false
+		opts.LoopInUsqueImmediate = false
+		return opts
+	}
+	opts.LoopOutUsqueImmediate = true
+	opts.LoopInUsqueImmediate = true
+	return opts
 }
 
 // TunnelDemux splits ingress IP frames before Device.WritePacket (CM netstack path).
@@ -50,6 +72,7 @@ func RunTunnel(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 	if device == nil || conn == nil {
 		return nil
 	}
+	opts = NormalizeTunnelOptions(opts)
 	mtu := opts.MTU
 	if mtu <= 0 {
 		mtu = DefaultTunnelMTU
@@ -94,18 +117,41 @@ func dispatchLoopOutFrame(ctx context.Context, device TunnelDevice, opts TunnelO
 }
 
 func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer) error {
-	buf := pool.Get()
-	defer pool.Put(buf)
+	var buf []byte
+	releaseBuf := func() {
+		if buf != nil {
+			pool.Put(buf)
+			buf = nil
+		}
+	}
+	defer releaseBuf()
 	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
 	defer tryCancel()
+	writeOne := func(n int) error {
+		retained, err := writeLoopInPacket(device, conn, buf[:n])
+		if err != nil {
+			return err
+		}
+		if retained {
+			buf = nil
+		}
+		return nil
+	}
 	for {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
+		}
+		if buf == nil {
+			buf = pool.Get()
 		}
 		n, err := device.ReadPacket(ctx, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
+			}
+			if IsRetryablePacketReadError(err) {
+				runtime.Gosched()
+				continue
 			}
 			return err
 		}
@@ -113,16 +159,19 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			runtime.Gosched()
 			continue
 		}
-		if err := writeLoopInPacket(device, conn, buf[:n]); err != nil {
+		if err := writeOne(n); err != nil {
 			return err
 		}
 		if !opts.LoopInUsqueImmediate {
 			for {
+				if buf == nil {
+					buf = pool.Get()
+				}
 				n2, err2 := device.ReadPacket(tryCtx, buf)
 				if err2 != nil || n2 <= 0 {
 					break
 				}
-				if err := writeLoopInPacket(device, conn, buf[:n2]); err != nil {
+				if err := writeOne(n2); err != nil {
 					return err
 				}
 			}
@@ -133,26 +182,46 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 	}
 }
 
+// PacketConnNoWake extends PacketConn with batched wire enqueue (caller flushes via OnLoopInEnd).
+type PacketConnNoWake interface {
+	PacketConn
+	WritePacketNoWake(buffer []byte) (icmp []byte, err error)
+}
+
+// PacketConnInPlaceNoWake extends PacketConnNoWake with zero-copy pump pool writes when QUIC retains buf.
+type PacketConnInPlaceNoWake interface {
+	PacketConnNoWake
+	WritePacketInPlaceNoWake(buffer []byte) (icmp []byte, retained bool, err error)
+}
+
 // writeLoopInPacket sends one egress datagram to wire (usque ipConn.WritePacket parity).
+// retained=true when the wire layer keeps pkt; caller must not reuse the slice.
 // CloseError is fatal; other write errors are logged and skipped without stopping the pump.
-func writeLoopInPacket(device TunnelDevice, conn PacketConn, pkt []byte) error {
-	icmp, err := conn.WritePacket(pkt)
+func writeLoopInPacket(device TunnelDevice, conn PacketConn, pkt []byte) (retained bool, err error) {
+	var icmp []byte
+	if ip, ok := conn.(PacketConnInPlaceNoWake); ok {
+		icmp, retained, err = ip.WritePacketInPlaceNoWake(pkt)
+	} else if nw, ok := conn.(PacketConnNoWake); ok {
+		icmp, err = nw.WritePacketNoWake(pkt)
+	} else {
+		icmp, err = conn.WritePacket(pkt)
+	}
 	if err != nil {
 		if errors.As(err, new(*connectip.CloseError)) {
-			return err
+			return retained, err
 		}
 		log.Printf("connect-ip pump: error writing to wire: %v, continuing...", err)
-		return nil
+		return retained, nil
 	}
 	if len(icmp) > 0 {
 		if err := device.WritePacket(icmp); err != nil {
 			if errors.As(err, new(*connectip.CloseError)) {
-				return err
+				return retained, err
 			}
 			log.Printf("connect-ip pump: error writing ICMP to device: %v, continuing...", err)
 		}
 	}
-	return nil
+	return retained, nil
 }
 
 func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer) error {
@@ -232,11 +301,12 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 	}
 }
 
-// RunIngressPump is deprecated; native L3 uses RunTunnel. Kept for narrow LoopOut-only tests.
+// RunIngressPump runs LoopOut-only (deprecated); prefer RunTunnel. Kept for narrow tests.
 func RunIngressPump(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions) error {
 	if device == nil || conn == nil {
 		return nil
 	}
+	opts = NormalizeTunnelOptions(opts)
 	mtu := opts.MTU
 	if mtu <= 0 {
 		mtu = DefaultTunnelMTU

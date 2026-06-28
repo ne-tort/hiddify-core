@@ -51,6 +51,7 @@ func (f *overlayLifecycleHostFake) ResetH2UDPTransportLockedAssumeMu() {}
 func (f *overlayLifecycleHostFake) CloseAllH2ClientTransports()        { f.closeH2++ }
 func (f *overlayLifecycleHostFake) CloseH2MasqueClientTransport(*http2.Transport) {
 }
+func (f *overlayLifecycleHostFake) StopConnectIPNativeL3Plane() {}
 
 func TestTeardownOverlayHTTPLockedAssumeMu(t *testing.T) {
 	shared := &http3.Transport{}

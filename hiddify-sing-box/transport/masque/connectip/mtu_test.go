@@ -41,8 +41,11 @@ func TestH2MaxCapsulePayloadParity(t *testing.T) {
 	if got != want {
 		t.Fatalf("H2MaxCapsulePayload=%d want %d", got, want)
 	}
-	if MaxIPv4Datagram(ceilingMax)+DatagramSlack != ceilingMax {
-		t.Fatalf("MaxIPv4Datagram + slack must equal ceiling max")
+	if MaxIPv4Datagram(ceilingMax) != MaxIPv4WireBytes {
+		t.Fatalf("MaxIPv4Datagram=%d want wire limit %d", MaxIPv4Datagram(ceilingMax), MaxIPv4WireBytes)
+	}
+	if MaxIPv4WireBytes+(DefaultDatagramCeilingMax-MaxIPv4WireBytes) != DefaultDatagramCeilingMax {
+		t.Fatalf("wire bytes + wire slack must equal default ceiling")
 	}
 }
 

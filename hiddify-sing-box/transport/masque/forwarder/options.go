@@ -3,13 +3,15 @@ package forwarder
 import (
 	"net"
 	"net/netip"
+
+	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 const (
 	// DefaultDatagramCeilingMax is the CONNECT-IP IPv4 datagram ceiling before H3 slack.
-	DefaultDatagramCeilingMax = 1500
+	DefaultDatagramCeilingMax = cip.DefaultDatagramCeilingMax
 	// MaxIPv4WireBytes caps forwarder S2C IPv4 datagram size (H3 CONNECT-IP return path ~1372 B).
-	MaxIPv4WireBytes = 1372
+	MaxIPv4WireBytes = cip.MaxIPv4WireBytes
 	// DatagramSlack is subtracted from the ceiling when sizing forwarder segments (H3 overhead).
 	DatagramSlack = DefaultDatagramCeilingMax - MaxIPv4WireBytes
 )

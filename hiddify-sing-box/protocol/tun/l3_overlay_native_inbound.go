@@ -45,7 +45,7 @@ func (t *Inbound) tryWireNativeConnectIPL3(
 	}
 	wire, wired, err := native.WireConnectIPNativeL3(ctx, tunIf, t.l3OverlayPrefixes, tunHost, wireLocal)
 	if err != nil || !wired || wire == nil {
-		return nil, nil, nil, wired, err
+		return nil, nil, nil, false, err
 	}
 	t.l3OverlayNativeStop = wire.Stop
 	t.l3OverlayNativeStart = wire.StartIngress
