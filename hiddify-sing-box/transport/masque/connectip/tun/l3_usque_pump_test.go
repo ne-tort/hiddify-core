@@ -12,7 +12,7 @@ func TestUsquePumpOptionsHostKernelCoalescesLoopIn(t *testing.T) {
 	b.SetHostEgressRead(func(context.Context, []byte) (int, error) { return 0, nil }, nil)
 	opts := b.usquePumpOptions(nil)
 	if opts.LoopInUsqueImmediate {
-		t.Fatal("LoopInUsqueImmediate want false for host-kernel")
+		t.Fatal("LoopInUsqueImmediate want false for host-kernel bulk coalesce")
 	}
 	if !opts.LoopOutYieldAfterWrite {
 		t.Fatal("LoopOutYieldAfterWrite want true for host-kernel")

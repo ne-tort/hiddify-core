@@ -3,10 +3,12 @@ package connectip
 import (
 	"errors"
 
+	connectipgo "github.com/quic-go/connect-ip-go"
 	cipegress "github.com/sagernet/sing-box/transport/masque/connectip/pump/egress"
 )
 
 func init() {
+	connectipgo.SetOutboundPayloadReleaseHook(returnOutboundBuf, IsOutboundPoolSlice)
 	cipegress.SetHooks(cipegress.Hooks{
 		JoinTransport: func(err error) error {
 			return errors.Join(Errs.Transport, err)

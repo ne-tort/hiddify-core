@@ -6,8 +6,8 @@ import cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 func (b *L3OverlayBridge) usquePumpOptions(onLoopInEnd func()) cippump.TunnelOptions {
 	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{})
 	if b.hostKernelRelay() {
-		// Host-kernel: LoopIn coalesces ReadHostEgress; LoopOut yields after WriteIngress so
-		// kernel TCP ACKs drain before bulk WriteIngress floods tun ingress (iperf -R stall).
+		// Host-kernel: coalesce tun reads for bulk upload; small-packet flush in runLoopIn
+		// keeps ACKs timely for download (iperf -R after upload).
 		opts.LoopInUsqueImmediate = false
 		opts.LoopOutYieldAfterWrite = true
 	}

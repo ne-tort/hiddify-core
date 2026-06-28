@@ -2,6 +2,7 @@ package connectip
 
 import (
 	"context"
+	"errors"
 
 	connectip "github.com/quic-go/connect-ip-go"
 	cipegress "github.com/sagernet/sing-box/transport/masque/connectip/pump/egress"
@@ -129,12 +130,46 @@ func (s *ClientPacketSession) ReadPacketWithContext(ctx context.Context, buffer 
 }
 
 func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
-	return cipegress.WritePacket(s.egressHost(), buffer)
+	if s == nil || s.conn == nil {
+		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
+	}
+	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
+		err := errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
+		TrackWriteFail(err, true)
+		return nil, err
+	}
+	icmp, err := s.conn.WritePacket(buffer)
+	if err != nil {
+		TrackWriteFail(err, false)
+		return icmp, err
+	}
+	TrackPacketTx(len(buffer))
+	if len(icmp) > 0 {
+		TrackPTBRx()
+	}
+	return icmp, err
 }
 
 // WritePacketNoWake enqueues without QUIC flush; caller must FlushEgressBatch once per pump iteration.
 func (s *ClientPacketSession) WritePacketNoWake(buffer []byte) ([]byte, error) {
-	return cipegress.WritePacketNoWake(s.egressHost(), buffer)
+	if s == nil || s.conn == nil {
+		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
+	}
+	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
+		err := errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
+		TrackWriteFail(err, true)
+		return nil, err
+	}
+	icmp, err := s.conn.WritePacketNoWake(buffer)
+	if err != nil {
+		TrackWriteFail(err, false)
+		return icmp, err
+	}
+	TrackPacketTx(len(buffer))
+	if len(icmp) > 0 {
+		TrackPTBRx()
+	}
+	return icmp, err
 }
 
 // WritePacketFromNetstack sends a netstack pool buffer in-place (NoWake); caller flushes the batch.
@@ -155,6 +190,13 @@ func (s *ClientPacketSession) WritePacketPrefixed(buffer []byte) ([]byte, error)
 // FlushEgressBatch wakes QUIC/H2 send after batched WritePacketInPlaceNoWake calls.
 func (s *ClientPacketSession) FlushEgressBatch() {
 	cipegress.FlushEgressBatch(s.egressHost())
+}
+
+// FlushEgressTransport schedules QUIC datagram send without ingress poke (LoopIn batch flush).
+func (s *ClientPacketSession) FlushEgressTransport() {
+	if s != nil && s.conn != nil {
+		s.conn.FlushOutgoingDatagramSend()
+	}
 }
 
 // ScheduleEgressFlush is a legacy alias for FlushEgressBatch (netstack OnEgressBatchComplete wiring).

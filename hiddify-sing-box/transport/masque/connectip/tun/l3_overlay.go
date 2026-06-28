@@ -405,43 +405,6 @@ func (b *L3OverlayBridge) ScheduleOutboundDrain() {
 	}
 }
 
-// pollHostKernelEgressDrain relays ready kernel→tun egress to wire (non-blocking, usque ACK parity).
-func (b *L3OverlayBridge) pollHostKernelEgressDrain(ctx context.Context) {
-	if b == nil || !b.hostKernelRelay() {
-		return
-	}
-	b.mu.Lock()
-	kernel := b.kernel
-	closed := b.closed
-	b.mu.Unlock()
-	if closed || kernel == nil {
-		return
-	}
-	buf := make([]byte, 65535)
-	tryCtx, cancel := context.WithTimeout(ctx, 0)
-	defer cancel()
-	pc := b.packetConn()
-	for {
-		n, err := kernel.ReadPacket(tryCtx, buf)
-		if err != nil || n <= 0 {
-			return
-		}
-		icmp, werr := pc.WritePacketNoWake(buf[:n])
-		if werr != nil {
-			return
-		}
-		if len(icmp) > 0 {
-			_ = kernel.WritePacket(icmp)
-		}
-	}
-	b.mu.Lock()
-	flush := b.onLoopInEnd
-	b.mu.Unlock()
-	if flush != nil {
-		flush()
-	}
-}
-
 // RunPump runs usque-shaped symmetric pump (LoopIn ‖ LoopOut) until ctx cancel or fatal error.
 func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 	if b == nil {
@@ -502,8 +465,7 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 				return nil, net.ErrClosed
 			}
 			if hostKernel {
-				// Host-kernel: sync wire write per egress datagram (usque ipConn.WritePacket parity).
-				// NoWake batching delays client ACKs → kernel TCP zero-window after upload bulk.
+				// Sync flush per datagram keeps kernel TCP ACK clock alive post-upload bulk.
 				return writeWirePacket(writer, p)
 			}
 			return writeWirePacketNoWake(writer, p)
