@@ -101,9 +101,15 @@ func ConnectIPTunNativeL3(
 		cs.connectIPNativeL3EgressSess.Store(egressSess)
 		plane.SetReadFatalHook(cs.noteConnectIPNativeL3IngressFatal)
 		flushEgress := func() {
-			if reader := cs.ipIngressPacketReader.Load(); reader != nil {
-				reader.FlushEgressBatch()
+			reader := cs.ipIngressPacketReader.Load()
+			if reader == nil {
+				return
 			}
+			if hostKernel {
+				reader.FlushEgressTransport()
+				return
+			}
+			reader.FlushEgressBatch()
 		}
 		if hostKernel {
 			bridge.SetPumpWakeHooks(cippump.WakeHooks{}, flushEgress)

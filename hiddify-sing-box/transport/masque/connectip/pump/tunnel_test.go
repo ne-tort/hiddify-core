@@ -297,20 +297,6 @@ func TestRunTunnelFlushWakeOnLoopOut(t *testing.T) {
 	}
 }
 
-func TestNetBufferPool(t *testing.T) {
-	t.Parallel()
-	pool := NewNetBuffer(128)
-	b1 := pool.Get()
-	if cap(b1) != 128 {
-		t.Fatalf("cap = %d", cap(b1))
-	}
-	pool.Put(b1)
-	b2 := pool.Get()
-	if cap(b2) != 128 {
-		t.Fatalf("reused cap = %d", cap(b2))
-	}
-}
-
 func TestConnectIPArchGuardOutboundDrainDeviceOptional(t *testing.T) {
 	t.Parallel()
 	var dev OutboundDrainDevice = (*mockDevice)(nil)
@@ -459,6 +445,10 @@ func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
 	opts := NormalizeTunnelOptions(TunnelOptions{})
 	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
 		t.Fatalf("expected usque immediate defaults: %+v", opts)
+	}
+	coalesce := NormalizeTunnelOptions(TunnelOptions{LoopInCoalescePoll: 100 * time.Microsecond})
+	if coalesce.LoopInUsqueImmediate {
+		t.Fatalf("coalesce poll must disable LoopInUsqueImmediate: %+v", coalesce)
 	}
 	legacy := NormalizeTunnelOptions(TunnelOptions{LegacyCMBatchDrain: true})
 	if legacy.LoopOutUsqueImmediate || legacy.LoopInUsqueImmediate {

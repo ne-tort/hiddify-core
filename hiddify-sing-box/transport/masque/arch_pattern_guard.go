@@ -39,7 +39,7 @@ const (
 	connectIPSynthPipeFastMinMbps                = 250.0  // pipe L1 fast enough to compare QUIC overhead
 	connectIPSynthPipeFastTargetRatio            = 0.85   // OPEN target when pipe >= PipeFastMinMbps
 	connectIPSynthPipeFastFloorRatio             = 0.60   // hard fail when pipe fast — raise toward Target as KPI closes
-	connectIPSynthWakeEstSegmentBytes            = 680    // native upload avg RFC9297+TCP segment (not 1400 MSS — test est_dgrams)
+	connectIPSynthWakeEstSegmentBytes            = 1310   // Docker upload wire segment (524 = 50k pps × 1310 B × 8)
 	connectIPSynthMaxAsymRatio                   = 8.0
 	connectIPSynthProdBenchDuration              = 2 * time.Second
 	connectIPDockerProdMinMbps                   = 1000.0 // connect-ip-h3-tun hard gate @0ms netem

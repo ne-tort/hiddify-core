@@ -33,12 +33,16 @@ type TunnelOptions struct {
 	LoopOutUsqueImmediate bool
 	// LoopInUsqueImmediate skips zero-timeout coalesce after ReadPacket (usque: one read → one wire write).
 	LoopInUsqueImmediate bool
+	// LoopInCoalescePoll waits up to this duration for extra tun reads before OnLoopInEnd flush (host-kernel bulk).
+	LoopInCoalescePoll time.Duration
 	// LoopOutYieldAfterWrite yields the scheduler after each WritePacket (host-kernel tun coupling ADAPT).
 	LoopOutYieldAfterWrite bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
 	LoopOutSkipBatchDrain bool
 	// LegacyCMBatchDrain enables pre-U0 CM zero-timeout + 2ms batch coalesce (tests only).
 	LegacyCMBatchDrain bool
+	// LoopInObserver collects per-iteration read/write/flush metrics (tests/diagnostics only).
+	LoopInObserver *LoopInObserver
 }
 
 // UsqueTunnelOptions returns MaintainTunnel-shaped pump defaults (one read → one write both loops).
@@ -57,7 +61,11 @@ func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
 		return opts
 	}
 	opts.LoopOutUsqueImmediate = true
-	opts.LoopInUsqueImmediate = true
+	if opts.LoopInCoalescePoll <= 0 {
+		opts.LoopInUsqueImmediate = true
+	} else {
+		opts.LoopInUsqueImmediate = false
+	}
 	return opts
 }
 
@@ -125,10 +133,17 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		}
 	}
 	defer releaseBuf()
-	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
-	defer tryCancel()
+	obs := opts.LoopInObserver
 	writeOne := func(n int) error {
+		var wStart time.Time
+		if obs != nil {
+			wStart = time.Now()
+		}
 		retained, err := writeLoopInPacket(device, conn, buf[:n])
+		if obs != nil {
+			obs.recordWrite(time.Since(wStart))
+			obs.recordPkt()
+		}
 		if err != nil {
 			return err
 		}
@@ -144,7 +159,14 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		if buf == nil {
 			buf = pool.Get()
 		}
+		var rStart time.Time
+		if obs != nil {
+			rStart = time.Now()
+		}
 		n, err := device.ReadPacket(ctx, buf)
+		if obs != nil {
+			obs.recordRead(time.Since(rStart))
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
@@ -163,11 +185,27 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			return err
 		}
 		if !opts.LoopInUsqueImmediate {
+			poll := opts.LoopInCoalescePoll
 			for {
 				if buf == nil {
 					buf = pool.Get()
 				}
-				n2, err2 := device.ReadPacket(tryCtx, buf)
+				coalesceCtx := ctx
+				var coalesceCancel context.CancelFunc
+				if poll > 0 {
+					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, poll)
+				} else {
+					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, 0)
+				}
+				var r2Start time.Time
+				if obs != nil {
+					r2Start = time.Now()
+				}
+				n2, err2 := device.ReadPacket(coalesceCtx, buf)
+				if obs != nil {
+					obs.recordRead(time.Since(r2Start))
+				}
+				coalesceCancel()
 				if err2 != nil || n2 <= 0 {
 					break
 				}
@@ -178,6 +216,12 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		}
 		if opts.OnLoopInEnd != nil {
 			opts.OnLoopInEnd()
+			if obs != nil {
+				obs.recordFlush()
+			}
+		}
+		if obs != nil {
+			obs.endIter()
 		}
 	}
 }

@@ -21,6 +21,7 @@ type mockL3Writer struct {
 	flushes      atomic.Int32
 	retainNext   atomic.Bool
 	lastPkt      atomic.Value // []byte
+	inPlaceDelay time.Duration
 }
 
 func (m *mockL3Writer) WritePacket(p []byte) ([]byte, error) {
@@ -36,6 +37,9 @@ func (m *mockL3Writer) WritePacketNoWake(p []byte) ([]byte, error) {
 }
 
 func (m *mockL3Writer) WritePacketInPlaceNoWake(p []byte) (retained bool, icmp []byte, err error) {
+	if m != nil && m.inPlaceDelay > 0 {
+		upload524SpinDelay(m.inPlaceDelay)
+	}
 	m.inPlace.Add(1)
 	m.lastPkt.Store(append([]byte(nil), p...))
 	return m.retainNext.Load(), nil, nil
@@ -156,9 +160,8 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	}
 }
 
-// TestL3HostKernelHybridBulkNoWakeAckSync verifies PERF-1b classification helpers (gate wiring OPEN).
+// TestL3HostKernelHybridBulkNoWakeAckSync bulk → NoWake; ACK → sync flush (same iter).
 func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
-	t.Skip("PERF-1b hybrid packetConn wiring OPEN — full NoWake regresses download; needs synth gate first")
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
 	server := netip.MustParseAddr("198.18.0.99")
@@ -168,19 +171,19 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 
 	var hostReads atomic.Int32
 	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
-		n := int(hostReads.Add(1))
-		if n == 1 {
+		switch hostReads.Add(1) {
+		case 1:
 			return copy(buf, bulk), nil
-		}
-		if n == 2 {
+		case 2:
 			return copy(buf, ack), nil
+		default:
+			<-ctx.Done()
+			return 0, ctx.Err()
 		}
-		<-ctx.Done()
-		return 0, ctx.Err()
 	})
 
 	w := &mockL3Writer{}
-	b := NewL3OverlayBridge(nil, w, &mockL3Reader{}, OverlayNAT{
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
 		TunHost: tunHost, WireLocal: wireLocal,
 	})
 	b.SetHostEgressRead(hostRead, prefixes)
@@ -189,6 +192,7 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = b.RunPump(ctx) }()
+
 	deadline := time.Now().Add(2 * time.Second)
 	for w.wireWrites() < 2 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -196,7 +200,7 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 	cancel()
 
 	if w.inPlace.Load()+w.noWakeWrites.Load() < 1 {
-		t.Fatalf("bulk path: inPlace=%d noWake=%d writes=%d wire=%d want bulk NoWake",
+		t.Fatalf("bulk: inPlace=%d noWake=%d writes=%d wire=%d",
 			w.inPlace.Load(), w.noWakeWrites.Load(), w.writes.Load(), w.wireWrites())
 	}
 	if w.writes.Load() < 1 {
@@ -205,6 +209,321 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 	if w.flushes.Load() < 1 {
 		t.Fatalf("OnLoopInEnd flushes=%d want >=1", w.flushes.Load())
 	}
+}
+
+// TestL3HostKernelHybridBulkNoWakeSingleFlushPerIter (GATE-P0-1) coalesced bulk → one iter flush.
+func TestL3HostKernelHybridBulkNoWakeSingleFlushPerIter(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		n := int(hostReads.Add(1))
+		if n <= 3 {
+			return copy(buf, bulk), nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.inPlace.Load()+w.noWakeWrites.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	if got := w.inPlace.Load() + w.noWakeWrites.Load(); got < 3 {
+		t.Fatalf("bulk wire ops=%d want >=3", got)
+	}
+	if w.writes.Load() != 0 {
+		t.Fatalf("sync writes=%d want 0 for bulk-only coalesce", w.writes.Load())
+	}
+	if fl := w.flushes.Load(); fl < 1 {
+		t.Fatalf("OnLoopInEnd flushes=%d want >=1", fl)
+	}
+}
+
+// TestL3HostKernelHybridSmallPacketSyncFlush (GATE-P0-2) pure ACK never uses NoWake path.
+func TestL3HostKernelHybridSmallPacketSyncFlush(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	ack := makeIPv4TCPAck(tunHost, server, 40000, 5201, byte(header.TCPFlagAck))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		if hostReads.Add(1) > 1 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		return copy(buf, ack), nil
+	})
+
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	if w.writes.Load() < 1 {
+		t.Fatalf("sync writes=%d want >=1 for pure ACK", w.writes.Load())
+	}
+	if w.inPlace.Load()+w.noWakeWrites.Load() != 0 {
+		t.Fatalf("NoWake path used for ACK: inPlace=%d noWake=%d", w.inPlace.Load(), w.noWakeWrites.Load())
+	}
+}
+
+// TestL3HostKernelHybridBulkThenAckDownloadAlive (GATE-P0-3) coalesced bulk + flush, then LoopOut ingress alive.
+func TestL3HostKernelHybridBulkThenAckDownloadAlive(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("172.30.99.2")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	downBulk := makeIPv4TCPPayload(server, wireLocal, 5201, 40000, 0x18, make([]byte, 1000))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		if hostReads.Add(1) > 2 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		return copy(buf, bulk), nil
+	})
+
+	var tunInjected atomic.Int32
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(func(p []byte) (int, error) {
+		tunInjected.Add(1)
+		return len(p), nil
+	}, w, &mockL3Reader{}, OverlayNAT{TunHost: tunHost, WireLocal: wireLocal})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.inPlace.Load()+w.noWakeWrites.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := w.inPlace.Load() + w.noWakeWrites.Load(); got < 2 {
+		t.Fatalf("bulk NoWake ops=%d want >=2", got)
+	}
+	syncBeforeDown := w.writes.Load()
+	if w.flushes.Load() < 1 {
+		t.Fatalf("OnLoopInEnd flushes=%d want >=1 after bulk coalesce", w.flushes.Load())
+	}
+
+	if err := b.WritePacket(downBulk); err != nil {
+		t.Fatalf("LoopOut WritePacket after bulk: %v", err)
+	}
+	if tunInjected.Load() < 1 {
+		t.Fatalf("tunInjected=%d want >=1 (download ingress alive)", tunInjected.Load())
+	}
+	if w.writes.Load() != syncBeforeDown {
+		t.Fatalf("LoopOut sync-relay writes=%d want %d", w.writes.Load(), syncBeforeDown)
+	}
+	cancel()
+}
+
+// TestL3HostKernelPumpInPlaceRetained (GATE-PERF-1c) host-kernel LoopIn retains pump pool buf on in-place wire write.
+func TestL3HostKernelPumpInPlaceRetained(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		if hostReads.Add(1) > 2 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		return copy(buf, bulk), nil
+	})
+
+	w := &mockL3Writer{}
+	w.retainNext.Store(true)
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for hostReads.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	if w.inPlace.Load() < 1 {
+		t.Fatalf("inPlace=%d want >=1", w.inPlace.Load())
+	}
+	if hostReads.Load() < 2 {
+		t.Fatalf("hostReads=%d want >=2 after retained in-place write", hostReads.Load())
+	}
+}
+
+// TestL3HostKernelDeepQueueCoalesceBurst (GATE-UP-1) deep host queue → many pkts per OnLoopInEnd flush.
+func TestL3HostKernelDeepQueueCoalesceBurst(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	const segLen = 1310
+	payload := make([]byte, segLen-20-20-20)
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), payload)
+	if len(bulk) < 1200 {
+		t.Fatalf("bulk len=%d want MSS-ish", len(bulk))
+	}
+
+	const burst = 32
+	var hostQ [][]byte
+	for i := 0; i < burst; i++ {
+		hostQ = append(hostQ, bulk)
+	}
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		if len(hostQ) == 0 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		pkt := hostQ[0]
+		hostQ = hostQ[1:]
+		return copy(buf, pkt), nil
+	})
+
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.inPlace.Load()+w.noWakeWrites.Load() < burst && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	writes := w.inPlace.Load() + w.noWakeWrites.Load()
+	fl := w.flushes.Load()
+	if writes < burst {
+		t.Fatalf("bulk wire ops=%d want >= %d", writes, burst)
+	}
+	if fl < 1 {
+		t.Fatalf("flushes=%d want >= 1", fl)
+	}
+	ratio := float64(writes) / float64(fl)
+	if ratio < 4 {
+		t.Fatalf("pkts/flush=%.1f want >= 4 with deep queue (writes=%d flushes=%d)", ratio, writes, fl)
+	}
+	t.Logf("deep queue coalesce: writes=%d flushes=%d pkts/flush=%.1f seg=%d", writes, fl, ratio, len(bulk))
+}
+
+// TestL3HostKernelSpacedSinglePktPerRead (GATE-UP-3) depth-1 channel + 18µs spacing → coalesce batch ~5 pkts/flush, ~524 Mbit/s identity.
+func TestL3HostKernelSpacedSinglePktPerRead(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	const segLen = 1310
+	payload := make([]byte, segLen-20-20-20)
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), payload)
+
+	const burst = 20
+	const spacing = 18 * time.Microsecond
+	staged := make(chan []byte, 1)
+	go func() {
+		for i := 0; i < burst; i++ {
+			staged <- bulk
+			time.Sleep(spacing)
+		}
+		close(staged)
+	}()
+
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		select {
+		case pkt, ok := <-staged:
+			if !ok {
+				return 0, ctx.Err()
+			}
+			return copy(buf, pkt), nil
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	})
+
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(func(p []byte) (int, error) { return len(p), nil }, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.inPlace.Load()+w.noWakeWrites.Load() < burst && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	writes := w.inPlace.Load() + w.noWakeWrites.Load()
+	fl := w.flushes.Load()
+	if writes < burst {
+		t.Fatalf("writes=%d want >= %d", writes, burst)
+	}
+	if fl < 1 {
+		t.Fatalf("flushes=%d want >= 1", fl)
+	}
+	ratio := float64(writes) / float64(fl)
+	if ratio > 2.5 {
+		t.Fatalf("depth-1 @ 18µs: pkts/flush=%.1f want <=2.5 (≈1 flush/pkt → 524 Mbit/s identity)", ratio)
+	}
+	elapsed := time.Since(start).Seconds()
+	impliedMbps := float64(writes) * float64(len(bulk)) * 8 / elapsed / 1e6
+	t.Logf("depth-1 spaced: writes=%d flushes=%d pkts/flush=%.2f wall=%.3fs implied=%.1f Mbit/s (524 = 50k×1310×8)",
+		writes, fl, ratio, elapsed, impliedMbps)
 }
 
 // TestL3OverlayLoopOutDoesNotSyncRelayHostEgress verifies usque parity: LoopOut WritePacket

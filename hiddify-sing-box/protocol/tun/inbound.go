@@ -150,6 +150,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	// For gVisor+l3_overlay we forward raw IP packets through an overlay path.
 	// Keep GSO disabled in this mode so overlay egress observes fully-formed
 	// packet wire data instead of offload-oriented buffers.
+	// ReadHostEgress prefetch (PERF-3) still drains non-blocking when GSO off.
 	enableGSO := C.IsLinux &&
 		options.Stack == "gvisor" &&
 		options.L3OverlayOutbound == "" &&

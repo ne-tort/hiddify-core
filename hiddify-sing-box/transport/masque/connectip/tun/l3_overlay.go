@@ -57,6 +57,7 @@ type L3OverlayBridge struct {
 	kernel              *KernelTunDevice
 	pumpWake            cippump.WakeHooks
 	onLoopInEnd         func()
+	hostEgressPipe      *hostKernelEgressPipeline // test-only manual PERF-2 wiring (RunPump does not set)
 	outboundDrainHook   func()
 }
 
@@ -68,7 +69,7 @@ func NewL3OverlayBridge(tunWrite func([]byte) (int, error), writer PacketWriter,
 		reader:     reader,
 		nat:        nat,
 		egressCh:   make(chan []byte, l3EgressQueueDepth),
-		egressPool: cippump.NewNetBuffer(cippump.DefaultTunnelMTU),
+		egressPool: cippump.DefaultNetBuffer(),
 	}
 }
 
@@ -445,6 +446,9 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 
 func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 	hostKernel := b.hostKernelRelay()
+	b.mu.Lock()
+	pipe := b.hostEgressPipe
+	b.mu.Unlock()
 	pc := &NativePumpPacketConn{
 		Read: func(ctx context.Context, buf []byte) (int, error) {
 			b.mu.Lock()
@@ -465,12 +469,39 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 				return nil, net.ErrClosed
 			}
 			if hostKernel {
-				return writeWirePacket(writer, p)
+				if pipe != nil && hostKernelBulkEgressNoWake(p) {
+					if _, err := pipe.submit(p); err != nil {
+						return nil, err
+					}
+					return nil, nil
+				}
+			if pipe != nil {
+				pipe.beforeSync()
 			}
+			return writeHostKernelEgressWire(writer, p)
+		}
 			return writeWirePacketNoWake(writer, p)
 		},
 	}
-	if !hostKernel {
+	if hostKernel {
+		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
+			b.mu.Lock()
+			closed := b.closed
+			writer := b.writer
+			b.mu.Unlock()
+			if closed || writer == nil {
+				return false, nil, net.ErrClosed
+			}
+			if pipe != nil && hostKernelBulkEgressNoWake(p) {
+				retained, err := pipe.submit(p)
+				return retained, nil, err
+			}
+			if pipe != nil {
+				pipe.beforeSync()
+			}
+			return writeHostKernelEgressInPlace(writer, p)
+		}
+	} else {
 		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
 			b.mu.Lock()
 			closed := b.closed

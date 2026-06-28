@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
@@ -23,6 +24,7 @@ type KernelTunDevice struct {
 	nat             OverlayNAT
 	overlayPrefixes []netip.Prefix
 	onEgress        func([]byte)
+	readObs         *HostKernelReadObserver // tests/diagnostics only
 }
 
 // NewKernelTunDevice wires host tun fd read/write with overlay NAT.
@@ -45,6 +47,22 @@ func NewKernelTunDevice(
 	}
 }
 
+// AttachReadObserver wires optional read metrics (tests only; nil in prod).
+func (d *KernelTunDevice) AttachReadObserver(obs *HostKernelReadObserver) {
+	if d == nil {
+		return
+	}
+	d.readObs = obs
+}
+
+// ReadObserver returns the attached read observer, if any.
+func (d *KernelTunDevice) ReadObserver() *HostKernelReadObserver {
+	if d == nil {
+		return nil
+	}
+	return d.readObs
+}
+
 // ReadPacket implements pump.TunnelDevice (usque Device.ReadPacket).
 func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	if d == nil || d.read == nil {
@@ -56,8 +74,11 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 			return 0, context.Cause(ctx)
 		}
 		d.readMu.Lock()
+		readStart := time.Now()
 		n, err := d.read(ctx, buf)
+		readElapsed := time.Since(readStart)
 		d.readMu.Unlock()
+		d.readObs.recordRead(readElapsed.Nanoseconds(), n)
 		if err != nil {
 			return 0, err
 		}
@@ -65,8 +86,10 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 			return 0, nil
 		}
 		if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
+			d.readObs.recordSkipped()
 			continue
 		}
+		d.readObs.recordAccepted(n)
 		d.nat.SNATEgressInPlace(buf[:n])
 		if d.onEgress != nil {
 			d.onEgress(buf[:n])

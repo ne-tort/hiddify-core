@@ -8,7 +8,7 @@ import (
 )
 
 func init() {
-	connectipgo.SetOutboundPayloadReleaseHook(returnOutboundBuf, IsOutboundPoolSlice)
+	connectipgo.SetOutboundPayloadReleaseHook(releaseOutboundPayload, IsOutboundPoolSlice)
 	cipegress.SetHooks(cipegress.Hooks{
 		JoinTransport: func(err error) error {
 			return errors.Join(Errs.Transport, err)

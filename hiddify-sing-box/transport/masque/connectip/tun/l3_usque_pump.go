@@ -1,20 +1,38 @@
 package tun
 
-import cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
+import (
+	"time"
+
+	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
+)
 
 // usquePumpOptions returns MaintainTunnel-shaped pump config.
 func (b *L3OverlayBridge) usquePumpOptions(onLoopInEnd func()) cippump.TunnelOptions {
-	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{})
+	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{
+		NetBuffer: b.loopInNetBuffer(),
+	})
 	if b.hostKernelRelay() {
-		// Host-kernel: coalesce tun reads for bulk upload; small-packet flush in runLoopIn
-		// keeps ACKs timely for download (iperf -R after upload).
 		opts.LoopInUsqueImmediate = false
+		opts.LoopInCoalescePoll = 100 * time.Microsecond
 		opts.LoopOutYieldAfterWrite = true
 	}
 	if onLoopInEnd != nil && !b.hostKernelRelay() {
 		opts.OnLoopInEnd = onLoopInEnd
 	}
 	return opts
+}
+
+func (b *L3OverlayBridge) loopInNetBuffer() *cippump.NetBuffer {
+	if b == nil {
+		return cippump.DefaultNetBuffer()
+	}
+	b.mu.Lock()
+	pool := b.egressPool
+	b.mu.Unlock()
+	if pool != nil {
+		return pool
+	}
+	return cippump.DefaultNetBuffer()
 }
 
 // hostKernelRelay is true when LoopIn reads OS tun egress (prod Docker kernel TCP path).

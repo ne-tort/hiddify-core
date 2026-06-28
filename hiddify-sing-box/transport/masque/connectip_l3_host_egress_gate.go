@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,6 +72,15 @@ func (s *hostEgressEgressSession) WritePacket(pkt []byte) ([]byte, error) {
 func startConnectIPL3HostEgressHarness(t *testing.T, link packetLink) *connectIPL3PumpHarness {
 	t.Helper()
 	clientSess, serverSess := link.endpoints()
+	return startConnectIPL3HostEgressHarnessWithClient(t, clientSess, serverSess)
+}
+
+func startConnectIPL3HostEgressHarnessWithClient(t *testing.T, clientSess, serverSess IPPacketSession, flushCount ...*atomic.Int64) *connectIPL3PumpHarness {
+	t.Helper()
+	var flushes *atomic.Int64
+	if len(flushCount) > 0 {
+		flushes = flushCount[0]
+	}
 	nat := dockerL3OverlayNAT()
 	tap := &hostEgressTap{}
 
@@ -107,6 +117,13 @@ func startConnectIPL3HostEgressHarness(t *testing.T, link packetLink) *connectIP
 		t.Fatalf("host-egress netstack: %v", err)
 	}
 	bridge.SetPumpWakeHooks(cippump.WakeHooks{}, func() {
+		if flushes != nil {
+			flushes.Add(1)
+		}
+		if f, ok := clientSess.(interface{ FlushEgressTransport() }); ok {
+			f.FlushEgressTransport()
+			return
+		}
 		if f, ok := clientSess.(interface{ FlushEgressBatch() }); ok {
 			f.FlushEgressBatch()
 		}

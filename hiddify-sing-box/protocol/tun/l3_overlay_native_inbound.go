@@ -11,6 +11,27 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
+func resolveL3OverlayNativeOutboundByTag(ctx context.Context, tag string) L3OverlayNativeOutbound {
+	if tag == "" {
+		return nil
+	}
+	if epManager := service.FromContext[adapter.EndpointManager](ctx); epManager != nil {
+		if ep, ok := epManager.Get(tag); ok {
+			if native, ok := ep.(L3OverlayNativeOutbound); ok {
+				return native
+			}
+		}
+	}
+	if obManager := service.FromContext[adapter.OutboundManager](ctx); obManager != nil {
+		if ob, ok := obManager.Outbound(tag); ok {
+			if native, ok := ob.(L3OverlayNativeOutbound); ok {
+				return native
+			}
+		}
+	}
+	return nil
+}
+
 func (t *Inbound) resolveL3OverlayNativeOutbound(ob interface{}) L3OverlayNativeOutbound {
 	if native, ok := ob.(L3OverlayNativeOutbound); ok {
 		return native
@@ -19,14 +40,7 @@ func (t *Inbound) resolveL3OverlayNativeOutbound(ob interface{}) L3OverlayNative
 	if tag == "" {
 		return nil
 	}
-	if epManager := service.FromContext[adapter.EndpointManager](t.ctx); epManager != nil {
-		if ep, ok := epManager.Get(tag); ok {
-			if native, ok := ep.(L3OverlayNativeOutbound); ok {
-				return native
-			}
-		}
-	}
-	return nil
+	return resolveL3OverlayNativeOutboundByTag(t.ctx, tag)
 }
 
 func (t *Inbound) tryWireNativeConnectIPL3(
