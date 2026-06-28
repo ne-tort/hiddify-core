@@ -465,7 +465,6 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 				return nil, net.ErrClosed
 			}
 			if hostKernel {
-				// Sync flush per datagram keeps kernel TCP ACK clock alive post-upload bulk.
 				return writeWirePacket(writer, p)
 			}
 			return writeWirePacketNoWake(writer, p)

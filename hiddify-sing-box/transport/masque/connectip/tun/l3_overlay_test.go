@@ -156,6 +156,57 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	}
 }
 
+// TestL3HostKernelHybridBulkNoWakeAckSync verifies PERF-1b classification helpers (gate wiring OPEN).
+func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
+	t.Skip("PERF-1b hybrid packetConn wiring OPEN — full NoWake regresses download; needs synth gate first")
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("198.18.0.99")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	ack := makeIPv4TCPAck(tunHost, server, 40000, 5201, byte(header.TCPFlagAck))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		n := int(hostReads.Add(1))
+		if n == 1 {
+			return copy(buf, bulk), nil
+		}
+		if n == 2 {
+			return copy(buf, ack), nil
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+
+	w := &mockL3Writer{}
+	b := NewL3OverlayBridge(nil, w, &mockL3Reader{}, OverlayNAT{
+		TunHost: tunHost, WireLocal: wireLocal,
+	})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for w.wireWrites() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	if w.inPlace.Load()+w.noWakeWrites.Load() < 1 {
+		t.Fatalf("bulk path: inPlace=%d noWake=%d writes=%d wire=%d want bulk NoWake",
+			w.inPlace.Load(), w.noWakeWrites.Load(), w.writes.Load(), w.wireWrites())
+	}
+	if w.writes.Load() < 1 {
+		t.Fatalf("ACK path: sync writes=%d want >=1", w.writes.Load())
+	}
+	if w.flushes.Load() < 1 {
+		t.Fatalf("OnLoopInEnd flushes=%d want >=1", w.flushes.Load())
+	}
+}
+
 // TestL3OverlayLoopOutDoesNotSyncRelayHostEgress verifies usque parity: LoopOut WritePacket
 // does not read tun egress (LoopIn owns ReadHostEgress; sync relay deadlocks on readAccess).
 func TestL3OverlayLoopOutDoesNotSyncRelayHostEgress(t *testing.T) {
@@ -792,6 +843,7 @@ func makeIPv4TCPPayload(src, dst netip.Addr, srcPort, dstPort uint16, tcpFlags b
 	pkt[ihl+3] = byte(srcPort)
 	pkt[ihl+4] = byte(dstPort >> 8)
 	pkt[ihl+5] = byte(dstPort)
+	pkt[ihl+12] = 0x50 // data offset 5 (20 bytes)
 	pkt[ihl+13] = tcpFlags
 	copy(pkt[ihl+20:], payload)
 	return pkt
