@@ -28,7 +28,7 @@ func TestHostEgressReadAheadDequeueBeforeExpiredCtx(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 
 	bufs := [][]byte{make([]byte, 1500), make([]byte, 1500)}
-	got, err := batch.ReadBatch(context.Background(), bufs, 2)
+	got, err := batch.ReadBatch(context.Background(), bufs, 1)
 	if err != nil || got != 1 {
 		t.Fatalf("first read: got=%d err=%v", got, err)
 	}

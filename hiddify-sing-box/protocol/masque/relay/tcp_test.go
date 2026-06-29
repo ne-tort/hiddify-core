@@ -12,17 +12,6 @@ import (
 	"time"
 )
 
-func TestUseLegacyFlushRelay(t *testing.T) {
-	t.Setenv("MASQUE_RELAY_TCP_LEGACY", "")
-	if UseLegacyFlushRelay() {
-		t.Fatal("expected tunnel relay by default")
-	}
-	t.Setenv("MASQUE_RELAY_TCP_LEGACY", "1")
-	if !UseLegacyFlushRelay() {
-		t.Fatal("expected legacy when MASQUE_RELAY_TCP_LEGACY=1")
-	}
-}
-
 func TestRelayTCPTunnelDuplex(t *testing.T) {
 	t.Parallel()
 	clientConn, serverConn := net.Pipe()
@@ -39,7 +28,7 @@ func TestRelayTCPTunnelDuplex(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := io.NopCloser(bytes.NewReader(nil))
-	err := TCPTunnel(context.Background(), clientConn, body, rec, "")
+	err := TCPForward(context.Background(), clientConn, body, rec, "")
 	wg.Wait()
 	if err != nil && !errorsIsEOF(err) {
 		t.Fatalf("relay: %v", err)
@@ -65,7 +54,7 @@ func TestRelayTCPTunnelDownloadToResponse(t *testing.T) {
 	reqBody := io.NopCloser(bytes.NewReader(nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	err := TCPTunnel(ctx, clientConn, reqBody, rec, "")
+	err := TCPForward(ctx, clientConn, reqBody, rec, "")
 	if err != nil && !errorsIsEOF(err) {
 		t.Fatalf("relay: %v", err)
 	}

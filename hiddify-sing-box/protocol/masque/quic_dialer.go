@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"reflect"
 	"syscall"
@@ -257,25 +256,15 @@ func unwrapMasqueQUICUnderlyingConn(c net.Conn) net.Conn {
 	return c
 }
 
-func masqueQUICDialerTraceEnabled() bool {
-	return false
-}
-
 func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	n, err = c.Conn.Read(p)
 	if err != nil {
 		return 0, nil, err
 	}
-	if masqueQUICDialerTraceEnabled() {
-		log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
-	}
 	return n, c.remoteAddr, nil
 }
 
 func (c *connectedPacketConn) WriteTo(p []byte, _ net.Addr) (n int, err error) {
-	if masqueQUICDialerTraceEnabled() {
-		log.Printf("masque quic_dialer write_to bytes=%d remote=%v", len(p), c.remoteAddr)
-	}
 	return c.Conn.Write(p)
 }
 

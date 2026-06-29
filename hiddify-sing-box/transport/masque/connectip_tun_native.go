@@ -72,40 +72,14 @@ func ConnectIPTunNativeL3(
 			ReadHostEgress(context.Context, []byte) (int, error)
 		}); ok {
 			rawRead := ciptun.HostEgressReader(hr.ReadHostEgress)
-			const vnetHdr = false
-			const useReadAhead = true
-			hostRead := rawRead
-			var readAheadBatch ciptun.HostEgressBatchReader
-			if useReadAhead {
-				hostRead, readAheadBatch = ciptun.WrapHostEgressReadAheadBatch(ctx, rawRead)
-			}
+			hostRead, readAheadBatch := ciptun.WrapHostEgressReadAheadBatch(ctx, rawRead)
 			bridge.SetHostEgressRead(hostRead, routePrefixes)
-			var innerBatch ciptun.HostEgressBatchReader
-			nativeVNetBatch := false
-			if vnetHdr {
-				if br, ok := tunIf.(interface {
-					ReadHostEgressBatch(context.Context, [][]byte, int) (int, error)
-				}); ok {
-					innerBatch = ciptun.AdaptNativeHostEgressBatch(br.ReadHostEgressBatch)
-					nativeVNetBatch = true
-				}
-			}
+			innerBatch := readAheadBatch
 			if innerBatch == nil {
-				if readAheadBatch != nil {
-					innerBatch = readAheadBatch
-				} else {
-					innerBatch = ciptun.HostEgressReaderAsBatch(hostRead)
-				}
+				innerBatch = ciptun.HostEgressReaderAsBatch(hostRead)
 			}
-			batch := innerBatch
-			// VNetHdr native batch: second-layer read-ahead on syscall-coalesced reads.
-			useBatchReadAhead := nativeVNetBatch && useReadAhead
-			if useBatchReadAhead {
-				batch = ciptun.WrapHostEgressBatchReadAhead(ctx, innerBatch)
-			}
-			bridge.SetHostEgressBatch(batch)
-			log.Printf("connect-ip native l3: host egress wired type=%T vnet_native_batch=%v read_ahead=%v batch_read_ahead=%v",
-				tunIf, nativeVNetBatch, useReadAhead, useBatchReadAhead)
+			bridge.SetHostEgressBatch(innerBatch)
+			log.Printf("connect-ip native l3: host egress wired type=%T read_ahead=true", tunIf)
 		} else {
 			log.Printf("connect-ip native l3: host egress NOT wired type=%T", tunIf)
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"runtime"
 	"sync"
-	"time"
 
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
@@ -60,13 +59,6 @@ func cloneHostEgressPkt(src []byte) []byte {
 	dst := acquireHostEgressPkt(len(src))
 	copy(dst, src)
 	return dst
-}
-
-// hostEgressBatchMinWait bounds wait for min-batch dequeue (~kernel MSS pacing @ 50 kpps).
-const hostEgressBatchMinWait = 25 * time.Microsecond
-
-func hostEgressBatchMinPackets() int {
-	return 1
 }
 
 // hostEgressBatchReadAhead overlaps blocking host reads with LoopIn write+flush (upload DoD path).
@@ -194,44 +186,15 @@ func (r *hostEgressBatchReadAhead) ReadBatch(ctx context.Context, bufs [][]byte,
 	if maxN < 1 || len(bufs) == 0 {
 		return 0, nil
 	}
-	minBatch := hostEgressBatchMinPackets()
-	if minBatch > maxN {
-		minBatch = maxN
-	}
-	var deadline time.Time
-	if minBatch > 1 {
-		deadline = time.Now().Add(hostEgressBatchMinWait)
-	}
 	for {
 		got := r.tryDequeue(bufs, maxN)
-		if got >= minBatch {
+		if got > 0 {
 			return got, nil
-		}
-		if got > 0 && minBatch <= 1 {
-			return got, nil
-		}
-		if got > 0 && !deadline.IsZero() && time.Now().After(deadline) {
-			return got, nil
-		}
-		var timeout <-chan time.Time
-		if got > 0 && !deadline.IsZero() {
-			if d := time.Until(deadline); d > 0 {
-				timeout = time.After(d)
-			} else {
-				return got, nil
-			}
 		}
 		select {
 		case <-ctx.Done():
-			if got > 0 {
-				return got, nil
-			}
 			return 0, context.Cause(ctx)
 		case <-r.ready:
-		case <-timeout:
-			if got > 0 {
-				return got, nil
-			}
 		}
 	}
 }

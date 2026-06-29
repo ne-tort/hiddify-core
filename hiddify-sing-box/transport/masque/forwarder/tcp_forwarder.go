@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,9 +45,6 @@ type packetForwarder struct {
 func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneConn, o ConnectIPTCPForwarderOptions) error {
 	if conn == nil {
 		return errors.New("masque: connect-ip forwarder: nil conn")
-	}
-	if mcip.ConnectIPDebugEnabled() {
-		log.Printf("masque connect_ip forwarder: started")
 	}
 	f := &packetForwarder{
 		conn:            conn,
@@ -153,9 +149,6 @@ func (f *packetForwarder) dispatchReadPacket(ctx context.Context, conn PacketPla
 }
 
 func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
-	if mcip.ConnectIPDebugEnabled() {
-		log.Printf("masque connect_ip forwarder: read n=%d first_byte=0x%02x", len(pkt), pkt[0])
-	}
 	if len(pkt) == 0 {
 		return
 	}
@@ -189,9 +182,6 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 	tc := header.TCP(pkt[ihl:])
 	doff := int(pkt[ihl+12]>>4) * 4
 	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: drop invalid tcp header doff=%d ihl=%d len=%d", doff, ihl, len(pkt))
-		}
 		return
 	}
 	tcpLen := uint16(len(pkt) - ihl)
@@ -210,15 +200,7 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 		repairIPv4TCPChecksum(pkt, ihl)
 		tc = header.TCP(pkt[ihl:])
 		if !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
-			if mcip.ConnectIPDebugEnabled() {
-				log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x len=%d %s:%d -> %s:%d",
-					csum, len(pkt), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
-			}
 			return
-		}
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: repaired tcp checksum was=0x%04x len=%d %s:%d -> %s:%d",
-				csum, len(pkt), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
 		}
 	}
 	flags := tc.Flags()
@@ -226,19 +208,12 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 		f.handleSyn(ctx, pkt, tc, flow)
 		return
 	}
-	if mcip.ConnectIPDebugEnabled() && flags&header.TCPFlagSyn != 0 {
-		log.Printf("masque connect_ip forwarder: skip non-syn flags=0x%02x", flags)
-	}
 	if flags&header.TCPFlagRst != 0 {
 		f.dropFlow(flow)
 		return
 	}
 	s := f.getSession(flow)
 	if s == nil {
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: no session flags=0x%x %s:%d -> %s:%d",
-				uint8(flags), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
-		}
 		return
 	}
 	s.handleSegment(ctx, pkt, tc, ihl, doff)

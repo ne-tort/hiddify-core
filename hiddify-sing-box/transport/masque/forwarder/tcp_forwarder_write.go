@@ -3,7 +3,6 @@ package forwarder
 import (
 	"context"
 	"errors"
-	"log"
 	"net"
 	"net/netip"
 	"time"
@@ -39,9 +38,6 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 			}
 			return
 		}
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: write loop err=%v", err)
-		}
 	}
 	returnPacket(pkt)
 }
@@ -49,9 +45,6 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	f.o.DownloadQueueMetrics.noteDequeued()
 	err := f.sendPacketNow(pkt)
-	if mcip.ConnectIPDebugEnabled() {
-		log.Printf("masque connect_ip forwarder: download send len=%d err=%v", len(pkt), err)
-	}
 	if err != nil {
 		if mcip.IsBenignEgressTeardownError(err) {
 			returnPacket(pkt)
@@ -64,9 +57,6 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 			case f.downloadCh <- pkt:
 			}
 			return
-		}
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: download write err=%v", err)
 		}
 	}
 	returnPacket(pkt)

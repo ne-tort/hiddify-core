@@ -2,10 +2,8 @@ package forwarder
 
 import (
 	"context"
-	"log"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
-	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 func (f *packetForwarder) shutdownSessions() {
@@ -86,9 +84,6 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 	}
 
 	dialAddr := DialAddr(dstIP, tc.DestinationPort())
-	if mcip.ConnectIPDebugEnabled() {
-		log.Printf("masque connect_ip forwarder: syn %s:%d -> dial %s", flow.srcAddr, flow.srcPort, dialAddr)
-	}
 
 	iss, err := randomISN()
 	if err != nil {
@@ -128,17 +123,11 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 
 	remote, dialErr := f.o.Dialer.DialContext(ctx, "tcp", dialAddr)
 	if dialErr != nil {
-		if mcip.ConnectIPDebugEnabled() {
-			log.Printf("masque connect_ip forwarder: syn dial %s err=%v", dialAddr, dialErr)
-		}
 		s.close()
 		_ = f.sendTCPRST(flow, irs+1)
 		return
 	}
 	tuneRemote(remote)
-	if mcip.ConnectIPDebugEnabled() {
-		log.Printf("masque connect_ip forwarder: syn dial ok %s", dialAddr)
-	}
 
 	s.bindRemote(remote)
 	// S2C pump starts on first C2S payload (handleSegment), not on dial — iperf -R bulk before params races params.

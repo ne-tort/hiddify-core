@@ -14,9 +14,6 @@ var tcpGoSource string
 //go:embed tune.go
 var tuneGoSource string
 
-//go:embed legacy_flush.go
-var legacyFlushGoSource string
-
 func requireContractSubstrings(t *testing.T, haystack, label string, subs ...string) {
 	t.Helper()
 	for _, sub := range subs {
@@ -55,10 +52,7 @@ func TestRelayTCPForwardWireContract(t *testing.T) {
 
 	requireContractSubstrings(t, tcpGoSource, "tcp.go",
 		`func TCPForward`,
-		`func UseLegacyFlushRelay`,
-		`MASQUE_RELAY_TCP_LEGACY`,
-		`return TCPBidirectional`,
-		`return TCPTunnel`,
+		`RelayTCPTunnel`,
 	)
 	requireContractSubstrings(t, tuneGoSource, "tune.go",
 		`func TuneTCPOutbound`,
@@ -66,17 +60,11 @@ func TestRelayTCPForwardWireContract(t *testing.T) {
 		`SetReadBuffer(TCPKernelBuf)`,
 		`SetWriteBuffer(TCPKernelBuf)`,
 	)
-	requireContractSubstrings(t, legacyFlushGoSource, "legacy_flush.go",
-		`func TCPBidirectional`,
-		`MASQUE_RELAY_TCP_LEGACY=1`,
-	)
 
 	requireContractSubstrings(t, contracts, "CLIENT-SERVER-CONTRACTS CONNECT-stream relay",
 		"## CONNECT-stream (L2)",
 		"`relay.TCPForward`",
 		"`relay.TuneTCPOutbound`",
-		"`MASQUE_RELAY_TCP_LEGACY=1`",
-		"`relay.TCPBidirectional`",
 		"TestRelayTCPForwardWireContract",
 	)
 }
