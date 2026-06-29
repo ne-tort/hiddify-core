@@ -62,6 +62,28 @@ func (d *KernelTunDevice) ReadObserver() *HostKernelReadObserver {
 	return d.readObs
 }
 
+func (d *KernelTunDevice) readLocked(ctx context.Context, buf []byte) (int, error) {
+	if d.readObs == nil {
+		return d.read(ctx, buf)
+	}
+	readStart := time.Now()
+	n, err := d.read(ctx, buf)
+	d.readObs.recordRead(time.Since(readStart).Nanoseconds(), n)
+	return n, err
+}
+
+func (d *KernelTunDevice) readBatchLocked(ctx context.Context, bufs [][]byte, maxN int) (int, error) {
+	if d.readObs == nil {
+		return d.readBatch.ReadBatch(ctx, bufs, maxN)
+	}
+	readStart := time.Now()
+	got, err := d.readBatch.ReadBatch(ctx, bufs, maxN)
+	if got > 0 {
+		d.readObs.recordRead(time.Since(readStart).Nanoseconds(), got)
+	}
+	return got, err
+}
+
 // ReadPacket implements pump.TunnelDevice (usque Device.ReadPacket).
 func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	if d == nil || d.read == nil {
@@ -70,11 +92,8 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 	tunHost := d.nat.TunHost
 	for {
 		d.readMu.Lock()
-		readStart := time.Now()
-		n, err := d.read(ctx, buf)
-		readElapsed := time.Since(readStart)
+		n, err := d.readLocked(ctx, buf)
 		d.readMu.Unlock()
-		d.readObs.recordRead(readElapsed.Nanoseconds(), n)
 		if err != nil {
 			return 0, err
 		}
@@ -103,7 +122,7 @@ func (d *KernelTunDevice) readOneAccepted(ctx context.Context, buf []byte) (int,
 	tunHost := d.nat.TunHost
 	for {
 		d.readMu.Lock()
-		n, err := d.read(ctx, buf)
+		n, err := d.readLocked(ctx, buf)
 		d.readMu.Unlock()
 		if err != nil {
 			return 0, err
@@ -174,9 +193,7 @@ func (d *KernelTunDevice) ReadEgressBatch(ctx context.Context, slots []cippump.E
 		if accepted > 0 {
 			readCtx = cippump.LoopInExpiredDrainCtx()
 		}
-		readStart := time.Now()
 		n, err := d.readOneAccepted(readCtx, slots[accepted].Buf)
-		d.readObs.recordRead(time.Since(readStart).Nanoseconds(), n)
 		if err != nil {
 			if accepted > 0 {
 				return accepted, nil
@@ -208,13 +225,9 @@ func (d *KernelTunDevice) readEgressBatchHost(ctx context.Context, slots []cippu
 		if accepted > 0 {
 			readCtx = cippump.LoopInExpiredDrainCtx()
 		}
-		readStart := time.Now()
 		d.readMu.Lock()
-		got, err := d.readBatch.ReadBatch(readCtx, bufs, remain)
+		got, err := d.readBatchLocked(readCtx, bufs, remain)
 		d.readMu.Unlock()
-		if got > 0 {
-			d.readObs.recordRead(time.Since(readStart).Nanoseconds(), got)
-		}
 		if err != nil {
 			if accepted > 0 {
 				return accepted, nil
