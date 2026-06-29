@@ -178,30 +178,9 @@ func InttestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 
 
 
-// TestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi compares prod asymmetric legs vs legacy bidi dial (UDP-AUDIT-11).
+// InttestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi compares prod asymmetric legs vs legacy bidi dial (UDP-AUDIT-11).
 func InttestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi(t *testing.T) {
-	dur := connectUDPSynthProdBenchDuration
-	benchEcho := func(asymmetric bool) float64 {
-		t.Helper()
-		if asymmetric {
-			t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "1")
-		} else {
-			t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "0")
-		}
-		_, mbps, err := benchConnectUDPProdProfileH2Download(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
-		if err != nil {
-			t.Fatalf("asymmetric=%v echo: %v", asymmetric, err)
-		}
-		return mbps
-	}
-	asymMbps := benchEcho(true)
-	bidiMbps := benchEcho(false)
-	ratio := asymMbps / bidiMbps
-	t.Logf("LOCALIZE h2 echo asymmetric=%.1f bidi=%.1f ratio=%.2f (prod default asymmetric; want ratio>1 when bidi capped)",
-		asymMbps, bidiMbps, ratio)
-	if bidiMbps >= 50 && ratio < 1.05 {
-		t.Logf("OPEN: asymmetric echo did not beat bidi by >5%% — shared TCP FC may still cap both legs")
-	}
+	t.Skip("HP-2d: non-asymmetric H2 CONNECT-UDP dial CUT — prod is asymmetric-only")
 }
 
 

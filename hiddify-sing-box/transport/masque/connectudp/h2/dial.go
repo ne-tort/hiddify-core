@@ -42,19 +42,7 @@ func DialH2Overlay(ctx context.Context, cfg H2OverlayDialConfig, template *urite
 	if cfg.Hook != nil {
 		return cfg.Hook(ctx, template, target)
 	}
-	policy := ConnectUDPDialPolicyFromEnv()
-	if policy.AsymmetricDuplex {
-		uploads := policy.UploadStreams
-		if uploads < 1 {
-			uploads = 1
-		}
-		return dialH2OverlayAsymmetric(ctx, cfg, template, target, uploads)
-	}
-	streams := policy.UploadStreams
-	if streams <= 1 {
-		return dialH2OverlaySingle(ctx, cfg, template, target, streamRoleBidi, "")
-	}
-	return dialH2OverlaySharded(ctx, cfg, template, target, streams)
+	return dialH2OverlayAsymmetric(ctx, cfg, template, target, 1)
 }
 
 func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, uploadCount int) (net.PacketConn, error) {
@@ -119,54 +107,6 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 		}
 	}
 	return NewAsymmetricPacketConn(download, uploads, localAddr, remoteAddr, onClose), nil
-}
-
-func dialH2OverlaySharded(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, streams int) (net.PacketConn, error) {
-	if cfg.NewTransport == nil {
-		return dialH2OverlaySingle(ctx, cfg, template, target, streamRoleBidi, "")
-	}
-	conns := make([]net.PacketConn, 0, streams)
-	var localAddr, remoteAddr net.Addr
-	var transports []*http2.Transport
-	for i := 0; i < streams; i++ {
-		streamCfg := cfg
-		streamCfg.EnsureTransport = func(ctx context.Context) (*http2.Transport, error) {
-			select {
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
-			default:
-			}
-			tr, err := cfg.NewTransport()
-			if err != nil {
-				return nil, err
-			}
-			transports = append(transports, tr)
-			return tr, nil
-		}
-		pc, err := dialH2OverlaySingle(ctx, streamCfg, template, target, streamRoleBidi, "")
-		if err != nil {
-			for _, c := range conns {
-				_ = c.Close()
-			}
-			for _, tr := range transports {
-				CloseClientTransport(tr)
-			}
-			return nil, err
-		}
-		if i == 0 {
-			localAddr = pc.LocalAddr()
-			if ra, ok := pc.(interface{ RemoteAddr() net.Addr }); ok {
-				remoteAddr = ra.RemoteAddr()
-			}
-		}
-		conns = append(conns, pc)
-	}
-	onClose := func() {
-		for _, tr := range transports {
-			CloseClientTransport(tr)
-		}
-	}
-	return NewShardedPacketConn(conns, localAddr, remoteAddr, onClose), nil
 }
 
 func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {

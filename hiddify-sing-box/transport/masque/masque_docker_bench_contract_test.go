@@ -717,7 +717,7 @@ func TestMasqueDockerBenchConnectUDPPipeUploadContract(t *testing.T) {
 	tunnelGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "tunnel.go"))
 	requireSubstrings(t, tunnelGo, "connect-stream prod nil body",
 		"nil Body",
-		"usePipe is ignored",
+		"tunneled upload on the bidi stream",
 	)
 	requireSubstrings(t, matrixDoc, "connect-udp pipe_upload",
 		"`connect-udp-h3`",

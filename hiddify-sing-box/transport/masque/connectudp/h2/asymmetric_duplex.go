@@ -1,10 +1,5 @@
 package h2
 
-// AsymmetricDuplexConfigured enables split download-primary + upload-pool CONNECT-UDP legs (prod: on).
-func AsymmetricDuplexConfigured() bool {
-	return ConnectUDPDialPolicyFromEnv().AsymmetricDuplex
-}
-
 type streamRole uint8
 
 const (

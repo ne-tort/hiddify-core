@@ -57,48 +57,6 @@ func newSlowUploadPacketConn() *slowUploadPacketConn {
 	return &slowUploadPacketConn{unblock: make(chan struct{})}
 }
 
-func TestShardedPacketConnCloseUnblocksBlockedWriteTo(t *testing.T) {
-	slowA := newSlowUploadPacketConn()
-	slowB := newSlowUploadPacketConn()
-	c := NewShardedPacketConn([]net.PacketConn{slowA, slowB}, nil, nil, nil)
-
-	payload := bytes.Repeat([]byte{'x'}, 512)
-	writeErr := make(chan error, 1)
-	go func() {
-		// Fill upload queue then block on send (slow worker holds slot).
-		for i := 0; i < 520; i++ {
-			_, err := c.WriteTo(payload, nil)
-			if err != nil {
-				writeErr <- err
-				return
-			}
-		}
-		writeErr <- nil
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	closeDone := make(chan struct{})
-	go func() {
-		_ = c.Close()
-		close(closeDone)
-	}()
-
-	select {
-	case <-closeDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("ShardedPacketConn.Close blocked >2s (selector interrupt contract)")
-	}
-
-	select {
-	case err := <-writeErr:
-		if err != nil && err != net.ErrClosed {
-			t.Fatalf("WriteTo after close: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("WriteTo did not unblock after Close")
-	}
-}
-
 func TestPacketConnCloseDuringBlockedUploadWrite(t *testing.T) {
 	pr, pw := io.Pipe()
 	t.Cleanup(func() {

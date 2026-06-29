@@ -10,6 +10,19 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/connectudp/split"
 )
 
+type uploadJob struct {
+	payload []byte
+	addr    net.Addr
+	sync    bool
+	pooled  bool
+	done    chan uploadWriteResult
+}
+
+type uploadWriteResult struct {
+	n   int
+	err error
+}
+
 // AsymmetricPacketConn splits C2S (upload pool) and S2C (download-primary) across CONNECT-UDP legs.
 type AsymmetricPacketConn struct {
 	download  net.PacketConn
@@ -17,7 +30,7 @@ type AsymmetricPacketConn struct {
 	localAddr net.Addr
 	remoteAddr net.Addr
 
-	uploadCh    chan shardedUploadJob
+	uploadCh    chan uploadJob
 	uploadSlots chan struct{} // bounds async in-flight vs uploadPipe backpressure
 	uploadWG    sync.WaitGroup
 	inFlight    sync.WaitGroup
@@ -61,7 +74,7 @@ func NewAsymmetricPacketConn(download net.PacketConn, uploads []net.PacketConn, 
 		localAddr:   localAddr,
 		remoteAddr:  remoteAddr,
 		onClose:     onClose,
-		uploadCh:    make(chan shardedUploadJob, uploadChCap),
+		uploadCh:    make(chan uploadJob, uploadChCap),
 		uploadSlots: make(chan struct{}, len(uploads)),
 		uploadClose: make(chan struct{}),
 	}
@@ -81,7 +94,7 @@ func (c *AsymmetricPacketConn) uploadWorker(conn net.PacketConn) {
 			releaseUploadPayload(job.payload)
 		}
 		if job.sync {
-			job.done <- shardedWriteResult{n: n, err: err}
+			job.done <- uploadWriteResult{n: n, err: err}
 			continue
 		}
 		<-c.uploadSlots
@@ -137,7 +150,7 @@ func (c *AsymmetricPacketConn) Close() error {
 	return nil
 }
 
-func (c *AsymmetricPacketConn) abortUploadJob(job shardedUploadJob) {
+func (c *AsymmetricPacketConn) abortUploadJob(job uploadJob) {
 	if job.pooled {
 		releaseUploadPayload(job.payload)
 	}
@@ -147,7 +160,7 @@ func (c *AsymmetricPacketConn) abortUploadJob(job shardedUploadJob) {
 	}
 }
 
-func (c *AsymmetricPacketConn) sendUploadJob(job shardedUploadJob) error {
+func (c *AsymmetricPacketConn) sendUploadJob(job uploadJob) error {
 	select {
 	case c.uploadCh <- job:
 		return nil
@@ -233,9 +246,9 @@ func (c *AsymmetricPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	}
 	payload := borrowUploadPayload(len(p))
 	copy(payload, p)
-	done := make(chan shardedWriteResult, 1)
+	done := make(chan uploadWriteResult, 1)
 	syncWrite := c.writesBeforeRead.Add(1) <= 4
-	job := shardedUploadJob{payload: payload, addr: addr, sync: syncWrite, pooled: true, done: done}
+	job := uploadJob{payload: payload, addr: addr, sync: syncWrite, pooled: true, done: done}
 	if !syncWrite {
 		c.inFlight.Add(1)
 		c.uploadSlots <- struct{}{}
