@@ -3,7 +3,6 @@ package stream
 import (
 	"context"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -15,11 +14,9 @@ func TestH3TunnelFromResponseSuccess(t *testing.T) {
 	conn, err := H3TunnelFromResponse(
 		context.Background(),
 		&http.Response{StatusCode: http.StatusOK},
-		nil,
 		"example.com",
 		443,
-		false,
-		func(context.Context, *http.Response, io.WriteCloser, string, uint16, bool) (net.Conn, error) {
+		func(context.Context, *http.Response, string, uint16) (net.Conn, error) {
 			return want, nil
 		},
 	)
@@ -37,11 +34,9 @@ func TestH3TunnelFromResponsePropagatesError(t *testing.T) {
 	_, err := H3TunnelFromResponse(
 		context.Background(),
 		&http.Response{StatusCode: http.StatusOK},
-		nil,
 		"example.com",
 		8080,
-		true,
-		func(context.Context, *http.Response, io.WriteCloser, string, uint16, bool) (net.Conn, error) {
+		func(context.Context, *http.Response, string, uint16) (net.Conn, error) {
 			return nil, sentinel
 		},
 	)

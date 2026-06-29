@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -46,17 +45,16 @@ func NewH3Hooks(w H3Wire) strm.DialH3Hooks {
 	}
 	return strm.DialH3Hooks{
 		NewRequestContext: newReqCtx,
-		BuildRequest: func(ctx context.Context, url, serverHost string, usePipe bool) (*http.Request, *io.PipeReader, io.WriteCloser, error) {
-			return h3.ConnectRequest(ctx, url, serverHost, false, func(h http.Header) {
+		BuildRequest: func(ctx context.Context, url, serverHost string) (*http.Request, error) {
+			return h3.ConnectRequest(ctx, url, serverHost, func(h http.Header) {
 				if w.SetAuth != nil {
 					w.SetAuth(h)
 				}
 			})
 		},
-		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload io.WriteCloser, targetHost string, targetPort uint16) (net.Conn, error) {
-			return strm.H3TunnelFromResponse(ctx, resp, upload, targetHost, targetPort, false, h3.ConnectTunnelFromResponse)
+		TunnelFromResponse: func(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error) {
+			return strm.H3TunnelFromResponse(ctx, resp, targetHost, targetPort, h3.ConnectTunnelFromResponse)
 		},
-		UsePipeUpload: func() bool { return false },
 		RequestURL:    w.RequestURL,
 		ClassifyError: w.ClassifyError,
 		AuthFailed:    w.AuthFailed,

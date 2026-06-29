@@ -18,9 +18,9 @@ func TestTunnelConnFromConnectResponseRequiresHTTPStreamer(t *testing.T) {
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(bytes.NewReader(nil)),
 	}
-	_, err := tunnelConnFromConnectResponse(t.Context(), resp, nil, "127.0.0.1", 5201)
-	if !errors.Is(err, errHTTPStreamerMissing) {
-		t.Fatalf("expected errHTTPStreamerMissing, got %v", err)
+	_, err := tunnelConnFromConnectResponse(t.Context(), resp, "127.0.0.1", 5201)
+	if !errors.Is(err, ErrHTTPStreamerMissing) {
+		t.Fatalf("expected ErrHTTPStreamerMissing, got %v", err)
 	}
 }
 

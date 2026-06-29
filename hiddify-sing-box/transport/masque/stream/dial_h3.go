@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -33,13 +32,12 @@ type DialH3Host interface {
 
 // DialH3Hooks supplies masque-layer CONNECT-stream H3 dependencies (wired from transport/masque).
 type DialH3Hooks struct {
-	NewRequestContext func(parent context.Context) (ctx context.Context, stop func(success bool))
-	BuildRequest      func(ctx context.Context, url, serverHost string, usePipe bool) (*http.Request, *io.PipeReader, io.WriteCloser, error)
-	TunnelFromResponse func(ctx context.Context, resp *http.Response, upload io.WriteCloser, targetHost string, targetPort uint16) (net.Conn, error)
-	UsePipeUpload     func() bool
-	RequestURL        func(u *url.URL) string
-	ClassifyError     func(err error) string
-	AuthFailed        error
+	NewRequestContext  func(parent context.Context) (ctx context.Context, stop func(success bool))
+	BuildRequest       func(ctx context.Context, url, serverHost string) (*http.Request, error)
+	TunnelFromResponse func(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error)
+	RequestURL         func(u *url.URL) string
+	ClassifyError      func(err error) string
+	AuthFailed         error
 }
 
 // DialHTTP3ConnectStream performs one HTTP/3 CONNECT-stream dial with retry on transport faults.
@@ -53,10 +51,10 @@ func DialHTTP3ConnectStream(
 	targetPort uint16,
 	tcpHTTP *http3.Transport,
 ) (net.Conn, error) {
-	return DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, hooks.UsePipeUpload(), "")
+	return DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, "")
 }
 
-// DialHTTP3ConnectStreamLeg dials one CONNECT-stream leg with an explicit pipe/bidi choice (P2 dual dial).
+// DialHTTP3ConnectStreamLeg dials one CONNECT-stream leg (P2 dual dial).
 func DialHTTP3ConnectStreamLeg(
 	ctx context.Context,
 	hooks DialH3Hooks,
@@ -66,7 +64,6 @@ func DialHTTP3ConnectStreamLeg(
 	targetHost string,
 	targetPort uint16,
 	tcpHTTP *http3.Transport,
-	usePipe bool,
 	legLabel string,
 ) (net.Conn, error) {
 	serverHost := tcpURL.Host
@@ -101,25 +98,16 @@ func DialHTTP3ConnectStreamLeg(
 		TraceTCPf("masque tcp connect_stream request host=%s port=%d attempt=%d%s", targetHost, targetPort, attempt+1, dialH3LegLogSuffix(legLabel))
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
 		legCtx := ContextWithConnectStreamLeg(streamCtx, legLabel)
-		req, pr, pw, reqErr := hooks.BuildRequest(legCtx, hooks.RequestURL(tcpURL), serverHost, usePipe)
+		req, reqErr := hooks.BuildRequest(legCtx, hooks.RequestURL(tcpURL), serverHost)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, reqErr)
-		}
-		if pr != nil {
-			req.Body = pr
 		}
 		roundTripper := host.RoundTripper(tcpHTTP)
 		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
-			if pr != nil {
-				_ = pr.Close()
-			}
-			if pw != nil {
-				_ = pw.Close()
-			}
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
 				TraceTCPf("masque tcp connect_stream cancelled host=%s port=%d attempt=%d error_class=%s err=%v",
 					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
@@ -143,12 +131,6 @@ func DialHTTP3ConnectStreamLeg(
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
-			if pr != nil {
-				_ = pr.Close()
-			}
-			if pw != nil {
-				_ = pw.Close()
-			}
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				TraceTCPf("masque tcp connect_stream denied host=%s port=%d status=%d error_class=%s",
@@ -161,23 +143,14 @@ func DialHTTP3ConnectStreamLeg(
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
 			stopReqCtxRelay(false)
-			if pr != nil {
-				_ = pr.Close()
-			}
-			if pw != nil {
-				_ = pw.Close()
-			}
 			_ = resp.Body.Close()
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
-		TraceTCPf("masque tcp connect_stream success host=%s port=%d status=%d pipe_upload=%t%s",
-			targetHost, targetPort, resp.StatusCode, usePipe, dialH3LegLogSuffix(legLabel))
+		TraceTCPf("masque tcp connect_stream success host=%s port=%d status=%d%s",
+			targetHost, targetPort, resp.StatusCode, dialH3LegLogSuffix(legLabel))
 		stopReqCtxRelay(true)
-		conn, err := hooks.TunnelFromResponse(legCtx, resp, pw, targetHost, targetPort)
+		conn, err := hooks.TunnelFromResponse(legCtx, resp, targetHost, targetPort)
 		if err != nil {
-			if pw != nil {
-				_ = pw.Close()
-			}
 			_ = resp.Body.Close()
 			return nil, err
 		}

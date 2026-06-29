@@ -39,17 +39,16 @@ func testStreamDialH3Hooks() strm.DialH3Hooks {
 		NewRequestContext: func(parent context.Context) (context.Context, func(bool)) {
 			return parent, func(bool) {}
 		},
-		BuildRequest: func(ctx context.Context, rawURL, serverHost string, usePipe bool) (*http.Request, *io.PipeReader, io.WriteCloser, error) {
+		BuildRequest: func(ctx context.Context, rawURL, serverHost string) (*http.Request, error) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodConnect, rawURL, nil)
 			if err != nil {
-				return nil, nil, nil, err
+				return nil, err
 			}
-			return req, nil, nil, nil
+			return req, nil
 		},
-		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload io.WriteCloser, targetHost string, targetPort uint16) (net.Conn, error) {
+		TunnelFromResponse: func(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error) {
 			return nil, session.ErrTCPConnectStreamFailed
 		},
-		UsePipeUpload: func() bool { return false },
 		RequestURL:    func(u *url.URL) string { return u.String() },
 		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },
 		AuthFailed:    session.ErrAuthFailed,

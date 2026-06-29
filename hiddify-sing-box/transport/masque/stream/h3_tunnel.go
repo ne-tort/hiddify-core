@@ -2,7 +2,6 @@ package stream
 
 import (
 	"context"
-	"io"
 	"net"
 	"net/http"
 )
@@ -12,16 +11,14 @@ import (
 func H3TunnelFromResponse(
 	ctx context.Context,
 	resp *http.Response,
-	upload io.WriteCloser,
 	targetHost string,
 	targetPort uint16,
-	allowPipe bool,
-	tunnel func(context.Context, *http.Response, io.WriteCloser, string, uint16, bool) (net.Conn, error),
+	tunnel func(context.Context, *http.Response, string, uint16) (net.Conn, error),
 ) (net.Conn, error) {
-	conn, err := tunnel(ctx, resp, upload, targetHost, targetPort, allowPipe)
+	conn, err := tunnel(ctx, resp, targetHost, targetPort)
 	if err != nil {
-		TraceTCPf("masque tcp connect_stream h3 tunnel err host=%s port=%d allow_pipe=%t err=%v",
-			targetHost, targetPort, allowPipe, err)
+		TraceTCPf("masque tcp connect_stream h3 tunnel err host=%s port=%d err=%v",
+			targetHost, targetPort, err)
 		return nil, err
 	}
 	return conn, nil
