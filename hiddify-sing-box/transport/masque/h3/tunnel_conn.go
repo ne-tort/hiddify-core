@@ -134,7 +134,7 @@ func (c *TunnelConn) applyH3ReadDeadlineLocked() {
 }
 
 func (c *TunnelConn) maybeStartDownloadDrain() {
-	if !H3BidiDownloadDrainEnabled() || c == nil || c.h3 == nil {
+	if c == nil || c.h3 == nil {
 		return
 	}
 	c.drainOnce.Do(func() {

@@ -197,7 +197,7 @@ func (c *bidiTunnelConn) maybeStartDownloadDrainOnUpload() {
 }
 
 func (c *bidiTunnelConn) maybeStartDownloadDrain() {
-	if !H2BidiDownloadDrainEnabled() || c.paths.Download == nil {
+	if c.paths.Download == nil {
 		return
 	}
 	if atomic.LoadInt32(&c.duplexCopy) > 0 ||

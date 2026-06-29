@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
@@ -31,12 +32,6 @@ func TestH3ConnectRequestOmitsLegHeader(t *testing.T) {
 	}
 	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != "" {
 		t.Fatalf("leg header=%q want empty (single bidi prod)", got)
-	}
-}
-
-func TestConnectUsePipeUploadAlwaysFalse(t *testing.T) {
-	if ConnectUsePipeUpload() {
-		t.Fatal("prod always uses nil Body (Invisv)")
 	}
 }
 
@@ -79,6 +74,18 @@ func TestTunnelPolicySnapshot(t *testing.T) {
 		t.Fatalf("unexpected single snapshot: %+v", s)
 	}
 }
+
+type testH3ConnectStream struct{}
+
+func (*testH3ConnectStream) Read([]byte) (int, error)  { return 0, io.EOF }
+func (*testH3ConnectStream) Write([]byte) (int, error) { return 0, nil }
+func (*testH3ConnectStream) Close() error              { return nil }
+func (*testH3ConnectStream) SetReadDeadline(time.Time) error {
+	return nil
+}
+func (*testH3ConnectStream) SetWriteDeadline(time.Time) error { return nil }
+func (*testH3ConnectStream) CancelRead(quic.StreamErrorCode)  {}
+func (*testH3ConnectStream) QUICStream() *quic.Stream           { return nil }
 
 type emptyReader struct{}
 

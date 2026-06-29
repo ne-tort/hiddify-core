@@ -52,17 +52,6 @@ func (s *testH3BidiStream) SetWriteDeadline(time.Time) error { return nil }
 func (s *testH3BidiStream) CancelRead(quic.StreamErrorCode)  {}
 func (s *testH3BidiStream) QUICStream() *quic.Stream         { return nil }
 
-func TestH3BidiDownloadDrainEnabledEnv(t *testing.T) {
-	t.Setenv(envH3BidiDownloadDrain, "0")
-	if H3BidiDownloadDrainEnabled() {
-		t.Fatal("MASQUE_H3_BIDI_DOWNLOAD_DRAIN=0 must disable")
-	}
-	t.Setenv(envH3BidiDownloadDrain, "")
-	if !H3BidiDownloadDrainEnabled() {
-		t.Fatal("default must enable H3 bidi download drain")
-	}
-}
-
 // TestH3TunnelConnWriteUploadDrainsPendingDownload verifies prod SOCKS upload (Write on
 // TunnelConn) still discards pending response DATA when the peer sends an iperf banner
 // (docker connect-stream-h3 upload hang shape; parity stream H2 bidi drain).
@@ -113,38 +102,5 @@ func TestH3TunnelConnWriteUploadDrainsPendingDownload(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("H3 TunnelConn.Write upload blocked >2s without download drain")
-	}
-}
-
-func TestH3TunnelConnWriteUploadDrainDisabledStalls(t *testing.T) {
-	t.Setenv(envH3BidiDownloadDrain, "0")
-	uploadR, uploadW := io.Pipe()
-	t.Cleanup(func() {
-		_ = uploadR.Close()
-		_ = uploadW.Close()
-	})
-
-	stream := &testH3BidiStream{uploadW: uploadW}
-	conn := NewTunnelConn(TunnelConnParams{
-		H3Stream: stream,
-		Local:    &net.TCPAddr{},
-		Remote:   &net.TCPAddr{Port: 5201},
-	})
-
-	stream.pushDownload([]byte("iperf3\r\n"))
-
-	uploadDone := make(chan error, 1)
-	go func() {
-		_, err := conn.Write(make([]byte, 4096))
-		uploadDone <- err
-	}()
-
-	select {
-	case err := <-uploadDone:
-		if err == nil {
-			t.Fatal("expected upload stall or error with drain disabled and unread banner")
-		}
-	case <-time.After(300 * time.Millisecond):
-		// stall without drain is acceptable
 	}
 }

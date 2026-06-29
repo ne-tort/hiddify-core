@@ -31,7 +31,7 @@ func TestArchREFSRCSBClientAudit(t *testing.T) {
 			t.Fatalf("incomplete non-RFC row: %+v", row)
 		}
 	}
-	if h3.ConnectUsePipeUpload() {
+	if h3.CurrentConnectStreamMode() != h3.ConnectStreamModeSingleBidi {
 		t.Fatal("REF-SRC-SB-C2: prod must use nil Body (pipe off)")
 	}
 	t.Log("REF-SRC-SB-C1/C2 verdict: h3_stream prod default; pipe/feeder opt-in legacy; duplex_coord keep")

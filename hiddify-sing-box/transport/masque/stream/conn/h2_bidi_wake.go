@@ -11,10 +11,6 @@ var h2BootstrapUploadBuf [4 * 1024]byte
 // H2BidiBootstrapUploadBytes returns one-shot upload DATA size before first download read.
 func H2BidiBootstrapUploadBytes() int { return h2BidiBootstrapUploadBytes }
 
-// H2BidiUploadWakeDuringDownload reports whether WriteTo should poke the CONNECT upload
-// half after each download chunk. Prod: always on.
-func H2BidiUploadWakeDuringDownload() bool { return true }
-
 func flushUploadPath(up UploadPath) {
 	if up == nil {
 		return
@@ -60,7 +56,7 @@ func (c *bidiTunnelConn) bootstrapH2UploadForDownloadOnce() {
 }
 
 func (c *bidiTunnelConn) wakeH2BidiUploadDuringDownload() {
-	if c == nil || !H2BidiUploadWakeDuringDownload() {
+	if c == nil {
 		return
 	}
 	if atomic.LoadInt32(&c.downloadActive) == 0 {

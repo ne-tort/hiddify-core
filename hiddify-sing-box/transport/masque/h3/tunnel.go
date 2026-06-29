@@ -10,9 +10,6 @@ import (
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
-// ConnectUsePipeUpload reports pipe mode for CONNECT-stream. Prod always uses nil Body (Invisv).
-func ConnectUsePipeUpload() bool { return false }
-
 // ConnectTunnelUsesPipeUpload reports whether a non-nil CONNECT request body should use pipe tunnel mode.
 func ConnectTunnelUsesPipeUpload(reqBody io.WriteCloser) bool {
 	return reqBody != nil

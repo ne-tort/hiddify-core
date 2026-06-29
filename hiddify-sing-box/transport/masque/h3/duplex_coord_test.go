@@ -1,52 +1,12 @@
 package h3
 
 import (
-	"bytes"
-	"io"
 	"testing"
 )
 
 func TestBidiDuplexCoordDisabled(t *testing.T) {
-	for _, env := range []string{"", "1", "0", "off"} {
-		t.Run(env, func(t *testing.T) {
-			t.Setenv(envH3BidiDuplexCoord, env)
-			if BidiDuplexCoordEnabled() {
-				t.Fatal("BidiDuplexCoordEnabled must stay false (direct h3 upload during download)")
-			}
-		})
-	}
-}
-
-func TestInterleaveDuplexTransferOrder(t *testing.T) {
-	download := bytes.Repeat([]byte("d"), 32*1024)
-	var (
-		readIdx  int
-		flushCnt int
-	)
-	_, err := interleaveDuplexTransfer(
-		writerFunc(func(p []byte) (int, error) {
-			return len(p), nil
-		}),
-		func(p []byte) (int, error) {
-			if readIdx >= len(download) {
-				return 0, io.EOF
-			}
-			n := copy(p, download[readIdx:])
-			readIdx += n
-			return n, nil
-		},
-		func() error {
-			flushCnt++
-			return nil
-		},
-		make([]byte, 16*1024),
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if flushCnt < 2 {
-		t.Fatalf("expected upload flush before each download chunk, got %d flushes", flushCnt)
+	if BidiDuplexCoordEnabled() {
+		t.Fatal("BidiDuplexCoordEnabled must stay false (direct h3 upload during download)")
 	}
 }
 

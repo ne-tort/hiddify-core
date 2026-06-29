@@ -16,18 +16,8 @@ func TestH3QUICPacketPlaneConfigIdleAndWindows(t *testing.T) {
 	if cfg.KeepAlivePeriod != 15*time.Second {
 		t.Fatalf("KeepAlivePeriod: got %v want 15s", cfg.KeepAlivePeriod)
 	}
-	t.Setenv("MASQUE_QUIC_KEEPALIVE_MS", "5000")
-	cfgFast := PacketPlaneQUICConfig(&quic.Config{})
-	if cfgFast.KeepAlivePeriod != 5*time.Second {
-		t.Fatalf("KeepAlivePeriod with env: got %v want 5s", cfgFast.KeepAlivePeriod)
-	}
-	if cfgFast.HandshakeIdleTimeout != 15*time.Second {
-		t.Fatalf("HandshakeIdleTimeout default: got %v want 15s", cfgFast.HandshakeIdleTimeout)
-	}
-	t.Setenv("MASQUE_QUIC_HANDSHAKE_IDLE_MS", "15000")
-	cfgHS := PacketPlaneQUICConfig(&quic.Config{})
-	if cfgHS.HandshakeIdleTimeout != 15*time.Second {
-		t.Fatalf("HandshakeIdleTimeout with env: got %v want 15s", cfgHS.HandshakeIdleTimeout)
+	if cfg.HandshakeIdleTimeout != 15*time.Second {
+		t.Fatalf("HandshakeIdleTimeout: got %v want 15s", cfg.HandshakeIdleTimeout)
 	}
 	if cfg.InitialStreamReceiveWindow != defaultInitialStreamRecvWindow {
 		t.Fatalf("InitialStreamReceiveWindow: got %d want %d", cfg.InitialStreamReceiveWindow, defaultInitialStreamRecvWindow)
@@ -117,12 +107,6 @@ func TestH3QUICConnectStreamEnableDatagrams(t *testing.T) {
 		}
 		if !TCPConnectStreamHTTP3EnableDatagrams(opts) {
 			t.Fatal("expected datagrams for warp mTLS")
-		}
-	})
-	t.Run("legacy_env", func(t *testing.T) {
-		t.Setenv("HIDDIFY_MASQUE_TCP_HTTP3_LEGACY_DATAGRAMS", "1")
-		if !TCPConnectStreamHTTP3EnableDatagrams(QUICDialProfile{}) {
-			t.Fatal("expected legacy env to enable datagrams")
 		}
 	})
 	t.Run("cf_connect_ip", func(t *testing.T) {

@@ -22,6 +22,5 @@ var (
 	PrimeH2UploadBootstrapOnConn   = conn.PrimeH2UploadBootstrapOnConn
 	H2BidiBootstrapUploadBytes     = conn.H2BidiBootstrapUploadBytes
 	H2ConnectUploadChunkBytes      = conn.H2ConnectUploadChunkBytes
-	H2BidiDownloadDrainEnabled     = conn.H2BidiDownloadDrainEnabled
 	ErrDeadlineUnsupported         = conn.ErrDeadlineUnsupported
 )

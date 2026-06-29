@@ -57,8 +57,8 @@ func TestArchREFSRCMasqueradeAudit(t *testing.T) {
 	if !strings.Contains(archRelayGoAuditSource(), "relayTCPTunnelBidiStream") {
 		t.Fatal("stream/relay.go missing relayTCPTunnelBidiStream anchor for MASQ-2 parity")
 	}
-	if h3.ConnectUsePipeUpload() || h3.BidiDuplexCoordEnabled() {
-		t.Fatal("prod must not use pipe upload or duplex_coord")
+	if h3.BidiDuplexCoordEnabled() {
+		t.Fatal("prod must not use duplex_coord")
 	}
 	t.Logf("REF-SRC-MASQ audit: %d rows (%d parity, %d mapped, %d skip); verdict=%q",
 		len(ArchREFSRCMasqueradeAudit), parity, mapped, skip, verdict)

@@ -162,9 +162,6 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 
 // TCPConnectStreamHTTP3EnableDatagrams controls http3.Transport.EnableDatagrams for CONNECT-stream.
 func TCPConnectStreamHTTP3EnableDatagrams(profile QUICDialProfile) bool {
-	if tcpStreamHTTP3LegacyDatagramsEnv() {
-		return true
-	}
 	if profile.hasWarpClientCert() {
 		return true
 	}
@@ -185,10 +182,6 @@ func packetPlaneKeepAlivePeriod() time.Duration {
 // packetPlaneHandshakeIdleTimeout tunes pre-handshake idle budget.
 func packetPlaneHandshakeIdleTimeout() time.Duration {
 	return 15 * time.Second
-}
-
-func tcpStreamHTTP3LegacyDatagramsEnv() bool {
-	return false
 }
 
 // HTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.

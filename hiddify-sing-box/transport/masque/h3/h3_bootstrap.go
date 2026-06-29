@@ -98,7 +98,7 @@ func (c *TunnelConn) bootstrapH3UploadForDownloadOnce() {
 }
 
 func (c *TunnelConn) wakeH3BidiUploadDuringDownload() {
-	if c == nil || !c.bidiUploadWakeEnabled() {
+	if c == nil {
 		return
 	}
 	if atomic.LoadInt32(&c.downloadActive) == 0 {

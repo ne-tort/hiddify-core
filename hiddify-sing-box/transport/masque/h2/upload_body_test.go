@@ -10,30 +10,11 @@ func TestUploadFlushPolicyProdDefaults(t *testing.T) {
 	if p.ChunkBytes != 0 {
 		t.Fatalf("prod chunk: got %d want 0 (bulk passthrough)", p.ChunkBytes)
 	}
-	if !p.bulkFlush {
-		t.Fatal("prod bulk flush should be enabled")
-	}
-}
-
-func TestH2ConnectChunkedUploadWriterFlushRequestBody(t *testing.T) {
-	inner := &chunkRecordFlusherWriter{
-		chunkRecordWriter: chunkRecordWriter{fn: func(p []byte) (int, error) {
-			return len(p), nil
-		}},
-	}
-	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024, bulkFlush: false}
-	w := policy.Wrap(inner)
-	if _, err := w.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
-		t.Fatal(err)
-	}
-	if inner.flushCalls < 2 {
-		t.Fatalf("expected FlushRequestBody per chunk, got %d flushes", inner.flushCalls)
-	}
 }
 
 func TestH2ConnectChunkedUploadWriterSplitsWrites(t *testing.T) {
 	var got []int
-	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024, bulkFlush: true}
+	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024}
 	w := policy.Wrap(&chunkRecordWriter{fn: func(p []byte) (int, error) {
 		got = append(got, len(p))
 		return len(p), nil
@@ -48,6 +29,30 @@ func TestH2ConnectChunkedUploadWriterSplitsWrites(t *testing.T) {
 		if n > 4*1024 {
 			t.Fatalf("chunk %d exceeds 4 KiB", n)
 		}
+	}
+}
+
+func TestH2ConnectChunkedUploadWriterPokeFlushes(t *testing.T) {
+	inner := &chunkRecordFlusherWriter{
+		chunkRecordWriter: chunkRecordWriter{fn: func(p []byte) (int, error) {
+			return len(p), nil
+		}},
+	}
+	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024}
+	w := policy.Wrap(inner)
+	if _, err := w.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
+		t.Fatal(err)
+	}
+	if inner.flushCalls != 0 {
+		t.Fatalf("bulk upload must not flush per chunk, got %d", inner.flushCalls)
+	}
+	if p, ok := w.(interface{ PokeH2BidiDownload() }); ok {
+		p.PokeH2BidiDownload()
+	} else {
+		t.Fatal("chunked upload writer must implement PokeH2BidiDownload")
+	}
+	if inner.flushCalls != 1 {
+		t.Fatalf("PokeH2BidiDownload must flush upload path, got %d flushes", inner.flushCalls)
 	}
 }
 

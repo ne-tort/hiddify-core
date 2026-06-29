@@ -12,15 +12,11 @@ type BidiWakeSink interface {
 	NoteDownloadWake()
 }
 
-func (c *TunnelConn) bidiUploadWakeEnabled() bool { return true }
-
-func (c *TunnelConn) bidiDownloadDeliveryWakeEnabled() bool { return true }
-
 func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if c == nil || c.h3 == nil || atomic.LoadInt32(&c.downloadActive) == 0 {
 		return
 	}
-	if c.bidiWakeSink != nil && c.bidiUploadWakeEnabled() {
+	if c.bidiWakeSink != nil {
 		c.bidiWakeSink.NoteUploadWake()
 	}
 	qs := c.h3.QUICStream()
@@ -50,7 +46,7 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 	if !c.downloadWakeEligible() {
 		return
 	}
-	if c.bidiWakeSink != nil && c.bidiDownloadDeliveryWakeEnabled() {
+	if c.bidiWakeSink != nil {
 		c.bidiWakeSink.NoteDownloadWake()
 	}
 	qs := c.h3.QUICStream()

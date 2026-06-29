@@ -63,9 +63,6 @@ func TestArchP1DuplexWriteToKS2(t *testing.T) {
 
 // TestArchREFSRCProdDefaultH3Stream (REF-SRC-SB-C2): prod dial is single-bidi Invisv (nil Body).
 func TestArchREFSRCProdDefaultH3Stream(t *testing.T) {
-	if h3.ConnectUsePipeUpload() {
-		t.Fatal("prod must not use pipe upload")
-	}
 	if h3.CurrentConnectStreamMode() != h3.ConnectStreamModeSingleBidi {
 		t.Fatalf("expected single_bidi mode, got %q", h3.CurrentConnectStreamMode())
 	}

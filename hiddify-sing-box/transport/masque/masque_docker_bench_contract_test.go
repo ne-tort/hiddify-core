@@ -495,15 +495,15 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		"masque-client-core",
 		"MASQUE_BENCH_SKIP_URL_TEST",
 	)
-	h3DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "h3_bidi_drain.go"))
+	h3DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "bidi_wake.go"))
 	requireSubstrings(t, localProfiles, "connect-stream-h3 zero-env client",
 		`def client_env`,
 		`MASQUE_BENCH_SKIP_URL_TEST`,
 		`skip_monitoring`,
 	)
-	requireSubstrings(t, h3DrainGo, "h3 bidi drain prod",
-		"H3BidiDownloadDrainEnabled",
-		"return true",
+	requireSubstrings(t, h3DrainGo, "h3 bidi wake prod",
+		"wakeBidiSendAfterUpload",
+		"BidiWakeSink",
 	)
 	requireSubstrings(t, localProfiles, "connect-stream-h3-tun field parity",
 		`name="connect-stream-h3-tun"`,
@@ -715,9 +715,9 @@ func TestMasqueDockerBenchConnectUDPPipeUploadContract(t *testing.T) {
 		`pipe_upload=False`,
 	)
 	tunnelGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "tunnel.go"))
-	requireSubstrings(t, tunnelGo, "connect-stream prod pipe off",
-		"ConnectUsePipeUpload",
-		"return false",
+	requireSubstrings(t, tunnelGo, "connect-stream prod nil body",
+		"nil Body",
+		"usePipe is ignored",
 	)
 	requireSubstrings(t, matrixDoc, "connect-udp pipe_upload",
 		"`connect-udp-h3`",
@@ -974,10 +974,10 @@ func TestMasqueDockerBenchConnectStreamH2BaselineContract(t *testing.T) {
 		"MASQUE_H2_BIDI_DOWNLOAD_DRAIN",
 		"TestTunnelConnReadFromUploadDrainsPendingDownload",
 	)
-	h2DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "stream", "conn", "h2_bidi_drain.go"))
+	h2DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "stream", "conn", "paths.go"))
 	requireSubstrings(t, h2DrainGo, "h2 bidi drain prod",
-		"H2BidiDownloadDrainEnabled",
-		"return true",
+		"maybeStartDownloadDrain",
+		"runDownloadDrain",
 	)
 	requireSubstrings(t, matrixDoc, "connect-stream-h2 map",
 		"`connect-stream-h2`",

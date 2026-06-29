@@ -10,16 +10,12 @@ import (
 // Chunking keeps HTTP/2 DATA frames small so download ACKs advance during iperf -R duplex.
 type UploadFlushPolicy struct {
 	ChunkBytes int
-	bulkFlush  bool
 }
 
 // H2UploadFlushPolicy returns the active H2 CONNECT-stream upload flush policy.
 func H2UploadFlushPolicy() UploadFlushPolicy {
 	p := conn.CurrentH2UploadPolicy()
-	return UploadFlushPolicy{
-		ChunkBytes: p.WrapChunkBytes(),
-		bulkFlush:  p.BulkFlushEnabled(),
-	}
+	return UploadFlushPolicy{ChunkBytes: p.WrapChunkBytes()}
 }
 
 func (p UploadFlushPolicy) passthrough() bool {
@@ -31,14 +27,13 @@ func (p UploadFlushPolicy) Wrap(w io.WriteCloser) io.WriteCloser {
 	if w == nil || p.passthrough() {
 		return w
 	}
-	return &chunkedUploadWriter{inner: w, chunk: p.ChunkBytes, bulkFlush: p.bulkFlush}
+	return &chunkedUploadWriter{inner: w, chunk: p.ChunkBytes}
 }
 
 // chunkedUploadWriter splits bulk upload into bounded writes (HTTP/2 DATA frame clock).
 type chunkedUploadWriter struct {
-	inner     io.WriteCloser
-	chunk     int
-	bulkFlush bool
+	inner io.WriteCloser
+	chunk int
 }
 
 func (w *chunkedUploadWriter) Write(p []byte) (int, error) {
@@ -55,9 +50,6 @@ func (w *chunkedUploadWriter) Write(p []byte) (int, error) {
 		total += wrote
 		if err != nil {
 			return total, err
-		}
-		if !w.bulkFlush {
-			FlushRequestBody(w.inner)
 		}
 		p = p[wrote:]
 	}

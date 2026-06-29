@@ -25,7 +25,6 @@ func TestTunnelConnFromConnectResponseRequiresHTTPStreamer(t *testing.T) {
 }
 
 func TestTunnelConnWriteChunksH3Upload(t *testing.T) {
-	t.Setenv(envH3UploadChunkKB, "4")
 	var got []int
 	c := NewTunnelConn(TunnelConnParams{
 		Writer: &chunkRecordWriter{fn: func(p []byte) (int, error) {
@@ -35,7 +34,7 @@ func TestTunnelConnWriteChunksH3Upload(t *testing.T) {
 		Local:  &net.TCPAddr{},
 		Remote: &net.TCPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 443},
 	})
-	if _, err := c.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
+	if _, err := c.Write(bytes.Repeat([]byte("x"), 150*1024)); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) < 2 {
