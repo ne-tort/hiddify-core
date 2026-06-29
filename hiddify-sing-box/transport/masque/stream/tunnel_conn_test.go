@@ -193,6 +193,9 @@ func TestH2BidiDrainDoesNotConsumeBeforeWriteTo(t *testing.T) {
 		_ = uploadR.Close()
 		_ = uploadW.Close()
 	})
+	go func() {
+		_, _ = io.Copy(io.Discard, uploadR)
+	}()
 
 	go func() {
 		payload := append([]byte(prefix), bytesRepeat(bulk, 'D')...)

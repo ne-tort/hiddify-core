@@ -12,14 +12,10 @@ func TestConnectStreamDialMaxAttemptsDefault(t *testing.T) {
 	}
 }
 
-func TestConnectStreamDialMaxAttemptsEnv(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_DIAL_MAX_ATTEMPTS", "5")
-	if got := ConnectStreamDialMaxAttempts(); got != 5 {
-		t.Fatalf("env max attempts: got %d want 5", got)
-	}
+func TestConnectStreamDialMaxAttemptsIgnoresEnv(t *testing.T) {
 	t.Setenv("MASQUE_CONNECT_STREAM_DIAL_MAX_ATTEMPTS", "99")
-	if got := ConnectStreamDialMaxAttempts(); got != 8 {
-		t.Fatalf("capped max attempts: got %d want 8", got)
+	if got := ConnectStreamDialMaxAttempts(); got != defaultConnectStreamDialMaxAttempts {
+		t.Fatalf("prod constant max attempts: got %d want %d (env ignored)", got, defaultConnectStreamDialMaxAttempts)
 	}
 }
 
@@ -33,9 +29,9 @@ func TestConnectStreamDialBackoffDefault(t *testing.T) {
 	}
 }
 
-func TestConnectStreamDialBackoffEnv(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_DIAL_BACKOFF_MS", "200")
+func TestConnectStreamDialBackoffIgnoresEnv(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DIAL_BACKOFF_MS", "999")
 	if got := ConnectStreamDialBackoff(1); got != 400*time.Millisecond {
-		t.Fatalf("env backoff: got %v want 400ms", got)
+		t.Fatalf("prod constant backoff: got %v want 400ms (env ignored)", got)
 	}
 }
