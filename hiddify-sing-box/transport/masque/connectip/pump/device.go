@@ -19,3 +19,19 @@ type TunnelDevice interface {
 	WritePacket(pkt []byte) error
 	Close() error
 }
+
+// EgressSlot holds one accepted egress datagram from ReadEgressBatch (Buf pool slice + Len).
+type EgressSlot struct {
+	Buf []byte
+	Len int
+}
+
+// BatchTunnelDevice extends TunnelDevice with upload DoD batch read (N≥2 pkts/LoopIn iter).
+// Ref: docs/masque/architecture/CONNECT-IP-UPLOAD-BATCH-READ.md
+type BatchTunnelDevice interface {
+	TunnelDevice
+	ReadEgressBatch(ctx context.Context, slots []EgressSlot, maxN int) (n int, err error)
+}
+
+// DefaultLoopInMaxBatch is the cap for one LoopIn batch read (coalesce depth in synth/prod).
+const DefaultLoopInMaxBatch = 48

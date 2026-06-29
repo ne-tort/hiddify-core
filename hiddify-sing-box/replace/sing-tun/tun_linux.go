@@ -51,7 +51,7 @@ type NativeTun struct {
 func New(options Options) (Tun, error) {
 	var nativeTun *NativeTun
 	if options.FileDescriptor == 0 {
-		tunFd, err := open(options.Name, options.GSO)
+		tunFd, err := open(options.Name, options.GSO || options.VNetHdr)
 		if err != nil {
 			return nil, err
 		}
@@ -120,9 +120,7 @@ func open(name string, vnetHdr bool) (int, error) {
 
 func (t *NativeTun) configure(tunLink netlink.Link) error {
 	err := netlink.LinkSetMTU(tunLink, int(t.options.MTU))
-	if errors.Is(err, unix.EPERM) {
-		return nil
-	} else if err != nil {
+	if err != nil && !errors.Is(err, unix.EPERM) {
 		return err
 	}
 	if !t.options.EXP_ExternalConfiguration {
@@ -150,6 +148,15 @@ func (t *NativeTun) configure(tunLink netlink.Link) error {
 		err = t.enableGSO()
 		if err != nil {
 			t.options.Logger.Warn(err)
+		}
+	} else if t.options.VNetHdr {
+		if err := t.enableVNetHdrRead(); err != nil {
+			if t.options.Logger != nil {
+				t.options.Logger.Warn(err)
+			}
+		}
+		if t.options.VNetHdr {
+			t.syncVNetHdrIO()
 		}
 	}
 
@@ -198,6 +205,38 @@ func (t *NativeTun) enableGSO() error {
 		t.gro.disableUDPGRO()
 	}
 	return nil
+}
+
+func (t *NativeTun) enableVNetHdrRead() error {
+	vnetHdrEnabled, err := checkVNETHDREnabled(t.tunFd, t.options.Name)
+	if err != nil {
+		return E.Cause(err, "enable vnet hdr read: check IFF_VNET_HDR")
+	}
+	if !vnetHdrEnabled {
+		return E.New("enable vnet hdr read: IFF_VNET_HDR not enabled")
+	}
+	// No TUNSETOFFLOAD/TSO by default: non-zero virtio GSO hdr breaks TCP ACK/cwnd without discriminator (PERF-8).
+	t.syncVNetHdrIO()
+	if t.options.VNetHdrTSO {
+		if err := setTCPOffload(t.tunFd); err != nil {
+			return E.Cause(err, "enable vnet hdr TSO read offload")
+		}
+		if t.options.Logger != nil {
+			t.options.Logger.Info("vnet hdr TSO read offload enabled (GRO split on egress read)")
+		}
+	}
+	if t.options.Logger != nil && !t.options.VNetHdrTSO {
+		t.options.Logger.Info("vnet hdr read enabled: virtioNetHdrLen=", virtioNetHdrLen)
+	}
+	return nil
+}
+
+// syncVNetHdrIO marks fd I/O as virtio when Options.VNetHdr opened IFF_VNET_HDR (must not use plain read/write).
+func (t *NativeTun) syncVNetHdrIO() {
+	t.vnetHdr = true
+	if t.writeBuffer == nil {
+		t.writeBuffer = make([]byte, virtioNetHdrLen+int(gsoMaxSize))
+	}
 }
 
 func (t *NativeTun) probeTCPGRO() error {
@@ -271,7 +310,7 @@ func (t *NativeTun) Start() error {
 		return err
 	}
 
-	if t.vnetHdr && len(t.options.Inet4Address) > 0 {
+	if t.options.GSO && t.vnetHdr && len(t.options.Inet4Address) > 0 {
 		err = t.probeTCPGRO()
 		if err != nil {
 			t.gro.disableTCPGRO()
@@ -439,8 +478,12 @@ func (t *NativeTun) BatchRead(buffers [][]byte, offset int, readN []int) (n int,
 func (t *NativeTun) BatchWrite(buffers [][]byte, offset int) (int, error) {
 	t.writeAccess.Lock()
 	defer func() {
-		t.tcpGROTable.reset()
-		t.udpGROTable.reset()
+		if t.tcpGROTable != nil {
+			t.tcpGROTable.reset()
+		}
+		if t.udpGROTable != nil {
+			t.udpGROTable.reset()
+		}
 		t.writeAccess.Unlock()
 	}()
 	var (
@@ -448,19 +491,37 @@ func (t *NativeTun) BatchWrite(buffers [][]byte, offset int) (int, error) {
 		total int
 	)
 	t.gsoToWrite = t.gsoToWrite[:0]
-	if t.vnetHdr {
+	if t.vnetHdr && t.options.GSO {
 		err := handleGRO(buffers, offset, t.tcpGROTable, t.udpGROTable, t.gro, &t.gsoToWrite)
 		if err != nil {
 			return 0, err
 		}
 		offset -= virtioNetHdrLen
+	} else if t.vnetHdr {
+		for i := range buffers {
+			t.gsoToWrite = append(t.gsoToWrite, i)
+		}
 	} else {
 		for i := range buffers {
 			t.gsoToWrite = append(t.gsoToWrite, i)
 		}
 	}
 	for _, toWrite := range t.gsoToWrite {
-		n, err := t.tunFile.Write(buffers[toWrite][offset:])
+		var out []byte
+		if t.vnetHdr && !t.options.GSO {
+			base := offset - virtioNetHdrLen
+			if base < 0 {
+				return total, errors.New("vnet hdr write: insufficient headroom")
+			}
+			hdr := buffers[toWrite][base:offset]
+			for j := range hdr {
+				hdr[j] = 0
+			}
+			out = buffers[toWrite][base : offset+len(buffers[toWrite][offset:])]
+		} else {
+			out = buffers[toWrite][offset:]
+		}
+		n, err := t.tunFile.Write(out)
 		if errors.Is(err, syscall.EBADFD) {
 			return total, os.ErrClosed
 		}

@@ -9,11 +9,19 @@ func (b *L3OverlayBridge) usquePumpOptions(onLoopInEnd func()) cippump.TunnelOpt
 	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{
 		NetBuffer: b.loopInNetBuffer(),
 	})
-	if b.hostKernelRelay() {
-		opts.LoopInDrainOnly = true
-		opts.LoopInUsqueImmediate = false
-	}
 	if onLoopInEnd != nil && !b.hostKernelRelay() {
+		opts.OnLoopInEnd = onLoopInEnd
+	}
+	return opts
+}
+
+// hostKernelBatchPumpOptions is RunTunnelBatch config (upload DoD: N read → 1 flush, no coalesce poll).
+func (b *L3OverlayBridge) hostKernelBatchPumpOptions(onLoopInEnd func()) cippump.TunnelOptions {
+	opts := cippump.NormalizeTunnelOptions(cippump.TunnelOptions{
+		NetBuffer:             b.loopInNetBuffer(),
+		LoopOutSkipBatchDrain: true, // zero-timeout wire coalesce only (ACK storms, no 2ms tun stall)
+	})
+	if onLoopInEnd != nil {
 		opts.OnLoopInEnd = onLoopInEnd
 	}
 	return opts

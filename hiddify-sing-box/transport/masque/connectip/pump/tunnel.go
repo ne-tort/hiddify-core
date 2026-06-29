@@ -190,18 +190,23 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		}
 		if !opts.LoopInUsqueImmediate {
 			poll := opts.LoopInCoalescePoll
+			drainCtx := ctx
+			var drainCancel context.CancelFunc
+			if opts.LoopInDrainOnly {
+				drainCtx = LoopInExpiredDrainCtx()
+			}
 			for {
 				if buf == nil {
 					buf = pool.Get()
 				}
-				coalesceCtx := ctx
-				var coalesceCancel context.CancelFunc
-				if opts.LoopInDrainOnly {
-					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, 0)
-				} else if poll > 0 {
-					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, poll)
-				} else {
-					coalesceCtx, coalesceCancel = context.WithTimeout(ctx, 0)
+				coalesceCtx := drainCtx
+				if !opts.LoopInDrainOnly {
+					coalesceCtx = ctx
+					if poll > 0 {
+						coalesceCtx, drainCancel = context.WithTimeout(ctx, poll)
+					} else {
+						coalesceCtx, drainCancel = context.WithTimeout(ctx, 0)
+					}
 				}
 				var r2Start time.Time
 				if obs != nil {
@@ -211,7 +216,10 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 				if obs != nil {
 					obs.recordRead(time.Since(r2Start))
 				}
-				coalesceCancel()
+				if drainCancel != nil {
+					drainCancel()
+					drainCancel = nil
+				}
 				if err2 != nil || n2 <= 0 {
 					break
 				}
@@ -221,9 +229,13 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			}
 		}
 		if opts.OnLoopInEnd != nil {
+			var flushStart time.Time
+			if obs != nil {
+				flushStart = time.Now()
+			}
 			opts.OnLoopInEnd()
 			if obs != nil {
-				obs.recordFlush()
+				obs.recordFlush(time.Since(flushStart))
 			}
 		}
 		if obs != nil {
@@ -249,13 +261,8 @@ type PacketConnInPlaceNoWake interface {
 // CloseError is fatal; other write errors are logged and skipped without stopping the pump.
 func writeLoopInPacket(device TunnelDevice, conn PacketConn, pkt []byte) (retained bool, err error) {
 	var icmp []byte
-	if ip, ok := conn.(PacketConnInPlaceNoWake); ok {
-		icmp, retained, err = ip.WritePacketInPlaceNoWake(pkt)
-	} else if nw, ok := conn.(PacketConnNoWake); ok {
-		icmp, err = nw.WritePacketNoWake(pkt)
-	} else {
-		icmp, err = conn.WritePacket(pkt)
-	}
+	// usque MaintainTunnel: ipConn.WritePacket(buf[:n]); ICMP → Device.WritePacket.
+	icmp, err = conn.WritePacket(pkt)
 	if err != nil {
 		if errors.As(err, new(*connectip.CloseError)) {
 			return retained, err

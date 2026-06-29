@@ -7,6 +7,23 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
 
+func TestHostKernelBulkEgressNoWakeDefaultOff(t *testing.T) {
+	t.Setenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_BULK_NOWAKE", "0")
+	src := netip.MustParseAddr("10.0.0.1")
+	dst := netip.MustParseAddr("10.0.0.2")
+	bulk := makeIPv4TCPPayload(src, dst, 1000, 80, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	if hostKernelBulkEgressNoWake(bulk) {
+		t.Fatal("default prod: bulk coalesce NoWake opt-in only")
+	}
+	w := &mockL3Writer{}
+	if _, err := writeHostKernelEgressWire(w, bulk); err != nil {
+		t.Fatalf("bulk wire: %v", err)
+	}
+	if w.noWakeWrites.Load() != 1 || w.inPlace.Load() != 0 {
+		t.Fatalf("bulk default: noWake=%d inPlace=%d want copy NoWake", w.noWakeWrites.Load(), w.inPlace.Load())
+	}
+}
+
 func TestHostKernelBulkEgressNoWake(t *testing.T) {
 	src := netip.MustParseAddr("10.0.0.1")
 	dst := netip.MustParseAddr("10.0.0.2")
@@ -40,7 +57,7 @@ func TestWriteHostKernelEgressWireHybrid(t *testing.T) {
 	if _, err := writeHostKernelEgressWire(w, ack); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	if w.writes.Load() != 1 {
-		t.Fatalf("ack wire: writes=%d want 1", w.writes.Load())
+	if w.noWakeWrites.Load() != 1 || w.flushes.Load() != 1 {
+		t.Fatalf("ack wire: noWake=%d flushes=%d want copy NoWake+flush", w.noWakeWrites.Load(), w.flushes.Load())
 	}
 }

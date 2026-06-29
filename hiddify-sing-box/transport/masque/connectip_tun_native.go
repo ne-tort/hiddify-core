@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"time"
 
@@ -71,7 +72,44 @@ func ConnectIPTunNativeL3(
 		if hr, ok := tunIf.(interface {
 			ReadHostEgress(context.Context, []byte) (int, error)
 		}); ok {
-			bridge.SetHostEgressRead(hr.ReadHostEgress, routePrefixes)
+			rawRead := ciptun.HostEgressReader(hr.ReadHostEgress)
+			vnetHdr := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR")) == "1"
+			readAheadOff := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_READ_AHEAD")) == "0"
+			useReadAhead := !readAheadOff
+			hostRead := rawRead
+			var readAheadBatch ciptun.HostEgressBatchReader
+			if useReadAhead {
+				hostRead, readAheadBatch = ciptun.WrapHostEgressReadAheadBatch(ctx, rawRead)
+			}
+			bridge.SetHostEgressRead(hostRead, routePrefixes)
+			var innerBatch ciptun.HostEgressBatchReader
+			nativeVNetBatch := false
+			if vnetHdr {
+				if br, ok := tunIf.(interface {
+					ReadHostEgressBatch(context.Context, [][]byte, int) (int, error)
+				}); ok {
+					innerBatch = ciptun.AdaptNativeHostEgressBatch(br.ReadHostEgressBatch)
+					nativeVNetBatch = true
+				}
+			}
+			if innerBatch == nil {
+				if readAheadBatch != nil {
+					innerBatch = readAheadBatch
+				} else {
+					innerBatch = ciptun.HostEgressReaderAsBatch(hostRead)
+				}
+			}
+			batch := innerBatch
+			// VNetHdr native batch: second-layer read-ahead on syscall-coalesced reads.
+			useBatchReadAhead := nativeVNetBatch && useReadAhead
+			if useBatchReadAhead {
+				batch = ciptun.WrapHostEgressBatchReadAhead(ctx, innerBatch)
+			}
+			bridge.SetHostEgressBatch(batch)
+			log.Printf("connect-ip native l3: host egress wired type=%T vnet_native_batch=%v read_ahead=%v batch_read_ahead=%v",
+				tunIf, nativeVNetBatch, useReadAhead, useBatchReadAhead)
+		} else {
+			log.Printf("connect-ip native l3: host egress NOT wired type=%T", tunIf)
 		}
 	}
 	egressSess := &l3BridgeEgressSession{IPPacketSession: ipSess, bridge: bridge}
@@ -103,10 +141,6 @@ func ConnectIPTunNativeL3(
 		flushEgress := func() {
 			reader := cs.ipIngressPacketReader.Load()
 			if reader == nil {
-				return
-			}
-			if hostKernel {
-				reader.FlushEgressTransport()
 				return
 			}
 			reader.FlushEgressBatch()
@@ -233,6 +267,13 @@ func connectIPNativeL3PlaneEndpoints(ipSess IPPacketSession) (nativeL3PacketWrit
 
 type readPacketCtxAdapter struct {
 	read func(context.Context, []byte) (int, error)
+}
+
+func hasReadHostEgressBatch(tunIf tun.Tun) bool {
+	_, ok := tunIf.(interface {
+		ReadHostEgressBatch(context.Context, [][]byte, int) (int, error)
+	})
+	return ok
 }
 
 func (a readPacketCtxAdapter) ReadPacket(ctx context.Context, buf []byte) (int, error) {

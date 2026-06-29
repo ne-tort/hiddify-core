@@ -13,20 +13,24 @@ type LoopInObserver struct {
 	readCalls     atomic.Int64
 	readNanos     atomic.Int64
 	writeNanos    atomic.Int64
+	flushNanos    atomic.Int64
 }
 
 // LoopInStats is a point-in-time snapshot of LoopInObserver counters.
 type LoopInStats struct {
-	Iters        int64
-	Pkts         int64
-	Flushes      int64
-	ReadCalls    int64
-	ReadNanos    int64
-	WriteNanos   int64
-	PktsPerIter  float64
-	PktsPerFlush float64
-	ReadUsPerPkt float64
+	Iters         int64
+	Pkts          int64
+	Flushes       int64
+	ReadCalls     int64
+	ReadNanos     int64
+	WriteNanos    int64
+	FlushNanos    int64
+	PktsPerIter   float64
+	PktsPerFlush  float64
+	ReadUsPerPkt  float64
 	WriteUsPerPkt float64
+	FlushUsPerPkt float64
+	IterUsPerPkt  float64
 }
 
 // Snapshot returns current observer counters and derived ratios.
@@ -40,9 +44,10 @@ func (o *LoopInObserver) Snapshot() LoopInStats {
 	rc := o.readCalls.Load()
 	rn := o.readNanos.Load()
 	wn := o.writeNanos.Load()
+	fn := o.flushNanos.Load()
 	st := LoopInStats{
 		Iters: iters, Pkts: pkts, Flushes: fl,
-		ReadCalls: rc, ReadNanos: rn, WriteNanos: wn,
+		ReadCalls: rc, ReadNanos: rn, WriteNanos: wn, FlushNanos: fn,
 	}
 	if iters > 0 {
 		st.PktsPerIter = float64(pkts) / float64(iters)
@@ -53,6 +58,8 @@ func (o *LoopInObserver) Snapshot() LoopInStats {
 	if pkts > 0 {
 		st.ReadUsPerPkt = float64(rn) / float64(pkts) / 1000.0
 		st.WriteUsPerPkt = float64(wn) / float64(pkts) / 1000.0
+		st.FlushUsPerPkt = float64(fn) / float64(pkts) / 1000.0
+		st.IterUsPerPkt = st.ReadUsPerPkt + st.WriteUsPerPkt + st.FlushUsPerPkt
 	}
 	return st
 }
@@ -86,9 +93,12 @@ func (o *LoopInObserver) endIter() {
 	o.iters.Add(1)
 }
 
-func (o *LoopInObserver) recordFlush() {
+func (o *LoopInObserver) recordFlush(d time.Duration) {
 	if o == nil {
 		return
 	}
 	o.flushes.Add(1)
+	if d > 0 {
+		o.flushNanos.Add(d.Nanoseconds())
+	}
 }

@@ -73,6 +73,10 @@ type Options struct {
 	Inet6Address             []netip.Prefix
 	MTU                      uint32
 	GSO                      bool
+	// VNetHdr enables IFF_VNET_HDR + virtio read batching without GSO write offload (CONNECT-IP L3 host egress).
+	VNetHdr                  bool
+	// VNetHdrTSO enables TUNSETOFFLOAD (read GRO superframes) while keeping write path zero-hdr (PERF-8b opt-in).
+	VNetHdrTSO               bool
 	AutoRoute                bool
 	InterfaceScope           bool
 	Inet4Gateway             netip.Addr

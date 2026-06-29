@@ -1,5 +1,12 @@
 package tun
 
+// flushWireEgressBatch wakes QUIC/H3 after batched NoWake enqueue (gVisor netstack parity).
+func flushWireEgressBatch(writer PacketWriter) {
+	if fw, ok := writer.(interface{ FlushEgressBatch() }); ok {
+		fw.FlushEgressBatch()
+	}
+}
+
 // writeWirePacket sends one datagram to CONNECT-IP wire (usque ipConn.WritePacket parity).
 func writeWirePacket(writer PacketWriter, p []byte) ([]byte, error) {
 	return writer.WritePacket(p)

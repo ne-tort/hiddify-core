@@ -202,17 +202,26 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 	if payloadLen > 0 {
 		payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
 	}
-	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-			log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x", csum)
-		}
-		return
-	}
 	flow := tcp4Tuple{
 		srcAddr: iph.SourceAddress(),
 		dstAddr: iph.DestinationAddress(),
 		srcPort: tc.SourcePort(),
 		dstPort: tc.DestinationPort(),
+	}
+	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+		repairIPv4TCPChecksum(pkt, ihl)
+		tc = header.TCP(pkt[ihl:])
+		if !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+				log.Printf("masque connect_ip forwarder: drop bad tcp checksum csum=0x%04x len=%d %s:%d -> %s:%d",
+					csum, len(pkt), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
+			}
+			return
+		}
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			log.Printf("masque connect_ip forwarder: repaired tcp checksum was=0x%04x len=%d %s:%d -> %s:%d",
+				csum, len(pkt), flow.srcAddr, flow.srcPort, flow.dstAddr, flow.dstPort)
+		}
 	}
 	flags := tc.Flags()
 	if flags&(header.TCPFlagSyn|header.TCPFlagAck) == header.TCPFlagSyn {
@@ -235,4 +244,30 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 		return
 	}
 	s.handleSegment(ctx, pkt, tc, ihl, doff)
+}
+
+func repairIPv4TCPChecksum(pkt []byte, ihl int) {
+	if len(pkt) < ihl+header.TCPMinimumSize {
+		return
+	}
+	ip := header.IPv4(pkt)
+	if !ip.IsValid(len(pkt)) {
+		ip.SetChecksum(0)
+		ip.SetChecksum(^ip.CalculateChecksum())
+	}
+	tcp := header.TCP(pkt[ihl:])
+	doff := int(tcp.DataOffset())
+	if doff < header.TCPMinimumSize || ihl+doff > len(pkt) {
+		return
+	}
+	tcpLen := uint16(len(pkt) - ihl)
+	payloadLen := tcpLen - uint16(doff)
+	var payCsum uint16
+	if payloadLen > 0 {
+		payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
+	}
+	xsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, ip.SourceAddress(), ip.DestinationAddress(), tcpLen)
+	xsum = checksum.Combine(xsum, payCsum)
+	tcp.SetChecksum(0)
+	tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
 }

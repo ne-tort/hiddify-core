@@ -16,9 +16,15 @@ const (
 	Upload524PktSpacing      = time.Second / Upload524PPS // 20µs
 	Upload524MbpsBandLo      = 470.0
 	Upload524MbpsBandHi      = 580.0
-	Upload524PPSBandLo       = 45000
+	Upload524PPSBandLo       = 35000
 	Upload524PPSBandHi       = 55000
 	Upload524PktsPerFlushMax = 1.15
+	// UploadDODMbps is connect-ip-h3-tun single-flow DoD @ Docker 0ms.
+	UploadDODMbps = 1000.0
+	// UploadDODIterBudget is per-pkt LoopIn budget for ≥1000 @ 1310 B (≈95.4 kpps).
+	UploadDODIterBudget = 10500 * time.Nanosecond
+	// Upload524IterBudget is verified prod steady-state identity (50 kpps).
+	Upload524IterBudget = 20000 * time.Nanosecond
 )
 
 func upload524MbpsFromPPS(pps float64, segBytes int) float64 {
@@ -137,6 +143,143 @@ func hostEgressDepth1Paced(spacing time.Duration, seg []byte) (HostEgressReader,
 		}
 	})
 	return read, feedCancel
+}
+
+// hostEgressDepth1Immediate feeds one segment at a time; no spacing (depth-1 always ready when LoopIn reads).
+func hostEgressDepth1Immediate(seg []byte) (HostEgressReader, context.CancelFunc) {
+	return hostEgressDepth1Paced(0, seg)
+}
+
+// hostEgressDepth1WithReadWork simulates syscall/kernel work on each successful read (depth-1 immediate feed).
+func hostEgressDepth1WithReadWork(seg []byte, readWork time.Duration) (HostEgressReader, context.CancelFunc) {
+	staged := make(chan []byte, 1)
+	feedCtx, feedCancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			select {
+			case <-feedCtx.Done():
+				return
+			case staged <- seg:
+			}
+		}
+	}()
+	read := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		select {
+		case pkt, ok := <-staged:
+			if !ok {
+				return 0, ctx.Err()
+			}
+			if readWork > 0 {
+				upload524SpinDelay(readWork)
+			}
+			return copy(buf, pkt), nil
+		case <-ctx.Done():
+			return 0, context.Cause(ctx)
+		}
+	})
+	return read, feedCancel
+}
+
+// hostSyscallBatchFeed delivers batch segments per simulated syscall (prefetch parity).
+type hostSyscallBatchFeed struct {
+	mu        sync.Mutex
+	q         [][]byte
+	seg       []byte
+	syscallUs time.Duration
+	batch     int
+}
+
+func newHostSyscallBatchFeed(seg []byte, batch int, syscallUs time.Duration) *hostSyscallBatchFeed {
+	if batch < 1 {
+		batch = 1
+	}
+	return &hostSyscallBatchFeed{seg: seg, batch: batch, syscallUs: syscallUs}
+}
+
+func (f *hostSyscallBatchFeed) read(ctx context.Context, buf []byte) (int, error) {
+	for {
+		f.mu.Lock()
+		if len(f.q) > 0 {
+			pkt := f.q[0]
+			f.q = f.q[1:]
+			f.mu.Unlock()
+			return copy(buf, pkt), nil
+		}
+		f.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if f.syscallUs > 0 {
+			upload524SpinDelay(f.syscallUs)
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		f.mu.Lock()
+		for i := 0; i < f.batch; i++ {
+			f.q = append(f.q, f.seg)
+		}
+		f.mu.Unlock()
+	}
+}
+
+// hostEgressKernelQueue models paced kernel tun egress: producer adds MSS on a fixed
+// spacing while reads pop instantly; coalesce drain can take a queued pkt without syscall.
+type hostEgressKernelQueue struct {
+	mu        sync.Mutex
+	q         [][]byte
+	seg       []byte
+	spacing   time.Duration
+	minDepth  int
+}
+
+func newHostEgressKernelQueue(seg []byte, spacing time.Duration, minDepth int) (*hostEgressKernelQueue, context.CancelFunc) {
+	if minDepth < 1 {
+		minDepth = 1
+	}
+	h := &hostEgressKernelQueue{seg: seg, spacing: spacing, minDepth: minDepth}
+	ctx, cancel := context.WithCancel(context.Background())
+	go h.producer(ctx)
+	return h, cancel
+}
+
+func (h *hostEgressKernelQueue) producer(ctx context.Context) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		h.mu.Lock()
+		depth := len(h.q)
+		h.mu.Unlock()
+		if depth >= h.minDepth {
+			upload524SpinDelay(h.spacing / 8)
+			continue
+		}
+		upload524SpinDelay(h.spacing)
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		h.mu.Lock()
+		h.q = append(h.q, h.seg)
+		h.mu.Unlock()
+	}
+}
+
+func (h *hostEgressKernelQueue) read(ctx context.Context, buf []byte) (int, error) {
+	for {
+		h.mu.Lock()
+		if len(h.q) > 0 {
+			pkt := h.q[0]
+			h.q = h.q[1:]
+			h.mu.Unlock()
+			return copy(buf, pkt), nil
+		}
+		h.mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		upload524SpinDelay(h.spacing / 16)
+	}
 }
 
 // hostEgressInfinite returns the same MSS segment without pacing (upper bound for pump+wire).

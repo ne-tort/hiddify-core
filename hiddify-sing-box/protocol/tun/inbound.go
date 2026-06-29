@@ -157,6 +157,18 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		platformInterface == nil &&
 		tunMTU > 0 &&
 		tunMTU < 49152
+	// PERF-8: VNetHdr read batch (IFF_VNET_HDR without GSO/TSO write). Opt-in until Docker nc+KPI gate.
+	// Enable: HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR=1 (docker-compose passes through).
+	// PERF-8b: HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR_TSO=1 adds TUNSETOFFLOAD read GRO (ingress zero-hdr).
+	enableVNetHdr := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR")) == "1" &&
+		C.IsLinux &&
+		options.Stack == "gvisor" &&
+		options.L3OverlayOutbound != "" &&
+		platformInterface == nil &&
+		tunMTU > 0 &&
+		tunMTU < 49152
+	enableVNetHdrTSO := enableVNetHdr &&
+		strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR_TSO")) == "1"
 	if tunMTU == 0 {
 		if platformInterface != nil && platformInterface.UnderNetworkExtension() {
 			// In Network Extension, when MTU exceeds 4064 (4096-UTUN_IF_HEADROOM_SIZE), the performance of tun will drop significantly, which may be a system bug.
@@ -227,6 +239,8 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			Name:                     options.InterfaceName,
 			MTU:                      tunMTU,
 			GSO:                      enableGSO,
+			VNetHdr:                  enableVNetHdr,
+			VNetHdrTSO:               enableVNetHdrTSO,
 			Inet4Address:             inet4Address,
 			Inet6Address:             inet6Address,
 			AutoRoute:                options.AutoRoute,
@@ -691,6 +705,10 @@ func (t *Inbound) l3OverlayReceiveLoop(conn net.PacketConn) {
 }
 
 func (t *Inbound) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
+	// Native connect_ip host-kernel owns overlay TCP on tun; gVisor Handler dials duplicate sessions (Docker upload stall).
+	if t.l3OverlayNativeStop != nil && network == N.NetworkTCP && l3OverlayAddr(destination.Addr, t.l3OverlayPrefixes) {
+		return nil, tun.ErrDrop
+	}
 	var ipVersion uint8
 	if !destination.IsIPv6() {
 		ipVersion = 4

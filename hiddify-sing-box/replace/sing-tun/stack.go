@@ -38,6 +38,12 @@ type HostEgressReader interface {
 	ReadHostEgress(ctx context.Context, p []byte) (int, error)
 }
 
+// HostEgressBatchReader extends HostEgressReader with upload DoD batch read (N pkts per LoopIn iter).
+type HostEgressBatchReader interface {
+	HostEgressReader
+	ReadHostEgressBatch(ctx context.Context, bufs [][]byte, maxN int) (n int, err error)
+}
+
 type StackOptions struct {
 	Context                context.Context
 	Tun                    Tun

@@ -30,6 +30,14 @@ func checkVNETHDREnabled(fd int, name string) (bool, error) {
 	return ifr.Uint16()&unix.IFF_VNET_HDR != 0, nil
 }
 
+func setCSUMOffload(fd int) error {
+	err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, unix.TUN_F_CSUM)
+	if err != nil {
+		return E.Cause(os.NewSyscallError("TUNSETOFFLOAD", err), "enable csum offload")
+	}
+	return nil
+}
+
 func setTCPOffload(fd int) error {
 	err := unix.IoctlSetInt(fd, unix.TUNSETOFFLOAD, tunTCPOffloads)
 	if err != nil {

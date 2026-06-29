@@ -1067,6 +1067,8 @@ func TestPTBMTUFromDatagramTooLarge(t *testing.T) {
 	require.Equal(t, 1280, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 800}))
 	require.Equal(t, 1350, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1350}))
 	require.Equal(t, 9000, ptbMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 120_000}))
+	require.Equal(t, 1278, ptbIPMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1280}))
+	require.Equal(t, 1348, ptbIPMTUFromDatagramTooLarge(&quic.DatagramTooLargeError{MaxDatagramPayloadSize: 1350}))
 }
 
 func TestSendLargeDatagramsICMPMTUReflectsQuicHint(t *testing.T) {

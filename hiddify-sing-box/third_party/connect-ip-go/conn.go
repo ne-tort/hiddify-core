@@ -198,6 +198,10 @@ func incrementPolicyDropICMPReason(reason string) {
 // On IPv6, the minimum MTU of a link is 1280 bytes.
 const minMTU = 1280
 
+// proxiedIPDatagramMinCapsuleOverhead is the smallest RFC9297 CONNECT-IP prefix on H3 DATAGRAM
+// (quarter-stream-id varint + default context-id zero).
+const proxiedIPDatagramMinCapsuleOverhead = 2
+
 // ptbMTUFromDatagramTooLarge picks the ICMP PTB "MTU of next hop" hint from quic-go.
 // Falls back to minMTU when the error carries no positive size; clamps to avoid absurd values.
 func ptbMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
@@ -211,6 +215,16 @@ func ptbMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
 	const ptbUpperClamp = 9000
 	if mtu > ptbUpperClamp {
 		mtu = ptbUpperClamp
+	}
+	return mtu
+}
+
+// ptbIPMTUFromDatagramTooLarge converts QUIC HTTP DATAGRAM max payload to IPv4 total-length MTU
+// for ICMP PTB (subtract proxied-IP capsule prefix so kernel MSS tracks wire fit).
+func ptbIPMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
+	mtu := ptbMTUFromDatagramTooLarge(err) - proxiedIPDatagramMinCapsuleOverhead
+	if mtu < minMTU {
+		return minMTU
 	}
 	return mtu
 }
@@ -1513,7 +1527,11 @@ func (c *Conn) finishWritePacketSend(icmpSource []byte, err error) (icmp []byte,
 	}
 	var errDTL *quic.DatagramTooLargeError
 	if errors.As(err, &errDTL) {
-		icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ptbMTUFromDatagramTooLarge(errDTL))
+		ipMTU := ptbIPMTUFromDatagramTooLarge(errDTL)
+		if masqueConnectIPDebug() && len(icmpSource) >= 256 {
+			log.Printf("connect-ip debug: DatagramTooLarge ip_len=%d quic_max=%d ptb_mtu=%d", len(icmpSource), errDTL.MaxDatagramPayloadSize, ipMTU)
+		}
+		icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ipMTU)
 		if icmpErr != nil {
 			log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
 			return nil, fmt.Errorf("connect-ip: compose ICMP PTB after datagram too large: %w", icmpErr)
@@ -1575,7 +1593,10 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 		return nil, true, nil
 	}
 	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
-		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, b))
+		// Copy after in-place prepare: NoWake may retain pkt until Flush; LoopIn pool reuse must not alias.
+		ip := make([]byte, len(b))
+		copy(ip, b)
+		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, ip))
 		return icmp, false, retErr
 	}
 	icmp, retErr := c.WritePacketNoWake(b)

@@ -52,10 +52,14 @@ func (t *Inbound) tryWireNativeConnectIPL3(
 	if native == nil {
 		return nil, nil, nil, false, nil
 	}
-	tunHost := firstTunInet4Host(t.tunOptions)
 	wireLocal := t.l3OverlaySocksDest.Addr
 	if !wireLocal.IsValid() {
 		wireLocal = netip.MustParseAddr("198.18.0.1")
+	}
+	// usque WaterAdapter: TUN host = CONNECT-IP assigned local (configure tun address = profile_local_ipv4).
+	tunHost := firstTunInet4Host(t.tunOptions)
+	if !tunHost.IsValid() {
+		tunHost = wireLocal
 	}
 	wire, wired, err := native.WireConnectIPNativeL3(ctx, tunIf, t.l3OverlayPrefixes, tunHost, wireLocal)
 	if err != nil || !wired || wire == nil {
@@ -100,4 +104,17 @@ func firstTunInet4Host(opts tun.Options) netip.Addr {
 		}
 	}
 	return netip.Addr{}
+}
+
+func l3OverlayAddr(addr netip.Addr, prefixes []netip.Prefix) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }

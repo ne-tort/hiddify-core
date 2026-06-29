@@ -41,8 +41,12 @@ func (m *mockL3Writer) WritePacketInPlaceNoWake(p []byte) (retained bool, icmp [
 		upload524SpinDelay(m.inPlaceDelay)
 	}
 	m.inPlace.Add(1)
+	if m != nil && m.retainNext.Load() {
+		m.lastPkt.Store(p)
+		return true, nil, nil
+	}
 	m.lastPkt.Store(append([]byte(nil), p...))
-	return m.retainNext.Load(), nil, nil
+	return false, nil, nil
 }
 
 func (m *mockL3Writer) lastPacket() []byte {
@@ -199,12 +203,9 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 	}
 	cancel()
 
-	if w.inPlace.Load()+w.noWakeWrites.Load() < 1 {
-		t.Fatalf("bulk: inPlace=%d noWake=%d writes=%d wire=%d",
-			w.inPlace.Load(), w.noWakeWrites.Load(), w.writes.Load(), w.wireWrites())
-	}
-	if w.writes.Load() < 1 {
-		t.Fatalf("ACK path: sync writes=%d want >=1", w.writes.Load())
+	if w.wireWrites() < 2 {
+		t.Fatalf("bulk+ack wire=%d want >=2 (inPlace=%d noWake=%d writes=%d)",
+			w.wireWrites(), w.inPlace.Load(), w.noWakeWrites.Load(), w.writes.Load())
 	}
 	if w.flushes.Load() < 1 {
 		t.Fatalf("OnLoopInEnd flushes=%d want >=1", w.flushes.Load())
@@ -286,16 +287,16 @@ func TestL3HostKernelHybridSmallPacketSyncFlush(t *testing.T) {
 	go func() { _ = b.RunPump(ctx) }()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for w.writes.Load() < 1 && time.Now().Before(deadline) {
+	for w.noWakeWrites.Load() < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 
-	if w.writes.Load() < 1 {
-		t.Fatalf("sync writes=%d want >=1 for pure ACK", w.writes.Load())
+	if w.noWakeWrites.Load() < 1 {
+		t.Fatalf("noWake=%d want >=1 for pure ACK", w.noWakeWrites.Load())
 	}
-	if w.inPlace.Load()+w.noWakeWrites.Load() != 0 {
-		t.Fatalf("NoWake path used for ACK: inPlace=%d noWake=%d", w.inPlace.Load(), w.noWakeWrites.Load())
+	if w.flushes.Load() < 1 {
+		t.Fatalf("flushes=%d want >=1", w.flushes.Load())
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +43,7 @@ type L3OverlayBridge struct {
 	closed        bool
 	tunWrite      func([]byte) (int, error)
 	hostEgressRead HostEgressReader
+	hostEgressBatch HostEgressBatchReader
 	overlayPrefixes []netip.Prefix
 	stackInject   func([]byte) error
 	writer        PacketWriter
@@ -84,6 +87,19 @@ func (b *L3OverlayBridge) SetHostEgressRead(read HostEgressReader, overlayPrefix
 		b.overlayPrefixes = append([]netip.Prefix(nil), overlayPrefixes...)
 	}
 	b.rebuildKernelDeviceLocked()
+	b.mu.Unlock()
+}
+
+// SetHostEgressBatch wires NativeTun ReadHostEgressBatch (VNetHdr upload DoD path).
+func (b *L3OverlayBridge) SetHostEgressBatch(batch HostEgressBatchReader) {
+	if b == nil || batch == nil {
+		return
+	}
+	b.mu.Lock()
+	b.hostEgressBatch = batch
+	if b.kernel != nil {
+		b.kernel.SetHostEgressBatch(batch)
+	}
 	b.mu.Unlock()
 }
 
@@ -303,6 +319,9 @@ func (b *L3OverlayBridge) rebuildKernelDeviceLocked() {
 			b.noteShortFlow(pkt)
 		},
 	)
+	if b.hostEgressBatch != nil {
+		b.kernel.SetHostEgressBatch(b.hostEgressBatch)
+	}
 }
 
 func (b *L3OverlayBridge) tunnelDevice() cippump.TunnelDevice {
@@ -426,22 +445,30 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 		opts.OnLoopOutEnd = func(_ cippump.TunnelDevice) {
 			b.flushIngressAckWake()
 		}
-	} else {
-		// LoopIn owns ReadHostEgress; sync drain from LoopOut deadlocks on readMu
-		// (TestL3OverlayLoopOutDoesNotSyncRelayHostEgress).
-		if onLoopInEnd != nil {
-			opts.OnLoopInEnd = onLoopInEnd
-		} else {
-			opts.OnLoopInEnd = func() {
-				b.flushIngressAckWake()
-			}
-		}
 	}
+	// host-kernel: usque MaintainTunnel — sync ReadPacket→WritePacket, no flush/wake hooks.
 	device := b.tunnelDevice()
 	if device == nil {
 		return net.ErrClosed
 	}
-	return cippump.RunTunnel(ctx, device, b.packetConn(), opts)
+	metrics := attachLoopInMetrics(b, device)
+	metrics.apply(&opts)
+	metricsCtx, metricsCancel := context.WithCancel(ctx)
+	metrics.startReporter(metricsCtx)
+	defer func() {
+		metricsCancel()
+		metrics.wait()
+	}()
+	conn := metrics.wrapPacketConn(b.packetConn())
+	if hostKernel {
+		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_BATCH_LOOPIN")) == "1" {
+			if batchDev, ok := device.(cippump.BatchTunnelDevice); ok {
+				batchOpts := b.hostKernelBatchPumpOptions(opts.OnLoopInEnd)
+				return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
+			}
+		}
+	}
+	return cippump.RunTunnel(ctx, device, conn, opts)
 }
 
 func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
@@ -481,26 +508,7 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 			return writeWirePacketNoWake(writer, p)
 		},
 	}
-	if hostKernel {
-		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
-			b.mu.Lock()
-			closed := b.closed
-			writer := b.writer
-			pipe := b.hostEgressPipe
-			b.mu.Unlock()
-			if closed || writer == nil {
-				return false, nil, net.ErrClosed
-			}
-			if pipe != nil && hostKernelBulkEgressNoWake(p) {
-				retained, err := pipe.submit(p)
-				return retained, nil, err
-			}
-			if pipe != nil {
-				pipe.beforeSync()
-			}
-			return writeHostKernelEgressInPlace(writer, p)
-		}
-	} else {
+	if !hostKernel {
 		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
 			b.mu.Lock()
 			closed := b.closed
@@ -555,7 +563,10 @@ func (p *NativePumpPacketConn) ReadPacket(ctx context.Context, buf []byte) (int,
 }
 
 func (p *NativePumpPacketConn) WritePacket(buffer []byte) ([]byte, error) {
-	return p.WritePacketNoWake(buffer)
+	if p == nil || p.Write == nil {
+		return nil, net.ErrClosed
+	}
+	return p.Write(buffer)
 }
 
 func (p *NativePumpPacketConn) WritePacketNoWake(buffer []byte) ([]byte, error) {

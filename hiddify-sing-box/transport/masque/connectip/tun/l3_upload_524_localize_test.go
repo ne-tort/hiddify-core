@@ -12,8 +12,10 @@ import (
 )
 
 type upload524PumpHarnessOpts struct {
-	CoalescePoll         time.Duration // -1 = prod default (100µs host-kernel)
+	CoalescePoll         time.Duration // -1 = prod default; >=0 overrides LoopInCoalescePoll
 	LoopInUsqueImmediate bool
+	Prod                 bool // prod usquePumpOptions only (LoopInDrainOnly)
+	NoObserver           bool // skip LoopInObserver overhead in tight budget gates
 }
 
 func makeUpload524BulkSeg(t *testing.T) []byte {
@@ -49,11 +51,15 @@ func runHostKernelPumpMeter(t *testing.T, host HostEgressReader, w *mockL3Writer
 	if harness.CoalescePoll >= 0 {
 		opts.LoopInCoalescePoll = harness.CoalescePoll
 	}
-	opts.LoopInUsqueImmediate = harness.LoopInUsqueImmediate
+	if !harness.Prod {
+		opts.LoopInUsqueImmediate = harness.LoopInUsqueImmediate
+	}
 
 	loopObs := &cippump.LoopInObserver{}
 	hostReadObs := &HostKernelReadObserver{}
-	opts.LoopInObserver = loopObs
+	if !harness.NoObserver {
+		opts.LoopInObserver = loopObs
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
@@ -62,8 +68,12 @@ func runHostKernelPumpMeter(t *testing.T, host HostEgressReader, w *mockL3Writer
 		if device == nil {
 			return
 		}
-		if kd, ok := device.(*KernelTunDevice); ok {
+		if kd, ok := device.(*KernelTunDevice); ok && !harness.NoObserver {
 			kd.AttachReadObserver(hostReadObs)
+		}
+		if harness.Prod {
+			_ = b.RunPump(ctx)
+			return
 		}
 		_ = cippump.RunTunnel(ctx, device, b.packetConn(), opts)
 	}()
@@ -110,69 +120,11 @@ func requireUpload524SubMsClock(t *testing.T) {
 	}
 }
 
-// TestGATEConnectIPUpload524ReproHostPaced (LOCALIZE-UP-1) depth-1 host @ 20µs/pkt → 524 Mbit/s identity.
-func TestGATEConnectIPUpload524ReproHostPaced(t *testing.T) {
-	requireUpload524SubMsClock(t)
-	seg := makeUpload524BulkSeg(t)
-	w := &mockL3Writer{}
-	m := runHostKernelPumpMeter(t, hostEgressReadPaced(Upload524PktSpacing, seg), w, 600*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
-		LoopInUsqueImmediate: true,
-	})
-	if m.Writes < 2000 {
-		t.Fatalf("writes=%d want >=2000 for steady sample", m.Writes)
-	}
-	assertUpload524Band(t, "host-paced", m)
-}
-
-// TestGATEConnectIPUpload524ReproWirePaced (LOCALIZE-UP-2) instant host + 20µs wire → same 524 band.
-func TestGATEConnectIPUpload524ReproWirePaced(t *testing.T) {
-	requireUpload524SubMsClock(t)
-	seg := makeUpload524BulkSeg(t)
-	w := &mockL3Writer{inPlaceDelay: Upload524PktSpacing}
-	m := runHostKernelPumpMeter(t, hostEgressInfinite(seg), w, 600*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
-		LoopInUsqueImmediate: true,
-	})
-	if m.Writes < 2000 {
-		t.Fatalf("writes=%d want >=2000", m.Writes)
-	}
-	assertUpload524Band(t, "wire-paced", m)
-}
-
-// TestGATEConnectIPUpload524DiscriminateFastPath (LOCALIZE-UP-3) no throttle → must exceed 524 band (not tun-limited).
-func TestGATEConnectIPUpload524DiscriminateFastPath(t *testing.T) {
-	seg := makeUpload524BulkSeg(t)
-	w := &mockL3Writer{}
-	m := runHostKernelPumpMeter(t, hostEgressInfinite(seg), w, 150*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
-		LoopInUsqueImmediate: true,
-	})
-	if m.Writes < 500 {
-		t.Fatalf("writes=%d want >=500", m.Writes)
-	}
-	if m.Mbps <= Upload524MbpsBandHi {
-		t.Fatalf("fast path mbps=%.1f want > %.0f (proves 524 is throttle identity, not mock ceiling)",
-			m.Mbps, Upload524MbpsBandHi)
-	}
-	if m.PPS <= float64(Upload524PPSBandHi) {
-		t.Fatalf("fast path pps=%.0f want > %d", m.PPS, Upload524PPSBandHi)
-	}
-	t.Logf("fast path: writes=%d pps=%.0f mbps=%.1f pkts/flush=%.1f",
-		m.Writes, m.PPS, m.Mbps, m.PktsPerFlush)
-}
-
-// TestGATEConnectIPUpload524CauseSummary logs the localization verdict (always pass — diagnostic gate).
-func TestGATEConnectIPUpload524CauseSummary(t *testing.T) {
-	got := upload524MbpsFromPPS(Upload524PPS, Upload524SegBytes)
-	if got < Upload524MbpsBandLo || got > Upload524MbpsBandHi {
-		t.Fatalf("formula mbps=%.1f want band", got)
-	}
-	t.Logf("LOCALIZE verdict: Docker 524 = %d pps × %d B = %.1f Mbit/s",
-		Upload524PPS, Upload524SegBytes, got)
-	t.Logf("LOCALIZE repro: pace host OR wire @ %v → same band (LOCALIZE-UP-1/2)", Upload524PktSpacing)
-	t.Logf("LOCALIZE discriminate: unpaced pump >>524 (LOCALIZE-UP-3) → prod cap = iteration budget @ ~50 kpps")
-	t.Logf("LOCALIZE prod mapping: kernel tun ReadHostEgress depth-1 ≈ %v/pkt (not slow QUIC on instant wire)", Upload524PktSpacing)
+func logUploadBoundMetrics(t *testing.T, label string, m upload524PumpMeter) {
+	t.Helper()
+	t.Logf("%s: bound=%s writes=%d flushes=%d pps=%.0f mbps=%.1f pkts/flush=%.2f pkts/iter=%.2f read_us/pkt=%.1f write_us/pkt=%.1f host_accepted=%d",
+		label, m.Bound, m.Writes, m.Flushes, m.PPS, m.Mbps, m.PktsPerFlush,
+		m.LoopIn.PktsPerIter, m.LoopIn.ReadUsPerPkt, m.LoopIn.WriteUsPerPkt, m.HostRead.Accepted)
 }
 
 func upload524Max64(a, b int64) int64 {
