@@ -17,7 +17,7 @@ type L3OverlayNativeWire struct {
 	Stop             func()
 }
 
-// L3OverlayNativeOutbound wires native connect_ip L3 instead of legacy IP-in-UDP overlay.
+// L3OverlayNativeOutbound wires native connect_ip L3 (required when l3_overlay_outbound is set).
 type L3OverlayNativeOutbound interface {
 	WireConnectIPNativeL3(
 		ctx context.Context,

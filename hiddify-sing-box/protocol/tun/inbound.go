@@ -2,16 +2,12 @@ package tun
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -65,10 +61,7 @@ type Inbound struct {
 	l3OverlayOutboundTag string
 	l3OverlayPrefixes    []netip.Prefix
 	l3OverlaySocksDest   M.Socksaddr
-	l3OverlayUDPDest     *net.UDPAddr
 	l3OverlayCancel      context.CancelFunc
-	l3OverlayPacketConn  net.PacketConn
-	l3OverlayRewriteSrc  netip.Addr
 	l3OverlayNativeStop         func()
 	l3OverlayNativeStart        func(context.Context) error
 	l3OverlayNativeBindIngress  func(func([]byte) error)
@@ -331,25 +324,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			return nil, E.New("invalid l3_overlay_destination")
 		}
 		inbound.l3OverlaySocksDest = sa
-		inbound.l3OverlayUDPDest = net.UDPAddrFromAddrPort(netip.AddrPortFrom(sa.Addr, sa.Port))
 		inbound.l3OverlayOutboundTag = options.L3OverlayOutbound
 		for _, p := range options.L3OverlayRouteAddress {
 			inbound.l3OverlayPrefixes = append(inbound.l3OverlayPrefixes, p)
-		}
-		for _, ap := range inet4Address {
-			a := ap.Addr().Unmap()
-			if !a.Is4() {
-				continue
-			}
-			for _, rp := range inbound.l3OverlayPrefixes {
-				if rp.Contains(a) {
-					inbound.l3OverlayRewriteSrc = a
-					break
-				}
-			}
-			if inbound.l3OverlayRewriteSrc.IsValid() {
-				break
-			}
 		}
 	}
 	return inbound, nil
@@ -500,84 +477,14 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			if prefixes, send, sendErr, wired, wireErr := t.tryWireNativeConnectIPL3(pctx, tunInterface, ob); wireErr != nil {
 				cancel()
 				return wireErr
-			} else if wired {
+			} else if !wired {
+				cancel()
+				return E.New("tun: l3_overlay_outbound requires native connect_ip L3 (legacy IP-in-UDP overlay removed)")
+			} else {
 				l3Prefixes = prefixes
 				l3Send = send
 				l3SendErr = sendErr
 				t.logger.Info("tun: connect_ip native L3 overlay wired outbound=", t.l3OverlayOutboundTag)
-			} else {
-			pConn, err := ob.ListenPacket(pctx, t.l3OverlaySocksDest)
-			if err != nil {
-				cancel()
-				return E.Cause(err, "l3 overlay ListenPacket")
-			}
-			t.l3OverlayPacketConn = pConn
-			udpAddr := t.l3OverlayUDPDest
-			if primeErr := primeL3OverlayHandshake(t.logger, pConn, udpAddr); primeErr != nil {
-				t.logger.Warn("l3 overlay prime handshake (non-fatal): ", primeErr)
-			}
-			l3Prefixes = t.l3OverlayPrefixes
-			rewriteSrc := t.l3OverlayRewriteSrc
-			var overlayConn atomic.Value // stores net.PacketConn
-			overlayConn.Store(pConn)
-			var reconnectMu sync.Mutex
-			var overlaySendErrors atomic.Uint64
-			var lastOverlaySendLog atomic.Int64
-			l3Send = func(packet []byte) error {
-				if rewriteSrc.IsValid() {
-					b := append([]byte(nil), packet...)
-					rewriteL3OverlayEgressIPv4(b, rewriteSrc)
-					packet = b
-				}
-				connAny := overlayConn.Load()
-				conn, _ := connAny.(net.PacketConn)
-				if conn == nil {
-					return net.ErrClosed
-				}
-				_, err := conn.WriteTo(packet, udpAddr)
-				if err == nil {
-					return nil
-				}
-				if !isOverlayWriteRecoverable(err) {
-					return err
-				}
-				reconnectMu.Lock()
-				defer reconnectMu.Unlock()
-				latestAny := overlayConn.Load()
-				latestConn, _ := latestAny.(net.PacketConn)
-				if latestConn != nil && latestConn != conn {
-					if _, retryErr := latestConn.WriteTo(packet, udpAddr); retryErr == nil {
-						return nil
-					}
-				}
-				newConn, connErr := ob.ListenPacket(pctx, t.l3OverlaySocksDest)
-				if connErr != nil {
-					return err
-				}
-				if latestConn != nil {
-					_ = latestConn.Close()
-				}
-				overlayConn.Store(newConn)
-				t.l3OverlayPacketConn = newConn
-				if primeErr := primeL3OverlayHandshake(t.logger, newConn, udpAddr); primeErr != nil {
-					t.logger.Warn("l3 overlay prime after reconnect (non-fatal): ", primeErr)
-				}
-				go t.l3OverlayReceiveLoop(newConn)
-				_, retryErr := newConn.WriteTo(packet, udpAddr)
-				if retryErr == nil {
-					return nil
-				}
-				return retryErr
-			}
-			l3SendErr = func(err error) {
-				count := overlaySendErrors.Add(1)
-				now := time.Now().UnixNano()
-				lastLoggedAt := lastOverlaySendLog.Load()
-				if now-lastLoggedAt >= int64(5*time.Second) && lastOverlaySendLog.CompareAndSwap(lastLoggedAt, now) {
-					t.logger.Warn("l3 overlay send error: ", err, " total_failures=", count)
-				}
-			}
-			go t.l3OverlayReceiveLoop(pConn)
 			}
 		}
 		tunStack, err := tun.NewStack(t.stack, tun.StackOptions{
@@ -637,17 +544,6 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 	return nil
 }
 
-func isOverlayWriteRecoverable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, net.ErrClosed) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
-		return true
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "use of closed network connection")
-}
-
 func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
 	t.routeAddressSet = common.FlatMap(t.routeRuleSet, adapter.RuleSet.ExtractIPSet)
 	t.routeExcludeAddressSet = common.FlatMap(t.routeExcludeRuleSet, adapter.RuleSet.ExtractIPSet)
@@ -664,35 +560,11 @@ func (t *Inbound) Close() error {
 		t.l3OverlayNativeStop()
 		t.l3OverlayNativeStop = nil
 	}
-	if t.l3OverlayPacketConn != nil {
-		t.l3OverlayPacketConn.Close()
-	}
 	return common.Close(
 		t.tunStack,
 		t.tunIf,
 		t.autoRedirect,
 	)
-}
-
-func (t *Inbound) l3OverlayReceiveLoop(conn net.PacketConn) {
-	buf := make([]byte, 65535)
-	for {
-		n, _, err := conn.ReadFrom(buf)
-		if err != nil {
-			if E.IsClosed(err) || errors.Is(err, net.ErrClosed) {
-				return
-			}
-			t.logger.Trace("l3 overlay read: ", err)
-			return
-		}
-		if n == 0 {
-			continue
-		}
-		_, werr := t.tunIf.Write(buf[:n])
-		if werr != nil {
-			t.logger.Trace("l3 overlay tun write: ", werr)
-		}
-	}
 }
 
 func (t *Inbound) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
