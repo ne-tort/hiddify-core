@@ -17,13 +17,13 @@ import (
 func RunGATEConnectIPTunCMPostUploadServerRecycleDownload(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session A: %v", err)
 	}
@@ -39,11 +39,11 @@ func RunGATEConnectIPTunCMPostUploadServerRecycleDownload(t *testing.T) {
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
 	_ = downLn.Close()
-	downLn = StartHybridConnectIPDownloadTarget(t)
+	downLn = StartNativeConnectIPDownloadTarget(t)
 	srv.Restart(t)
 	time.Sleep(tunRecycleRacePause)
 
-	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session B: %v", err)
 	}
@@ -83,13 +83,13 @@ func RunGATEConnectIPTunCMPostUploadServerRecycleDownload(t *testing.T) {
 // RunGATEConnectIPTunCMProbeThenBulk mirrors native probe-then-bulk on the CM/tun path (no server recycle).
 func RunGATEConnectIPTunCMProbeThenBulk(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

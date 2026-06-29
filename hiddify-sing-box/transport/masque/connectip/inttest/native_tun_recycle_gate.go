@@ -24,13 +24,13 @@ const (
 func RunGATEConnectIPTunNativeH3PostUploadServerRecycleDownload(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session A: %v", err)
 	}
@@ -54,12 +54,12 @@ func RunGATEConnectIPTunNativeH3PostUploadServerRecycleDownload(t *testing.T) {
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
 	_ = downLn.Close()
-	downLn = StartHybridConnectIPDownloadTarget(t)
+	downLn = StartNativeConnectIPDownloadTarget(t)
 
 	srv.Restart(t)
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
-	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session B: %v", err)
 	}
@@ -107,13 +107,13 @@ func RunGATEConnectIPTunNativeH3PostUploadServerRecycleDownload(t *testing.T) {
 func RunGATEConnectIPTunNativeH3PostUploadSameSessionControl(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -154,13 +154,13 @@ func RunGATEConnectIPTunNativeH3PostUploadSameSessionControl(t *testing.T) {
 func RunGATEConnectIPTunNativeH3PostUploadSameSessionProbeThenBulk(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -223,13 +223,13 @@ func RunGATEConnectIPTunNativeH3PostUploadSameSessionProbeThenBulk(t *testing.T)
 func RunGATEConnectIPTunNativeH3PostUploadServerRecycleSameSession(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -249,7 +249,7 @@ func RunGATEConnectIPTunNativeH3PostUploadServerRecycleSameSession(t *testing.T)
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
 	_ = downLn.Close()
-	downLn = StartHybridConnectIPDownloadTarget(t)
+	downLn = StartNativeConnectIPDownloadTarget(t)
 	srv.Restart(t)
 	masque.InttestMarkConnectIPServerRecycled(sess)
 	time.Sleep(tunRecycleRacePause)

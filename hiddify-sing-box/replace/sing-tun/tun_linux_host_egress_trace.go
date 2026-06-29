@@ -4,16 +4,12 @@ package tun
 
 import (
 	"log"
-	"os"
-	"strings"
 	"sync/atomic"
 )
 
 var hostEgressRawReadCount atomic.Uint64
 
-func hostEgressTraceEnabled() bool {
-	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_EGRESS_TRACE")) == "1"
-}
+func hostEgressTraceEnabled() bool { return false }
 
 func logHostEgressRawRead(n int, err error, b0, b10 byte, vnet bool) {
 	if !hostEgressTraceEnabled() {

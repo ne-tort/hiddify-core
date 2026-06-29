@@ -1,15 +1,4 @@
 package stream
 
-import (
-	"log"
-	"os"
-	"strings"
-)
-
-// TraceTCPf logs CONNECT-stream TCP diagnostics when MASQUE_TRACE_TCP=1.
-func TraceTCPf(format string, args ...any) {
-	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_TCP")) != "1" {
-		return
-	}
-	log.Printf(format, args...)
-}
+// TraceTCPf is a no-op in prod (MASQUE_TRACE_TCP env removed; bench uses MASQUE_TRACE_TCP=0 in compose only).
+func TraceTCPf(string, ...any) {}

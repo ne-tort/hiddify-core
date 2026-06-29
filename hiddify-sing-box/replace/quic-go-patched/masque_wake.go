@@ -2,8 +2,6 @@ package quic
 
 import (
 	"io"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/flowcontrol"
@@ -12,28 +10,17 @@ import (
 )
 
 const (
-	envWakeSendOnReceiveRead = "MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ"
-	envBidiConnWake          = "MASQUE_QUIC_BIDI_CONN_WAKE"
 	// masqueStreamWriteToBufLen matches transport/masque h3 tunnelWriteToBufLen (256 KiB).
 	masqueStreamWriteToBufLen = 256 * 1024
 )
 
 var (
-	masqueWakeStreamSendHook   func()
-	masqueWakeConnSendHook     func()
-	masqueScheduleSendingHook  func()
-	masqueWakeSendOnReceiveReadEnabled = true
-	masqueWakeBidiConnOnReceiveReadEnabled = true // duplex: conn-level send wake for FC interleave
+	masqueWakeStreamSendHook                 func()
+	masqueWakeConnSendHook                   func()
+	masqueScheduleSendingHook                func()
+	masqueWakeSendOnReceiveReadEnabled       = true
+	masqueWakeBidiConnOnReceiveReadEnabled   = true // duplex: conn-level send wake for FC interleave
 )
-
-func init() {
-	if strings.TrimSpace(os.Getenv(envWakeSendOnReceiveRead)) == "0" {
-		masqueWakeSendOnReceiveReadEnabled = false
-	}
-	if strings.TrimSpace(os.Getenv(envBidiConnWake)) == "0" {
-		masqueWakeBidiConnOnReceiveReadEnabled = false
-	}
-}
 
 func masqueWakeSendOnReceiveRead() bool {
 	return masqueWakeSendOnReceiveReadEnabled

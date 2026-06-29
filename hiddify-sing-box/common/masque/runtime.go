@@ -19,21 +19,10 @@ import (
 
 const transportModeConnectIP = "connect_ip"
 
-// connectIPEagerOpenIPSessionAtStart opens CONNECT-IP during Runtime.Start when the packet
-// plane must be live before the first Dial/ListPacket (tcp_transport connect_ip userspace stack).
-// Hybrid connect_ip + connect_stream defers OpenIPSession until ListenPacket or dialConnectIPTCP.
+// connectIPEagerOpenIPSessionAtStart opens CONNECT-IP during Runtime.Start when transport_mode is connect_ip.
 func connectIPEagerOpenIPSessionAtStart(transportMode, tcpTransport string) bool {
-	if !strings.EqualFold(strings.TrimSpace(transportMode), transportModeConnectIP) {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(tcpTransport)) {
-	case "", "auto", "connect_stream":
-		return false
-	case "connect_ip":
-		return true
-	default:
-		return false
-	}
+	_ = tcpTransport
+	return strings.EqualFold(strings.TrimSpace(transportMode), transportModeConnectIP)
 }
 
 // wrapStartRouterCancel marks context.Canceled on the Runtime.Start path as lifecycle-classified for
@@ -218,9 +207,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 		return err
 	}
 	r.session = session
-	// Hybrid connect_ip + tcp_transport connect_stream must not open CONNECT-IP at Start:
-	// the dedicated ipHTTPConn/ingress competes with the separate CONNECT-stream QUIC stack and
-	// bench iperf over TUN hangs until wall timeout (see §15 connect-ip-h3 profile).
 	if connectIPEagerOpenIPSessionAtStart(r.options.TransportMode, r.options.TCPTransport) {
 		ipPlane, err := session.OpenIPSession(ctx)
 		if err != nil {

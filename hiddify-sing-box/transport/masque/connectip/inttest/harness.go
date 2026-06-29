@@ -1,6 +1,6 @@
 package inttest
 
-// In-process CONNECT-IP hybrid harness (W-IP-0 PR1). Imports protocol/server here to avoid
+// In-process CONNECT-IP native harness (W-IP-0 PR1). Imports protocol/server here to avoid
 // masque ↔ server import cycle when external tests import transport/masque.
 
 import (
@@ -17,75 +17,48 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
 	"github.com/sagernet/sing-box/transport/masque"
-	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/yosida95/uritemplate/v3"
-	"golang.org/x/net/http2"
 )
 
 const (
-	HybridSmokeEchoPayload = "hybrid-smoke"
-	HybridSmokeMinDownMbps = 1.0
-	HybridSmokeMinBytes    = 4096
-	HybridSmokeBenchDur    = 200 * time.Millisecond
-	HybridSynthBenchDur    = 2 * time.Second
-	// HybridNativeProfileLocalIPv4 matches generic-server AssignAddresses (198.18.0.1/32).
-	HybridNativeProfileLocalIPv4 = "198.18.0.1"
+	NativeSmokeEchoPayload = "native-smoke"
+	NativeSmokeMinDownMbps = 1.0
+	NativeSmokeMinBytes    = 4096
+	NativeSmokeBenchDur    = 200 * time.Millisecond
+	NativeSynthBenchDur    = 2 * time.Second
+	// NativeProfileLocalIPv4 matches generic-server AssignAddresses (198.18.0.1/32).
+	NativeProfileLocalIPv4 = "198.18.0.1"
 )
 
-// HybridNativeH3ClientOptions builds ClientOptions for native connect_ip TCP leg on hybrid H3 server.
-func HybridNativeH3ClientOptions(proxyPort int) masque.ClientOptions {
+// NativeH3ClientOptions builds ClientOptions for native connect_ip TCP leg on in-proc H3 server.
+func NativeH3ClientOptions(proxyPort int) masque.ClientOptions {
 	return masque.ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		TransportMode:       "connect_ip",
 		TCPTransport:        "connect_ip",
-		ProfileLocalIPv4:    HybridNativeProfileLocalIPv4,
+		ProfileLocalIPv4:    NativeProfileLocalIPv4,
 	}
 }
 
-// HybridConnectStreamH3ClientOptions builds ClientOptions for connect_ip + connect_stream over H3.
-func HybridConnectStreamH3ClientOptions(proxyPort int) masque.ClientOptions {
-	return masque.ClientOptions{
-		Server:              "127.0.0.1",
-		ServerPort:          uint16(proxyPort),
-		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TransportMode:       "connect_ip",
-		TCPTransport:        "connect_stream",
-		ProfileLocalIPv4:    HybridNativeProfileLocalIPv4,
-	}
-}
-
-// HybridConnectStreamH2ClientOptions builds ClientOptions for connect_ip + connect_stream over H2.
-func HybridConnectStreamH2ClientOptions(proxyPort int, tcpDial masque.MasqueTCPDialFunc) masque.ClientOptions {
-	return masque.ClientOptions{
-		Server:                   "127.0.0.1",
-		ServerPort:               uint16(proxyPort),
-		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
-		TransportMode:            "connect_ip",
-		TCPTransport:             "connect_stream",
-		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
-		TCPDial:                  tcpDial,
-	}
-}
-
-func StartHybridConnectIPH3Server(tb testing.TB) int {
+func StartNativeConnectIPH3Server(tb testing.TB) int {
 	tb.Helper()
-	return NewHybridConnectIPH3Server(tb).Port()
+	return NewNativeConnectIPH3Server(tb).Port()
 }
 
-// HybridConnectIPH3Server is a restartable in-proc CONNECT-IP H3 server (W-IP-TUN synth).
-type HybridConnectIPH3Server struct {
+// NativeConnectIPH3Server is a restartable in-proc CONNECT-IP H3 server (W-IP-TUN synth).
+type NativeConnectIPH3Server struct {
 	port    int
 	quicLn  *net.UDPConn
 	h3srv   *http3.Server
 	serveWG sync.WaitGroup
 }
 
-// NewHybridConnectIPH3Server starts an H3 CONNECT-IP server; tb.Cleanup stops it.
-func NewHybridConnectIPH3Server(tb testing.TB) *HybridConnectIPH3Server {
+// NewNativeConnectIPH3Server starts an H3 CONNECT-IP server; tb.Cleanup stops it.
+func NewNativeConnectIPH3Server(tb testing.TB) *NativeConnectIPH3Server {
 	tb.Helper()
-	s := &HybridConnectIPH3Server{}
+	s := &NativeConnectIPH3Server{}
 	if err := s.launch(tb, 0); err != nil {
 		tb.Fatalf("launch h3 server: %v", err)
 	}
@@ -93,9 +66,9 @@ func NewHybridConnectIPH3Server(tb testing.TB) *HybridConnectIPH3Server {
 	return s
 }
 
-func (s *HybridConnectIPH3Server) Port() int { return s.port }
+func (s *NativeConnectIPH3Server) Port() int { return s.port }
 
-func (s *HybridConnectIPH3Server) Stop() error {
+func (s *NativeConnectIPH3Server) Stop() error {
 	if s.h3srv != nil {
 		_ = s.h3srv.Close()
 	}
@@ -109,7 +82,7 @@ func (s *HybridConnectIPH3Server) Stop() error {
 }
 
 // Restart stops and relaunches the server on the same UDP port (Docker masque-server-core parity).
-func (s *HybridConnectIPH3Server) Restart(tb testing.TB) {
+func (s *NativeConnectIPH3Server) Restart(tb testing.TB) {
 	tb.Helper()
 	keepPort := s.port
 	_ = s.Stop()
@@ -119,7 +92,7 @@ func (s *HybridConnectIPH3Server) Restart(tb testing.TB) {
 	}
 }
 
-func (s *HybridConnectIPH3Server) launch(tb testing.TB, fixedPort int) error {
+func (s *NativeConnectIPH3Server) launch(tb testing.TB, fixedPort int) error {
 	tlsCfg := masque.InProcessH3TestTLS(tb)
 	quicConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: fixedPort})
 	if err != nil {
@@ -135,7 +108,7 @@ func (s *HybridConnectIPH3Server) launch(tb testing.TB, fixedPort int) error {
 		return err
 	}
 	host := server.ConnectIPHandlerHost{
-		Tag:     "hybrid-smoke",
+		Tag:     "native-smoke",
 		Type:    "masque",
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
 		Dialer:  net.Dialer{Timeout: 5 * time.Second},
@@ -184,81 +157,7 @@ func (s *HybridConnectIPH3Server) launch(tb testing.TB, fixedPort int) error {
 	return nil
 }
 
-func StartHybridConnectIPH2Server(tb testing.TB) int {
-	tb.Helper()
-	serverTLS := masque.InProcessH3TestTLS(tb)
-	serverTLS.NextProtos = []string{http2.NextProtoTLS, "http/1.1"}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		tb.Fatalf("listen tcp: %v", err)
-	}
-	proxyPort := ln.Addr().(*net.TCPAddr).Port
-
-	mux := http.NewServeMux()
-	ipTemplateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/ip", proxyPort)
-	ipTemplate, err := uritemplate.New(ipTemplateRaw)
-	if err != nil {
-		tb.Fatalf("ip template: %v", err)
-	}
-	ipHost := server.ConnectIPHandlerHost{
-		Tag:     "hybrid-smoke-h2",
-		Type:    "masque",
-		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
-		Dialer:  net.Dialer{Timeout: 5 * time.Second},
-		Authorize: func(*http.Request) bool {
-			return true
-		},
-		RequestForParse: func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request {
-			return r
-		},
-		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return true },
-	}
-	mux.HandleFunc("/masque/ip", func(w http.ResponseWriter, r *http.Request) {
-		_ = http.NewResponseController(w).EnableFullDuplex()
-		server.HandleConnectIPRequest(ipHost, w, r, ipTemplate)
-	})
-	tcpTemplate := uritemplate.MustNew(fmt.Sprintf("https://127.0.0.1:%d/masque/tcp/{target_host}/{target_port}", proxyPort))
-	mux.HandleFunc("/masque/tcp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodConnect {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		if p := r.Header.Get(":protocol"); p != "" && p != "HTTP/2" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		tcpHost := server.TCPConnectHost{
-			Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
-			Dialer:  net.Dialer{Timeout: 5 * time.Second},
-			Authorize: func(*http.Request) bool {
-				return true
-			},
-			AuthorityMatches: func(_, _ string, _ bool) bool { return true },
-		}
-		server.HandleTCPConnectRequest(tcpHost, w, r, tcpTemplate, true)
-	})
-
-	tlsLn := tls.NewListener(ln, serverTLS)
-	srv := &http.Server{Handler: mux}
-	if err := http2.ConfigureServer(srv, mh2.BulkHTTP2ServerConfig()); err != nil {
-		tb.Fatalf("configure http2 server: %v", err)
-	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		_ = srv.Serve(tlsLn)
-	}()
-	tb.Cleanup(func() {
-		_ = srv.Close()
-		wg.Wait()
-	})
-	time.Sleep(20 * time.Millisecond)
-	return proxyPort
-}
-
-func StartHybridConnectIPEchoTarget(tb testing.TB) net.Listener {
+func StartNativeConnectIPEchoTarget(tb testing.TB) net.Listener {
 	tb.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -291,19 +190,19 @@ func StartHybridConnectIPEchoTarget(tb testing.TB) net.Listener {
 	return ln
 }
 
-// StartHybridConnectIPIperfReverseTarget serves iperf3 -R setup: read 89B params, write 53B header, then bulk.
-func StartHybridConnectIPIperfReverseTarget(tb testing.TB) net.Listener {
+// StartNativeConnectIPIperfReverseTarget serves iperf3 -R setup: read 89B params, write 53B header, then bulk.
+func StartNativeConnectIPIperfReverseTarget(tb testing.TB) net.Listener {
 	tb.Helper()
-	return startHybridConnectIPIperfReverseTarget(tb, true)
+	return startNativeConnectIPIperfReverseTarget(tb, true)
 }
 
-// StartHybridConnectIPIperfReverseHeaderOnlyTarget is synth localization: 53B header only, no bulk flood.
-func StartHybridConnectIPIperfReverseHeaderOnlyTarget(tb testing.TB) net.Listener {
+// StartNativeConnectIPIperfReverseHeaderOnlyTarget is synth localization: 53B header only, no bulk flood.
+func StartNativeConnectIPIperfReverseHeaderOnlyTarget(tb testing.TB) net.Listener {
 	tb.Helper()
-	return startHybridConnectIPIperfReverseTarget(tb, false)
+	return startNativeConnectIPIperfReverseTarget(tb, false)
 }
 
-func startHybridConnectIPIperfReverseTarget(tb testing.TB, withBulk bool) net.Listener {
+func startNativeConnectIPIperfReverseTarget(tb testing.TB, withBulk bool) net.Listener {
 	tb.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -334,7 +233,6 @@ func startHybridConnectIPIperfReverseTarget(tb testing.TB, withBulk bool) net.Li
 					_, _ = io.Copy(io.Discard, c)
 					return
 				}
-				// Let client enter ReadFull on header before bulk floods hybrid forwarder/pump.
 				time.Sleep(50 * time.Millisecond)
 				chunk := make([]byte, 16*1024)
 				deadline := time.Now().Add(30 * time.Second)
@@ -349,8 +247,8 @@ func startHybridConnectIPIperfReverseTarget(tb testing.TB, withBulk bool) net.Li
 	return ln
 }
 
-// StartHybridConnectIPSingleChunkDownloadTarget sends one chunk after client probe (kernel bulk localize).
-func StartHybridConnectIPSingleChunkDownloadTarget(tb testing.TB, chunkLen int) net.Listener {
+// StartNativeConnectIPSingleChunkDownloadTarget sends one chunk after client probe (kernel bulk localize).
+func StartNativeConnectIPSingleChunkDownloadTarget(tb testing.TB, chunkLen int) net.Listener {
 	tb.Helper()
 	if chunkLen <= 0 {
 		chunkLen = 4096
@@ -386,7 +284,7 @@ func StartHybridConnectIPSingleChunkDownloadTarget(tb testing.TB, chunkLen int) 
 	return ln
 }
 
-func StartHybridConnectIPDownloadTarget(tb testing.TB) net.Listener {
+func StartNativeConnectIPDownloadTarget(tb testing.TB) net.Listener {
 	tb.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -405,7 +303,6 @@ func StartHybridConnectIPDownloadTarget(tb testing.TB) net.Listener {
 				if tc, ok := c.(*net.TCPConn); ok {
 					_ = tc.SetNoDelay(true)
 				}
-				// Wait for client payload before bulk (forwarder S2C requires clientPayloadSeen).
 				probe := make([]byte, 1)
 				if _, err := io.ReadFull(c, probe); err != nil {
 					return
@@ -423,12 +320,12 @@ func StartHybridConnectIPDownloadTarget(tb testing.TB) net.Listener {
 	return ln
 }
 
-type hybridSmokeBenchSink struct {
+type nativeSmokeBenchSink struct {
 	deadline time.Time
 	total    int64
 }
 
-func (s *hybridSmokeBenchSink) Write(p []byte) (int, error) {
+func (s *nativeSmokeBenchSink) Write(p []byte) (int, error) {
 	if time.Now().After(s.deadline) {
 		return 0, io.EOF
 	}
@@ -436,19 +333,18 @@ func (s *hybridSmokeBenchSink) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func MeasureHybridSmokeDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
+func MeasureNativeSmokeDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64, float64, error) {
 	wt, ok := conn.(io.WriterTo)
 	if !ok {
 		return 0, 0, fmt.Errorf("masque: conn lacks io.WriterTo")
 	}
-	// Download target waits for one client byte before bulk (forwarder clientPayloadSeen parity).
 	if _, err := conn.Write([]byte{0x42}); err != nil {
 		return 0, 0, err
 	}
 	deadline := time.Now().Add(duration)
 	_ = conn.SetReadDeadline(deadline)
 	defer conn.SetReadDeadline(time.Time{})
-	sink := &hybridSmokeBenchSink{deadline: deadline}
+	sink := &nativeSmokeBenchSink{deadline: deadline}
 	_, err := wt.WriteTo(sink)
 	if err != nil && err != io.EOF && sink.total == 0 {
 		return 0, 0, err

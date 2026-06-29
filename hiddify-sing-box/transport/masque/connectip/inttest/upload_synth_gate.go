@@ -107,11 +107,11 @@ func RunLocalizeConnectIPUploadDatagramWakeCoalescing(t *testing.T) {
 	defer restore()
 
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

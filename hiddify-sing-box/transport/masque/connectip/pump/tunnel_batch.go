@@ -22,7 +22,6 @@ func RunTunnelBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 	// Batch path replaces coalesce poll/drain — one syscall boundary read per iter.
 	opts.LoopInUsqueImmediate = true
 	opts.LoopInDrainOnly = false
-	opts.LoopInCoalescePoll = 0
 	// Host-kernel ACK return: drain queued ingress without 2ms blocking batch (LoopOutSkipBatchDrain).
 	if opts.LoopOutSkipBatchDrain && !opts.LegacyCMBatchDrain {
 		opts.LoopOutUsqueImmediate = false

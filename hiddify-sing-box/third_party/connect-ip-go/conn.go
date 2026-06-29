@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -34,9 +33,7 @@ func (e *CloseError) Is(target error) bool { return target == net.ErrClosed }
 type appendable interface{ append([]byte) []byte }
 
 // masqueConnectIPDebug enables verbose policy/netstack diagnostics (addresses and lengths only).
-func masqueConnectIPDebug() bool {
-	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
-}
+func masqueConnectIPDebug() bool { return false }
 
 type writeCapsule struct {
 	capsule appendable

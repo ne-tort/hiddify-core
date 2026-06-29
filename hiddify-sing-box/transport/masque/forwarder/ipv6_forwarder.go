@@ -4,11 +4,10 @@ import (
 	"context"
 	"log"
 	"net/netip"
-	"os"
-	"strings"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/checksum"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 func (f *packetForwarder) handleIPv6ReadPacket(ctx context.Context, pkt []byte) {
@@ -44,7 +43,7 @@ func (f *packetForwarder) handleIPv6TCPPacket(ctx context.Context, pkt []byte, l
 	tc := header.TCP(pkt[l4Off:])
 	doff := int(pkt[l4Off+12]>>4) * 4
 	if doff < header.TCPMinimumSize || l4Off+doff > len(pkt) {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: drop invalid ipv6 tcp header doff=%d l4Off=%d len=%d", doff, l4Off, len(pkt))
 		}
 		return
@@ -58,7 +57,7 @@ func (f *packetForwarder) handleIPv6TCPPacket(ctx context.Context, pkt []byte, l
 	srcAddr := iph.SourceAddress()
 	dstAddr := iph.DestinationAddress()
 	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: drop bad ipv6 tcp checksum csum=0x%04x", csum)
 		}
 		return

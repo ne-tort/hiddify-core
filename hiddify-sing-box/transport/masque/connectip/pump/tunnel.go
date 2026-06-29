@@ -33,12 +33,8 @@ type TunnelOptions struct {
 	LoopOutUsqueImmediate bool
 	// LoopInUsqueImmediate skips zero-timeout coalesce after ReadPacket (usque: one read → one wire write).
 	LoopInUsqueImmediate bool
-	// LoopInCoalescePoll waits up to this duration for extra tun reads before OnLoopInEnd flush (host-kernel bulk).
-	LoopInCoalescePoll time.Duration
-	// LoopInDrainOnly drains already-buffered tun/prefetch reads with zero timeout (no poll sleep).
+	// LoopInDrainOnly drains already-buffered tun/prefetch reads with zero timeout (legacy CM / localize tests).
 	LoopInDrainOnly bool
-	// LoopOutYieldAfterWrite yields the scheduler after each WritePacket (host-kernel tun coupling ADAPT).
-	LoopOutYieldAfterWrite bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
 	LoopOutSkipBatchDrain bool
 	// LegacyCMBatchDrain enables pre-U0 CM zero-timeout + 2ms batch coalesce (tests only).
@@ -65,10 +61,8 @@ func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
 	opts.LoopOutUsqueImmediate = true
 	if opts.LoopInDrainOnly {
 		opts.LoopInUsqueImmediate = false
-	} else if opts.LoopInCoalescePoll <= 0 {
-		opts.LoopInUsqueImmediate = true
 	} else {
-		opts.LoopInUsqueImmediate = false
+		opts.LoopInUsqueImmediate = true
 	}
 	return opts
 }
@@ -189,36 +183,18 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			return err
 		}
 		if !opts.LoopInUsqueImmediate {
-			poll := opts.LoopInCoalescePoll
-			drainCtx := ctx
-			var drainCancel context.CancelFunc
-			if opts.LoopInDrainOnly {
-				drainCtx = LoopInExpiredDrainCtx()
-			}
+			drainCtx := LoopInExpiredDrainCtx()
 			for {
 				if buf == nil {
 					buf = pool.Get()
-				}
-				coalesceCtx := drainCtx
-				if !opts.LoopInDrainOnly {
-					coalesceCtx = ctx
-					if poll > 0 {
-						coalesceCtx, drainCancel = context.WithTimeout(ctx, poll)
-					} else {
-						coalesceCtx, drainCancel = context.WithTimeout(ctx, 0)
-					}
 				}
 				var r2Start time.Time
 				if obs != nil {
 					r2Start = time.Now()
 				}
-				n2, err2 := device.ReadPacket(coalesceCtx, buf)
+				n2, err2 := device.ReadPacket(drainCtx, buf)
 				if obs != nil {
 					obs.recordRead(time.Since(r2Start))
-				}
-				if drainCancel != nil {
-					drainCancel()
-					drainCancel = nil
 				}
 				if err2 != nil || n2 <= 0 {
 					break
@@ -261,8 +237,11 @@ type PacketConnInPlaceNoWake interface {
 // CloseError is fatal; other write errors are logged and skipped without stopping the pump.
 func writeLoopInPacket(device TunnelDevice, conn PacketConn, pkt []byte) (retained bool, err error) {
 	var icmp []byte
-	// usque MaintainTunnel: ipConn.WritePacket(buf[:n]); ICMP → Device.WritePacket.
-	icmp, err = conn.WritePacket(pkt)
+	if ip, ok := conn.(PacketConnInPlaceNoWake); ok {
+		icmp, retained, err = ip.WritePacketInPlaceNoWake(pkt)
+	} else {
+		icmp, err = conn.WritePacket(pkt)
+	}
 	if err != nil {
 		if errors.As(err, new(*connectip.CloseError)) {
 			return retained, err
@@ -320,9 +299,6 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 		if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n]); err != nil {
 			return err
 		}
-		if opts.LoopOutYieldAfterWrite {
-			runtime.Gosched()
-		}
 		// usque LoopOut: one wire datagram → one WritePacket per iteration (no zero-timeout coalesce).
 		// Batching WriteIngress starves LoopIn ReadHostEgress → tun ENOBUFS / kernel TCP stall (iperf -R).
 		if !opts.LoopOutUsqueImmediate {
@@ -333,9 +309,6 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 				}
 				if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n2]); err != nil {
 					return err
-				}
-				if opts.LoopOutYieldAfterWrite {
-					runtime.Gosched()
 				}
 			}
 		}

@@ -5,16 +5,14 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"strings"
 
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 // UseLegacyFlushRelay selects the old template relay (per-read flush, prime chunk).
-// Default is h2o/Invisv-style full-duplex io.Copy tunnel (MASQUE_RELAY_TCP_LEGACY=1 to revert).
+// Default is h2o/Invisv-style full-duplex io.Copy tunnel.
 func UseLegacyFlushRelay() bool {
-	return strings.TrimSpace(os.Getenv("MASQUE_RELAY_TCP_LEGACY")) == "1"
+	return false
 }
 
 // TCPForward is the server TCP relay entry: tunnel (default) or legacy flush relay.

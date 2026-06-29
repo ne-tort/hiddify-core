@@ -61,13 +61,13 @@ func startDualFlowControlTarget(tb testing.TB) (*dualFlowControlTarget, uint16) 
 func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 	t.Helper()
 	controlTarget, controlPort := startDualFlowControlTarget(t)
-	bulkLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	bulkLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -139,13 +139,13 @@ func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 func RunGATEConnectIPTunCMDualFlowIperfRControl(t *testing.T) {
 	t.Helper()
 	controlTarget, controlPort := startDualFlowControlTarget(t)
-	bulkLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	bulkLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

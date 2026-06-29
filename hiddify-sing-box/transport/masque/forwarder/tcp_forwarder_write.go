@@ -6,8 +6,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
-	"strings"
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
@@ -41,7 +39,7 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 			}
 			return
 		}
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: write loop err=%v", err)
 		}
 	}
@@ -51,7 +49,7 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	f.o.DownloadQueueMetrics.noteDequeued()
 	err := f.sendPacketNow(pkt)
-	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+	if mcip.ConnectIPDebugEnabled() {
 		log.Printf("masque connect_ip forwarder: download send len=%d err=%v", len(pkt), err)
 	}
 	if err != nil {
@@ -67,7 +65,7 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 			}
 			return
 		}
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: download write err=%v", err)
 		}
 	}

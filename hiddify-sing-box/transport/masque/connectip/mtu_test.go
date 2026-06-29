@@ -1,22 +1,11 @@
 package connectip
 
-import (
-	"os"
-	"testing"
-)
+import "testing"
 
-func TestDatagramCeilingMaxEnvContract(t *testing.T) {
-	run := func(env string, want int) {
-		t.Helper()
-		ResetDatagramCeilingMaxEnvCache()
-		t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", env)
-		if got := DatagramCeilingMax(); got != want {
-			t.Fatalf("env=%q: got %d want %d", env, got, want)
-		}
+func TestDatagramCeilingMaxDefault(t *testing.T) {
+	if got := DatagramCeilingMax(); got != DefaultDatagramCeilingMax {
+		t.Fatalf("got %d want %d", got, DefaultDatagramCeilingMax)
 	}
-	run("", DefaultDatagramCeilingMax)
-	run("4096", 4096)
-	run("not-a-number", DefaultDatagramCeilingMax)
 }
 
 func TestH3H2NetstackMTUParity(t *testing.T) {
@@ -47,15 +36,4 @@ func TestH2MaxCapsulePayloadParity(t *testing.T) {
 	if MaxIPv4WireBytes+(DefaultDatagramCeilingMax-MaxIPv4WireBytes) != DefaultDatagramCeilingMax {
 		t.Fatalf("wire bytes + wire slack must equal default ceiling")
 	}
-}
-
-func TestDatagramCeilingMaxRestoresAfterTest(t *testing.T) {
-	prev, ok := os.LookupEnv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX")
-	t.Cleanup(func() {
-		if ok {
-			_ = os.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", prev)
-		} else {
-			_ = os.Unsetenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX")
-		}
-	})
 }

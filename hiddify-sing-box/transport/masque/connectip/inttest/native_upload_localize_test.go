@@ -13,7 +13,3 @@ func TestLocalizeConnectIPUploadNativeConcurrentDownloadPollution(t *testing.T) 
 func TestLocalizeConnectIPUploadNativeDownloadFirstOrder(t *testing.T) {
 	inttest.RunLocalizeConnectIPUploadNativeDownloadFirstOrder(t)
 }
-
-func TestLocalizeConnectIPUploadNativeVsHybridStreamUpload(t *testing.T) {
-	inttest.RunLocalizeConnectIPUploadNativeVsHybridStreamUpload(t)
-}

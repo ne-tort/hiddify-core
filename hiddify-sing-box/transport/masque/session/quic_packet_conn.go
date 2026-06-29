@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"strings"
 	"syscall"
 
@@ -34,16 +33,9 @@ const (
 	QUICTransportPacketConnTierB QUICTransportPacketConnTier = "TierB"
 )
 
-// ReadQUICPacketConnPolicy reads MASQUE_QUIC_PACKET_CONN_POLICY (default permissive).
+// ReadQUICPacketConnPolicy returns prod packet conn validation policy (permissive).
 func ReadQUICPacketConnPolicy() QUICPacketConnPolicy {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("MASQUE_QUIC_PACKET_CONN_POLICY"))) {
-	case "":
-		return QUICPacketConnPolicyPermissive
-	case string(QUICPacketConnPolicyPermissive):
-		return QUICPacketConnPolicyPermissive
-	default:
-		return QUICPacketConnPolicyStrict
-	}
+	return QUICPacketConnPolicyPermissive
 }
 
 // ValidateQUICTransportPacketConn enforces TierA capabilities when policy is strict.

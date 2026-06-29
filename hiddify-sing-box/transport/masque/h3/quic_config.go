@@ -2,9 +2,6 @@ package h3
 
 import (
 	"crypto/tls"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -26,26 +23,9 @@ func (p QUICDialProfile) hasWarpClientCert() bool {
 // and CONNECT-stream (1420 B leaves room for CONNECT-IP datagram framing on bulk paths).
 const DefaultUDPInitialPacketSize uint16 = 1420
 
-// packetPlaneInitialPacketSize aligns QUIC first-flight MTU with HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX
-// so CONNECT-IP can carry larger IPv4 segments per DATAGRAM on jumbo-capable paths (Docker bridge, loopback).
+// packetPlaneInitialPacketSize is the first-flight QUIC packet size for CONNECT-IP/UDP.
 func packetPlaneInitialPacketSize() uint16 {
-	raw := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX"))
-	if raw == "" {
-		return DefaultUDPInitialPacketSize
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1280 {
-		return DefaultUDPInitialPacketSize
-	}
-	// ceiling + RFC9297/H3 datagram prefix headroom; cap below common jumbo.
-	want := n + 96
-	if want > 9000 {
-		want = 9000
-	}
-	if want < int(DefaultUDPInitialPacketSize) {
-		return DefaultUDPInitialPacketSize
-	}
-	return uint16(want)
+	return DefaultUDPInitialPacketSize
 }
 
 const (
@@ -181,7 +161,6 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 }
 
 // TCPConnectStreamHTTP3EnableDatagrams controls http3.Transport.EnableDatagrams for CONNECT-stream.
-// Labs can restore the historic default via HIDDIFY_MASQUE_TCP_HTTP3_LEGACY_DATAGRAMS=1.
 func TCPConnectStreamHTTP3EnableDatagrams(profile QUICDialProfile) bool {
 	if tcpStreamHTTP3LegacyDatagramsEnv() {
 		return true
@@ -198,45 +177,18 @@ func TCPConnectStreamHTTP3EnableDatagrams(profile QUICDialProfile) bool {
 	return false
 }
 
-// packetPlaneKeepAlivePeriod tunes QUIC PING cadence (MASQUE_QUIC_KEEPALIVE_MS).
-// Shorter keepalive helps Docker/NAT field paths where 15s idle gaps drop UDP mappings.
+// packetPlaneKeepAlivePeriod tunes QUIC PING cadence for field NAT paths.
 func packetPlaneKeepAlivePeriod() time.Duration {
-	const defaultPeriod = 15 * time.Second
-	raw := strings.TrimSpace(os.Getenv("MASQUE_QUIC_KEEPALIVE_MS"))
-	if raw == "" {
-		return defaultPeriod
-	}
-	ms, err := strconv.Atoi(raw)
-	if err != nil || ms <= 0 {
-		return defaultPeriod
-	}
-	return time.Duration(ms) * time.Millisecond
+	return 15 * time.Second
 }
 
-// packetPlaneHandshakeIdleTimeout tunes pre-handshake idle budget (MASQUE_QUIC_HANDSHAKE_IDLE_MS).
-// Field remote paths with higher RTT may need >5s (stock quic-go default).
+// packetPlaneHandshakeIdleTimeout tunes pre-handshake idle budget.
 func packetPlaneHandshakeIdleTimeout() time.Duration {
-	// Field remote paths with higher RTT need >5s (REF1-2); default matches bench tuning.
-	const defaultPeriod = 15 * time.Second
-	raw := strings.TrimSpace(os.Getenv("MASQUE_QUIC_HANDSHAKE_IDLE_MS"))
-	if raw == "" {
-		return defaultPeriod
-	}
-	ms, err := strconv.Atoi(raw)
-	if err != nil || ms <= 0 {
-		return defaultPeriod
-	}
-	return time.Duration(ms) * time.Millisecond
+	return 15 * time.Second
 }
 
 func tcpStreamHTTP3LegacyDatagramsEnv() bool {
-	raw := strings.TrimSpace(strings.ToLower(os.Getenv("HIDDIFY_MASQUE_TCP_HTTP3_LEGACY_DATAGRAMS")))
-	switch raw {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 // HTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.

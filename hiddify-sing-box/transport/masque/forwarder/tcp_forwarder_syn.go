@@ -3,10 +3,9 @@ package forwarder
 import (
 	"context"
 	"log"
-	"os"
-	"strings"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 func (f *packetForwarder) shutdownSessions() {
@@ -87,7 +86,7 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 	}
 
 	dialAddr := DialAddr(dstIP, tc.DestinationPort())
-	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+	if mcip.ConnectIPDebugEnabled() {
 		log.Printf("masque connect_ip forwarder: syn %s:%d -> dial %s", flow.srcAddr, flow.srcPort, dialAddr)
 	}
 
@@ -129,7 +128,7 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 
 	remote, dialErr := f.o.Dialer.DialContext(ctx, "tcp", dialAddr)
 	if dialErr != nil {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: syn dial %s err=%v", dialAddr, dialErr)
 		}
 		s.close()
@@ -137,7 +136,7 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 		return
 	}
 	tuneRemote(remote)
-	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+	if mcip.ConnectIPDebugEnabled() {
 		log.Printf("masque connect_ip forwarder: syn dial ok %s", dialAddr)
 	}
 

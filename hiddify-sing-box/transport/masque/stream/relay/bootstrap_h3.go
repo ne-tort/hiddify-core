@@ -4,53 +4,21 @@ import (
 	"errors"
 	"io"
 	"net"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
-
-const envH3BidiBootstrapUpload = "MASQUE_H3_BIDI_BOOTSTRAP_UPLOAD_BYTES"
 
 // StripH3ClientBootstrapUpload removes one-shot H3 bidi bootstrap padding before relaying to onward TCP.
 func StripH3ClientBootstrapUpload(r io.Reader) io.Reader {
 	if r == nil {
 		return nil
 	}
-	n := h3BootstrapUploadBytes()
+	n := conn.H2BidiBootstrapUploadBytes()
 	if n <= 0 {
 		return r
 	}
 	return &h3BootstrapUploadStripper{inner: r, skip: n}
-}
-
-func h3BootstrapUploadBytes() int {
-	for _, key := range []string{envH3BidiBootstrapUpload, conn.EnvH2BidiBootstrapUpload} {
-		if n := parseH3BootstrapUploadBytes(os.Getenv(key)); n >= 0 {
-			return n
-		}
-	}
-	return conn.H2BidiBootstrapUploadBytes()
-}
-
-func parseH3BootstrapUploadBytes(raw string) int {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return -1
-	}
-	if raw == "0" || raw == "false" || raw == "no" || raw == "off" {
-		return 0
-	}
-	kb, err := strconv.Atoi(raw)
-	if err != nil || kb <= 0 {
-		return conn.H2ConnectUploadChunkBytes()
-	}
-	if kb > 1024 {
-		kb = 1024
-	}
-	return kb * 1024
 }
 
 type h3BootstrapUploadStripper struct {

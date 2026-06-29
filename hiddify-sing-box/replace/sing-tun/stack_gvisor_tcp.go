@@ -5,10 +5,7 @@ package tun
 import (
 	"context"
 	"errors"
-	"log"
 	"net/netip"
-	"os"
-	"strings"
 
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -98,11 +95,7 @@ func (f *TCPForwarder) Forward(r *tcp.ForwarderRequest) {
 	// Host kernel owns overlay TCP on tun; gVisor Handler dials duplicate iperf sessions (Docker upload stall).
 	if f.overlayTCPRoute(r.ID()) {
 		if nt, ok := f.tun.(*NativeTun); ok && nt.l3OverlayKernelRelay() {
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-				log.Printf("connect-ip gvisor: block overlay tcp forward %s:%d -> %s:%d (kernel relay)",
-					AddrFromAddress(r.ID().RemoteAddress), r.ID().RemotePort,
-					AddrFromAddress(r.ID().LocalAddress), r.ID().LocalPort)
-			}
+			_ = r // prod: no verbose overlay-tcp forward logging
 			r.Complete(true)
 			return
 		}

@@ -3,56 +3,25 @@ package h2
 import (
 	"bytes"
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
-func TestUploadFlushPolicyDefaultChunk(t *testing.T) {
-	t.Setenv("MASQUE_H2_CONNECT_UPLOAD_BULK_FLUSH", "1")
-	t.Setenv(conn.EnvH2ConnectUploadChunk, "")
+func TestUploadFlushPolicyProdDefaults(t *testing.T) {
 	p := H2UploadFlushPolicy()
 	if p.ChunkBytes != 0 {
-		t.Fatalf("default chunk: got %d want 0 (bulk passthrough)", p.ChunkBytes)
+		t.Fatalf("prod chunk: got %d want 0 (bulk passthrough)", p.ChunkBytes)
 	}
-}
-
-func TestUploadFlushPolicyFromEnv(t *testing.T) {
-		tests := []struct {
-		env  string
-		want int
-	}{
-		{"", 0}, // bulk flush on by default → passthrough wrap
-		{"4", 4 * 1024},
-		{"8", 8 * 1024},
-		{"0", 0},
-		{"-1", 0},
-		{"bogus", 0},
-		{"2048", 1024 * 1024},
-	}
-	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			if tc.env == "" {
-				t.Setenv(conn.EnvH2ConnectUploadChunk, "")
-			} else {
-				t.Setenv(conn.EnvH2ConnectUploadChunk, tc.env)
-			}
-			got := H2UploadFlushPolicy().ChunkBytes
-			if got != tc.want {
-				t.Fatalf("chunk bytes: got %d want %d", got, tc.want)
-			}
-		})
+	if !p.bulkFlush {
+		t.Fatal("prod bulk flush should be enabled")
 	}
 }
 
 func TestH2ConnectChunkedUploadWriterFlushRequestBody(t *testing.T) {
-	t.Setenv(conn.EnvH2ConnectUploadChunk, "4")
-	t.Setenv("MASQUE_H2_CONNECT_UPLOAD_BULK_FLUSH", "0")
 	inner := &chunkRecordFlusherWriter{
 		chunkRecordWriter: chunkRecordWriter{fn: func(p []byte) (int, error) {
 			return len(p), nil
 		}},
 	}
-	policy := H2UploadFlushPolicy()
+	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024, bulkFlush: false}
 	w := policy.Wrap(inner)
 	if _, err := w.Write(bytes.Repeat([]byte("x"), 10*1024)); err != nil {
 		t.Fatal(err)
@@ -63,9 +32,8 @@ func TestH2ConnectChunkedUploadWriterFlushRequestBody(t *testing.T) {
 }
 
 func TestH2ConnectChunkedUploadWriterSplitsWrites(t *testing.T) {
-	t.Setenv(conn.EnvH2ConnectUploadChunk, "4")
 	var got []int
-	policy := H2UploadFlushPolicy()
+	policy := UploadFlushPolicy{ChunkBytes: 4 * 1024, bulkFlush: true}
 	w := policy.Wrap(&chunkRecordWriter{fn: func(p []byte) (int, error) {
 		got = append(got, len(p))
 		return len(p), nil

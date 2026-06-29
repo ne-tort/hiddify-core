@@ -1,8 +1,8 @@
 package h2
 
-// AsymmetricDuplexConfigured enables split download-primary + upload-pool CONNECT-UDP legs (default on).
+// AsymmetricDuplexConfigured enables split download-primary + upload-pool CONNECT-UDP legs (prod: on).
 func AsymmetricDuplexConfigured() bool {
-	return parseAsymmetricDuplexEnv()
+	return ConnectUDPDialPolicyFromEnv().AsymmetricDuplex
 }
 
 type streamRole uint8

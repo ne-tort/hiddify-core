@@ -44,6 +44,5 @@ func (s *coreSession) streamAdvanceHopLocked() (bool, error) {
 }
 
 func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	LogHybridTCPDeprecation(s.Options.Tag, s.Options.TCPTransport, s.Options.TransportMode)
 	return strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(ctx, destination)
 }

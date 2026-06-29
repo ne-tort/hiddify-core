@@ -9,8 +9,8 @@ import (
 
 // requiredSynthAnchorFiles are real in-repo synth anchors referenced by MASQUE docs.
 var requiredSynthAnchorFiles = []string{
-	"connect_stream_ceiling_test.go",
-	"connect_stream_bypass_matrix_test.go",
+	"connect_stream_synth_kpi_prod_stack_test.go",
+	"connect_stream_localize_test.go",
 }
 
 // ghostSynthDocPaths must not appear in active MASQUE docs (retired or never existed).
@@ -88,7 +88,7 @@ func TestMasqueDocSynthAnchorPathsNoGhosts(t *testing.T) {
 			t.Errorf("active MASQUE docs missing anchor reference %q (ADR or 30-connect-stream)", name)
 		}
 	}
-	if !strings.Contains(corpus, "BypassMatrix") && !strings.Contains(corpus, "connect_stream_bypass_matrix_test.go") {
-		t.Error("active MASQUE docs missing BypassMatrix synth anchor reference")
+	if !strings.Contains(corpus, "TestGATEH3SynthProdStackDownload") && !strings.Contains(corpus, "connect_stream_synth_kpi_prod_stack_test.go") {
+		t.Error("active MASQUE docs missing H3 synth prod stack anchor reference")
 	}
 }

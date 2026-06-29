@@ -1,10 +1,5 @@
 package h3
 
-import (
-	"os"
-	"strings"
-)
-
 // IngressAckWakeHTTPLayerH2 is the HTTP overlay tag where MasqueWakeSend must not run.
 const IngressAckWakeHTTPLayerH2 = "h2"
 
@@ -14,12 +9,10 @@ type MasqueWakeSender interface {
 }
 
 // IngressAckWakeOnReceiveRead reports whether quic-go may MasqueWakeStreamSend after CONNECT
-// stream response Read. Set MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ=0 to disable conn-wide wake
-// during bidi bulk localize (CONNECT-stream upload on the same QUIC connection).
+// stream response Read (prod: always on).
 func IngressAckWakeOnReceiveRead() bool {
-	return strings.TrimSpace(os.Getenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ")) != "0"
+	return true
 }
-
 // FlushConnectIPIngressAckWake schedules QUIC egress after CONNECT-IP ingress TCP ACK/DATA.
 // H2 overlay consumes the wake without MasqueWakeSend; H3 calls MasqueWakeConnSend only here.
 func FlushConnectIPIngressAckWake(httpLayer string, conn MasqueWakeSender) {

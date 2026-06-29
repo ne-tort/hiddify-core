@@ -3,12 +3,9 @@ package relay
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -280,16 +277,6 @@ func (w *flushWriter) Write(p []byte) (int, error) {
 	return nn, nil
 }
 
-func traceFlushWrite(n int, pending int, firstDone bool) {
-	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_RELAY_FLUSH")) != "1" {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "MASQUE_RELAY_FLUSH event=write n=%d pending=%d first_done=%t\n", n, pending, firstDone)
-}
+func traceFlushWrite(n int, pending int, firstDone bool) {}
 
-func traceFlush(reason string, pending int, firstDone bool) {
-	if strings.TrimSpace(os.Getenv("MASQUE_TRACE_RELAY_FLUSH")) != "1" {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "MASQUE_RELAY_FLUSH event=flush reason=%s pending=%d first_done=%t\n", reason, pending, firstDone)
-}
+func traceFlush(reason string, pending int, firstDone bool) {}

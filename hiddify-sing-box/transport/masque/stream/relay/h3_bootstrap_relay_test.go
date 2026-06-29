@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 func TestStripH3ClientBootstrapUploadDiscardsZeros(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
 	body := io.NopCloser(bytes.NewReader(make([]byte, 4096)))
 	r := StripH3ClientBootstrapUpload(body)
 	out, err := io.ReadAll(r)
@@ -22,7 +19,6 @@ func TestStripH3ClientBootstrapUploadDiscardsZeros(t *testing.T) {
 }
 
 func TestStripH3ClientBootstrapUploadPassthroughPayload(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
 	payload := append(make([]byte, 4096), 'x')
 	body := io.NopCloser(bytes.NewReader(payload))
 	r := StripH3ClientBootstrapUpload(body)
@@ -34,4 +30,3 @@ func TestStripH3ClientBootstrapUploadPassthroughPayload(t *testing.T) {
 		t.Fatalf("got %q want x", out)
 	}
 }
-

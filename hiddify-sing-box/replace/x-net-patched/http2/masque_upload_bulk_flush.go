@@ -2,56 +2,17 @@ package http2
 
 import (
 	"io"
-	"os"
-	"strconv"
-	"strings"
 	"time"
 )
 
-const (
-	envH2UploadBulkFlush         = "MASQUE_H2_CONNECT_UPLOAD_BULK_FLUSH"
-	envH2UploadBulkFlushBytes    = "MASQUE_H2_UPLOAD_BULK_FLUSH_BYTES"
-	envH2UploadBulkFlushMaxMs    = "MASQUE_H2_UPLOAD_BULK_FLUSH_MAX_MS"
-	envH2UploadBulkFlushMinBytes = "MASQUE_H2_UPLOAD_BULK_FLUSH_MIN_BYTES"
-)
-
-func masqueUploadBulkFlushEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(envH2UploadBulkFlush))) {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
+func masqueUploadBulkFlushEnabled() bool { return true }
 
 // masqueBulkFlushThreshold returns bytes to batch before TLS flush in bulk mode.
-// Default 64 KiB: instant burst ~485 Mbit/s; deadline flush prevents upload-pipe stall.
-func masqueBulkFlushThreshold() int {
-	if v := strings.TrimSpace(os.Getenv(envH2UploadBulkFlushBytes)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return 256 << 10
-}
+func masqueBulkFlushThreshold() int { return 256 << 10 }
 
-func masqueBulkFlushMinPending() int {
-	if v := strings.TrimSpace(os.Getenv(envH2UploadBulkFlushMinBytes)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 32 << 10
-}
+func masqueBulkFlushMinPending() int { return 32 << 10 }
 
-func masqueBulkFlushMaxDelay() time.Duration {
-	if v := strings.TrimSpace(os.Getenv(envH2UploadBulkFlushMaxMs)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return time.Duration(n) * time.Millisecond
-		}
-	}
-	return 8 * time.Millisecond
-}
+func masqueBulkFlushMaxDelay() time.Duration { return 8 * time.Millisecond }
 
 func masqueShouldBulkFlushNow(pendingAck int, sawEOF bool) bool {
 	if pendingAck <= 0 {

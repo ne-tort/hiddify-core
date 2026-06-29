@@ -12,7 +12,6 @@ import (
 )
 
 type upload524PumpHarnessOpts struct {
-	CoalescePoll         time.Duration // -1 = prod default; >=0 overrides LoopInCoalescePoll
 	LoopInUsqueImmediate bool
 	Prod                 bool // prod usquePumpOptions only (LoopInDrainOnly)
 	NoObserver           bool // skip LoopInObserver overhead in tight budget gates
@@ -47,9 +46,6 @@ func runHostKernelPumpMeter(t *testing.T, host HostEgressReader, w *mockL3Writer
 	opts := b.usquePumpOptions(onFlush)
 	if b.hostKernelRelay() {
 		opts.OnLoopInEnd = onFlush
-	}
-	if harness.CoalescePoll >= 0 {
-		opts.LoopInCoalescePoll = harness.CoalescePoll
 	}
 	if !harness.Prod {
 		opts.LoopInUsqueImmediate = harness.LoopInUsqueImmediate

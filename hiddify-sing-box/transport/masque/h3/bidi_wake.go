@@ -1,16 +1,9 @@
 package h3
 
 import (
-	"os"
-	"strings"
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
-)
-
-const (
-	envH3BidiUploadWake   = "MASQUE_H3_BIDI_UPLOAD_WAKE"
-	envH3BidiDownloadWake = "MASQUE_H3_BIDI_DOWNLOAD_WAKE"
 )
 
 // BidiWakeSink counts upload/download-side wake attempts during WriteTo duplex (test/inject).
@@ -19,26 +12,9 @@ type BidiWakeSink interface {
 	NoteDownloadWake()
 }
 
-func envBidiWakeEnabled(key string) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-	if v == "" {
-		return true
-	}
-	switch v {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
+func (c *TunnelConn) bidiUploadWakeEnabled() bool { return true }
 
-func (c *TunnelConn) bidiUploadWakeEnabled() bool {
-	return envBidiWakeEnabled(envH3BidiUploadWake)
-}
-
-func (c *TunnelConn) bidiDownloadDeliveryWakeEnabled() bool {
-	return envBidiWakeEnabled(envH3BidiDownloadWake)
-}
+func (c *TunnelConn) bidiDownloadDeliveryWakeEnabled() bool { return true }
 
 func (c *TunnelConn) wakeBidiSendAfterUpload() {
 	if c == nil || c.h3 == nil || atomic.LoadInt32(&c.downloadActive) == 0 {

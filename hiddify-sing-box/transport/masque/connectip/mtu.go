@@ -1,12 +1,5 @@
 package connectip
 
-import (
-	"os"
-	"strconv"
-	"strings"
-	"sync"
-)
-
 const (
 	// DefaultDatagramCeilingMax is the inclusive upper bound for CONNECT-IP IPv4 datagram bytes.
 	DefaultDatagramCeilingMax = 1500
@@ -18,42 +11,14 @@ const (
 	MaxIPv4WireBytes = 1372
 )
 
-var datagramCeilingMaxEnvCache struct {
-	mu    sync.Mutex
-	done  bool
-	value int
-}
-
-func parseDatagramCeilingMaxFromEnv() int {
-	raw := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX"))
-	if raw == "" {
-		return DefaultDatagramCeilingMax
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1280 || n > 65535 {
-		return DefaultDatagramCeilingMax
-	}
-	return n
-}
-
-// DatagramCeilingMax returns the configured CONNECT-IP datagram ceiling max.
-// Env is read once per process (HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX in [1280, 65535]).
+// DatagramCeilingMax returns the default CONNECT-IP datagram ceiling max.
+// Per-endpoint mtu in masque config overrides session ceiling at runtime.
 func DatagramCeilingMax() int {
-	datagramCeilingMaxEnvCache.mu.Lock()
-	defer datagramCeilingMaxEnvCache.mu.Unlock()
-	if !datagramCeilingMaxEnvCache.done {
-		datagramCeilingMaxEnvCache.value = parseDatagramCeilingMaxFromEnv()
-		datagramCeilingMaxEnvCache.done = true
-	}
-	return datagramCeilingMaxEnvCache.value
+	return DefaultDatagramCeilingMax
 }
 
-// ResetDatagramCeilingMaxEnvCache clears the env cache (tests only).
-func ResetDatagramCeilingMaxEnvCache() {
-	datagramCeilingMaxEnvCache.mu.Lock()
-	defer datagramCeilingMaxEnvCache.mu.Unlock()
-	datagramCeilingMaxEnvCache.done = false
-}
+// ResetDatagramCeilingMaxEnvCache is a no-op (env ceiling removed; tests may still call).
+func ResetDatagramCeilingMaxEnvCache() {}
 
 // H3NetstackMTU returns gVisor link MTU for H3 overlay (ceiling minus slack).
 func H3NetstackMTU(ceiling int) int {

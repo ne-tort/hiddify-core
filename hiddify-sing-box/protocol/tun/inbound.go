@@ -157,18 +157,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		platformInterface == nil &&
 		tunMTU > 0 &&
 		tunMTU < 49152
-	// PERF-8: VNetHdr read batch (IFF_VNET_HDR without GSO/TSO write). Opt-in until Docker nc+KPI gate.
-	// Enable: HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR=1 (docker-compose passes through).
-	// PERF-8b: HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR_TSO=1 adds TUNSETOFFLOAD read GRO (ingress zero-hdr).
-	enableVNetHdr := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR")) == "1" &&
-		C.IsLinux &&
-		options.Stack == "gvisor" &&
-		options.L3OverlayOutbound != "" &&
-		platformInterface == nil &&
-		tunMTU > 0 &&
-		tunMTU < 49152
-	enableVNetHdrTSO := enableVNetHdr &&
-		strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR_TSO")) == "1"
+	// VNetHdr read batch disabled in prod (upload dead @ IFF_VNET_HDR).
+	enableVNetHdr := false
+	enableVNetHdrTSO := false
 	if tunMTU == 0 {
 		if platformInterface != nil && platformInterface.UnderNetworkExtension() {
 			// In Network Extension, when MTU exceeds 4064 (4096-UTUN_IF_HEADROOM_SIZE), the performance of tun will drop significantly, which may be a system bug.

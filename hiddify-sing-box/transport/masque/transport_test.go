@@ -802,20 +802,17 @@ func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 		t.Fatal("expected connect_ip+transport connect_ip session to advertise ConnectTCP")
 	}
 
-	hybridSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
+	_, err = (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
 		Server:        "example.com",
 		ServerPort:    443,
 		TransportMode: "connect_ip",
 		TCPTransport:  "connect_stream",
 	})
-	if err != nil {
-		t.Fatalf("new connect_ip+connect_stream hybrid session: %v", err)
+	if err == nil {
+		t.Fatal("expected connect_ip+connect_stream combo to be rejected")
 	}
-	if !hybridSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_ip+connect_stream hybrid session to advertise ConnectTCP")
-	}
-	if !hybridSession.Capabilities().ConnectIP {
-		t.Fatal("expected connect_ip+connect_stream hybrid session to advertise ConnectIP")
+	if !strings.Contains(err.Error(), "connect_stream") {
+		t.Fatalf("unexpected hybrid rejection error: %v", err)
 	}
 }
 
@@ -1050,21 +1047,17 @@ func TestCoreSessionCloseClearsConnectIPHTTPStateAndIsIdempotent(t *testing.T) {
 func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 	testCases := []struct {
 		name            string
-		envCeilingMax   string
 		requested       uint32
 		expectedCeiling int
 	}{
-		{name: "zero requested uses default ceiling max", envCeilingMax: "4096", requested: 0, expectedCeiling: mcip.DefaultDatagramCeilingMax},
-		{name: "zero requested clamps to env max below default", envCeilingMax: "1400", requested: 0, expectedCeiling: 1400},
-		{name: "below lower bound clamps to 1280", envCeilingMax: "4096", requested: 1200, expectedCeiling: 1280},
-		{name: "within bounds preserved", envCeilingMax: "4096", requested: 1400, expectedCeiling: 1400},
-		{name: "above env max clamps down", envCeilingMax: "4096", requested: 5000, expectedCeiling: 4096},
-		{name: "default max clamps to 1500", envCeilingMax: "not-a-number", requested: 2000, expectedCeiling: mcip.DefaultDatagramCeilingMax},
+		{name: "zero requested uses default ceiling max", requested: 0, expectedCeiling: mcip.DefaultDatagramCeilingMax},
+		{name: "below lower bound clamps to 1280", requested: 1200, expectedCeiling: 1280},
+		{name: "within bounds preserved", requested: 1400, expectedCeiling: 1400},
+		{name: "above default max clamps to 1500", requested: 5000, expectedCeiling: mcip.DefaultDatagramCeilingMax},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			mcip.ResetDatagramCeilingMaxEnvCache()
-			t.Setenv("HIDDIFY_MASQUE_DATAGRAM_CEILING_MAX", tc.envCeilingMax)
 			session, err := (CoreClientFactory{}).NewSession(context.Background(), ClientOptions{
 				Server:                   "example.com",
 				ServerPort:               443,

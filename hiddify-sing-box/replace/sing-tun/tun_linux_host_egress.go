@@ -7,7 +7,6 @@ import (
 	"errors"
 	"log"
 	"os"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -387,9 +386,7 @@ func virtioHdrAllZero(hdr []byte) bool {
 	return len(hdr) > 0
 }
 
-func hostEgressDebug() bool {
-	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
-}
+func hostEgressDebug() bool { return false }
 
 // ReadHostEgressBatch reads up to maxN datagrams per syscall boundary (prefetch first, then blocking read + drain).
 func (t *NativeTun) ReadHostEgressBatch(ctx context.Context, bufs [][]byte, maxN int) (int, error) {

@@ -3,10 +3,8 @@ package h2
 import (
 	"context"
 	"crypto/tls"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 
@@ -57,17 +55,11 @@ func NewClientTransport(cfg ClientTransportConfig) (*http2.Transport, error) {
 	if strings.EqualFold(strings.TrimSpace(cfg.WarpConnectIPProtocol), "cf-connect-ip") {
 		alternateDialHost = WarpH2AlternateDialHost(dialOverrideHost)
 	}
-	debug := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
 	return h2c.NewClientTransport(h2c.ClientDialConfig{
 		TLSConfig:          cfg.TLSConfig,
 		DialHostCandidates: H2DialHostCandidates(strings.TrimSpace(cfg.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost),
 		TCPDial:            cfg.TCPDial,
 		MasqueTCPDialTLS:   cfg.MasqueTCPDialTLS,
-		DebugTCPDial: func(network, dialAddr, candidate string) {
-			if debug {
-				log.Printf("masque h2 tcp dial attempt network=%s addr=%s candidate=%q", network, dialAddr, candidate)
-			}
-		},
 	})
 }
 

@@ -18,11 +18,11 @@ import (
 // RunGATEConnectIPNativeH3DownloadLeg measures native download ceiling without upload on same session.
 func RunGATEConnectIPNativeH3DownloadLeg(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -57,13 +57,13 @@ func RunGATEConnectIPNativeH3DownloadLeg(t *testing.T) {
 func RunGATEConnectIPNativeH3Synth(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(waitCtx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(waitCtx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -128,12 +128,12 @@ func RunGATEConnectIPNativeH3Synth(t *testing.T) {
 func RunGATEConnectIPNativeH3OrderSensitivity(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -178,13 +178,13 @@ func RunGATEConnectIPNativeH3OrderSensitivity(t *testing.T) {
 // RunGATEConnectIPNativeH3IngressDropCorrelation localizes down collapse against ingress queue drops.
 func RunGATEConnectIPNativeH3IngressDropCorrelation(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	beforeDrops := cipgo.StreamCapsuleDatagramIngressDropTotal()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -215,14 +215,14 @@ func RunGATEConnectIPNativeH3IngressDropCorrelation(t *testing.T) {
 // RunLocalizeConnectIPNativeH3ValidationDropCorrelation checks route/policy validation drops vs download.
 func RunLocalizeConnectIPNativeH3ValidationDropCorrelation(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	beforeIngressDrops := cipgo.StreamCapsuleDatagramIngressDropTotal()
 	beforeValidationDrops := cipgo.ValidationDropTotal()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -257,15 +257,15 @@ func RunLocalizeConnectIPNativeH3ValidationDropCorrelation(t *testing.T) {
 func RunGATEConnectIPNativeH3Variability(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	const runs = 4
 	upVals := make([]float64, 0, runs)
 	downVals := make([]float64, 0, runs)
 	for i := 0; i < runs; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+		session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 		if err != nil {
 			cancel()
 			t.Fatalf("run %d: new session: %v", i, err)
@@ -340,15 +340,15 @@ func RunGATEConnectIPNativeH3Variability(t *testing.T) {
 // RunGATEConnectIPNativeH3PacedVsSaturatedDownload localizes ingress queue overflow under download pressure.
 func RunGATEConnectIPNativeH3PacedVsSaturatedDownload(t *testing.T) {
 	t.Helper()
-	saturatedLn := StartHybridConnectIPDownloadTarget(t)
+	saturatedLn := StartNativeConnectIPDownloadTarget(t)
 	pacedLn := masque.StartConnectIPNativePacedDownloadTarget(t, 32*1024, 150*time.Microsecond)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	runDown := func(target net.Listener) (float64, uint64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		before := cipgo.StreamCapsuleDatagramIngressDropTotal()
-		session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+		session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 		if err != nil {
 			t.Fatalf("new session: %v", err)
 		}
@@ -379,12 +379,12 @@ func RunGATEConnectIPNativeH3PacedVsSaturatedDownload(t *testing.T) {
 func RunLocalizeConnectIPNativeH3RequireAssignedPrefix(t *testing.T) {
 	t.Helper()
 	t.Setenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX", "1")
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -408,14 +408,14 @@ func RunLocalizeConnectIPNativeH3RequireAssignedPrefix(t *testing.T) {
 // RunLocalizeConnectIPNativeH3ObsPlaneDownload correlates native H3 download with observability counters.
 func RunLocalizeConnectIPNativeH3ObsPlaneDownload(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 	beforeIngress := cipgo.StreamCapsuleDatagramIngressDropTotal()
 	snapBefore := cip.ObservabilitySnapshot()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new native h3 session: %v", err)
 	}
@@ -463,12 +463,12 @@ func RunLocalizeConnectIPNativeH3Prod1G(t *testing.T) {
 	t.Helper()
 	target := masque.ConnectIPSynthProdMinMbps
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}

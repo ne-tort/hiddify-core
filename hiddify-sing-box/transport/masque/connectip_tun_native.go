@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"os"
 	"strings"
 	"time"
 
@@ -73,9 +72,8 @@ func ConnectIPTunNativeL3(
 			ReadHostEgress(context.Context, []byte) (int, error)
 		}); ok {
 			rawRead := ciptun.HostEgressReader(hr.ReadHostEgress)
-			vnetHdr := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_VNET_HDR")) == "1"
-			readAheadOff := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_READ_AHEAD")) == "0"
-			useReadAhead := !readAheadOff
+			const vnetHdr = false
+			const useReadAhead = true
 			hostRead := rawRead
 			var readAheadBatch ciptun.HostEgressBatchReader
 			if useReadAhead {
@@ -232,17 +230,6 @@ func ConnectIPTunNativeL3Eligible(transportMode, tcpTransport string) bool {
 		return false
 	}
 	return true
-}
-
-// LogHybridTCPDeprecation warns when connect_stream TCP is used with connect_ip transport (ARCH-4 interim).
-func LogHybridTCPDeprecation(tag, tcpTransport, transportMode string) {
-	if !strings.EqualFold(strings.TrimSpace(transportMode), "connect_ip") {
-		return
-	}
-	if !strings.EqualFold(strings.TrimSpace(tcpTransport), "connect_stream") {
-		return
-	}
-	log.Printf("masque connect_ip: deprecated hybrid tcp_transport=connect_stream tag=%s — use native connect_ip (W-IP-ARCH-4)", strings.TrimSpace(tag))
 }
 
 type nativeL3PacketReader interface {

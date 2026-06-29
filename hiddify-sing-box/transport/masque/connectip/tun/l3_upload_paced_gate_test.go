@@ -13,7 +13,6 @@ func TestGATEConnectIPUpload524ReproHostPaced(t *testing.T) {
 	seg := makeUpload524BulkSeg(t)
 	w := &mockL3Writer{}
 	m := runHostKernelPumpMeter(t, hostEgressReadPaced(Upload524PktSpacing, seg), w, 600*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
 		LoopInUsqueImmediate: true,
 	})
 	if m.Writes < 2000 {
@@ -28,7 +27,6 @@ func TestGATEConnectIPUpload524ReproWirePaced(t *testing.T) {
 	seg := makeUpload524BulkSeg(t)
 	w := &mockL3Writer{inPlaceDelay: Upload524PktSpacing}
 	m := runHostKernelPumpMeter(t, hostEgressInfinite(seg), w, 600*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
 		LoopInUsqueImmediate: true,
 	})
 	if m.Writes < 2000 {
@@ -43,7 +41,6 @@ func TestGATEConnectIPUploadBoundDiscriminatorPaced(t *testing.T) {
 	seg := makeUpload524BulkSeg(t)
 
 	hostPaced := runHostKernelPumpMeter(t, hostEgressReadPaced(Upload524PktSpacing, seg), &mockL3Writer{}, 400*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
 		LoopInUsqueImmediate: true,
 	})
 	logUploadBoundMetrics(t, "host-paced", hostPaced)
@@ -57,7 +54,6 @@ func TestGATEConnectIPUploadBoundDiscriminatorPaced(t *testing.T) {
 
 	wirePacedW := &mockL3Writer{inPlaceDelay: Upload524PktSpacing}
 	wirePaced := runHostKernelPumpMeter(t, hostEgressInfinite(seg), wirePacedW, 400*time.Millisecond, upload524PumpHarnessOpts{
-		CoalescePoll:         0,
 		LoopInUsqueImmediate: true,
 	})
 	logUploadBoundMetrics(t, "wire-paced", wirePaced)

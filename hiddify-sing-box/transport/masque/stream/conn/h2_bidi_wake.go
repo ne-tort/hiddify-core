@@ -1,48 +1,19 @@
 package conn
 
 import (
-	"os"
-	"strconv"
-	"strings"
 	"sync/atomic"
 )
 
-const EnvH2BidiUploadWake = "MASQUE_H2_BIDI_UPLOAD_WAKE"
-const EnvH2BidiBootstrapUpload = "MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES"
+const h2BidiBootstrapUploadBytes = 4 * 1024 // prod: MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES=4 (KiB)
 
-var h2BootstrapUploadBuf [4 * 1024]byte // bootstrap stays 4 KiB (MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES default)
+var h2BootstrapUploadBuf [4 * 1024]byte
 
-// H2BidiBootstrapUploadBytes returns one-shot upload DATA size before first download read
-// (iperf -R / docker download-first). Flush-only poke is noop on io.PipeWriter; real DATA
-// unblocks H2 bidi stream scheduling. Disable with MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES=0.
-func H2BidiBootstrapUploadBytes() int {
-	raw := strings.ToLower(strings.TrimSpace(os.Getenv(EnvH2BidiBootstrapUpload)))
-	if raw == "" {
-		return H2ConnectUploadChunkBytes()
-	}
-	if raw == "0" || raw == "false" || raw == "no" || raw == "off" {
-		return 0
-	}
-	kb, err := strconv.Atoi(raw)
-	if err != nil || kb <= 0 {
-		return H2ConnectUploadChunkBytes()
-	}
-	if kb > 1024 {
-		kb = 1024
-	}
-	return kb * 1024
-}
+// H2BidiBootstrapUploadBytes returns one-shot upload DATA size before first download read.
+func H2BidiBootstrapUploadBytes() int { return h2BidiBootstrapUploadBytes }
 
 // H2BidiUploadWakeDuringDownload reports whether WriteTo should poke the CONNECT upload
-// half after each download chunk (iperf -R / H2 bidi FC interleave). Default on.
-func H2BidiUploadWakeDuringDownload() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvH2BidiUploadWake))) {
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
+// half after each download chunk. Prod: always on.
+func H2BidiUploadWakeDuringDownload() bool { return true }
 
 func flushUploadPath(up UploadPath) {
 	if up == nil {

@@ -215,6 +215,17 @@ func TestValidateMasqueHTTPLayerH2VersusQuicExperimental(t *testing.T) {
 	}
 }
 
+func TestValidateMasqueOptionsRejectsConnectIPHybrid(t *testing.T) {
+	opts := option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
+		TransportMode: option.MasqueTransportModeConnectIP,
+		TCPTransport:  option.MasqueTCPTransportConnectStream,
+	}
+	if err := validateMasqueOptions(opts); err == nil {
+		t.Fatal("expected error: connect_ip + connect_stream")
+	}
+}
+
 func TestValidateMasqueHTTPLayerH2AllowsConnectIP(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},

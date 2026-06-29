@@ -164,8 +164,8 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	}
 }
 
-// TestL3HostKernelHybridBulkNoWakeAckSync bulk → NoWake; ACK → sync flush (same iter).
-func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
+// TestL3HostKernelBulkSyncBulkNoWakeAckSync bulk → NoWake; ACK → sync flush (same iter).
+func TestL3HostKernelBulkSyncBulkNoWakeAckSync(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
 	server := netip.MustParseAddr("198.18.0.99")
@@ -212,8 +212,8 @@ func TestL3HostKernelHybridBulkNoWakeAckSync(t *testing.T) {
 	}
 }
 
-// TestL3HostKernelHybridBulkNoWakeSingleFlushPerIter (GATE-P0-1) coalesced bulk → one iter flush.
-func TestL3HostKernelHybridBulkNoWakeSingleFlushPerIter(t *testing.T) {
+// TestL3HostKernelBulkSyncBulkNoWakeSingleFlushPerIter (GATE-P0-1) coalesced bulk → one iter flush.
+func TestL3HostKernelBulkSyncBulkNoWakeSingleFlushPerIter(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
 	server := netip.MustParseAddr("198.18.0.99")
@@ -258,8 +258,8 @@ func TestL3HostKernelHybridBulkNoWakeSingleFlushPerIter(t *testing.T) {
 	}
 }
 
-// TestL3HostKernelHybridSmallPacketSyncFlush (GATE-P0-2) pure ACK never uses NoWake path.
-func TestL3HostKernelHybridSmallPacketSyncFlush(t *testing.T) {
+// TestL3HostKernelBulkSyncSmallPacketSyncFlush (GATE-P0-2) pure ACK uses copy NoWake + OnLoopInEnd flush.
+func TestL3HostKernelBulkSyncSmallPacketSyncFlush(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
 	server := netip.MustParseAddr("198.18.0.99")
@@ -293,15 +293,15 @@ func TestL3HostKernelHybridSmallPacketSyncFlush(t *testing.T) {
 	cancel()
 
 	if w.noWakeWrites.Load() < 1 {
-		t.Fatalf("noWake=%d want >=1 for pure ACK", w.noWakeWrites.Load())
+		t.Fatalf("noWake=%d want >=1 for pure ACK copy NoWake", w.noWakeWrites.Load())
 	}
 	if w.flushes.Load() < 1 {
-		t.Fatalf("flushes=%d want >=1", w.flushes.Load())
+		t.Fatalf("flushes=%d want >=1 via OnLoopInEnd", w.flushes.Load())
 	}
 }
 
-// TestL3HostKernelHybridBulkThenAckDownloadAlive (GATE-P0-3) coalesced bulk + flush, then LoopOut ingress alive.
-func TestL3HostKernelHybridBulkThenAckDownloadAlive(t *testing.T) {
+// TestL3HostKernelBulkSyncBulkThenAckDownloadAlive (GATE-P0-3) coalesced bulk + flush, then LoopOut ingress alive.
+func TestL3HostKernelBulkSyncBulkThenAckDownloadAlive(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
 	server := netip.MustParseAddr("172.30.99.2")

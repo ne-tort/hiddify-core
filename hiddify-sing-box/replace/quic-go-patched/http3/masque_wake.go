@@ -1,19 +1,10 @@
 package http3
 
 import (
-	"os"
-	"strings"
-
 	"github.com/quic-go/quic-go"
 )
 
 var masqueHTTP3WakeSendOnReceiveReadEnabled = true
-
-func init() {
-	if strings.TrimSpace(os.Getenv("MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ")) == "0" {
-		masqueHTTP3WakeSendOnReceiveReadEnabled = false
-	}
-}
 
 func masqueWakeSendOnReceiveRead() bool {
 	return masqueHTTP3WakeSendOnReceiveReadEnabled

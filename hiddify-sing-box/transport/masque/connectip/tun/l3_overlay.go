@@ -6,8 +6,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,7 +58,6 @@ type L3OverlayBridge struct {
 	kernel              *KernelTunDevice
 	pumpWake            cippump.WakeHooks
 	onLoopInEnd         func()
-	hostEgressPipe      *hostKernelEgressPipeline // test-only manual PERF-2 wiring (RunPump does not set)
 	outboundDrainHook   func()
 }
 
@@ -461,11 +458,9 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 	}()
 	conn := metrics.wrapPacketConn(b.packetConn())
 	if hostKernel {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_BATCH_LOOPIN")) == "1" {
-			if batchDev, ok := device.(cippump.BatchTunnelDevice); ok {
-				batchOpts := b.hostKernelBatchPumpOptions(opts.OnLoopInEnd)
-				return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
-			}
+		if batchDev, ok := device.(cippump.BatchTunnelDevice); ok {
+			batchOpts := b.hostKernelBatchPumpOptions(onLoopInEnd)
+			return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
 		}
 	}
 	return cippump.RunTunnel(ctx, device, conn, opts)
@@ -488,27 +483,28 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 			b.mu.Lock()
 			closed := b.closed
 			writer := b.writer
-			pipe := b.hostEgressPipe
 			b.mu.Unlock()
 			if closed || writer == nil {
 				return nil, net.ErrClosed
 			}
 			if hostKernel {
-				if pipe != nil && hostKernelBulkEgressNoWake(p) {
-					if _, err := pipe.submit(p); err != nil {
-						return nil, err
-					}
-					return nil, nil
-				}
-				if pipe != nil {
-					pipe.beforeSync()
-				}
 				return writeHostKernelEgressWire(writer, p)
 			}
 			return writeWirePacketNoWake(writer, p)
 		},
 	}
-	if !hostKernel {
+	if hostKernel {
+		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
+			b.mu.Lock()
+			closed := b.closed
+			writer := b.writer
+			b.mu.Unlock()
+			if closed || writer == nil {
+				return false, nil, net.ErrClosed
+			}
+			return writeHostKernelEgressInPlace(writer, p)
+		}
+	} else {
 		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
 			b.mu.Lock()
 			closed := b.closed

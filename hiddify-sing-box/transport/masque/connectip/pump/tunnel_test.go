@@ -446,9 +446,9 @@ func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
 	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
 		t.Fatalf("expected usque immediate defaults: %+v", opts)
 	}
-	coalesce := NormalizeTunnelOptions(TunnelOptions{LoopInCoalescePoll: 100 * time.Microsecond})
-	if coalesce.LoopInUsqueImmediate {
-		t.Fatalf("coalesce poll must disable LoopInUsqueImmediate: %+v", coalesce)
+	drain := NormalizeTunnelOptions(TunnelOptions{LoopInDrainOnly: true})
+	if drain.LoopInUsqueImmediate {
+		t.Fatalf("LoopInDrainOnly must disable LoopInUsqueImmediate: %+v", drain)
 	}
 	legacy := NormalizeTunnelOptions(TunnelOptions{LegacyCMBatchDrain: true})
 	if legacy.LoopOutUsqueImmediate || legacy.LoopInUsqueImmediate {

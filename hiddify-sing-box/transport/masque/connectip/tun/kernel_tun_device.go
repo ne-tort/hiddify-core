@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/netip"
-	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -270,16 +267,10 @@ func (d *KernelTunDevice) WritePacket(pkt []byte) error {
 	out := d.nat.DNATIngress(pkt)
 	n, err := d.write(out)
 	if err != nil {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-			log.Printf("connect-ip kernel tun WritePacket err len=%d: %v", len(out), err)
-		}
 		return err
 	}
 	if n != len(out) {
 		return fmt.Errorf("connect-ip kernel tun: write short %d/%d", n, len(out))
-	}
-	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
-		log.Printf("connect-ip kernel tun WritePacket ok len=%d", len(out))
 	}
 	return nil
 }

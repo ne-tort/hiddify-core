@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"io"
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 func TestStripH2ClientBootstrapUploadDiscardsZeros(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
 	body := io.NopCloser(io.MultiReader(
 		bytes.NewReader(make([]byte, 4*1024)),
 		bytes.NewReader([]byte("FAKEIPERF")),
@@ -25,7 +22,6 @@ func TestStripH2ClientBootstrapUploadDiscardsZeros(t *testing.T) {
 }
 
 func TestStripH2ClientBootstrapUploadChunkedZeros(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
 	const chunk = 512
 	const total = 4 * 1024
 	var parts []io.Reader
@@ -45,8 +41,6 @@ func TestStripH2ClientBootstrapUploadChunkedZeros(t *testing.T) {
 }
 
 func TestStripH2ClientBootstrapUploadPartialZeroPrefix(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
-	// Less than full bootstrap — not stripped; real iperf would see leading zeros.
 	body := io.NopCloser(bytes.NewReader([]byte{0, 0, 'X'}))
 	r := StripH2ClientBootstrapUpload(body)
 	out, err := io.ReadAll(r)
@@ -59,7 +53,6 @@ func TestStripH2ClientBootstrapUploadPartialZeroPrefix(t *testing.T) {
 }
 
 func TestStripH2ClientBootstrapUploadPassthroughNonZero(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "4")
 	body := io.NopCloser(bytes.NewReader([]byte{1, 2, 3, 4, 'X'}))
 	r := StripH2ClientBootstrapUpload(body)
 	out, err := io.ReadAll(r)
@@ -70,13 +63,3 @@ func TestStripH2ClientBootstrapUploadPassthroughNonZero(t *testing.T) {
 		t.Fatalf("unexpected passthrough: %v", out)
 	}
 }
-
-func TestStripH2ClientBootstrapUploadDisabled(t *testing.T) {
-	t.Setenv(conn.EnvH2BidiBootstrapUpload, "0")
-	body := io.NopCloser(bytes.NewReader([]byte("keep")))
-	r := StripH2ClientBootstrapUpload(body)
-	if r != body {
-		t.Fatal("disabled strip must return original body")
-	}
-}
-

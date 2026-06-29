@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 
@@ -55,7 +54,7 @@ func BuildH3DialOptions(p H3DialParams) cip.DialOptions {
 // DialH3Tunnel opens a CONNECT-IP session over an established HTTP/3 client connection.
 func DialH3Tunnel(ctx context.Context, clientConn *http3.ClientConn, template *uritemplate.Template, p H3DialParams) (*cip.Conn, *http.Response, error) {
 	proto := strings.TrimSpace(p.WarpConnectIPProtocol)
-	if strings.EqualFold(proto, "cf-connect-ip") && strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+	if strings.EqualFold(proto, "cf-connect-ip") && ConnectIPDebugEnabled() {
 		if st := clientConn.Settings(); st != nil {
 			log.Printf("masque connect_ip debug: h3 peer settings extended_connect=%v datagrams=%v tag=%s",
 				st.EnableExtendedConnect, st.EnableDatagrams, strings.TrimSpace(p.Tag))

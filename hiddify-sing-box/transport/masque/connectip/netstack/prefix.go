@@ -20,11 +20,6 @@ var (
 		done  bool
 		value time.Duration
 	}
-	netstackDebugEnvCache struct {
-		mu    sync.Mutex
-		done  bool
-		value bool
-	}
 )
 
 func parseLocalPrefixWaitFromEnv() time.Duration {
@@ -206,24 +201,13 @@ func syntheticConnectIPPlaceholder(addr netip.Addr) bool {
 	return addr == netip.MustParseAddr("fd00::1")
 }
 
-// NetstackDebugEnabled reports whether CONNECT-IP TCP netstack verbose logging is on.
-// Env is read once per process (HIDDIFY_MASQUE_CONNECT_IP_DEBUG=1).
+// NetstackDebugEnabled reports whether CONNECT-IP TCP netstack verbose logging is on (prod: off).
 func NetstackDebugEnabled() bool {
-	netstackDebugEnvCache.mu.Lock()
-	defer netstackDebugEnvCache.mu.Unlock()
-	if !netstackDebugEnvCache.done {
-		netstackDebugEnvCache.value = strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1"
-		netstackDebugEnvCache.done = true
-	}
-	return netstackDebugEnvCache.value
+	return false
 }
 
-// ResetNetstackDebugEnvCache clears the netstack debug env cache (tests only).
-func ResetNetstackDebugEnvCache() {
-	netstackDebugEnvCache.mu.Lock()
-	defer netstackDebugEnvCache.mu.Unlock()
-	netstackDebugEnvCache.done = false
-}
+// ResetNetstackDebugEnvCache is a no-op (debug env removed).
+func ResetNetstackDebugEnvCache() {}
 
 func netstackDebugf(format string, args ...any) {
 	if NetstackDebugEnabled() {

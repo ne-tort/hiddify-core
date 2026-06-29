@@ -3,8 +3,6 @@ package stream
 import (
 	"errors"
 	"net"
-	"os"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,32 +19,13 @@ const (
 )
 
 // ConnectStreamDialMaxAttempts returns H3/H2 CONNECT-stream round-trip retry budget.
-// Field paths may raise via MASQUE_CONNECT_STREAM_DIAL_MAX_ATTEMPTS (default 3).
 func ConnectStreamDialMaxAttempts() int {
-	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_STREAM_DIAL_MAX_ATTEMPTS"))
-	if raw == "" {
-		return defaultConnectStreamDialMaxAttempts
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 {
-		return defaultConnectStreamDialMaxAttempts
-	}
-	if n > maxConnectStreamDialMaxAttempts {
-		return maxConnectStreamDialMaxAttempts
-	}
-	return n
+	return defaultConnectStreamDialMaxAttempts
 }
 
 // ConnectStreamDialBackoff returns per-attempt delay before retrying a transport fault.
-// MASQUE_CONNECT_STREAM_DIAL_BACKOFF_MS sets the base step (default 50ms; attempt n waits n×base).
 func ConnectStreamDialBackoff(attempt int) time.Duration {
 	baseMs := defaultConnectStreamDialBackoffMs
-	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_STREAM_DIAL_BACKOFF_MS"))
-	if raw != "" {
-		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
-			baseMs = ms
-		}
-	}
 	if attempt < 0 {
 		attempt = 0
 	}

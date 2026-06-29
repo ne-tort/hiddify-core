@@ -1,16 +1,9 @@
 package stream
 
-import (
-	"testing"
-)
+import "testing"
 
-func TestH2BidiDownloadDrainEnabledEnv(t *testing.T) {
-	t.Setenv(EnvH2BidiDownloadDrain, "0")
-	if H2BidiDownloadDrainEnabled() {
-		t.Fatal("expected drain disabled with env=0")
-	}
-	t.Setenv(EnvH2BidiDownloadDrain, "")
+func TestH2BidiDownloadDrainEnabledProd(t *testing.T) {
 	if !H2BidiDownloadDrainEnabled() {
-		t.Fatal("expected drain enabled by default")
+		t.Fatal("expected H2 bidi download drain enabled (prod hardcoded)")
 	}
 }

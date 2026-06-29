@@ -56,13 +56,13 @@ func assertGoroutineDelta(t *testing.T, before int) {
 func RunGATEConnectIPLifecycleGoroutineAfterClose(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	srv := NewHybridConnectIPH3Server(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
 	beforeSess := goroutineCount()
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -87,13 +87,13 @@ func RunGATEConnectIPLifecycleGoroutineAfterClose(t *testing.T) {
 func RunGATEConnectIPLifecycleGoroutineAfterRecycle(t *testing.T) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessA, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session A: %v", err)
 	}
@@ -113,12 +113,12 @@ func RunGATEConnectIPLifecycleGoroutineAfterRecycle(t *testing.T) {
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
 	_ = downLn.Close()
-	downLn = StartHybridConnectIPDownloadTarget(t)
+	downLn = StartNativeConnectIPDownloadTarget(t)
 	srv.Restart(t)
 	masque.WaitNativeConnectIPEgressSettled(ctx, tunRecycleRacePause)
 
 	beforeSess := goroutineCount()
-	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sessB, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session B: %v", err)
 	}
@@ -144,14 +144,14 @@ func RunGATEConnectIPLifecycleGoroutineAfterRecycle(t *testing.T) {
 // must finish with zero active CM connections and no goroutine growth.
 func RunGATEConnectIPRelayTeardownDownloadOnly(t *testing.T) {
 	t.Helper()
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
 	beforeSess := goroutineCount()
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

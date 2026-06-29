@@ -8,7 +8,7 @@ Set-Location (Join-Path $root 'hiddify-sing-box')
 
 Write-Host "=== connect-ip upload synth gate (phase 1: structural + regression) ===" -ForegroundColor Cyan
 
-$phase1 = '^TestGATEConnectIPUploadSynth$|^TestGATEConnectIPUploadSynthNative$|^TestLocalizeConnectIPUploadNativeVsHybridStreamUpload$|^TestLocalizeConnectIPUploadDatagramWakeCoalescing$|^TestLocalizeConnectIPUploadNativeConcurrentDownloadPollution$|^TestLocalizeConnectIPUploadPipeClientPacketSession$|^TestLocalizeConnectIPUploadNativeObs$|^TestMasqueConnectIPLocalizeRecycle$'
+$phase1 = '^TestGATEConnectIPUploadSynth$|^TestGATEConnectIPUploadSynthNative$|^TestLocalizeConnectIPUploadDatagramWakeCoalescing$|^TestLocalizeConnectIPUploadNativeConcurrentDownloadPollution$|^TestLocalizeConnectIPUploadPipeClientPacketSession$|^TestLocalizeConnectIPUploadNativeObs$|^TestMasqueConnectIPLocalizeRecycle$'
 
 go test ./transport/masque/ -run $phase1 -count=1 -timeout 180s -v
 

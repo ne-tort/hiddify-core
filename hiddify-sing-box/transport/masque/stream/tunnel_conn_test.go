@@ -179,7 +179,6 @@ func (zeroUploadReader) Read(p []byte) (int, error) {
 // TestH2BidiDrainDoesNotConsumeBeforeWriteTo models docker connect-stream-h2 download-first:
 // dial returns before route ConnectionManager WriteTo; eager drain must not discard iperf preamble.
 func TestH2BidiDrainDoesNotConsumeBeforeWriteTo(t *testing.T) {
-	t.Setenv(EnvH2BidiBootstrapUpload, "0")
 	const (
 		prefix = "IPERFCOOK"
 		bulk   = 64 * 1024

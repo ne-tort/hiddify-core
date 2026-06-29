@@ -12,15 +12,19 @@ import (
 
 var (
 	masqueGetenvLiteralRe = regexp.MustCompile(`os\.Getenv\(\s*"((?:MASQUE|HIDDIFY_MASQUE)_[^"]+)"`)
-	masqueConstSingleRe   = regexp.MustCompile(`const\s+(?:\w+\s+)?\w+\s*=\s*"((?:MASQUE|HIDDIFY_MASQUE)_[^"]+)"`)
-	masqueConstGroupRe    = regexp.MustCompile(`(?m)^\s+\w+\s*=\s*"((?:MASQUE|HIDDIFY_MASQUE)_[^"]+)"`)
+	hybridConnectIPProfileRe = regexp.MustCompile(`connect-ip-h[23](?:[^-a-z0-9_]|$)`)
 )
 
 // TestMasqueDocumentedEnvVarsExist (H-S22) — every documented MASQUE knob is read in prod Go, and vice versa.
 func TestMasqueDocumentedEnvVarsExist(t *testing.T) {
 	t.Parallel()
-	root := masquePackageRoot(t)
-	prodEnv := collectMasqueProdEnvVars(t, root)
+	roots := masqueProdEnvRoots(t)
+	prodEnv := make(map[string]bool)
+	for _, root := range roots {
+		for name := range collectMasqueProdEnvVars(t, root) {
+			prodEnv[name] = true
+		}
+	}
 
 	doc := make(map[string]struct{}, len(MasqueDocumentedEnvVars))
 	for _, name := range MasqueDocumentedEnvVars {
@@ -58,6 +62,16 @@ func masquePackageRoot(t *testing.T) string {
 	return filepath.Dir(filename)
 }
 
+func masqueProdEnvRoots(t *testing.T) []string {
+	t.Helper()
+	transportMasque := masquePackageRoot(t)
+	singBox := filepath.Dir(filepath.Dir(transportMasque))
+	return []string{
+		transportMasque,
+		filepath.Join(singBox, "protocol", "masque"),
+	}
+}
+
 func collectMasqueProdEnvVars(t *testing.T, root string) map[string]bool {
 	t.Helper()
 	found := make(map[string]bool)
@@ -81,12 +95,6 @@ func collectMasqueProdEnvVars(t *testing.T, root string) map[string]bool {
 		}
 		src := stripGoLineComments(string(data))
 		for _, m := range masqueGetenvLiteralRe.FindAllStringSubmatch(src, -1) {
-			found[m[1]] = true
-		}
-		for _, m := range masqueConstSingleRe.FindAllStringSubmatch(src, -1) {
-			found[m[1]] = true
-		}
-		for _, m := range masqueConstGroupRe.FindAllStringSubmatch(src, -1) {
 			found[m[1]] = true
 		}
 		return nil

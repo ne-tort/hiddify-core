@@ -19,16 +19,8 @@ func TestLocalPrefixWaitEnvContract(t *testing.T) {
 	run("not-a-number", defaultLocalPrefixWait)
 }
 
-func TestNetstackDebugEnvContract(t *testing.T) {
-	run := func(env string, want bool) {
-		t.Helper()
-		ResetNetstackDebugEnvCache()
-		t.Setenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG", env)
-		if got := NetstackDebugEnabled(); got != want {
-			t.Fatalf("env=%q: got %v want %v", env, got, want)
-		}
+func TestNetstackDebugDisabledInProd(t *testing.T) {
+	if NetstackDebugEnabled() {
+		t.Fatal("netstack debug must be off in prod")
 	}
-	run("", false)
-	run("1", true)
-	run("0", false)
 }

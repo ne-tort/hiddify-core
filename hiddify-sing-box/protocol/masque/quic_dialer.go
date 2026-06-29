@@ -3,14 +3,11 @@ package masque
 import (
 	"context"
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"os"
 	"reflect"
-	"strings"
 	"syscall"
 	"time"
 
@@ -261,8 +258,7 @@ func unwrapMasqueQUICUnderlyingConn(c net.Conn) net.Conn {
 }
 
 func masqueQUICDialerTraceEnabled() bool {
-	return strings.TrimSpace(os.Getenv("MASQUE_TRACE_QUIC_DIAL")) == "1" ||
-		strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_QUIC_TRACE")) == "1"
+	return false
 }
 
 func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -272,9 +268,6 @@ func (c *connectedPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	}
 	if masqueQUICDialerTraceEnabled() {
 		log.Printf("masque quic_dialer read_from bytes=%d remote=%v", n, c.remoteAddr)
-		if os.Getenv("HIDDIFY_MASQUE_QUIC_HEX_SMALL_READS") == "1" && n > 0 && n <= 64 {
-			log.Printf("masque quic_dialer small_read hex=%s", strings.ToUpper(hex.EncodeToString(p[:n])))
-		}
 	}
 	return n, c.remoteAddr, nil
 }

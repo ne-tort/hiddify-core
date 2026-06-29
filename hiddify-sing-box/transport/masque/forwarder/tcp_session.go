@@ -8,13 +8,12 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 )
 
 type tcpForwardSession struct {
@@ -88,7 +87,7 @@ func (s *tcpForwardSession) close() {
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
-	if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+	if mcip.ConnectIPDebugEnabled() {
 		log.Printf("masque connect_ip forwarder: session close %s:%d -> %s:%d",
 			s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 	}
@@ -160,7 +159,7 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc he
 	if flags&header.TCPFlagAck != 0 && ack >= s.iss+1 {
 		if !s.established && flags&header.TCPFlagSyn == 0 {
 			s.established = true
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			if mcip.ConnectIPDebugEnabled() {
 				log.Printf("masque connect_ip forwarder: handshake established %s:%d -> %s:%d",
 					s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
@@ -212,7 +211,7 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc he
 		}
 		if _, err := s.outbound.Write(payCopy); err != nil {
 			returnPacket(payCopy)
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			if mcip.ConnectIPDebugEnabled() {
 				log.Printf("masque connect_ip forwarder: remote write err=%v %s:%d -> %s:%d",
 					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
@@ -221,7 +220,7 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc he
 		}
 		returnPacket(payCopy)
 		if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			if mcip.ConnectIPDebugEnabled() {
 				log.Printf("masque connect_ip forwarder: remote flush err=%v %s:%d -> %s:%d",
 					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
@@ -277,7 +276,7 @@ func (s *tcpForwardSession) flushPendingRemote(immediate bool) {
 				returnPacket(p)
 			}
 			s.pendingRemote = nil
-			if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+			if mcip.ConnectIPDebugEnabled() {
 				log.Printf("masque connect_ip forwarder: pending remote write err=%v %s:%d -> %s:%d",
 					err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 			}
@@ -288,7 +287,7 @@ func (s *tcpForwardSession) flushPendingRemote(immediate bool) {
 	}
 	s.pendingRemote = nil
 	if err := s.maybeFlushRemote(immediate); err != nil {
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: pending remote flush err=%v %s:%d -> %s:%d",
 				err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 		}
@@ -507,7 +506,7 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 						}
 						continue
 					}
-					if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+					if mcip.ConnectIPDebugEnabled() {
 						log.Printf("masque connect_ip forwarder: remote read err=%v %s:%d -> %s:%d",
 							err, s.flow.srcAddr, s.flow.srcPort, s.flow.dstAddr, s.flow.dstPort)
 					}
@@ -529,7 +528,7 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			}
 			continue
 		}
-		if strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG")) == "1" {
+		if mcip.ConnectIPDebugEnabled() {
 			log.Printf("masque connect_ip forwarder: pump s2c n=%d %s:%d -> %s:%d",
 				len(data), s.flow.dstAddr, s.flow.dstPort, s.flow.srcAddr, s.flow.srcPort)
 		}

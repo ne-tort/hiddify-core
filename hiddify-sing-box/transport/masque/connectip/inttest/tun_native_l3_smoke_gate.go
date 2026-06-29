@@ -80,13 +80,13 @@ func RunGATEConnectIPTunNativeL3DownloadOnly(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -130,13 +130,13 @@ func runGATEConnectIPTunNativeL3KernelSingleChunkDownload(t *testing.T, chunkLen
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	downLn := StartHybridConnectIPSingleChunkDownloadTarget(t, chunkLen)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPSingleChunkDownloadTarget(t, chunkLen)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -198,13 +198,13 @@ func RunGATEConnectIPTunNativeL3KernelDownloadOnly(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -229,13 +229,13 @@ func RunGATEConnectIPTunNativeL3IperfReverse(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	revLn := StartHybridConnectIPIperfReverseTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	revLn := StartNativeConnectIPIperfReverseTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -279,13 +279,13 @@ func RunGATEConnectIPTunNativeL3KernelIperfReverseHeaderOnly(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	revLn := StartHybridConnectIPIperfReverseHeaderOnlyTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	revLn := StartNativeConnectIPIperfReverseHeaderOnlyTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -324,13 +324,13 @@ func RunGATEConnectIPTunNativeL3KernelIperfReverseFull(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	revLn := StartHybridConnectIPIperfReverseTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	revLn := StartNativeConnectIPIperfReverseTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -381,13 +381,13 @@ func RunGATEConnectIPTunNativeL3KernelNcZIperfReverse(t *testing.T) {
 	t.Helper()
 	masque.SkipUnlessTunGVisor(t)
 
-	revLn := StartHybridConnectIPIperfReverseTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	revLn := StartNativeConnectIPIperfReverseTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -426,13 +426,13 @@ func RunGATEConnectIPTunNativeL3PostUploadProbeThenIperfReverse(t *testing.T) {
 	masque.SkipUnlessTunGVisor(t)
 
 	uploadSink := masque.StartConnectIPTunGVisorUploadSink(t)
-	revLn := StartHybridConnectIPIperfReverseTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	revLn := StartNativeConnectIPIperfReverseTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -494,12 +494,12 @@ func RunGATEConnectIPTunNativeL3PostNcWarmupUpload(t *testing.T) {
 	masque.SkipUnlessTunGVisor(t)
 
 	uploadSink := masque.StartConnectIPTunGVisorUploadSink(t)
-	srv := NewHybridConnectIPH3Server(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -534,13 +534,13 @@ func RunGATEConnectIPTunNativeL3UploadDownloadSmoke(t *testing.T) {
 	masque.SkipUnlessTunGVisor(t)
 
 	uploadSink := masque.StartConnectIPTunGVisorUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -575,13 +575,13 @@ func RunGATEConnectIPTunNativeL3PostUploadSameSessionProbeThenBulk(t *testing.T)
 	masque.SkipUnlessTunGVisor(t)
 
 	uploadSink := masque.StartConnectIPTunGVisorUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	srv := NewHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	srv := NewNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(srv.Port()))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(srv.Port()))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

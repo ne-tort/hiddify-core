@@ -2,10 +2,7 @@ package tun
 
 import (
 	"context"
-	"os"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -69,15 +66,7 @@ func cloneHostEgressPkt(src []byte) []byte {
 const hostEgressBatchMinWait = 25 * time.Microsecond
 
 func hostEgressBatchMinPackets() int {
-	v := strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_TUN_BATCH_MIN"))
-	if v == "" {
-		return 1
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return 1
-	}
-	return n
+	return 1
 }
 
 // hostEgressBatchReadAhead overlaps blocking host reads with LoopIn write+flush (upload DoD path).

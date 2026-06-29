@@ -1,11 +1,10 @@
 package inttest
 
-// Native H3 upload localize gates (W-IP-7 IP-TEST-09). Hybrid server harness in harness.go.
+// Native H3 upload localize gates (W-IP-7 IP-TEST-09). In-proc server harness in harness.go.
 
 import (
 	"context"
 	"net"
-	"runtime"
 	"testing"
 	"time"
 
@@ -13,16 +12,16 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// BenchConnectIPNativeUploadH3 measures upload-only on hybrid H3 connect_ip session.
+// BenchConnectIPNativeUploadH3 measures upload-only on native H3 connect_ip session.
 func BenchConnectIPNativeUploadH3(t *testing.T, duration time.Duration) (float64, int64) {
 	t.Helper()
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -54,13 +53,13 @@ func RunLocalizeConnectIPUploadNativeConcurrentDownloadPollution(t *testing.T) {
 	}
 
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -120,13 +119,13 @@ func RunLocalizeConnectIPUploadNativeDownloadFirstOrder(t *testing.T) {
 	uploadOnlyMbps, _ := BenchConnectIPNativeUploadH3(t, masque.ConnectIPNativeSynthBenchDur)
 
 	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	downLn := StartHybridConnectIPDownloadTarget(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
+	downLn := StartNativeConnectIPDownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 
-	session, err := (masque.CoreClientFactory{}).NewSession(ctx, HybridNativeH3ClientOptions(proxyPort))
+	session, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -165,66 +164,5 @@ func RunLocalizeConnectIPUploadNativeDownloadFirstOrder(t *testing.T) {
 	const orderCollapseRatio = 0.50
 	if ratio < orderCollapseRatio {
 		t.Logf("OPEN: download-first collapses upload (ratio %.2f) — not Docker connect-ip-h3-tun order but shared-session state", ratio)
-	}
-}
-
-// RunLocalizeConnectIPUploadNativeVsHybridStreamUpload compares connect_stream vs connect_ip TCP leg upload.
-func RunLocalizeConnectIPUploadNativeVsHybridStreamUpload(t *testing.T) {
-	t.Helper()
-	uploadLn := masque.StartConnectIPNativeUploadSink(t)
-	proxyPort := StartHybridConnectIPH3Server(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	upPort := uint16(uploadLn.Addr().(*net.TCPAddr).Port)
-	dest := M.ParseSocksaddrHostPort("127.0.0.1", upPort)
-
-	measure := func(tcpTransport string) float64 {
-		t.Helper()
-		opts := HybridNativeH3ClientOptions(proxyPort)
-		opts.TCPTransport = tcpTransport
-		sess, err := (masque.CoreClientFactory{}).NewSession(ctx, opts)
-		if err != nil {
-			t.Fatalf("%s session: %v", tcpTransport, err)
-		}
-		defer sess.Close()
-		if _, err := sess.OpenIPSession(ctx); err != nil {
-			t.Fatalf("%s OpenIPSession: %v", tcpTransport, err)
-		}
-		conn, err := sess.DialContext(ctx, "tcp", dest)
-		if err != nil {
-			t.Fatalf("%s dial: %v", tcpTransport, err)
-		}
-		defer conn.Close()
-		_, mbps, err := masque.MeasureNativeUploadMbps(conn, masque.ConnectIPNativeSynthBenchDur)
-		if err != nil {
-			t.Logf("%s upload ended: %v", tcpTransport, err)
-		}
-		return mbps
-	}
-
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-	streamMbps := measure("connect_stream")
-	runtime.GC()
-	time.Sleep(100 * time.Millisecond)
-	nativeMbps := measure("connect_ip")
-
-	ratio := 0.0
-	if streamMbps > 0 {
-		ratio = nativeMbps / streamMbps
-	}
-	t.Logf("upload localize stream=%.1f native=%.1f native/stream=%.2f", streamMbps, nativeMbps, ratio)
-
-	if nativeMbps < masque.ConnectIPSynthRegressionFloorUpMbps {
-		t.Fatalf("native upload regression: %.1f < %.1f", nativeMbps, masque.ConnectIPSynthRegressionFloorUpMbps)
-	}
-	if streamMbps < masque.ConnectIPSynthRegressionFloorUpMbps {
-		t.Fatalf("connect_stream upload regression: %.1f < %.1f", streamMbps, masque.ConnectIPSynthRegressionFloorUpMbps)
-	}
-	const datagramOverheadMaxRatio = 0.75
-	if ratio < datagramOverheadMaxRatio {
-		t.Logf("OPEN: native/stream %.2f < %.2f — datagram-per-segment is dominant vs connect_stream TCP leg",
-			ratio, datagramOverheadMaxRatio)
 	}
 }

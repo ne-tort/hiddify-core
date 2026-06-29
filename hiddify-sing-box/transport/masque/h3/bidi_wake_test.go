@@ -2,22 +2,15 @@ package h3
 
 import "testing"
 
-func TestEnvBidiWakeEnabled(t *testing.T) {
-	tests := []struct {
-		env  string
-		want bool
-	}{
-		{"", true},
-		{"1", true},
-		{"0", false},
-		{"off", false},
+func TestH3BidiDownloadDrainEnabledProd(t *testing.T) {
+	if !H3BidiDownloadDrainEnabled() {
+		t.Fatal("expected H3 bidi download drain enabled (prod hardcoded)")
 	}
-	for _, tc := range tests {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv(envH3BidiUploadWake, tc.env)
-			if got := envBidiWakeEnabled(envH3BidiUploadWake); got != tc.want {
-				t.Fatalf("envBidiWakeEnabled(%q)=%v want %v", tc.env, got, tc.want)
-			}
-		})
+}
+
+func TestH3BidiWakeEnabledProd(t *testing.T) {
+	c := &TunnelConn{}
+	if !c.bidiUploadWakeEnabled() || !c.bidiDownloadDeliveryWakeEnabled() {
+		t.Fatal("expected H3 bidi wake enabled (prod hardcoded)")
 	}
 }

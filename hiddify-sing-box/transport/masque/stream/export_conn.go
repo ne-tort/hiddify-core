@@ -25,9 +25,3 @@ var (
 	H2BidiDownloadDrainEnabled     = conn.H2BidiDownloadDrainEnabled
 	ErrDeadlineUnsupported         = conn.ErrDeadlineUnsupported
 )
-
-const (
-	EnvH2BidiBootstrapUpload = conn.EnvH2BidiBootstrapUpload
-	EnvH2BidiDownloadDrain   = conn.EnvH2BidiDownloadDrain
-	EnvH2ConnectUploadChunk  = conn.EnvH2ConnectUploadChunk
-)

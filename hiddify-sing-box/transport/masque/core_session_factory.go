@@ -2,6 +2,8 @@ package masque
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/sagernet/sing-box/transport/masque/session"
 )
@@ -10,6 +12,9 @@ import (
 type CoreClientFactory struct{}
 
 func (CoreClientFactory) NewSession(ctx context.Context, options ClientOptions) (ClientSession, error) {
+	if err := rejectConnectIPHybridTransport(options.TransportMode, options.TCPTransport); err != nil {
+		return nil, err
+	}
 	return buildCoreSession(ctx, options)
 }
 
@@ -18,6 +23,15 @@ type DirectClientFactory struct{}
 
 func (DirectClientFactory) NewSession(ctx context.Context, options ClientOptions) (ClientSession, error) {
 	return session.NewDirectSession(ctx, options)
+}
+
+func rejectConnectIPHybridTransport(transportMode, tcpTransport string) error {
+	tm := strings.ToLower(strings.TrimSpace(transportMode))
+	tt := strings.ToLower(strings.TrimSpace(tcpTransport))
+	if tm == "connect_ip" && tt == "connect_stream" {
+		return errors.New("masque: transport_mode connect_ip with tcp_transport connect_stream is not supported")
+	}
+	return nil
 }
 
 func buildCoreSession(ctx context.Context, options ClientOptions) (ClientSession, error) {

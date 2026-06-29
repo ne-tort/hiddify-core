@@ -3,8 +3,6 @@ package pump
 import (
 	"fmt"
 	"log"
-	"os"
-	"strings"
 )
 
 // LoopInBoundClass labels the dominant LoopIn stage from metrics snapshot.
@@ -19,9 +17,9 @@ const (
 
 const loopInBoundUsThreshold = 3.0
 
-// LoopInMetricsEnabled reports Docker/synth iter-budget diagnostics (HIDDIFY_MASQUE_CONNECT_IP_LOOPIN_METRICS=1).
+// LoopInMetricsEnabled reports Docker/synth iter-budget diagnostics (disabled in prod).
 func LoopInMetricsEnabled() bool {
-	return strings.TrimSpace(os.Getenv("HIDDIFY_MASQUE_CONNECT_IP_LOOPIN_METRICS")) == "1"
+	return false
 }
 
 // ClassifyLoopInBound picks dominant stage from per-pkt micro-budgets.
