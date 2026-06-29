@@ -38,9 +38,6 @@ func MasqueH3HTTPServerQUICConfig() *quic.Config {
 	return session.H3HTTPServerQUICConfig()
 }
 
-// ErrQUICPacketConnContract is re-exported from session for protocol/masque and tests.
-var ErrQUICPacketConnContract = session.ErrQUICPacketConnContract
-
 func unsupportedNetworkError(network string) error {
 	return session.UnsupportedNetworkError(network)
 }

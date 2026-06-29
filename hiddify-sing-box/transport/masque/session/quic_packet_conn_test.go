@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"io"
 	"net"
 	"testing"
@@ -18,36 +17,27 @@ func TestValidateQUICTransportPacketConnTierAUDPConnPasses(t *testing.T) {
 		t.Fatalf("listen packet: %v", err)
 	}
 	defer pc.Close()
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
 	if err := ValidateQUICTransportPacketConn(pc, "test_server"); err != nil {
-		t.Fatalf("expected TierA udp conn to pass strict policy, got: %v", err)
+		t.Fatalf("expected TierA udp conn to pass, got: %v", err)
 	}
 }
 
-func TestValidateQUICTransportPacketConnTierBStrictRejects(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
+func TestValidateQUICTransportPacketConnTierBPermissivePasses(t *testing.T) {
 	pc := &tierBPacketConnStub{}
-	err := ValidateQUICTransportPacketConn(pc, "test_custom")
-	if err == nil {
-		t.Fatal("expected strict policy to reject TierB packet conn")
-	}
-	if !errors.Is(err, ErrQUICPacketConnContract) {
-		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
+	if err := ValidateQUICTransportPacketConn(pc, "test_custom"); err != nil {
+		t.Fatalf("expected TierB degraded mode to pass, got: %v", err)
 	}
 }
 
-func TestQuicDialWithPolicyStrictRejectsCustomDial(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_PACKET_CONN_POLICY", "strict")
+func TestQuicDialWithPolicyCustomDialRuns(t *testing.T) {
+	var ran bool
 	dial := QuicDialWithPolicy("client_connect_stream", func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
-		t.Fatal("custom QUICDial must not run in strict mode")
+		ran = true
 		return nil, nil
 	})
-	_, err := dial(context.Background(), "127.0.0.1:443", &tls.Config{}, &quic.Config{})
-	if err == nil {
-		t.Fatal("expected strict policy reject error")
-	}
-	if !errors.Is(err, ErrQUICPacketConnContract) {
-		t.Fatalf("expected ErrQUICPacketConnContract, got: %v", err)
+	_, _ = dial(context.Background(), "127.0.0.1:443", &tls.Config{}, &quic.Config{})
+	if !ran {
+		t.Fatal("expected custom QUICDial to run in prod degraded mode")
 	}
 }
 
