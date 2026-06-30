@@ -149,14 +149,14 @@ func TestMaxCapsulePayloadMTUParityWithH3(t *testing.T) {
 	}
 	h3MTU := cip.H3NetstackMTU(ceilingMax)
 	h2MTU := cip.H2NetstackMTU(ceilingMax)
-	if h2MTU-h3MTU != cip.DatagramSlack {
-		t.Fatalf("H2-H3 netstack delta=%d want slack %d", h2MTU-h3MTU, cip.DatagramSlack)
+	if h2MTU-h3MTU != cip.H3FramingSlack {
+		t.Fatalf("H2-H3 netstack delta=%d want slack %d", h2MTU-h3MTU, cip.H3FramingSlack)
 	}
-	if MaxCapsulePayload() != ceilingMax+cip.DatagramSlack {
-		t.Fatalf("capsule max=%d want ceiling+slack=%d", MaxCapsulePayload(), ceilingMax+cip.DatagramSlack)
+	if MaxCapsulePayload() != ceilingMax+cip.H3FramingSlack {
+		t.Fatalf("capsule max=%d want ceiling+slack=%d", MaxCapsulePayload(), ceilingMax+cip.H3FramingSlack)
 	}
-	if cip.MaxIPv4Datagram(ceilingMax)+cip.DatagramSlack != ceilingMax {
-		t.Fatalf("forwarder max IPv4 + slack must equal ceiling max")
+	if cip.MaxIPv4Datagram(ceilingMax) != cip.MaxIPv4WireBytes {
+		t.Fatalf("MaxIPv4Datagram=%d want wire limit %d", cip.MaxIPv4Datagram(ceilingMax), cip.MaxIPv4WireBytes)
 	}
 }
 
