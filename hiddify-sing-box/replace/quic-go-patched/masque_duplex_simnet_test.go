@@ -436,9 +436,6 @@ func TestMasqueDuplexDownloadSimnetStreamReadWake(t *testing.T) {
 	restore := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
 	defer restore()
 
-	t.Setenv(envWakeSendOnReceiveRead, "1")
-	t.Setenv(envBidiConnWake, "0")
-
 	result := runMasqueDuplexDownloadBench(t, "1", masqueDuplexDrainWriteTo)
 	t.Logf("S113 simnet WriteTo: %.1f Mbit/s, stream wakes=%d", result.downloadMbps, streamWakes)
 

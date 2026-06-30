@@ -100,53 +100,58 @@ func TestMasqueStreamWriteToReadChunk64KiB(t *testing.T) {
 	}
 }
 
-func TestMasqueWakeAfterDownloadReadEnvAndActive(t *testing.T) {
+func TestMasqueWakeAfterDownloadReadNilSafe(t *testing.T) {
 	inactive := &Stream{}
 	active := &Stream{}
 	active.setMasqueDownloadActive(true)
 
-	t.Setenv(envWakeSendOnReceiveRead, "1")
 	masqueWakeAfterDownloadRead(nil, 64)
 	masqueWakeAfterDownloadRead(inactive, 64)
 	masqueWakeAfterDownloadRead(active, 0)
-
-	t.Setenv(envWakeSendOnReceiveRead, "0")
-	masqueWakeAfterDownloadRead(active, 64)
 }
 
-func TestMasqueWakeAfterDownloadWriteEnvAndActive(t *testing.T) {
-	inactive := &Stream{}
-	active := &Stream{}
+func TestMasqueWakeAfterDownloadWriteActive(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockSender := NewMockStreamSender(ctrl)
+	mockSender.EXPECT().onHasStreamData(gomock.Any(), gomock.Any()).AnyTimes()
+	mockSender.EXPECT().onHasStreamControlFrame(gomock.Any(), gomock.Any()).AnyTimes()
+	mockSender.EXPECT().onHasConnectionData().AnyTimes()
+	ctx := context.Background()
+	connFC := flowcontrol.NewConnectionFlowController(
+		protocol.DefaultInitialMaxData,
+		protocol.DefaultMaxReceiveConnectionFlowControlWindow,
+		nil,
+		utils.NewRTTStats(),
+		utils.DefaultLogger,
+	)
+	fc := flowcontrol.NewStreamFlowController(
+		4, connFC,
+		protocol.DefaultInitialMaxStreamData,
+		protocol.DefaultMaxReceiveStreamFlowControlWindow,
+		protocol.DefaultInitialMaxStreamData,
+		utils.NewRTTStats(),
+		utils.DefaultLogger,
+	)
+	inactive := newStream(ctx, 4, mockSender, fc, false)
+	active := newStream(ctx, 8, mockSender, fc, false)
 	active.setMasqueDownloadActive(true)
 
-	t.Setenv(envWakeSendOnReceiveRead, "1")
-	t.Setenv(envBidiConnWake, "1")
-	var streamWakes, connWakes int
+	var streamWakes int
 	restoreStream := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
 	defer restoreStream()
-	restoreConn := SetMasqueWakeConnSendHook(func() { connWakes++ })
-	defer restoreConn()
 
 	masqueWakeAfterDownloadWrite(nil, 64)
 	masqueWakeAfterDownloadWrite(inactive, 0)
-	streamWakes, connWakes = 0, 0
+	streamWakes = 0
 	masqueWakeAfterDownloadWrite(inactive, 64)
-	if streamWakes != 1 || connWakes != 1 {
-		t.Fatalf("upload-only Write wake: stream=%d conn=%d want 1/1", streamWakes, connWakes)
+	if streamWakes != 1 {
+		t.Fatalf("upload-only Write wake: stream=%d want 1", streamWakes)
 	}
 
-	streamWakes, connWakes = 0, 0
+	streamWakes = 0
 	masqueWakeAfterDownloadWrite(active, 64)
-	if streamWakes < 1 || connWakes < 1 {
-		t.Fatalf("download-active Write wake: stream=%d conn=%d want >=1", streamWakes, connWakes)
-	}
-
-	t.Setenv(envWakeSendOnReceiveRead, "0")
-	streamWakes, connWakes = 0, 0
-	masqueWakeAfterDownloadWrite(inactive, 64)
-	masqueWakeAfterDownloadWrite(active, 64)
-	if streamWakes != 0 || connWakes != 0 {
-		t.Fatalf("wake disabled: stream=%d conn=%d want 0/0", streamWakes, connWakes)
+	if streamWakes < 1 {
+		t.Fatalf("download-active Write wake: stream=%d want >=1", streamWakes)
 	}
 }
 
@@ -237,18 +242,9 @@ func TestMasqueWakeOnControlFrameRenotify(t *testing.T) {
 	if streamWakes != 0 {
 		t.Fatalf("inactive non-boost stream must not wake, calls=%d", streamWakes)
 	}
-
-	t.Setenv(envBidiSendBoost, "1")
-	streamWakes = 0
-	masqueWakeOnControlFrameRenotify(inactive, true)
-	if streamWakes != 1 {
-		t.Fatalf("boosted stream must wake, calls=%d want 1", streamWakes)
-	}
 }
 
 func TestMasqueStreamWriteToDeliveryPoke(t *testing.T) {
-	t.Setenv(envWakeSendOnReceiveRead, "1")
-
 	active := &Stream{}
 	active.setMasqueDownloadActive(true)
 

@@ -36,16 +36,11 @@ func TestMasquePokeDownloadReceiveWindowNilSafe(t *testing.T) {
 	if masquePokeDownloadReceiveWindow(&Stream{}) {
 		t.Fatal("nil receiveStr must not poke")
 	}
-	t.Setenv(envDownloadEagerWindow, "0")
-	if masquePokeDownloadReceiveWindow(&Stream{receiveStr: &ReceiveStream{}}) {
-		t.Fatal("eager off must not poke")
-	}
 }
 
 // TestReceiveStreamMasquePokeNotifiesControlFrame (REF1-2): eager poke must call
 // onHasStreamControlFrame so MAX_STREAM_DATA is not delayed until the next Read.
 func TestReceiveStreamMasquePokeNotifiesControlFrame(t *testing.T) {
-	t.Setenv(envDownloadEagerWindow, "1")
 	ctrl := gomock.NewController(t)
 	mockSender := NewMockStreamSender(ctrl)
 	const streamID protocol.StreamID = 42
