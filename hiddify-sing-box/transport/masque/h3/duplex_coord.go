@@ -102,8 +102,8 @@ func (c *TunnelConn) waitConcurrentUploadAnnounce() {
 
 func (c *TunnelConn) beginDuplexDownload() {
 	atomic.StoreInt32(&c.downloadDelivered, 0)
-	c.maybeSendH3BootstrapBeforeDuplexDownload()
 	atomic.AddInt32(&c.downloadActive, 1)
+	c.maybeSendH3BootstrapBeforeDuplexDownload()
 	c.waitConcurrentUploadAnnounce()
 	c.syncArmRouteBidiDuplex()
 	if TestDuplexDownloadArmedHook != nil {

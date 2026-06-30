@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,11 +106,24 @@ func (c *TunnelConn) UsesH3Stream() bool {
 }
 
 func (c *TunnelConn) stopDownloadDrain() {
-	if atomic.SwapInt32(&c.drainStopped, 1) == 1 {
-		return
+	atomic.StoreInt32(&c.drainStopped, 1)
+	// Always poke: drain may already be stopped but still blocked in h3.Read under readMu.
+	if c.h3 != nil {
+		_ = c.h3.SetReadDeadline(time.Now())
 	}
-	// Unblock runDownloadDrain if it holds readMu in a blocking h3.Read (WriteTo needs the lock).
-	_ = c.h3.SetReadDeadline(time.Now())
+}
+
+// lockReadMuForWriteTo acquires readMu after background drain releases it (H2 downloadMu parity).
+func (c *TunnelConn) lockReadMuForWriteTo() {
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		c.stopDownloadDrain()
+		if c.readMu.TryLock() {
+			return
+		}
+		runtime.Gosched()
+	}
+	c.readMu.Lock()
 }
 
 // applyH3ReadDeadlineLocked sets or clears the h3 read deadline under readMu.
@@ -365,12 +379,12 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 }
 
 func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
-	c.stopDownloadDrain()
 	c.beginDuplexDownload()
+	c.stopDownloadDrain()
 	defer c.endDuplexDownload()
 
 	if wt, ok := c.h3.(io.WriterTo); ok {
-		c.readMu.Lock()
+		c.lockReadMuForWriteTo()
 		c.applyH3ReadDeadlineLocked()
 		err := c.ctx.Err()
 		c.readMu.Unlock()
@@ -387,7 +401,7 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
-	c.readMu.Lock()
+	c.lockReadMuForWriteTo()
 	c.applyH3ReadDeadlineLocked()
 	err := c.ctx.Err()
 	c.readMu.Unlock()

@@ -118,6 +118,14 @@ type blockingDrainH3Stream struct {
 }
 
 func (s *blockingDrainH3Stream) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	if len(s.pending) > 0 {
+		n := copy(p, s.pending)
+		s.pending = s.pending[n:]
+		s.mu.Unlock()
+		return n, nil
+	}
+	s.mu.Unlock()
 	select {
 	case s.readEntered <- struct{}{}:
 	default:
@@ -127,9 +135,18 @@ func (s *blockingDrainH3Stream) Read(p []byte) (int, error) {
 }
 
 func (s *blockingDrainH3Stream) SetReadDeadline(t time.Time) error {
-	select {
-	case s.unblock <- struct{}{}:
-	default:
+	if !t.IsZero() {
+		for {
+			select {
+			case <-s.unblock:
+			default:
+				select {
+				case s.unblock <- struct{}{}:
+				default:
+				}
+				return nil
+			}
+		}
 	}
 	return nil
 }
@@ -153,10 +170,17 @@ func TestH3TunnelConnWriteToUnblocksDrainReadLock(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	go func() {
-		stream.pushDownload([]byte("payload"))
 		_, _ = conn.WriteTo(io.Discard)
 		done <- struct{}{}
 	}()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&conn.drainStopped) != 0 {
+			stream.pushDownload([]byte("payload"))
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	select {
 	case <-done:
