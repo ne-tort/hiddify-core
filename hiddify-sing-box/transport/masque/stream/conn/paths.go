@@ -13,11 +13,9 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 )
 
-const bidiTunnelWriteToBufLen = 64 * 1024
-
 var bidiTunnelWriteToBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, bidiTunnelWriteToBufLen)
+		b := make([]byte, H2ConnectUploadChunkBytes)
 		return &b
 	},
 }
@@ -288,17 +286,7 @@ func (c *bidiTunnelConn) ReadFrom(r io.Reader) (int64, error) {
 	if c.paths.Upload == nil {
 		return 0, io.ErrClosedPipe
 	}
-	chunk := H2ConnectUploadChunkBytes()
-	if chunk <= 0 {
-		c.uploadMu.Lock()
-		defer c.uploadMu.Unlock()
-		n, err := io.Copy(c.paths.Upload, r)
-		if err != nil {
-			return n, errors.Join(tcpConnectStreamFailed, err)
-		}
-		return n, nil
-	}
-	buf := make([]byte, chunk)
+	buf := make([]byte, H2ConnectUploadChunkBytes)
 	var total int64
 	for {
 		n, err := r.Read(buf)
