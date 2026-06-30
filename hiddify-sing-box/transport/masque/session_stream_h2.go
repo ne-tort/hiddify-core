@@ -8,7 +8,6 @@ import (
 
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -16,21 +15,12 @@ import (
 var h2ConnectRequestContextFactory = httpx.NewH2ExtendedConnectRequestContext
 
 func (s *coreSession) streamH2Host() strmclient.SessionH2Host {
-	if strm.ConnectStreamH2NewTransportPerDial() {
-		return strmclient.SessionH2Host{
-			EnsureTransport: func(ctx context.Context) (http.RoundTripper, error) {
-				return s.newMasqueClientH2Transport()
-			},
-			GetRoundTripper: s.getTCPRoundTripper,
-			ResetTransport:  func() {},
-		}
-	}
 	return strmclient.SessionH2Host{
 		EnsureTransport: func(ctx context.Context) (http.RoundTripper, error) {
-			return s.ensureH2ConnectStreamTransport(ctx)
+			return s.newMasqueClientH2Transport()
 		},
 		GetRoundTripper: s.getTCPRoundTripper,
-		ResetTransport:  s.resetTCPHTTPTransport,
+		ResetTransport:  func() {},
 	}
 }
 

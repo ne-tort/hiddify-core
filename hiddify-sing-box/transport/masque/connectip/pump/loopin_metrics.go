@@ -2,7 +2,6 @@ package pump
 
 import (
 	"fmt"
-	"log"
 )
 
 // LoopInBoundClass labels the dominant LoopIn stage from metrics snapshot.
@@ -55,9 +54,4 @@ func FormatLoopInMetricsLine(st LoopInStats, hostAccepted int64, hostReadUs floa
 		st.ReadUsPerPkt, st.WriteUsPerPkt, st.FlushUsPerPkt, st.IterUsPerPkt,
 		st.PktsPerIter, st.PktsPerFlush, hostAccepted, hostReadUs,
 	)
-}
-
-// LogLoopInMetrics emits one metrics line to the standard logger.
-func LogLoopInMetrics(st LoopInStats, hostAccepted int64, hostReadUs float64) {
-	log.Print(FormatLoopInMetricsLine(st, hostAccepted, hostReadUs))
 }
