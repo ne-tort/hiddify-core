@@ -420,7 +420,9 @@ func (s *Netstack) Close() error {
 	var closeErr error
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
-		obsSessionReset("lifecycle_close")
+		if obsEventsEnabled() {
+			obsSessionReset("lifecycle_close")
+		}
 		close(s.done)
 		s.endpoint.RemoveNotify(s.notifyHandle)
 		closeErr = s.session.Close()

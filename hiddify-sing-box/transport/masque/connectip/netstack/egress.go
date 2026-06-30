@@ -169,14 +169,18 @@ func (s *Netstack) sendOutboundPayload(payload []byte) bool {
 			return false
 		}
 		if IsRetryablePacketWriteError(err) {
-			obsWriteFailReason("retryable")
+			if obsEventsEnabled() {
+				obsWriteFailReason("retryable")
+			}
 			if !retained {
 				returnOutboundBuf(payload)
 			}
 			return false
 		}
-		obsWriteFailReason("fatal")
-		obsSessionReset("write_fail_fatal")
+		if obsEventsEnabled() {
+			obsWriteFailReason("fatal")
+			obsSessionReset("write_fail_fatal")
+		}
 		s.FailWithError(joinTransport(err))
 		if !retained {
 			returnOutboundBuf(payload)
