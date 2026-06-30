@@ -56,13 +56,7 @@ func (h dispatchHost) RecordTCPDialErrorClass(err error) { session.RecordTCPDial
 
 func (h dispatchHost) RecordTCPFallback() { session.RecordTCPFallback() }
 
-func (h dispatchHost) TraceTCPConnectStreamDirectFallback(destination M.Socksaddr) {
-	if host, hostErr := resolveDestinationHost(destination); hostErr == nil {
-		tcpTracef("masque tcp masque_or_direct+fallback=direct_explicit: CONNECT-stream failed, trying direct tcp host=%s port=%d", host, destination.Port)
-	} else {
-		tcpTracef("masque tcp masque_or_direct+fallback=direct_explicit: CONNECT-stream failed, direct tcp host resolution failed err=%v", hostErr)
-	}
-}
+func (h dispatchHost) TraceTCPConnectStreamDirectFallback(destination M.Socksaddr) {}
 
 func (h dispatchHost) OpenIPSessionLocked(ctx context.Context) (session.IPPacketSession, error) {
 	return h.s.openIPSessionLocked(ctx)

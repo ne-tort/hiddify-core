@@ -90,7 +90,6 @@ func DialHTTP2ConnectStream(
 		if err != nil {
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, err)
 		}
-		TraceTCPf("masque tcp connect_stream h2 host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
 
 		if hooks.NewConnectUploadPipe == nil {
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, errors.New("masque h2: connect-stream upload pipe hook required"))
@@ -121,21 +120,15 @@ func DialHTTP2ConnectStream(
 			_ = uploadR.Close()
 			_ = uploadW.Close()
 			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
-				TraceTCPf("masque tcp connect_stream h2 cancelled host=%s port=%d attempt=%d error_class=%s err=%v",
-					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
 				return nil, errors.Join(Errs.TCPConnectStreamFailed, roundTripErr)
 			}
 			if attempt+1 < maxAttempts && IsRetryableTCPStreamError(roundTripErr) && ctx.Err() == nil {
-				TraceTCPf("masque tcp connect_stream h2 retry host=%s port=%d attempt=%d error_class=%s err=%v",
-					targetHost, targetPort, attempt+1, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
 				host.ResetH2ConnectStreamTransport()
 				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, errors.Join(Errs.TCPConnectStreamFailed, backoffErr)
 				}
 				continue
 			}
-			TraceTCPf("masque tcp connect_stream h2 failed host=%s port=%d status=roundtrip_error error_class=%s err=%v",
-				targetHost, targetPort, hooks.ClassifyError(Errs.TCPConnectStreamFailed), roundTripErr)
 			if IsRetryableTCPStreamError(roundTripErr) {
 				host.ResetH2ConnectStreamTransport()
 			}
@@ -147,12 +140,8 @@ func DialHTTP2ConnectStream(
 			_ = uploadW.Close()
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				TraceTCPf("masque tcp connect_stream h2 denied host=%s port=%d status=%d error_class=%s",
-					targetHost, targetPort, resp.StatusCode, hooks.ClassifyError(hooks.AuthFailed))
 				return nil, errors.Join(hooks.AuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, hooks.RequestURL(tcpURL)))
 			}
-			TraceTCPf("masque tcp connect_stream h2 failed host=%s port=%d status=%d error_class=%s",
-				targetHost, targetPort, resp.StatusCode, hooks.ClassifyError(Errs.TCPConnectStreamFailed))
 			return nil, fmt.Errorf("masque h2: %w: status=%d url=%s", Errs.TCPConnectStreamFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 		}
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
@@ -163,7 +152,6 @@ func DialHTTP2ConnectStream(
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
 		stopReqCtxRelay(true)
-		TraceTCPf("masque tcp connect_stream h2 success host=%s port=%d status=%d", targetHost, targetPort, resp.StatusCode)
 		return hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
 	}
 	if lastRoundTripErr != nil {

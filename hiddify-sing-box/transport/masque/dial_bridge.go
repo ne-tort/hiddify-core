@@ -85,10 +85,6 @@ func tcpMasqueConnectStreamChosenLogFields(tcpURL *url.URL, options ClientOption
 	})
 }
 
-func tcpTracef(format string, args ...any) {
-	strm.TraceTCPf(format, args...)
-}
-
 func isRetryableTCPStreamError(err error) bool {
 	return strm.IsRetryableTCPStreamError(err)
 }
