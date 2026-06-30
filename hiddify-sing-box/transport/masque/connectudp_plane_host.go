@@ -60,7 +60,10 @@ func (h connectUDPPlaneHost) DialOverHTTP2(ctx context.Context, template *uritem
 }
 
 func (h connectUDPPlaneHost) DialH3(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	return cudpclient.DialH3Production(ctx, h.s.udpDial, client, template, target)
+	if h.s.udpDial != nil {
+		return h.s.udpDial(ctx, client, template, target)
+	}
+	return dialConnectUDPH3Asymmetric(ctx, client, template, target)
 }
 
 func (h connectUDPPlaneHost) RecordHTTPLayerSuccess(layer string) {

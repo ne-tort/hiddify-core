@@ -10,6 +10,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
+	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 )
@@ -36,6 +37,15 @@ type Handler struct {
 	Hooks Hooks
 	// H2SessionRegistry scopes asymmetric H2 CONNECT-UDP sessions (nil → package default).
 	H2SessionRegistry *cudph2.SessionRegistry
+	// H3SessionRegistry scopes asymmetric H3 CONNECT-UDP sessions (nil → relay default).
+	H3SessionRegistry *cudprelay.H3SessionRegistry
+}
+
+func (h Handler) h3Sessions() *cudprelay.H3SessionRegistry {
+	if h.H3SessionRegistry != nil {
+		return h.H3SessionRegistry
+	}
+	return cudprelay.DefaultH3SessionRegistry
 }
 
 func (h Handler) h2Sessions() *cudph2.SessionRegistry {
@@ -97,6 +107,16 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 		return
 	}
 	if _, ok := w.(http3.HTTPStreamer); ok {
+		if cudpasym.StreamRoleFromRequest(r) != "" {
+			if err := cudprelay.ServeH3Asymmetric(w, r, parsed, h.h3Sessions()); err != nil {
+				if cudpasym.IsMissingMuxKey(err) {
+					w.WriteHeader(http.StatusBadRequest)
+				} else if errors.Is(err, cudprelay.ErrDuplicateH3DownloadSession) {
+					w.WriteHeader(http.StatusConflict)
+				}
+			}
+			return
+		}
 		_ = udpProxy.Proxy(w, parsed)
 		return
 	}

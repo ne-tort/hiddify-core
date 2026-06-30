@@ -41,6 +41,28 @@ type sessionKey struct {
 	target string
 }
 
+// AsymmetricSessionKey correlates asymmetric CONNECT-UDP legs across streams.
+type AsymmetricSessionKey struct {
+	Mux    string
+	Target string
+}
+
+func (k sessionKey) export() AsymmetricSessionKey {
+	return AsymmetricSessionKey{Mux: k.mux, Target: k.target}
+}
+
+// AsymmetricSessionKeyFromRequest builds the mux key when stream role is set.
+func AsymmetricSessionKeyFromRequest(r *http.Request, targetAddr string) (AsymmetricSessionKey, error) {
+	key, err := RequireSessionKey(r, targetAddr)
+	if err != nil {
+		return AsymmetricSessionKey{}, err
+	}
+	if StreamRoleFromRequest(r) == "" {
+		return AsymmetricSessionKey{}, nil
+	}
+	return key.export(), nil
+}
+
 // SessionKeyFromRequest builds the server session key for asymmetric CONNECT-UDP legs.
 // Masque-Udp-Mux-Key is required when stream role is set.
 func SessionKeyFromRequest(r *http.Request, targetAddr string) (sessionKey, error) {
