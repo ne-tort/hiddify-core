@@ -129,15 +129,6 @@ func WarpConsumerBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionB
 	if !conn.ControlCapsulesSupported() {
 		return runLegacyH2ConsumerBootstrap(dpCtx, conn, p, tag)
 	}
-	// MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES must not bypass bootstrap for consumer WARP: without
-	// RequestAddresses(empty) the edge often never emits ADDRESS_ASSIGN, gVisor stays on 198.18.0.1,
-	// and incoming policy/datapath breaks (TUN-smoke curl timeouts). Log once if set and continue.
-	if raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES")); raw != "" {
-		r := strings.ToLower(raw)
-		if r == "1" || r == "true" || r == "yes" || r == "on" {
-			log.Printf("masque connect_ip bootstrap: MASQUE_CONNECT_IP_SKIP_BOOTSTRAP_CAPSULES=%q ignored for cf-connect-ip (bootstrap required) tag=%s", raw, tag)
-		}
-	}
 	profileV4 := strings.TrimSpace(p.ProfileLocalIPv4)
 	profileV6 := strings.TrimSpace(p.ProfileLocalIPv6)
 	policy := NewBootstrapWaitPolicy(
