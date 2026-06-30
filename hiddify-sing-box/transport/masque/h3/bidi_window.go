@@ -22,7 +22,7 @@ type BidiWindowConfig struct {
 	WindowBytes      int
 	NoLimitS2C       bool // unlimited download (response) credit — bypass B2
 	InstantCredit    bool // release both directions without RTT delay — bypass B7
-	InstantCreditS2C bool // release download credit without RTT (MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW prod model)
+	InstantCreditS2C bool // release download credit without RTT (prod eager S2C WINDOW model)
 }
 
 // WrapBidiWindow wraps inner with bench-shaped bidi flow-control for synth localize/duplex tests.

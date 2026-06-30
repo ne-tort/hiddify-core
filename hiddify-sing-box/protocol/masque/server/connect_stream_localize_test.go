@@ -86,18 +86,15 @@ func (serverWindowedLink) wrap(c net.Conn) net.Conn {
 	})
 }
 
-// serverProdWindowedLink models prod client S2C credit (instant when MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW on).
+// serverProdWindowedLink models prod client S2C credit (instant eager WINDOW).
 type serverProdWindowedLink struct{}
 
 func (serverProdWindowedLink) wrap(c net.Conn) net.Conn {
-	cfg := h3.BidiWindowConfig{
-		RTT:         serverLocalizeBenchRTT,
-		WindowBytes: serverLocalizeWindowBytes,
-	}
-	if h3.DownloadEagerWindowEnabled() {
-		cfg.InstantCreditS2C = true
-	}
-	return h3.WrapBidiWindow(c, cfg)
+	return h3.WrapBidiWindow(c, h3.BidiWindowConfig{
+		RTT:              serverLocalizeBenchRTT,
+		WindowBytes:      serverLocalizeWindowBytes,
+		InstantCreditS2C: true,
+	})
 }
 
 // streamFlusherWriter streams CONNECT response bytes into the bench pipe (not httptest buffer).
@@ -338,9 +335,6 @@ func benchServerHandlerDuplexDownloadMbps(t *testing.T, link serverHandlerLink, 
 // TestServerHandleTCPConnectDuplexProdWake (REF5-SRV-3): STREAM_HIJACK duplex upload pulse +
 // windowed prod client must exceed K-SRV1 when bidi upload read wake is on.
 func TestServerHandleTCPConnectDuplexProdWake(t *testing.T) {
-	if !h3.DownloadEagerWindowEnabled() {
-		t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-	}
 	t.Setenv("MASQUE_RELAY_BIDI_DOWNLOAD_WRITE_WAKE", "1")
 	n, mbps := benchServerHandlerDuplexDownloadMbps(t, serverProdWindowedLink{}, map[string]string{
 		"MASQUE_RELAY_TCP_STREAM_HIJACK": "1",
@@ -379,9 +373,6 @@ func TestServerHandleTCPConnectLocalizeDownload(t *testing.T) {
 		}
 	})
 	t.Run("windowed_prod_client", func(t *testing.T) {
-		if !h3.DownloadEagerWindowEnabled() {
-			t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-		}
 		const kpiTargetMbps = 21.0
 		windowedBytes, windowedMbps := benchServerHandlerDownloadMbps(t, serverProdWindowedLink{})
 		t.Logf("server handler windowed prod client: bytes=%d %.1f Mbit/s", windowedBytes, windowedMbps)

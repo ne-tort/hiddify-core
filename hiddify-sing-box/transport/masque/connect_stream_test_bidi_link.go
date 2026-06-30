@@ -5,7 +5,6 @@ import (
 	"net"
 	"time"
 
-	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
@@ -85,37 +84,27 @@ func bypassB8BidiLink() windowedBidiLink {
 
 // benchWindowedBidiLinkStrict models HTTP/2-style bidi FC without prod eager S2C WINDOW.
 func benchWindowedBidiLinkStrict() windowedBidiLink {
-	link := windowedBidiLink{
+	return windowedBidiLink{
 		rtt:         localizeBenchRTT,
 		windowBytes: localizeBenchWindowBytes,
 	}
-	if mh2.DownloadEagerWindowEnabled() {
-		link.instantCreditS2C = true
-	}
-	return link
 }
 
 // benchWindowedBidiLinkH2Prod applies H2-specific eager download window for windowed KPI tests.
 func benchWindowedBidiLinkH2Prod() windowedBidiLink {
-	link := windowedBidiLink{
-		rtt:         localizeBenchRTT,
-		windowBytes: localizeBenchWindowBytes,
+	return windowedBidiLink{
+		rtt:              localizeBenchRTT,
+		windowBytes:      localizeBenchWindowBytes,
+		instantCreditS2C: true,
 	}
-	if mh2.DownloadEagerWindowEnabled() {
-		link.instantCreditS2C = true
-	}
-	return link
 }
 
 func benchWindowedBidiLink() windowedBidiLink {
-	link := windowedBidiLink{
-		rtt:         localizeBenchRTT,
-		windowBytes: localizeBenchWindowBytes,
+	return windowedBidiLink{
+		rtt:              localizeBenchRTT,
+		windowBytes:      localizeBenchWindowBytes,
+		instantCreditS2C: true,
 	}
-	if h3.DownloadEagerWindowEnabled() {
-		link.instantCreditS2C = true
-	}
-	return link
 }
 
 // benchWindowedBidiLinkStrictH3 models QUIC bidi FC without prod eager S2C instant credit.
@@ -137,9 +126,7 @@ func benchWindowedBidiLinkStrictH3L256() windowedBidiLink {
 // benchWindowedBidiLinkH3Prod applies prod eager S2C window on strict H3 bidi link (H2 P1c parity).
 func benchWindowedBidiLinkH3Prod() windowedBidiLink {
 	link := benchWindowedBidiLinkStrictH3()
-	if h3.DownloadEagerWindowEnabled() {
-		link.instantCreditS2C = true
-	}
+	link.instantCreditS2C = true
 	return link
 }
 

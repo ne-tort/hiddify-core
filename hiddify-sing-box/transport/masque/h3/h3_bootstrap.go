@@ -85,10 +85,8 @@ func PrimeH3UploadBootstrapOnConn(c *TunnelConn) error {
 		quic.MasqueSetBidiDownloadReceiveActive(qs, true)
 		quic.MasqueSetPeerDuplexLazyFC(qs, false)
 		quic.MasqueBoostDuplexReceiveFC(qs)
-		if quic.MasqueDownloadEagerWindowEnabled() {
-			quic.MasquePokeDownloadReceiveWindow(qs)
-			quic.MasquePokeConnPeerUploadCredit(qs)
-		}
+		quic.MasquePokeDownloadReceiveWindow(qs)
+		quic.MasquePokeConnPeerUploadCredit(qs)
 		quic.MasqueWakeStreamSend(qs)
 	}
 	return nil

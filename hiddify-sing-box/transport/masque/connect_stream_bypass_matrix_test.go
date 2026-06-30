@@ -6,8 +6,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 func startWindowedBypassFeeder(t *testing.T, link windowedBidiLink, duration time.Duration) (net.Conn, func()) {
@@ -176,15 +174,10 @@ func TestMasqueConnectStreamBypassMatrix(t *testing.T) {
 // eager WINDOW_UPDATE is on; legacy ceiling band when off.
 func TestMasqueConnectStreamDuplexWriteToDownload(t *testing.T) {
 	link := benchWindowedBidiLink()
-	if h3.DownloadEagerWindowEnabled() {
-		dl := runConnectStreamDuplexWriteToBench(t, link, connectStreamVPSKPITargetDownMbps)
-		if dl.mbps <= connectStreamVPSKPITargetDownMbps {
-			t.Fatalf("K-S2 prod eager window: %.1f Mbit/s want > %.0f", dl.mbps, connectStreamVPSKPITargetDownMbps)
-		}
-		return
+	dl := runConnectStreamDuplexWriteToBench(t, link, connectStreamVPSKPITargetDownMbps)
+	if dl.mbps <= connectStreamVPSKPITargetDownMbps {
+		t.Fatalf("K-S2 prod eager window: %.1f Mbit/s want > %.0f", dl.mbps, connectStreamVPSKPITargetDownMbps)
 	}
-	dl := runConnectStreamDuplexWriteToBench(t, link, connectStreamLocalizeDownloadKPIMin)
-	assertConnectStreamWindowedCeilingBand(t, dl.mbps, "duplex WriteTo download (S5b)")
 }
 
 // TestWindowedBidiBridgeDownloadBand checks S2C window + credit in isolation via WriteTo (S5c).

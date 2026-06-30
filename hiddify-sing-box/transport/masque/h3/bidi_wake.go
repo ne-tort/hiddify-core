@@ -54,10 +54,8 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 		return
 	}
 	if quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs) {
-		if quic.MasqueDownloadEagerWindowEnabled() {
-			quic.MasquePokeDownloadReceiveWindow(qs)
-			quic.MasquePokeConnPeerUploadCredit(qs)
-		}
+		quic.MasquePokeDownloadReceiveWindow(qs)
+		quic.MasquePokeConnPeerUploadCredit(qs)
 		quic.MasqueWakeStreamSend(qs)
 		return
 	}
@@ -66,7 +64,7 @@ func (c *TunnelConn) wakeBidiSendAfterDownloadDelivery() {
 		quic.MasqueWakeBidiDuplex(qs)
 		return
 	}
-	if quic.MasqueDownloadEagerWindowEnabled() && quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
+	if quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 		quic.MasquePokeDownloadReceiveWindow(qs)
 	}
 	quic.MasqueRepromoteDuplexUploadSend(qs)

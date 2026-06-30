@@ -210,7 +210,7 @@ func (c *TunnelConn) activateDownloadReceiveOnRead() {
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSetBidiDownloadReceiveActive(qs, true)
 			quic.MasqueSetPeerDuplexLazyFC(qs, false)
-			if quic.MasqueDownloadEagerWindowEnabled() && quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
+			if quic.MasqueDuplexGrantPeerDownloadCredit(qs) {
 				quic.MasquePokeDownloadReceiveWindow(qs)
 			}
 			quic.MasquePokeConnPeerUploadCredit(qs)

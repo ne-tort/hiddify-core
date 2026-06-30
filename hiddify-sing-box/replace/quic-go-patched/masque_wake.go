@@ -30,11 +30,6 @@ func masqueWakeBidiConnOnReceiveRead() bool {
 	return masqueWakeBidiConnOnReceiveReadEnabled
 }
 
-// MasqueDownloadEagerWindowEnabled reports whether eager MAX_STREAM_DATA poke is on (always on).
-func MasqueDownloadEagerWindowEnabled() bool {
-	return true
-}
-
 // MasquePokeDownloadReceiveWindow queues MAX_STREAM_DATA on a download-active bidi stream.
 // Safe to call repeatedly; re-notifies sender when MAX_STREAM_DATA already queued.
 func MasquePokeDownloadReceiveWindow(s *Stream) bool {
@@ -340,7 +335,7 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 	if n <= 0 || s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
 		return
 	}
-	if MasqueDownloadEagerWindowEnabled() && masqueDuplexGrantPeerDownloadCredit(s) {
+	if masqueDuplexGrantPeerDownloadCredit(s) {
 		masquePokeDownloadReceiveWindow(s)
 	}
 	masqueSyncDuplexReceiveAutoUpdate(s)
@@ -363,9 +358,7 @@ func masqueWakeAfterDownloadWrite(s *Stream, n int) {
 		return
 	}
 	if s.masqueIsDownloadActive() && MasqueIsBidiDownloadReceiveOnly(s) {
-		if MasqueDownloadEagerWindowEnabled() {
-			masquePokeDownloadReceiveWindow(s)
-		}
+		masquePokeDownloadReceiveWindow(s)
 		MasqueWakeStreamSend(s)
 		return
 	}
@@ -382,7 +375,7 @@ func masqueWakeAfterDownloadDelivery(s *Stream) {
 	if s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
 		return
 	}
-	if MasqueDownloadEagerWindowEnabled() && masqueDuplexGrantPeerDownloadCredit(s) {
+	if masqueDuplexGrantPeerDownloadCredit(s) {
 		masquePokeDownloadReceiveWindow(s)
 	}
 	masqueSyncDuplexReceiveAutoUpdate(s)

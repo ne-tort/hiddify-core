@@ -259,9 +259,6 @@ func TestMasqueConnectStreamParallelStreams(t *testing.T) {
 // TestConnectStreamDockerH3KPIInProcGuard proxies docker connect-stream-h3 KPI on prod
 // windowed bidi link (tcp_down >= 21 in run_local.py @ netem 35 ms).
 func TestConnectStreamDockerH3KPIInProcGuard(t *testing.T) {
-	if !h3.DownloadEagerWindowEnabled() {
-		t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-	}
 	const duration = localizeBenchDuration
 	link := benchWindowedBidiLink()
 	r := benchConnectStreamDownloadLayerWriteTo(t, "L3", link, duration)
@@ -284,9 +281,6 @@ const connectStreamFieldRemoteRTTMax = 100 * time.Millisecond
 
 func benchConnectStreamFieldRemoteRTTKPI(t *testing.T, rtt time.Duration) {
 	t.Helper()
-	if !h3.DownloadEagerWindowEnabled() {
-		t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-	}
 	link := benchWindowedBidiLink()
 	link.rtt = rtt
 	r := benchConnectStreamDownloadLayerWriteTo(t, "L3", link, localizeBenchDuration)

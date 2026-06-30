@@ -62,7 +62,7 @@ func TestArchREFSRCSBClientC3PeerAttribution(t *testing.T) {
 // TestArchREFSRCSBClientProdBenchLink (REF-SRC-SB-C1): windowed bench uses eager S2C when default env on.
 func TestArchREFSRCSBClientProdBenchLink(t *testing.T) {
 	link := benchWindowedBidiLink()
-	if h3.DownloadEagerWindowEnabled() && !link.instantCreditS2C {
-		t.Fatal("benchWindowedBidiLink must set instantCreditS2C with default eager window")
+	if !link.instantCreditS2C {
+		t.Fatal("benchWindowedBidiLink must set instantCreditS2C for prod eager window")
 	}
 }

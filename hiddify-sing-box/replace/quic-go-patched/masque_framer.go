@@ -8,8 +8,7 @@ const defaultBidiSendBoostMaxFrames = 384
 
 // Legacy env names for regression tests (t.Setenv); prod MasqueBidiSendBoostEnabled stays hardcoded off.
 const (
-	envBidiSendBoost       = "MASQUE_QUIC_BIDI_SEND_BOOST"
-	envDownloadEagerWindow = "MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW"
+	envBidiSendBoost = "MASQUE_QUIC_BIDI_SEND_BOOST"
 )
 
 // MasqueBidiSendBoostEnabled is hardcoded off for prod (boost caused duplex winner-takes-all).

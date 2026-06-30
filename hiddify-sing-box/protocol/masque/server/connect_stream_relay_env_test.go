@@ -152,9 +152,6 @@ func TestRelayEnvMatrixSTREAM_HIJACKDownload(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.wantKPI && !h3.DownloadEagerWindowEnabled() {
-				t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-			}
 			n, mbps := benchServerHandlerDownloadWriteToMbps(t, tc.link, tc.env, tc.h3Leg)
 			t.Logf("%s: bytes=%d %.1f Mbit/s", tc.name, n, mbps)
 			if n < serverLocalizeMinBytes {

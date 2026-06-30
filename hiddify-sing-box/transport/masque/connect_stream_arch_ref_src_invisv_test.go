@@ -2,8 +2,6 @@ package masque
 
 import (
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // TestArchREFSRCInvisvAudit (REF-SRC-INVISV-1…4): frozen Invisv vs sing-box client differential.
@@ -32,9 +30,6 @@ func TestArchREFSRCInvisvAudit(t *testing.T) {
 // TestArchREFSRCInvisvProdKPI (REF-SRC-INVISV-2/4): prod bench link exceeds VPS KPI when eager WINDOW on;
 // Invisv upstream quic-go uses stock 0.05 threshold — our patch is the KPI unlock, not Invisv fork alone.
 func TestArchREFSRCInvisvProdKPI(t *testing.T) {
-	if !h3.DownloadEagerWindowEnabled() {
-		t.Skip("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0")
-	}
 	h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 	defer h.close()
 	_, mbps, err := measureTCPDownloadWriteToMbps(h.conn, localizeBenchDuration)

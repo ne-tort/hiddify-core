@@ -150,17 +150,6 @@ func TestMasqueWakeAfterDownloadWriteEnvAndActive(t *testing.T) {
 	}
 }
 
-func TestMasqueDownloadEagerWindowEnabledExport(t *testing.T) {
-	t.Setenv(envDownloadEagerWindow, "")
-	if !MasqueDownloadEagerWindowEnabled() {
-		t.Fatal("default eager window must be on")
-	}
-	t.Setenv(envDownloadEagerWindow, "0")
-	if MasqueDownloadEagerWindowEnabled() {
-		t.Fatal("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW=0 must disable")
-	}
-}
-
 func TestMasquePokeDownloadReceiveWindowExportNilSafe(t *testing.T) {
 	if MasquePokeDownloadReceiveWindow(nil) {
 		t.Fatal("nil stream must not poke")
@@ -259,7 +248,6 @@ func TestMasqueWakeOnControlFrameRenotify(t *testing.T) {
 
 func TestMasqueStreamWriteToDeliveryPoke(t *testing.T) {
 	t.Setenv(envWakeSendOnReceiveRead, "1")
-	t.Setenv(envDownloadEagerWindow, "1")
 
 	active := &Stream{}
 	active.setMasqueDownloadActive(true)

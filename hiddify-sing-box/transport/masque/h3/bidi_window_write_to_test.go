@@ -94,3 +94,43 @@ func TestWrapBidiWindowWriteToDownloadBand(t *testing.T) {
 		t.Fatalf("WriteTo download %.1f Mbit/s want %.0f–%.0f", mbps, minMbps, maxMbps)
 	}
 }
+
+func TestWrapBidiWindowInstantCreditS2COnly(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		c, _ := ln.Accept()
+		if c != nil {
+			buf := make([]byte, 64*1024)
+			_, _ = c.Write(buf)
+			_ = c.Close()
+		}
+	}()
+	cli, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+	wrapped := WrapBidiWindow(cli, BidiWindowConfig{
+		RTT:              DefaultBidiWindowRTT,
+		WindowBytes:      DefaultBidiWindowSizeBytes,
+		InstantCreditS2C: true,
+	})
+	w := wrapped.(*windowedBidiConn)
+	if !w.instantCreditS2C {
+		t.Fatal("InstantCreditS2C not set")
+	}
+	if w.instantCredit {
+		t.Fatal("InstantCreditS2C must not enable full instantCredit")
+	}
+	if w.s2cCreditDelay() != 0 {
+		t.Fatal("S2C credit delay must be 0 with InstantCreditS2C")
+	}
+	if w.creditDelay() != DefaultBidiWindowRTT {
+		t.Fatal("C2S credit delay must keep RTT with InstantCreditS2C only")
+	}
+}

@@ -245,10 +245,8 @@ func TestLaunchMasqueStackH2ConnectStreamDownloadKPINetem(t *testing.T) {
 	}
 }
 
-// TestLaunchMasqueStackH2ConnectStreamFakeIperfNoEager (H2-R5) — prod stack with
-// MASQUE_H2_DOWNLOAD_EAGER_WINDOW=0 must still complete fake iperf handshake (no stall).
+// TestLaunchMasqueStackH2ConnectStreamFakeIperf (H2-R5) — prod stack must complete fake iperf handshake.
 func TestLaunchMasqueStackH2ConnectStreamFakeIperfNoEager(t *testing.T) {
-	t.Setenv("MASQUE_H2_DOWNLOAD_EAGER_WINDOW", "0")
 	targetPort := masque.InttestStartH2FakeIperfDownloadTarget(t)
 	proxyPort := startLaunchMasqueStackH2ConnectStreamServer(t)
 	n := runH2ProdStackSocksFakeIperfNoPulse(t, proxyPort, targetPort, h2ProdStackFakeIperfMinBytes)
