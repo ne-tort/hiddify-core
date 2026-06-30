@@ -13,7 +13,6 @@ import (
 
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
-	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
 
 // PacketWriter is the CONNECT-IP wire egress from TUN L3 overlay (RFC 9484 datagram plane).
@@ -378,25 +377,6 @@ func (b *L3OverlayBridge) releaseEgressPoolSlice(pkt []byte) {
 	if pool != nil {
 		pool.Put(pkt[:cap(pkt)])
 	}
-}
-
-func shouldRelayHostEgress(pkt []byte, prefixes []netip.Prefix, tunHost netip.Addr) bool {
-	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
-		return false
-	}
-	dst, ok := ipv4Destination(pkt)
-	if !ok || !dst.IsValid() || dst == tunHost {
-		return false
-	}
-	if len(prefixes) == 0 {
-		return dst.IsGlobalUnicast()
-	}
-	for _, p := range prefixes {
-		if p.IsValid() && p.Contains(dst) {
-			return true
-		}
-	}
-	return false
 }
 
 // WritePacket injects one CONNECT-IP ingress frame (RunTunnel LoopOut).

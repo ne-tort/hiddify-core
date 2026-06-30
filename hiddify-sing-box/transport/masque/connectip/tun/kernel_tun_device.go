@@ -9,7 +9,6 @@ import (
 	"time"
 
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
-	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
 
 // KernelTunDevice is usque TunnelDevice for prod host-kernel path:
@@ -106,36 +105,13 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 }
 
 func (d *KernelTunDevice) acceptEgressBuf(buf []byte) (int, bool) {
-	n := ipv4WireLen(buf)
-	if n <= 0 {
+	n, ok := prepareRelayHostEgress(buf, d.nat, d.overlayPrefixes, d.onEgress)
+	if !ok {
 		d.readObs.recordSkipped()
 		return 0, false
 	}
-	tunHost := d.nat.TunHost
-	if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
-		d.readObs.recordSkipped()
-		return 0, false
-	}
-	n = normalizeIPv4EgressLen(buf, n)
 	d.readObs.recordAccepted(n)
-	d.nat.SNATEgressInPlace(buf[:n])
-	fixIPv4TransportChecksum(buf[:n])
-	if d.onEgress != nil {
-		d.onEgress(buf[:n])
-	}
 	return n, true
-}
-
-// normalizeIPv4EgressLen trims trailing buffer slack so TCP checksum matches forwarder trim (IP total length).
-func normalizeIPv4EgressLen(buf []byte, n int) int {
-	if n <= 0 {
-		return n
-	}
-	wire := ipv4WireLen(buf[:n])
-	if wire > 0 && wire < n {
-		return wire
-	}
-	return n
 }
 
 // SetHostEgressBatch overrides syscall batch read (NativeTun ReadHostEgressBatch when VNetHdr).
@@ -195,17 +171,6 @@ func (d *KernelTunDevice) readEgressBatchHost(ctx context.Context, slots []cippu
 		}
 	}
 	return accepted, nil
-}
-
-func ipv4WireLen(pkt []byte) int {
-	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
-		return 0
-	}
-	total := int(pkt[2])<<8 | int(pkt[3])
-	if total < header.IPv4MinimumSize || total > len(pkt) {
-		return len(pkt)
-	}
-	return total
 }
 
 // WritePacket implements pump.TunnelDevice (usque Device.WritePacket — error is fatal in LoopOut).
