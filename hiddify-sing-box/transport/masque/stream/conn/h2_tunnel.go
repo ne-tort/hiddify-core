@@ -22,6 +22,8 @@ type h2ConnectStreamResponseBody struct {
 	br *bufio.Reader
 	dl connDeadlines
 	mu sync.Mutex
+	// inflightDrain is closed when a deadline-expired Read finishes draining the underlying read.
+	inflightDrain chan struct{}
 }
 
 // NewH2ConnectStreamResponseBody wraps r with SetReadDeadline support for H2 CONNECT download.
@@ -43,6 +45,7 @@ func (w *h2ConnectStreamResponseBody) Read(p []byte) (int, error) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.waitInflightDrainLocked()
 	if w.dl.readTimeoutExceeded() {
 		return 0, os.ErrDeadlineExceeded
 	}
@@ -72,11 +75,13 @@ func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context
 	}()
 	select {
 	case <-ctx.Done():
-		// Deadline poll / stopDownloadDrain poke must not Close the CONNECT response body вЂ”
+		// Deadline poll / stopDownloadDrain poke must not Close the CONNECT response body —
 		// WriteTo and later drain reads still own the same H2 download half (parity H3 poke).
+		drainDone := make(chan struct{})
+		w.inflightDrain = drainDone
 		go func() {
-			got := <-ch
-			_ = got
+			<-ch
+			close(drainDone)
 		}()
 		if ce := context.Cause(ctx); errors.Is(ce, context.Canceled) {
 			return 0, ce
@@ -84,6 +89,19 @@ func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context
 		return 0, os.ErrDeadlineExceeded
 	case got := <-ch:
 		return got.n, got.err
+	}
+}
+
+func (w *h2ConnectStreamResponseBody) waitInflightDrainLocked() {
+	ch := w.inflightDrain
+	if ch == nil {
+		return
+	}
+	w.mu.Unlock()
+	<-ch
+	w.mu.Lock()
+	if w.inflightDrain == ch {
+		w.inflightDrain = nil
 	}
 }
 
@@ -98,6 +116,10 @@ func (w *h2ConnectStreamResponseBody) Close() error {
 	if w.r == nil {
 		return nil
 	}
-	return w.r.Close()
+	w.mu.Lock()
+	w.waitInflightDrainLocked()
+	r := w.r
+	w.mu.Unlock()
+	return r.Close()
 }
 
