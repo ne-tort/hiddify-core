@@ -11,6 +11,7 @@ import (
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 )
 
 const RequestProtocol = cudpframe.RequestProtocol
@@ -82,23 +83,7 @@ func targetPolicyHTTPStatus(err error) int {
 
 // ResolveDialToHTTPStatus maps UDP resolve/dial failures to HTTP status codes.
 func ResolveDialToHTTPStatus(err error) int {
-	if err == nil {
-		return http.StatusOK
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return http.StatusGatewayTimeout
-	}
-	var dnsError *net.DNSError
-	if errors.As(err, &dnsError) {
-		return http.StatusBadGateway
-	}
-	var addrErr *net.AddrError
-	var parseError *net.ParseError
-	if errors.As(err, &addrErr) || errors.As(err, &parseError) {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
+	return connectudp.ResolveDialToHTTPStatus(err)
 }
 
 // HandleConnectUDP serves RFC 9298 CONNECT-UDP over HTTP/3 or HTTP/2.

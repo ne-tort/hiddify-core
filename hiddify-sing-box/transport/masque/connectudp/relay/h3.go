@@ -12,6 +12,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
@@ -33,22 +34,6 @@ type Proxy struct {
 	closers  map[io.Closer]struct{}
 }
 
-func errToStatus(err error) int {
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return http.StatusGatewayTimeout
-	}
-	var dnsError *net.DNSError
-	if errors.As(err, &dnsError) {
-		return http.StatusBadGateway
-	}
-	var addrErr *net.AddrError
-	var parseError *net.ParseError
-	if errors.As(err, &addrErr) || errors.As(err, &parseError) {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
-}
 
 func dnsErrorToProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
 	if dnsError.Timeout() {
@@ -93,7 +78,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 			dnsErrorToProxyStatus(&proxyStatus, dnsError)
 		}
 		err = writeProxyStatus(err)
-		w.WriteHeader(errToStatus(err))
+		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
 
@@ -103,7 +88,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 	if err != nil {
 		proxyStatus.Params.Add("error", "destination_ip_unroutable")
 		err = writeProxyStatus(err)
-		w.WriteHeader(errToStatus(err))
+		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
 
@@ -111,7 +96,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 
 	if err = writeProxyStatus(nil); err != nil {
 		conn.Close()
-		w.WriteHeader(errToStatus(err))
+		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
 
