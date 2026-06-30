@@ -678,5 +678,15 @@ func (t *autoRedirectHandler) NewConnectionEx(ctx context.Context, conn net.Conn
 }
 
 func (t *autoRedirectHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	panic("unexcepted")
+	ctx = log.ContextWithNewID(ctx)
+	var metadata adapter.InboundContext
+	metadata.Inbound = t.tag
+	metadata.InboundType = C.TypeTun
+	metadata.Source = source
+	metadata.Destination = destination
+	//nolint:staticcheck
+	metadata.InboundOptions = t.inboundOptions
+	t.logger.InfoContext(ctx, "inbound packet connection from ", metadata.Source)
+	t.logger.InfoContext(ctx, "inbound packet connection to ", metadata.Destination)
+	t.router.RoutePacketConnectionEx(ctx, conn, metadata, onClose)
 }
