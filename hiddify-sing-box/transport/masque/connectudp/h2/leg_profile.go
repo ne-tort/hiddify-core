@@ -34,17 +34,8 @@ func (p LegProfile) uploadNoCoalesceTimer() bool {
 	return p == LegProfileUpload
 }
 
-func (p LegProfile) uploadCoalesceEnabled() bool {
-	return p == LegProfileEchoBidi
-}
-
 func (p LegProfile) usesAsyncDownlinkPump() bool {
 	return p == LegProfileDownloadFountain || p == LegProfileEchoBidi
-}
-
-// primesDownlinkPumpAtDial starts background body reader before first ReadFrom (bidi echo).
-func (p LegProfile) primesDownlinkPumpAtDial() bool {
-	return p == LegProfileEchoBidi
 }
 
 // serverDownlinkBulkImmediateFlush: fountain S2C — flush in bulk FSM without debounce timer.
@@ -52,17 +43,10 @@ func (p LegProfile) serverDownlinkBulkImmediateFlush() bool {
 	return p == LegProfileDownloadFountain
 }
 
-func (p LegProfile) serverDownlinkImmediateFlush() bool {
-	return false
-}
-
 func newH2DownlinkWriter(w http.ResponseWriter, profile LegProfile) *H2ResponseWriter {
-	immediate := profile.serverDownlinkImmediateFlush()
-	bulkImmediate := profile.serverDownlinkBulkImmediateFlush()
 	return &H2ResponseWriter{
 		ResponseWriter:     w,
-		immediateFlush:     immediate,
-		bulkImmediateFlush: bulkImmediate,
+		bulkImmediateFlush: profile.serverDownlinkBulkImmediateFlush(),
 	}
 }
 

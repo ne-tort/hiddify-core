@@ -33,11 +33,11 @@ func TestLegProfileUploadImmediateFlush(t *testing.T) {
 }
 
 func TestLegProfileServerFountainBulkFlush(t *testing.T) {
-	if LegProfileDownloadFountain.serverDownlinkImmediateFlush() {
-		t.Fatal("fountain must not per-packet flush")
-	}
 	if !LegProfileDownloadFountain.serverDownlinkBulkImmediateFlush() {
 		t.Fatal("fountain bulk no-timer flush")
+	}
+	if LegProfileEchoBidi.serverDownlinkBulkImmediateFlush() {
+		t.Fatal("echo bidi must not use fountain bulk flush")
 	}
 }
 
@@ -56,10 +56,10 @@ func TestLegProfileAsyncDownlinkPumpByRole(t *testing.T) {
 
 // TestLegProfileUploadCoalesceIsEchoOnly documents upload coalesce scope (UDP-M3-09 SIMPLIFY).
 func TestLegProfileUploadCoalesceIsEchoOnly(t *testing.T) {
-	if LegProfileUpload.uploadCoalesceEnabled() {
+	if LegProfileUpload == LegProfileEchoBidi {
 		t.Fatal("upload profile must not debounce-coalesce")
 	}
-	if !LegProfileEchoBidi.uploadCoalesceEnabled() {
-		t.Fatal("echo bidi keeps coalesce path")
+	if LegProfileDownloadFountain == LegProfileEchoBidi {
+		t.Fatal("fountain must not use echo coalesce path")
 	}
 }
