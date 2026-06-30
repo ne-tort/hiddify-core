@@ -35,8 +35,6 @@ func init() {
 		ObsWriteSuccess:    obsWriteSuccess,
 		ObsWriteFailReason: obsWriteFailReason,
 		ObsSessionReset:    obsSessionReset,
-		DefaultDatagramCeilingMax: func() int { return DefaultDatagramCeilingMax },
-		DatagramSlack:             func() int { return H3FramingSlack },
 		H2NetstackMTU:             H2NetstackMTU,
 	})
 	cipingress.SetHooks(cipingress.Hooks{

@@ -2,6 +2,13 @@ package netstack
 
 import "errors"
 
+const (
+	// prodDatagramCeilingMax matches connectip.DefaultDatagramCeilingMax (import cycle break).
+	prodDatagramCeilingMax = 1500
+	// prodDatagramSlack matches connectip.H3FramingSlack (import cycle break).
+	prodDatagramSlack = 80
+)
+
 // Hooks wires connectip root helpers without import cycles (W-IP-1 PR3).
 type Hooks struct {
 	JoinStackInit      func(error) error
@@ -19,9 +26,7 @@ type Hooks struct {
 	ObsWriteFailReason func(reason string)
 	ObsSessionReset    func(reason string)
 
-	DefaultDatagramCeilingMax func() int
-	DatagramSlack             func() int
-	H2NetstackMTU             func(ceiling int) int
+	H2NetstackMTU func(ceiling int) int
 }
 
 var hooks Hooks
@@ -120,17 +125,11 @@ func obsSessionReset(reason string) {
 }
 
 func defaultDatagramCeilingMax() int {
-	if hooks.DefaultDatagramCeilingMax != nil {
-		return hooks.DefaultDatagramCeilingMax()
-	}
-	return 1500
+	return prodDatagramCeilingMax
 }
 
 func datagramSlack() int {
-	if hooks.DatagramSlack != nil {
-		return hooks.DatagramSlack()
-	}
-	return 80
+	return prodDatagramSlack
 }
 
 func h2NetstackMTU(ceiling int) int {
