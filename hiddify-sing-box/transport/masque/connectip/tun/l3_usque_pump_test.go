@@ -27,7 +27,7 @@ func TestHostKernelBatchPumpOptionsLoopOutCoalesce(t *testing.T) {
 		t.Fatal("LoopOutSkipBatchDrain want true for host-kernel batch ACK coalesce")
 	}
 	opts = cippump.NormalizeTunnelOptions(opts)
-	if opts.LoopOutSkipBatchDrain && !opts.LegacyCMBatchDrain {
+	if opts.LoopOutSkipBatchDrain {
 		opts.LoopOutUsqueImmediate = false
 	}
 	if opts.LoopOutUsqueImmediate {

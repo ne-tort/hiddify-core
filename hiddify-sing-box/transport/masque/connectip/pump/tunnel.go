@@ -13,9 +13,6 @@ import (
 	connectip "github.com/quic-go/connect-ip-go"
 )
 
-// loopOutBatchDrain is used only when LegacyCMBatchDrain opts in (CUT default — U0-1).
-const loopOutBatchDrain = 2 * time.Millisecond
-
 // TunnelOptions configures RunTunnel (usque MaintainTunnel pump + R2 flush/wake extensions).
 type TunnelOptions struct {
 	MTU int
@@ -33,12 +30,8 @@ type TunnelOptions struct {
 	LoopOutUsqueImmediate bool
 	// LoopInUsqueImmediate skips zero-timeout coalesce after ReadPacket (usque: one read → one wire write).
 	LoopInUsqueImmediate bool
-	// LoopInDrainOnly drains already-buffered tun/prefetch reads with zero timeout (legacy CM / localize tests).
-	LoopInDrainOnly bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
 	LoopOutSkipBatchDrain bool
-	// LegacyCMBatchDrain enables pre-U0 CM zero-timeout + 2ms batch coalesce (tests only).
-	LegacyCMBatchDrain bool
 	// LoopInObserver collects per-iteration read/write/flush metrics (tests/diagnostics only).
 	LoopInObserver *LoopInObserver
 }
@@ -51,19 +44,10 @@ func UsqueTunnelOptions() TunnelOptions {
 	}
 }
 
-// NormalizeTunnelOptions applies usque defaults unless LegacyCMBatchDrain is set (U0-1).
+// NormalizeTunnelOptions applies usque immediate defaults (prod always one read → one write).
 func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
-	if opts.LegacyCMBatchDrain {
-		opts.LoopOutUsqueImmediate = false
-		opts.LoopInUsqueImmediate = false
-		return opts
-	}
 	opts.LoopOutUsqueImmediate = true
-	if opts.LoopInDrainOnly {
-		opts.LoopInUsqueImmediate = false
-	} else {
-		opts.LoopInUsqueImmediate = true
-	}
+	opts.LoopInUsqueImmediate = true
 	return opts
 }
 
@@ -182,28 +166,6 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		if err := writeOne(n); err != nil {
 			return err
 		}
-		if !opts.LoopInUsqueImmediate {
-			drainCtx := LoopInExpiredDrainCtx()
-			for {
-				if buf == nil {
-					buf = pool.Get()
-				}
-				var r2Start time.Time
-				if obs != nil {
-					r2Start = time.Now()
-				}
-				n2, err2 := device.ReadPacket(drainCtx, buf)
-				if obs != nil {
-					obs.recordRead(time.Since(r2Start))
-				}
-				if err2 != nil || n2 <= 0 {
-					break
-				}
-				if err := writeOne(n2); err != nil {
-					return err
-				}
-			}
-		}
 		if opts.OnLoopInEnd != nil {
 			var flushStart time.Time
 			if obs != nil {
@@ -311,21 +273,6 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 					return err
 				}
 			}
-		}
-		// Blocking batch drain window (CM / H3 queue pressure parity). Native L3 host-kernel skips this.
-		if !opts.LoopOutUsqueImmediate && !opts.LoopOutSkipBatchDrain {
-			batchDeadline, batchCancel := context.WithTimeout(ctx, loopOutBatchDrain)
-			for {
-				n3, err3 := conn.ReadPacket(batchDeadline, buf)
-				if err3 != nil || n3 <= 0 {
-					break
-				}
-				if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n3]); err != nil {
-					batchCancel()
-					return err
-				}
-			}
-			batchCancel()
 		}
 		flushWake()
 	}

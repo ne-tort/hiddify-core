@@ -13,7 +13,7 @@ import (
 
 type upload524PumpHarnessOpts struct {
 	LoopInUsqueImmediate bool
-	Prod                 bool // prod usquePumpOptions only (LoopInDrainOnly)
+	Prod                 bool // prod usquePumpOptions via RunPump
 	NoObserver           bool // skip LoopInObserver overhead in tight budget gates
 }
 

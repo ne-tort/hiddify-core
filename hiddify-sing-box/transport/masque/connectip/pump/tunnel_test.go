@@ -161,23 +161,11 @@ func TestRunTunnelLoopInForwardsToConn(t *testing.T) {
 	}
 }
 
-func TestRunTunnelLoopOutBatchCoalescingLegacyCM(t *testing.T) {
+func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
 	t.Parallel()
-	dev := newMockDevice()
-	conn := newMockPacketConn()
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	conn.readCh <- []byte{0x10}
-	conn.readCh <- []byte{0x20}
-	go func() {
-		_ = RunTunnel(ctx, dev, conn, TunnelOptions{LegacyCMBatchDrain: true})
-	}()
-	time.Sleep(100 * time.Millisecond)
-	dev.mu.Lock()
-	n := len(dev.written)
-	dev.mu.Unlock()
-	if n < 2 {
-		t.Fatalf("expected batch coalescing >=2 writes, got %d", n)
+	opts := NormalizeTunnelOptions(TunnelOptions{})
+	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
+		t.Fatalf("expected usque immediate defaults: %+v", opts)
 	}
 }
 
@@ -440,38 +428,6 @@ func TestRunTunnelDefaultUsqueLoopOutSingleDatagram(t *testing.T) {
 	}
 }
 
-func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
-	t.Parallel()
-	opts := NormalizeTunnelOptions(TunnelOptions{})
-	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
-		t.Fatalf("expected usque immediate defaults: %+v", opts)
-	}
-	drain := NormalizeTunnelOptions(TunnelOptions{LoopInDrainOnly: true})
-	if drain.LoopInUsqueImmediate {
-		t.Fatalf("LoopInDrainOnly must disable LoopInUsqueImmediate: %+v", drain)
-	}
-	legacy := NormalizeTunnelOptions(TunnelOptions{LegacyCMBatchDrain: true})
-	if legacy.LoopOutUsqueImmediate || legacy.LoopInUsqueImmediate {
-		t.Fatalf("legacy CM must disable immediate: %+v", legacy)
-	}
-}
-
-func TestRunTunnelLoopOutBatchDrainCoalescesLegacyCM(t *testing.T) {
-	t.Parallel()
-	dev := newMockDevice()
-	conn := &queuedPacketConn{}
-	conn.push([]byte{1}, []byte{2}, []byte{3})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_ = RunTunnel(ctx, dev, conn, TunnelOptions{LegacyCMBatchDrain: true})
-	dev.mu.Lock()
-	n := len(dev.written)
-	dev.mu.Unlock()
-	if n != 3 {
-		t.Fatalf("written=%d want 3 with batch drain enabled", n)
-	}
-}
-
 func TestRunTunnelLoopOutWakePerPacketUsqueImmediate(t *testing.T) {
 	t.Parallel()
 	dev := newMockDevice()
@@ -485,23 +441,6 @@ func TestRunTunnelLoopOutWakePerPacketUsqueImmediate(t *testing.T) {
 	})
 	if got := loopOutEnd.Load(); got != 3 {
 		t.Fatalf("loopOutEnd=%d want 3 (usque immediate: one wake per datagram)", got)
-	}
-}
-
-func TestRunTunnelLoopOutWakeCoalescesLegacyCM(t *testing.T) {
-	t.Parallel()
-	dev := newMockDevice()
-	conn := &queuedPacketConn{}
-	conn.push([]byte{1}, []byte{2}, []byte{3})
-	var loopOutEnd atomic.Int32
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_ = RunTunnel(ctx, dev, conn, TunnelOptions{
-		LegacyCMBatchDrain: true,
-		OnLoopOutEnd:       func(TunnelDevice) { loopOutEnd.Add(1) },
-	})
-	if got := loopOutEnd.Load(); got != 1 {
-		t.Fatalf("loopOutEnd=%d want 1 (legacy CM batch coalesces ACK wake)", got)
 	}
 }
 

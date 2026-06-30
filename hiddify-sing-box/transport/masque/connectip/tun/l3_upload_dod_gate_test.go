@@ -12,7 +12,7 @@ func prodUploadHarness() upload524PumpHarnessOpts {
 	return upload524PumpHarnessOpts{Prod: true}
 }
 
-// TestGATEConnectIPUpload524IterBudget20us (GATE-UP-7) 20µs/pkt feed → 524 band (prod LoopInDrainOnly).
+// TestGATEConnectIPUpload524IterBudget20us (GATE-UP-7) 20µs/pkt feed → 524 band (prod RunTunnelBatch).
 func TestGATEConnectIPUpload524IterBudget20us(t *testing.T) {
 	requireUpload524SubMsClock(t)
 	seg := makeUpload524BulkSeg(t)
