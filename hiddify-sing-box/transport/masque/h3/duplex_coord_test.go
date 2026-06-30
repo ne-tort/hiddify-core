@@ -4,12 +4,6 @@ import (
 	"testing"
 )
 
-func TestBidiDuplexCoordDisabled(t *testing.T) {
-	if BidiDuplexCoordEnabled() {
-		t.Fatal("BidiDuplexCoordEnabled must stay false (direct h3 upload during download)")
-	}
-}
-
 func TestTunnelConnPipeUploadUsesDirectWrite(t *testing.T) {
 	var wrote int
 	c := NewPipeUploadTunnelConn(PipeUploadTunnelConnParams{

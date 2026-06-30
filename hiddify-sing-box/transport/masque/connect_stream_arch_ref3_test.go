@@ -16,9 +16,6 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 			t.Fatalf("REF3-1 gap %s: invisv=%s thin=%s", row.Attr, row.Invisv, row.Thin)
 		}
 	}
-	if h3.BidiDuplexCoordEnabled() {
-		t.Fatal("thin mode must disable duplex_coord")
-	}
 	if h3.TunnelWriteToBufLen() != 256*1024 {
 		t.Fatalf("thin WriteTo buf=%d want 262144", h3.TunnelWriteToBufLen())
 	}
@@ -94,9 +91,6 @@ func TestArchREF3MasqueradeStreamBlockedAudit(t *testing.T) {
 	}
 	if parityCount < 3 {
 		t.Fatalf("REF3-2 parity rows %d want >= 3 (StreamBlocked + CONNECT upload + download)", parityCount)
-	}
-	if h3.BidiDuplexCoordEnabled() {
-		t.Fatal("thin path must disable duplex_coord (masquerade direct stream copy)")
 	}
 	t.Logf("REF3-2 audit: %d masquerade rows (%d parity); KPI ceiling = wire S2C FC (REF2-2) not retry queue alone",
 		len(ArchMasqueradeStreamBlockedAudit), parityCount)

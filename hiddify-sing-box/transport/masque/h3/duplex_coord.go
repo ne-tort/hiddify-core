@@ -13,9 +13,6 @@ var testBidiDownloadActiveHook func(active bool)
 // TestDuplexDownloadArmedHook fires when beginDuplexDownload runs (synth duplex barrier).
 var TestDuplexDownloadArmedHook chan struct{}
 
-// BidiDuplexCoordEnabled reports whether legacy env-gated duplex_coord queue is active.
-func BidiDuplexCoordEnabled() bool { return false }
-
 // DownloadActive reports whether WriteTo is draining the response half (iperf -R duplex).
 func (c *TunnelConn) DownloadActive() bool {
 	return c != nil && atomic.LoadInt32(&c.downloadActive) > 0

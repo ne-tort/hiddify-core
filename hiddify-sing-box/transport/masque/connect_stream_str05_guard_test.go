@@ -6,8 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 func h3ProdSource(t *testing.T, name string) string {
@@ -50,15 +48,17 @@ func TestSTR05ProdBidiWakeUsesMS3NotM9(t *testing.T) {
 	}
 }
 
-// TestSTR05ProdDuplexCoordLegacyCut locks STR-MS3: legacy duplex_coord queue stays disabled in prod.
+// TestSTR05ProdDuplexCoordLegacyCut locks STR-MS3: legacy duplex_coord queue stays removed from prod.
 func TestSTR05ProdDuplexCoordLegacyCut(t *testing.T) {
 	t.Parallel()
-	if h3.BidiDuplexCoordEnabled() {
-		t.Fatal("BidiDuplexCoordEnabled must stay false in prod")
-	}
 	src := h3ProdSource(t, "duplex_coord.go")
-	if !strings.Contains(src, "return false") {
-		t.Fatal("duplex_coord.go must hardcode legacy coord off")
+	for _, forbidden := range []string{
+		"BidiDuplexCoordEnabled",
+		"maybeEnableDuplexFairDefer",
+	} {
+		if strings.Contains(src, forbidden) {
+			t.Fatalf("duplex_coord.go must not retain legacy %q", forbidden)
+		}
 	}
 }
 
