@@ -96,17 +96,8 @@ func newNetstackFromRoot(ctx context.Context, session PacketSession, opts Netsta
 	return cipnet.NewNetstack(ctx, wrapPacketSession(session), opts)
 }
 
-// NewNetstackForSession constructs a netstack and auto-wires egress batch flush when session
-// implements ScheduleEgressFlush (harness ClientPacketSession path).
+// NewNetstackForSession constructs a netstack for a packet session (harness + native L3).
 func NewNetstackForSession(ctx context.Context, session PacketSession, opts NetstackOptions) (*Netstack, error) {
-	if opts.OnEgressBatchComplete == nil {
-		type egressFlusher interface {
-			ScheduleEgressFlush()
-		}
-		if flusher, ok := session.(egressFlusher); ok {
-			opts.OnEgressBatchComplete = flusher.ScheduleEgressFlush
-		}
-	}
 	return newNetstackFromRoot(ctx, session, opts)
 }
 
