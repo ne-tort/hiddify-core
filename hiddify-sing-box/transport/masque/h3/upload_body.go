@@ -25,7 +25,7 @@ func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploa
 	_ = downloadActive
 	_ = downloadDelivered
 	_ = duplexUploadStarted
-	return tunnelWriteToBufLen
+	return TunnelWriteToBufLen
 }
 
 func (p UploadFlushPolicy) passthrough() bool {
@@ -42,7 +42,7 @@ func writeBatchedWake(w io.Writer, p []byte, batchBytes int, pending *int, wake 
 		return 0, io.ErrClosedPipe
 	}
 	if batchBytes <= 0 {
-		batchBytes = tunnelWriteToBufLen
+		batchBytes = TunnelWriteToBufLen
 	}
 	n, err := w.Write(p)
 	if n > 0 && wake != nil && pending != nil {

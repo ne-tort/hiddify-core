@@ -10,9 +10,9 @@ func TestH3UploadChunkBytesProd(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		for _, delivered := range []bool{false, true} {
 			for _, duplex := range []bool{false, true} {
-				if got := H3UploadChunkBytes(active, delivered, duplex); got != tunnelWriteToBufLen {
+				if got := H3UploadChunkBytes(active, delivered, duplex); got != TunnelWriteToBufLen {
 					t.Fatalf("chunk=%d want %d (active=%v delivered=%v duplex=%v)",
-						got, tunnelWriteToBufLen, active, delivered, duplex)
+						got, TunnelWriteToBufLen, active, delivered, duplex)
 				}
 			}
 		}

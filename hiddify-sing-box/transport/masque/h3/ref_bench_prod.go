@@ -43,7 +43,7 @@ func (s *refBenchInfiniteStream) CancelRead(quic.StreamErrorCode)  {}
 func (s *refBenchInfiniteStream) QUICStream() *quic.Stream         { return nil }
 
 func (s *refBenchInfiniteStream) WriteTo(w io.Writer) (int64, error) {
-	buf := make([]byte, tunnelWriteToBufLen)
+	buf := make([]byte, TunnelWriteToBufLen)
 	var total int64
 	for {
 		nr, err := s.Read(buf)

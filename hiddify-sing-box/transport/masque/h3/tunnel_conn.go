@@ -22,14 +22,12 @@ var ErrTunnelConnFailed = errors.New("masque h3 connect tunnel failed")
 // ErrDeadlineUnsupported is returned when the underlying stream does not support deadlines.
 var ErrDeadlineUnsupported = errors.New("deadline not supported")
 
-const tunnelWriteToBufLen = 256 * 1024
-
-// TunnelWriteToBufLen reports the prod route WriteTo drain buffer (256 KiB anchor).
-func TunnelWriteToBufLen() int { return tunnelWriteToBufLen }
+// TunnelWriteToBufLen is the prod route WriteTo drain buffer (256 KiB anchor).
+const TunnelWriteToBufLen = 256 * 1024
 
 var tunnelWriteToBufPool = sync.Pool{
 	New: func() any {
-		b := make([]byte, tunnelWriteToBufLen)
+		b := make([]byte, TunnelWriteToBufLen)
 		return &b
 	},
 }
@@ -307,7 +305,7 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 	}
 	if err == nil {
 		if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok {
-			if c.DownloadActive() || len(p) < tunnelWriteToBufLen {
+			if c.DownloadActive() || len(p) < TunnelWriteToBufLen {
 				_ = f.FlushMasqueCoalesce()
 			}
 		}

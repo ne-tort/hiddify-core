@@ -81,8 +81,8 @@ func (c *TunnelConn) noteDownloadDeliveryWake(delivered int) {
 		return
 	}
 	pending := atomic.AddInt32(&c.downloadDeliveryPending, int32(delivered))
-	if pending >= int32(tunnelWriteToBufLen) {
-		atomic.AddInt32(&c.downloadDeliveryPending, -int32(tunnelWriteToBufLen))
+	if pending >= int32(TunnelWriteToBufLen) {
+		atomic.AddInt32(&c.downloadDeliveryPending, -int32(TunnelWriteToBufLen))
 		c.wakeBidiSendAfterDownloadDelivery()
 	}
 }

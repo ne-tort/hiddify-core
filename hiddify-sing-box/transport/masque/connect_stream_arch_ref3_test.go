@@ -16,8 +16,8 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 			t.Fatalf("REF3-1 gap %s: invisv=%s thin=%s", row.Attr, row.Invisv, row.Thin)
 		}
 	}
-	if h3.TunnelWriteToBufLen() != 256*1024 {
-		t.Fatalf("thin WriteTo buf=%d want 262144", h3.TunnelWriteToBufLen())
+	if h3.TunnelWriteToBufLen != 256*1024 {
+		t.Fatalf("thin WriteTo buf=%d want 262144", h3.TunnelWriteToBufLen)
 	}
 	t.Logf("REF3-1 audit: %d Invisv parity rows; thin env forces h3_stream + direct WriteTo", len(ArchInvisvThinAudit))
 }

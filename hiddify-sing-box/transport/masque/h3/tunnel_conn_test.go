@@ -50,8 +50,8 @@ func TestTunnelConnRouteCopyMarkers(t *testing.T) {
 }
 
 func TestTunnelConnWriteToBufferLen(t *testing.T) {
-	if tunnelWriteToBufLen != 256*1024 {
-		t.Fatalf("tunnelWriteToBufLen=%d want 262144 (relay parity)", tunnelWriteToBufLen)
+	if TunnelWriteToBufLen != 256*1024 {
+		t.Fatalf("TunnelWriteToBufLen=%d want 262144 (relay parity)", TunnelWriteToBufLen)
 	}
 }
 
