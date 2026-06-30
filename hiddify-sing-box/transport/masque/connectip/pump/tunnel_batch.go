@@ -63,6 +63,10 @@ func RunTunnelBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 }
 
 func runLoopInBatch(ctx context.Context, device BatchTunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer, maxBatch int) error {
+	wire, err := loopInWireConn(conn)
+	if err != nil {
+		return err
+	}
 	slots := make([]EgressSlot, maxBatch)
 	obs := opts.LoopInObserver
 
@@ -107,7 +111,7 @@ func runLoopInBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 			if obs != nil {
 				wStart = time.Now()
 			}
-			retained, err := writeLoopInPacket(device, conn, slots[i].Buf[:pktLen])
+			retained, err := writeLoopInPacket(device, wire, slots[i].Buf[:pktLen])
 			obs.recordWrite(time.Since(wStart))
 			obs.recordPkt()
 			if err != nil {

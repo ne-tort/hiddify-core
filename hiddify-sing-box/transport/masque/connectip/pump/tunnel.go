@@ -107,6 +107,10 @@ func dispatchLoopOutFrame(ctx context.Context, device TunnelDevice, opts TunnelO
 }
 
 func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer) error {
+	wire, err := loopInWireConn(conn)
+	if err != nil {
+		return err
+	}
 	var buf []byte
 	releaseBuf := func() {
 		if buf != nil {
@@ -121,7 +125,7 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 		if obs != nil {
 			wStart = time.Now()
 		}
-		retained, err := writeLoopInPacket(device, conn, buf[:n])
+		retained, err := writeLoopInPacket(device, wire, buf[:n])
 		obs.recordWrite(time.Since(wStart))
 		obs.recordPkt()
 		if err != nil {
@@ -186,16 +190,20 @@ type PacketConnInPlaceNoWake interface {
 	WritePacketInPlaceNoWake(buffer []byte) (icmp []byte, retained bool, err error)
 }
 
+// loopInWireConn resolves the batched in-place wire writer (prod: NativePumpPacketConn).
+func loopInWireConn(conn PacketConn) (PacketConnInPlaceNoWake, error) {
+	ip, ok := conn.(PacketConnInPlaceNoWake)
+	if !ok {
+		return nil, errors.New("connect-ip pump: conn must implement PacketConnInPlaceNoWake")
+	}
+	return ip, nil
+}
+
 // writeLoopInPacket sends one egress datagram to wire (usque ipConn.WritePacket parity).
 // retained=true when the wire layer keeps pkt; caller must not reuse the slice.
 // CloseError is fatal; other write errors are logged and skipped without stopping the pump.
-func writeLoopInPacket(device TunnelDevice, conn PacketConn, pkt []byte) (retained bool, err error) {
-	var icmp []byte
-	if ip, ok := conn.(PacketConnInPlaceNoWake); ok {
-		icmp, retained, err = ip.WritePacketInPlaceNoWake(pkt)
-	} else {
-		icmp, err = conn.WritePacket(pkt)
-	}
+func writeLoopInPacket(device TunnelDevice, conn PacketConnInPlaceNoWake, pkt []byte) (retained bool, err error) {
+	icmp, retained, err := conn.WritePacketInPlaceNoWake(pkt)
 	if err != nil {
 		if errors.As(err, new(*connectip.CloseError)) {
 			return retained, err

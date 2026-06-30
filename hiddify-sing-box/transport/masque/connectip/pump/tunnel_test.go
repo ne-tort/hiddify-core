@@ -62,6 +62,15 @@ func (m *mockPacketConn) WritePacket(buffer []byte) ([]byte, error) {
 	return nil, nil
 }
 
+func (m *mockPacketConn) WritePacketNoWake(buffer []byte) ([]byte, error) {
+	return m.WritePacket(buffer)
+}
+
+func (m *mockPacketConn) WritePacketInPlaceNoWake(buffer []byte) ([]byte, bool, error) {
+	icmp, err := m.WritePacketNoWake(buffer)
+	return icmp, false, err
+}
+
 func (m *mockPacketConn) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -213,6 +222,11 @@ func (c *icmpReturningConn) WritePacket(buffer []byte) ([]byte, error) {
 	return c.icmp, nil
 }
 
+func (c *icmpReturningConn) WritePacketInPlaceNoWake(buffer []byte) ([]byte, bool, error) {
+	icmp, err := c.WritePacket(buffer)
+	return icmp, false, err
+}
+
 func TestRunTunnelSupervisorCancel(t *testing.T) {
 	t.Parallel()
 	dev := newMockDevice()
@@ -314,7 +328,13 @@ func (q *queuedPacketConn) ReadPacket(ctx context.Context, buf []byte) (int, err
 }
 
 func (q *queuedPacketConn) WritePacket([]byte) ([]byte, error) { return nil, nil }
-func (q *queuedPacketConn) Close() error                       { return nil }
+func (q *queuedPacketConn) WritePacketNoWake([]byte) ([]byte, error) {
+	return nil, nil
+}
+func (q *queuedPacketConn) WritePacketInPlaceNoWake([]byte) ([]byte, bool, error) {
+	return nil, false, nil
+}
+func (q *queuedPacketConn) Close() error { return nil }
 
 func (q *queuedPacketConn) push(pkts ...[]byte) {
 	q.mu.Lock()
