@@ -224,43 +224,31 @@ func (c *bidiTunnelConn) maybeStartDownloadDrain() {
 }
 
 func (c *bidiTunnelConn) runDownloadDrain() {
-	const drainPollInterval = 50 * time.Millisecond
-	buf := make([]byte, 32*1024)
-	for {
-		if c.ctx != nil {
-			if err := context.Cause(c.ctx); err != nil {
-				return
+	RunDownloadDrainLoop(DownloadDrainConfig{
+		CtxDone: func() error {
+			if c.ctx != nil {
+				return context.Cause(c.ctx)
 			}
-		}
-		if atomic.LoadInt32(&c.drainStopped) > 0 || atomic.LoadInt32(&c.downloadActive) > 0 {
-			return
-		}
-		if c.paths.Download == nil {
-			return
-		}
-		c.downloadMu.Lock()
-		if atomic.LoadInt32(&c.drainStopped) > 0 || atomic.LoadInt32(&c.downloadActive) > 0 {
+			return nil
+		},
+		ShouldStop: func() bool {
+			return atomic.LoadInt32(&c.drainStopped) > 0 ||
+				atomic.LoadInt32(&c.downloadActive) > 0 ||
+				c.paths.Download == nil
+		},
+		Iter: func(buf []byte) (int, error) {
+			c.downloadMu.Lock()
+			if atomic.LoadInt32(&c.drainStopped) > 0 || atomic.LoadInt32(&c.downloadActive) > 0 {
+				c.downloadMu.Unlock()
+				return 0, errDownloadDrainStop
+			}
+			_ = c.setDownloadReadDeadline(time.Now().Add(DownloadDrainPollInterval))
+			n, err := readDownloadPath(c.paths.Download, buf)
+			_ = c.setDownloadReadDeadline(time.Time{})
 			c.downloadMu.Unlock()
-			return
-		}
-		_ = c.setDownloadReadDeadline(time.Now().Add(drainPollInterval))
-		n, err := readDownloadPath(c.paths.Download, buf)
-		_ = c.setDownloadReadDeadline(time.Time{})
-		c.downloadMu.Unlock()
-		if n > 0 {
-			continue
-		}
-		if err != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
-			}
-			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
-				continue
-			}
-			return
-		}
-	}
+			return n, err
+		},
+	})
 }
 
 func (c *bidiTunnelConn) Read(p []byte) (int, error) {

@@ -12,6 +12,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	C "github.com/sagernet/sing-box/constant"
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // ErrTunnelConnFailed is returned for H3 CONNECT tunnel dial/relay failures.
@@ -153,43 +154,42 @@ func (c *TunnelConn) maybeStartDownloadDrainOnUpload() {
 }
 
 func (c *TunnelConn) runDownloadDrain() {
-	const drainPollInterval = 50 * time.Millisecond
-	buf := make([]byte, 32*1024)
-	for {
-		if err := c.ctx.Err(); err != nil {
-			return
-		}
-		if atomic.LoadInt32(&c.drainStopped) > 0 || c.DownloadActive() {
-			return
-		}
-		c.readMu.Lock()
-		if atomic.LoadInt32(&c.drainStopped) > 0 || c.DownloadActive() {
-			c.readMu.Unlock()
-			return
-		}
-		dl := c.readDL
-		if !dl.IsZero() {
-			_ = c.h3.SetReadDeadline(dl)
-		} else {
-			_ = c.h3.SetReadDeadline(time.Now().Add(drainPollInterval))
-		}
-		n, err := c.h3.Read(buf)
-		if dl.IsZero() {
-			_ = c.h3.SetReadDeadline(time.Time{})
-		}
-		c.readMu.Unlock()
-		if n > 0 {
-			continue
-		}
-		if err != nil {
-			if dl.IsZero() {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					continue
-				}
+	pollDrain := true
+	strmconn.RunDownloadDrainLoop(strmconn.DownloadDrainConfig{
+		CtxDone: func() error { return c.ctx.Err() },
+		ShouldStop: func() bool {
+			return atomic.LoadInt32(&c.drainStopped) > 0 || c.DownloadActive()
+		},
+		Iter: func(buf []byte) (int, error) {
+			c.readMu.Lock()
+			if atomic.LoadInt32(&c.drainStopped) > 0 || c.DownloadActive() {
+				c.readMu.Unlock()
+				return 0, strmconn.ErrDownloadDrainStop()
 			}
-			return
-		}
-	}
+			dl := c.readDL
+			pollDrain = dl.IsZero()
+			if !dl.IsZero() {
+				_ = c.h3.SetReadDeadline(dl)
+			} else {
+				_ = c.h3.SetReadDeadline(time.Now().Add(strmconn.DownloadDrainPollInterval))
+			}
+			n, err := c.h3.Read(buf)
+			if dl.IsZero() {
+				_ = c.h3.SetReadDeadline(time.Time{})
+			}
+			c.readMu.Unlock()
+			return n, err
+		},
+		RetryReadErr: func(err error) bool {
+			if !pollDrain {
+				return false
+			}
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return true
+			}
+			return false
+		},
+	})
 }
 
 func (c *TunnelConn) Read(p []byte) (int, error) {
