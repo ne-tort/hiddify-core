@@ -13,11 +13,7 @@ func StripH2ClientBootstrapUpload(reqBody io.ReadCloser) io.Reader {
 	if reqBody == nil {
 		return nil
 	}
-	n := conn.H2BidiBootstrapUploadBytes()
-	if n <= 0 {
-		return reqBody
-	}
-	return &h2BootstrapUploadStripper{inner: reqBody, skip: n}
+	return &h2BootstrapUploadStripper{inner: reqBody, skip: conn.H2BidiBootstrapUploadBytes}
 }
 
 type h2BootstrapUploadStripper struct {

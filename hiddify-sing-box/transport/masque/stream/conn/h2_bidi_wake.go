@@ -4,12 +4,10 @@ import (
 	"sync/atomic"
 )
 
-const h2BidiBootstrapUploadBytes = 4 * 1024 // prod: MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES=4 (KiB)
+// H2BidiBootstrapUploadBytes is one-shot upload DATA size before first download read (4 KiB).
+const H2BidiBootstrapUploadBytes = 4 * 1024
 
-var h2BootstrapUploadBuf [4 * 1024]byte
-
-// H2BidiBootstrapUploadBytes returns one-shot upload DATA size before first download read.
-func H2BidiBootstrapUploadBytes() int { return h2BidiBootstrapUploadBytes }
+var h2BootstrapUploadBuf [H2BidiBootstrapUploadBytes]byte
 
 func flushUploadPath(up UploadPath) {
 	if up == nil {
@@ -39,18 +37,14 @@ func (c *bidiTunnelConn) bootstrapH2UploadForDownloadOnce() {
 	if c == nil || atomic.LoadInt32(&c.downloadActive) == 0 {
 		return
 	}
-	n := H2BidiBootstrapUploadBytes()
-	if n <= 0 || c.paths.Upload == nil {
+	if c.paths.Upload == nil {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {
 		return
 	}
-	if n > len(h2BootstrapUploadBuf) {
-		n = len(h2BootstrapUploadBuf)
-	}
 	c.uploadMu.Lock()
-	_, _ = c.paths.Upload.Write(h2BootstrapUploadBuf[:n])
+	_, _ = c.paths.Upload.Write(h2BootstrapUploadBuf[:])
 	c.uploadMu.Unlock()
 	pokeUploadPathForH2BidiDownload(c.paths.Upload)
 }

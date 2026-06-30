@@ -36,18 +36,14 @@ func unwrapBidiTunnelConn(c net.Conn) *bidiTunnelConn {
 }
 
 func (c *bidiTunnelConn) primeH2UploadBootstrapWire(barrier UploadWireBarrier) error {
-	n := H2BidiBootstrapUploadBytes()
-	if n <= 0 || c.paths.Upload == nil {
+	if c.paths.Upload == nil {
 		return nil
 	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {
 		return nil
 	}
-	if n > len(h2BootstrapUploadBuf) {
-		n = len(h2BootstrapUploadBuf)
-	}
 	c.uploadMu.Lock()
-	_, err := c.paths.Upload.Write(h2BootstrapUploadBuf[:n])
+	_, err := c.paths.Upload.Write(h2BootstrapUploadBuf[:])
 	c.uploadMu.Unlock()
 	if err != nil {
 		atomic.StoreInt32(&c.bootstrapUploadDone, 0)
@@ -55,7 +51,7 @@ func (c *bidiTunnelConn) primeH2UploadBootstrapWire(barrier UploadWireBarrier) e
 	}
 	pokeUploadPathForH2BidiDownload(c.paths.Upload)
 	if barrier != nil {
-		return barrier.AwaitUploadConsumed(int64(n), 3*time.Second)
+		return barrier.AwaitUploadConsumed(H2BidiBootstrapUploadBytes, 3*time.Second)
 	}
 	return nil
 }

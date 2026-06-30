@@ -3443,7 +3443,7 @@ func startH2ConnectUploadBootstrapDrain(req *http.Request) {
 		return
 	}
 	go func() {
-		buf := make([]byte, strm.H2BidiBootstrapUploadBytes())
+		buf := make([]byte, strm.H2BidiBootstrapUploadBytes)
 		_, _ = io.ReadFull(req.Body, buf)
 	}()
 }
