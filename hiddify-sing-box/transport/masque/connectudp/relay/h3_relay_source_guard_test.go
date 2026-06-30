@@ -36,13 +36,20 @@ func TestProdRelaySourceHasC2STryReceiveDrain(t *testing.T) {
 	}
 }
 
+//go:embed h3_tune.go
+var h3RelayTuneSource string
+
 // TestProdRelaySourceHasC2SICMPRelayOnWrite locks R3 masque-go C2S ICMP relay on onward Write refused.
 func TestProdRelaySourceHasC2SICMPRelayOnWrite(t *testing.T) {
 	t.Parallel()
+	c2sICMP := h3RelayC2SSource + h3RelayTuneSource
 	for _, needle := range []string{"c2sRelayUDPWrite", "icmpRelay"} {
-		if !strings.Contains(h3RelayC2SSource, needle) {
-			t.Fatalf("prod connectudp/relay/h3_c2s.go must contain %q (C2S ICMP relay parity)", needle)
+		if !strings.Contains(c2sICMP, needle) {
+			t.Fatalf("prod connectudp/relay C2S path must contain %q (C2S ICMP relay parity)", needle)
 		}
+	}
+	if !strings.Contains(h3RelayC2SSource, "relayICMP") {
+		t.Fatal("h3_c2s.go must relay ICMP via relayICMP when onward.Queue reports unreachable")
 	}
 }
 

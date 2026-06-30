@@ -224,6 +224,13 @@ func (c *H3Conn) FlushC2SWrites() {
 	}
 }
 
+// FlushPendingC2SBatch pushes a partial NoWake batch without draining the async write queue (duplex interleave).
+func (c *H3Conn) FlushPendingC2SBatch() {
+	if c.write != nil {
+		c.write.flushPendingWriteBatch()
+	}
+}
+
 func (c *H3Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {

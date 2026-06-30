@@ -181,6 +181,14 @@ func (c *AsymmetricPacketConn) FlushC2SWrites() {
 	}
 }
 
+func (c *AsymmetricPacketConn) flushUploadPendingBeforeRead() {
+	for _, conn := range c.uploads {
+		if f, ok := conn.(interface{ FlushPendingC2SBatch() }); ok {
+			f.FlushPendingC2SBatch()
+		}
+	}
+}
+
 func (c *AsymmetricPacketConn) AwaitUploadDrain(timeout time.Duration) error {
 	if c == nil || c.closed.Load() {
 		return nil
@@ -284,6 +292,7 @@ func (c *AsymmetricPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if v := c.deadlines.Read.Load(); v != 0 && time.Now().UnixNano() > v {
 		return 0, nil, os.ErrDeadlineExceeded
 	}
+	c.flushUploadPendingBeforeRead()
 	n, addr, err := c.download.ReadFrom(p)
 	if n > 0 {
 		for _, conn := range c.uploads {

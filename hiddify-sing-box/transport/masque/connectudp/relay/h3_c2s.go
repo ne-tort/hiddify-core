@@ -21,6 +21,7 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	onward := NewOnwardUDPWriter(conn)
 	var drainer tryDrainHTTPDatagrams
 	if dr, ok := any(str).(tryDrainHTTPDatagrams); ok {
 		drainer = dr
@@ -29,6 +30,25 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 	if sender, ok := any(str).(h3DatagramSender); ok {
 		icmpRelay = func() error { return sender.SendDatagram(contextIDZero) }
 	}
+	relayICMP := func(icmp bool) error {
+		if !icmp || icmpRelay == nil {
+			return nil
+		}
+		relayErr := icmpRelay()
+		if relayErr == nil || isTransientHTTPDatagramSendError(relayErr) {
+			return nil
+		}
+		return relayErr
+	}
+	flushOnward := func() error {
+		icmp, err := onward.Flush()
+		if err != nil {
+			return err
+		}
+		return relayICMP(icmp)
+	}
+	defer func() { _ = flushOnward() }()
+
 	var recvBackoff transientPressureBackoff
 	forwardC2SDatagram := func(data []byte) error {
 		defer quic.ReleaseMasqueDatagramReceiveBuffer(data)
@@ -50,7 +70,11 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 			log.Printf("dropping UDP packet larger than MTU")
 			return nil
 		}
-		return c2sRelayUDPWrite(conn, udpPayload, icmpRelay)
+		icmp, err := onward.Queue(udpPayload)
+		if err != nil {
+			return err
+		}
+		return relayICMP(icmp)
 	}
 	drainQueued := func() (int, error) {
 		if drainer == nil {
@@ -66,6 +90,11 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 				return forwarded, err
 			}
 			forwarded++
+		}
+		if forwarded > 0 {
+			if err := flushOnward(); err != nil {
+				return forwarded, err
+			}
 		}
 		return forwarded, nil
 	}
@@ -106,10 +135,11 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 			return err
 		}
 		recvBackoff.onProgress()
-		if forwarded, err := drainQueued(); err != nil {
+		if _, err := drainQueued(); err != nil {
 			return err
-		} else if forwarded > 0 {
-			recvBackoff.onProgress()
+		}
+		if err := flushOnward(); err != nil {
+			return err
 		}
 	}
 }
