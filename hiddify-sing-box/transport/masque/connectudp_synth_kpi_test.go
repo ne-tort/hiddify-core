@@ -253,21 +253,32 @@ func (h *connectUDPProdDownloadHandle) downloadOnce(nbytes int64) (int64, error)
 	return received, nil
 }
 
-// TestGATEConnectUDPH3SynthProdUpload measures connect-udp-h3 prod upload rx goodput on instant link (UDP-5t1).
-// Interim >=500 is OPEN when rx goodput is below gate (sent-based path previously overstated Mbps).
+// TestGATEConnectUDPH3SynthProdUpload locks connect-udp-h3 prod upload on instant link (UDP-5t2 sequenced zero-loss + rx goodput).
 func TestGATEConnectUDPH3SynthProdUpload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	bytes, mbps, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	mbps, st, err := benchConnectUDPProdProfileH3UploadZeroLoss(t, instantDatagramLink{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h3 prod upload: %v", err)
 	}
-	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload (rx): %.1f Mbit/s (%d bytes)", mbps, bytes)
-	if mbps < connectUDPSynthInstantMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
-		t.Logf("OPEN: h3 rx upload %.1f < interim gate %.0f — UDP-5t1 rx goodput; C2S queue/datagram path",
-			mbps, connectUDPSynthInstantMinMbps)
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload (sequenced rx): %.1f Mbit/s rx=%d/%d loss=%.2f%%",
+		mbps, st.RxPkts, st.SentPkts, st.LossPct)
+	if !st.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Logf("OPEN: h3 upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%) — C2S queue/datagram path",
+			st.LossPct, st.DupPct)
 		return
 	}
-	t.Logf("h3 upload rx goodput meets interim gate %.0f Mbit/s", connectUDPSynthInstantMinMbps)
+	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", mbps,
+		"sequenced burst zero-loss upload")
+}
+
+// TestLocalizeConnectUDPH3UploadFloodRx measures unlimited flood rx goodput (loss expected; not a GATE metric).
+func TestLocalizeConnectUDPH3UploadFloodRx(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	bytes, mbps, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("connect-udp-h3 flood upload: %v", err)
+	}
+	t.Logf("LOCALIZE h3 upload flood rx: %.1f Mbit/s (%d bytes)", mbps, bytes)
 }
 
 // TestGATEConnectUDPH3SynthProdDownload locks connect-udp-h3 prod S2C fountain on instant link (synth >= 500 Mbit/s).
@@ -326,16 +337,22 @@ func TestConnectUDPH3FountainSynthNoDatagramQueueDrops(t *testing.T) {
 	}
 }
 
-// TestGATEConnectUDPH2SynthProdUpload locks connect-udp-h2 prod unlimited upload on instant link (synth >= 500 Mbit/s).
+// TestGATEConnectUDPH2SynthProdUpload locks connect-udp-h2 prod upload on instant link (UDP-5t2 sequenced zero-loss + rx goodput).
 func TestGATEConnectUDPH2SynthProdUpload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	bytes, mbps, err := benchConnectUDPProdProfileH2Upload(t, instantH2Link{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	mbps, st, err := benchConnectUDPProdProfileH2UploadZeroLoss(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h2 prod upload: %v", err)
 	}
-	t.Logf("GATE-CONNECT-UDP-SYNTH h2 upload (rx): %.1f Mbit/s (%d bytes)", mbps, bytes)
+	t.Logf("GATE-CONNECT-UDP-SYNTH h2 upload (sequenced rx): %.1f Mbit/s rx=%d/%d loss=%.2f%%",
+		mbps, st.RxPkts, st.SentPkts, st.LossPct)
+	if !st.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Logf("OPEN: h2 upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%) — capsule/flush path",
+			st.LossPct, st.DupPct)
+		return
+	}
 	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_up", mbps,
-		"H2 capsule path — check DatagramSplitConn / flush / relay")
+		"H2 capsule path — sequenced burst zero-loss upload")
 }
 
 // TestGATEConnectUDPH2SynthStretchUploadMaxCapsule enforces DoD stretch on max RFC9297 capsule (W-UDP-2t).

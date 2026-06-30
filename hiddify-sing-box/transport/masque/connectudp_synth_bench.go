@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -69,6 +70,89 @@ func benchConnectUDPProdProfileH3Upload(
 	defer func() { _ = pkt.Close() }()
 
 	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx)
+}
+
+// benchConnectUDPProdProfileH3UploadZeroLoss measures sequenced upload goodput with Docker burst zero-loss semantics (UDP-5t2).
+func benchConnectUDPProdProfileH3UploadZeroLoss(
+	t *testing.T,
+	link datagramTransportLink,
+	duration time.Duration,
+	payloadLen int,
+) (float64, connectudp.SequencedStats, error) {
+	t.Helper()
+	const runID = uint32(0xC0FFEE01)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sinkConn, seqSink := runUDPSequencedSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+
+	proxyPort := startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
+		registerMasqueUDPProxyHandler(t, mux, proxyPort)
+	})
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	opts := ClientOptions{
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		TransportMode:       option.MasqueTransportModeConnectUDP,
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+	}
+	if dial := link.quicDialOverride(); dial != nil {
+		opts.QUICDial = dial
+	}
+
+	session, err := (CoreClientFactory{}).NewSession(waitCtx, opts)
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = session.Close() }()
+
+	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
+		Port: uint16(sinkAddr.Port),
+	})
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = pkt.Close() }()
+	route.TuneUDPPacketConn(pkt)
+
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen)
+	return mbps, st, err
+}
+
+func benchConnectUDPProdProfileH2UploadZeroLoss(
+	t *testing.T,
+	link h2TransportLink,
+	duration time.Duration,
+	payloadLen int,
+) (float64, connectudp.SequencedStats, error) {
+	t.Helper()
+	const runID = uint32(0xC0FFEE02)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sinkConn, seqSink := runUDPSequencedSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
+
+	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
+		Port: uint16(sinkAddr.Port),
+	})
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = pkt.Close() }()
+	route.TuneUDPPacketConn(pkt)
+
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen)
+	return mbps, st, err
 }
 
 func benchConnectUDPProdProfileH3Download(
@@ -344,6 +428,63 @@ func newConnectUDPProdProfileH2SessionWithLinkTB(tb testing.TB, proxyPort int, l
 	}
 	tb.Cleanup(func() { closeConnectUDPTestSession(session) })
 	return session, waitCtx
+}
+
+// benchConnectUDPPacketUploadSequenced floods sequenced probes (docker burst parity), flush/drain, rx goodput (UDP-5t2).
+func benchConnectUDPPacketUploadSequenced(
+	tb testing.TB,
+	pkt net.PacketConn,
+	sinkAddr *net.UDPAddr,
+	seqSink *connectudp.SequencedSink,
+	runID uint32,
+	duration time.Duration,
+	targetMbit float64,
+	payloadLen int,
+) (float64, connectudp.SequencedStats, error) {
+	tb.Helper()
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	wallStart := time.Now()
+	deadline := wallStart.Add(duration)
+	wall := connectUDPSynthBenchWallDeadline(duration)
+	var seq uint64
+	var sent int
+	var paceSlot time.Time
+	for time.Now().Before(deadline) {
+		if time.Now().After(wall) {
+			break
+		}
+		p := connectudp.BuildProbePayload(seq, runID, payloadLen)
+		var err error
+		if targetMbit <= 0 {
+			err = writeToBenchUpload(pkt, p, sinkAddr)
+		} else {
+			err = writeToWithStallGuard(tb, pkt, p, sinkAddr, connectUDPSynthUploadWriteStall)
+		}
+		if err != nil {
+			if sent > 0 {
+				break
+			}
+			return 0, connectudp.SequencedStats{}, err
+		}
+		sent++
+		seq++
+		connectudp.PaceSleepUntil(&paceSlot, payloadLen, targetMbit)
+	}
+	sendSec := time.Since(wallStart).Seconds()
+	if sendSec <= 0 {
+		sendSec = duration.Seconds()
+	}
+	finishConnectUDPPacedProbeUpload(pkt, false)
+	time.Sleep(50 * time.Millisecond)
+	st := seqSink.Analyze(sent, payloadLen)
+	mbps := connectudp.BurstSinkGoodputMbit(st.RxPkts, payloadLen, sendSec)
+	if sent > 0 {
+		tb.Logf("connect-udp sequenced upload: sent=%d rx=%d loss=%.2f%% dup=%.2f%% goodput=%.1f Mbit/s",
+			st.SentPkts, st.RxPkts, st.LossPct, st.DupPct, mbps)
+	}
+	return mbps, st, nil
 }
 
 func benchConnectUDPPacketUpload(
