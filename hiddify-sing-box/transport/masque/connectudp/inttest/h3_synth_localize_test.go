@@ -21,3 +21,7 @@ func TestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 func TestLocalizeConnectUDPH3Pipeline1ProdShape(t *testing.T) {
 	masque.InttestLocalizeConnectUDPH3Pipeline1ProdShape(t)
 }
+
+func TestLocalizeConnectUDPH3UploadPayloadScaling(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3UploadPayloadScaling(t)
+}

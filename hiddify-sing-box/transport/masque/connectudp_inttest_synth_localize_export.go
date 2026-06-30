@@ -443,9 +443,30 @@ func InttestLocalizeConnectUDPH2UploadPayloadScaling(t *testing.T) {
 	}
 }
 
+// InttestLocalizeConnectUDPH3UploadPayloadScaling checks whether H3 upload is PPS/datagram-bound (UDP-5p1).
+func InttestLocalizeConnectUDPH3UploadPayloadScaling(t *testing.T) {
+	t.Helper()
+	dur := connectUDPSynthProdBenchDuration
+	_, mbps512, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("h3 upload 512B: %v", err)
+	}
+	steady := connectudp.SteadyUploadPayloadLenH3()
+	_, mbpsSteady, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, steady)
+	if err != nil {
+		t.Fatalf("h3 upload steady(%dB): %v", steady, err)
+	}
+	ratio := mbpsSteady / mbps512
+	t.Logf("LOCALIZE h3 upload payload scaling: 512B=%.1f steady(%dB)=%.1f ratio=%.2f",
+		mbps512, steady, mbpsSteady, ratio)
+	const minRatio = 1.15
+	if mbps512 >= 200 && ratio < minRatio {
+		t.Fatalf("h3 upload weak payload scaling (512=%.1f steady=%.1f ratio=%.2f) — PPS/datagram tax (UDP-5p1)",
+			mbps512, mbpsSteady, ratio)
+	}
+}
 
-
-// TestLocalizeConnectUDPH2UploadVsConnectStreamAnchor compares H2 CONNECT-UDP upload with
+// InttestLocalizeConnectUDPH2UploadVsConnectStreamAnchor compares H2 CONNECT-UDP upload with
 // connect-stream upload on the same in-proc H2 proxy + SOCKS path. FAIL when stream is fast
 // but UDP upload is structurally capped (wire ceiling), not when both legs are slow.
 func InttestLocalizeConnectUDPH2UploadVsConnectStreamAnchor(t *testing.T) {
