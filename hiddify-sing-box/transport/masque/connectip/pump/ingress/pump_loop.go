@@ -137,6 +137,15 @@ func (c *hostPacketConn) WritePacket(buffer []byte) ([]byte, error) {
 	return c.write(buffer)
 }
 
+func (c *hostPacketConn) WritePacketNoWake(buffer []byte) ([]byte, error) {
+	return c.WritePacket(buffer)
+}
+
+func (c *hostPacketConn) WritePacketInPlaceNoWake(buffer []byte) ([]byte, bool, error) {
+	icmp, err := c.WritePacketNoWake(buffer)
+	return icmp, false, err
+}
+
 func (c *hostPacketConn) Close() error { return nil }
 
 func (ing *Ingress) runPumpLoop(ctx context.Context) {
@@ -196,6 +205,7 @@ var (
 	_ cippump.TunnelDevice        = (*dynamicPumpDevice)(nil)
 	_ cippump.OutboundDrainDevice = (*dynamicPumpDevice)(nil)
 	_ cippump.PacketConn          = (*hostPacketConn)(nil)
+	_ cippump.PacketConnInPlaceNoWake = (*hostPacketConn)(nil)
 )
 
 // Compile-time check that netstack satisfies pump loop hooks.
