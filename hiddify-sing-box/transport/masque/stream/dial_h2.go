@@ -92,14 +92,10 @@ func DialHTTP2ConnectStream(
 		}
 		TraceTCPf("masque tcp connect_stream h2 host=%s port=%d attempt=%d", targetHost, targetPort, attempt+1)
 
-		var uploadR io.ReadCloser
-		var uploadW io.WriteCloser
-		if hooks.NewConnectUploadPipe != nil {
-			uploadR, uploadW = hooks.NewConnectUploadPipe()
-		} else {
-			pr, pw := io.Pipe()
-			uploadR, uploadW = pr, pw
+		if hooks.NewConnectUploadPipe == nil {
+			return nil, errors.Join(Errs.TCPConnectStreamFailed, errors.New("masque h2: connect-stream upload pipe hook required"))
 		}
+		uploadR, uploadW := hooks.NewConnectUploadPipe()
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
 		uploadBody := hooks.NewConnectUploadBody(uploadR)
 		req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodConnect, hooks.RequestURL(tcpURL), uploadBody)

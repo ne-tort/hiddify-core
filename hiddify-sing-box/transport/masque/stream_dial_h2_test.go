@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
@@ -44,17 +45,34 @@ func (h *streamDialH2FakeHost) ResetH2ConnectStreamTransport() {
 }
 
 func testStreamDialH2Hooks() strm.DialH2Hooks {
-	return strm.DialH2Hooks{
-		NewRequestContext: func(parent context.Context) (context.Context, func(bool)) {
-			return parent, func(bool) {}
-		},
-		NewConnectUploadBody: func(uploadR io.Reader) io.Reader { return uploadR },
-		RequestURL:           func(u *url.URL) string { return u.String() },
-		TunnelFromResponse: func(ctx context.Context, resp *http.Response, upload io.WriteCloser, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error) {
-			return nil, session.ErrTCPConnectStreamFailed
-		},
-		ClassifyError: func(err error) string { return string(session.ClassifyError(err)) },
-		AuthFailed:    session.ErrAuthFailed,
+	hooks := strmclient.NewH2Hooks(strmclient.H2Wire{
+		RequestURL: func(u *url.URL) string { return u.String() },
+	})
+	hooks.TunnelFromResponse = func(ctx context.Context, resp *http.Response, upload io.WriteCloser, uploadBody io.Reader, targetHost string, targetPort uint16) (net.Conn, error) {
+		_ = resp
+		_ = upload
+		_ = uploadBody
+		return nil, session.ErrTCPConnectStreamFailed
+	}
+	return hooks
+}
+
+func TestStreamDialH2HooksRequireUploadPipe(t *testing.T) {
+	t.Parallel()
+	u, err := url.Parse("https://example.com/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := testStreamDialH2Hooks()
+	hooks.NewConnectUploadPipe = nil
+	_, dialErr := strm.DialHTTP2ConnectStream(context.Background(), hooks, &streamDialH2FakeHost{}, u, strm.DialH2LogInput{
+		Server: "example.com", ServerPort: 443,
+	}, "target", 443)
+	if dialErr == nil {
+		t.Fatal("expected error when upload pipe hook missing")
+	}
+	if !strings.Contains(dialErr.Error(), "upload pipe hook required") {
+		t.Fatalf("unexpected error: %v", dialErr)
 	}
 }
 
