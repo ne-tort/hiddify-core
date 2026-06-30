@@ -12,8 +12,8 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
-	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -187,7 +187,7 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
 	}
-	want := cudph2.CapsuleProtocolHeaderValue()
+	want := h2c.CapsuleProtocolHeaderValue()
 	if got := rec.Header().Get(http3.CapsuleProtocolHeader); got != want {
 		t.Fatalf("Capsule-Protocol: got %q want %q", got, want)
 	}

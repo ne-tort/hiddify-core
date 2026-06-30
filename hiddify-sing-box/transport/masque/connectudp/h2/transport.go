@@ -83,8 +83,3 @@ func ResetTransportSlot(mu *sync.Mutex, slot **http2.Transport) {
 func CloseClientTransport(tr *http2.Transport) {
 	h2c.CloseClientTransport(tr)
 }
-
-// CapsuleProtocolHeaderValue returns the Capsule-Protocol structured field for Extended CONNECT over HTTP/2.
-func CapsuleProtocolHeaderValue() string {
-	return h2c.CapsuleProtocolHeaderValue()
-}
