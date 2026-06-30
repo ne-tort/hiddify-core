@@ -2,4 +2,6 @@
 //
 // Client: PacketConn dial via DialH2Overlay. Server: ServeH2 capsule relay scan.
 // Imports connectudp/frame and connectudp/split only — not parent connectudp.
+//
+// Leg-profile defaults (W-UDP-2t): prod CONNECT-UDP dial is always asymmetric duplex (dial.go).
 package h2
