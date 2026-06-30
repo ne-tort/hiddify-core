@@ -3,6 +3,8 @@ package connectip
 import (
 	"sync/atomic"
 	"testing"
+
+	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 )
 
 type recordingPacketDest struct {
@@ -24,11 +26,11 @@ func TestBatchingPipeProxiedStreamDeferredFlushLocalize(t *testing.T) {
 	stream := &batchingPipeProxiedStream{dest: dest}
 
 	const n = 64
-	pkt := borrowOutboundPayload(20)
+	pkt := cipnet.BorrowOutboundPayload(20)
 	pkt[0] = 0x45
 	pkt[8] = 64
 	for i := 0; i < n; i++ {
-		dup := borrowOutboundPayload(20)
+		dup := cipnet.BorrowOutboundPayload(20)
 		copy(dup, pkt)
 		if err := stream.SendProxiedIPDatagramNoWake(nil, dup); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
@@ -41,5 +43,5 @@ func TestBatchingPipeProxiedStreamDeferredFlushLocalize(t *testing.T) {
 	if got := dest.writes.Load(); int(got) != n {
 		t.Fatalf("after flush: dest writes=%d want %d", got, n)
 	}
-	returnOutboundBuf(pkt)
+	cipnet.ReturnOutboundBuf(pkt)
 }

@@ -69,10 +69,6 @@ func CloneInboundFrame(data []byte) []byte {
 	return b
 }
 
-func borrowOutboundBuf(n int) []byte {
-	return borrowOutboundPayload(n)
-}
-
 func returnOutboundBuf(b []byte) {
 	if cap(b) > 64*1024 {
 		return

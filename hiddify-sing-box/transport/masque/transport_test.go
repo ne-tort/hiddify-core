@@ -1057,7 +1057,6 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			mcip.ResetDatagramCeilingMaxEnvCache()
 			session, err := (CoreClientFactory{}).NewSession(context.Background(), ClientOptions{
 				Server:                   "example.com",
 				ServerPort:               443,

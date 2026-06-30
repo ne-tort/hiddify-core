@@ -43,7 +43,7 @@ var ArchREFSRCUsqueSourceNeedles = []string{
 	"netstackInboundBufPool",
 	"netstackOutboundBufPool",
 	"CloneInboundFrame",
-	"borrowOutboundBuf",
+	"returnOutboundBuf",
 	"WritePacket",
 }
 

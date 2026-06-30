@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 	"github.com/quic-go/quic-go"
 )
 
@@ -78,11 +79,11 @@ func TestClientPacketSessionEgressCoalescesWakeOnFlush(t *testing.T) {
 
 	const n = 64
 	for i := 0; i < n; i++ {
-		pkt := borrowOutboundPayload(20)
+		pkt := cipnet.BorrowOutboundPayload(20)
 		pkt[0] = 0x45
 		pkt[8] = 64
 		if _, _, err := s.WritePacketFromNetstack(pkt); err != nil {
-			returnOutboundBuf(pkt)
+			cipnet.ReturnOutboundBuf(pkt)
 			t.Fatalf("WritePacketFromNetstack %d: %v", i, err)
 		}
 	}

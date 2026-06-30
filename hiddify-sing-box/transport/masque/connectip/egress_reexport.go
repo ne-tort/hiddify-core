@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	connectipgo "github.com/quic-go/connect-ip-go"
+	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 	cipegress "github.com/sagernet/sing-box/transport/masque/connectip/pump/egress"
 )
 
@@ -16,8 +17,8 @@ func init() {
 		TrackWriteFail:    TrackWriteFail,
 		TrackPacketTx:     TrackPacketTx,
 		TrackPTBRx:        TrackPTBRx,
-		BorrowOutboundBuf: borrowOutboundBuf,
-		ReturnOutboundBuf: returnOutboundBuf,
+		BorrowOutboundBuf: cipnet.BorrowOutboundPayload,
+		ReturnOutboundBuf: cipnet.ReturnOutboundBuf,
 	})
 }
 

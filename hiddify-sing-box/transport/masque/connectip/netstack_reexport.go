@@ -36,7 +36,7 @@ func init() {
 		ObsWriteFailReason: obsWriteFailReason,
 		ObsSessionReset:    obsSessionReset,
 		DefaultDatagramCeilingMax: func() int { return DefaultDatagramCeilingMax },
-		DatagramSlack:             func() int { return DatagramSlack },
+		DatagramSlack:             func() int { return H3FramingSlack },
 		H2NetstackMTU:             H2NetstackMTU,
 	})
 	cipingress.SetHooks(cipingress.Hooks{
@@ -79,18 +79,6 @@ var (
 	RegisterAssignedPrefixesListener = cipnet.RegisterAssignedPrefixesListener
 	AssignedPrefixesListenerCallback = cipnet.AssignedPrefixesListenerCallback
 )
-
-func borrowOutboundBuf(n int) []byte {
-	return cipnet.BorrowOutboundPayload(n)
-}
-
-func borrowOutboundPayload(n int) []byte {
-	return cipnet.BorrowOutboundPayload(n)
-}
-
-func returnOutboundBuf(b []byte) {
-	cipnet.ReturnOutboundBuf(b)
-}
 
 func newNetstackFromRoot(ctx context.Context, session PacketSession, opts NetstackOptions) (*Netstack, error) {
 	return cipnet.NewNetstack(ctx, wrapPacketSession(session), opts)

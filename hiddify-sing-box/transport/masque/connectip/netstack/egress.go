@@ -123,7 +123,7 @@ func (s *Netstack) sendLinkEndpointOutboundBatch() int {
 		if obsEventsEnabled() {
 			obsWriteDequeued()
 		}
-		payload := borrowOutboundBuf(len(outbound))
+	payload := borrowOutboundPayload(len(outbound))
 		copy(payload, outbound)
 		packet.DecRef()
 		if s.closed.Load() {

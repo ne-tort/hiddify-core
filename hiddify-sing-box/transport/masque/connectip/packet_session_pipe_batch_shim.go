@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	cipgo "github.com/quic-go/connect-ip-go"
+	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 	"github.com/quic-go/quic-go"
 )
 
@@ -30,7 +31,7 @@ func (p *batchingPipeProxiedStream) SendProxiedIPDatagram(_, ip []byte) error {
 	return err
 }
 func (p *batchingPipeProxiedStream) SendProxiedIPDatagramNoWake(_, ip []byte) error {
-	dup := borrowOutboundPayload(len(ip))
+	dup := cipnet.BorrowOutboundPayload(len(ip))
 	copy(dup, ip)
 	p.mu.Lock()
 	p.pending = append(p.pending, dup)
@@ -38,7 +39,7 @@ func (p *batchingPipeProxiedStream) SendProxiedIPDatagramNoWake(_, ip []byte) er
 	return nil
 }
 func (p *batchingPipeProxiedStream) SendProxiedIPDatagramInPlaceNoWake(_, ip []byte, release func()) error {
-	dup := borrowOutboundPayload(len(ip))
+	dup := cipnet.BorrowOutboundPayload(len(ip))
 	copy(dup, ip)
 	if release != nil {
 		release()
@@ -56,7 +57,7 @@ func (p *batchingPipeProxiedStream) FlushProxiedIPDatagramSend() {
 	for _, ip := range pending {
 		_, _ = p.dest.WritePacket(ip)
 		if IsOutboundPoolSlice(ip) {
-			returnOutboundBuf(ip)
+			cipnet.ReturnOutboundBuf(ip)
 		}
 	}
 }
