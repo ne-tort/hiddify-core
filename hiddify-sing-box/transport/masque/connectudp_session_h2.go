@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
@@ -15,12 +16,16 @@ import (
 )
 
 func (s *coreSession) newMasqueClientH2Transport() (*http2.Transport, error) {
-	return cudph2.NewClientTransport(cudph2.ClientTransportConfig{
-		TLSConfig:             masqueClientH2TLSConfig(s.Options),
-		WarpConnectIPProtocol: s.Options.WarpConnectIPProtocol,
-		DialOverrideHost:      masqueQuicDialCandidateHost(s.Options),
-		TCPDial:               s.Options.TCPDial,
-		MasqueTCPDialTLS:      s.Options.MasqueTCPDialTLS,
+	dialOverrideHost := strings.TrimSpace(masqueQuicDialCandidateHost(s.Options))
+	alternateDialHost := ""
+	if strings.EqualFold(strings.TrimSpace(s.Options.WarpConnectIPProtocol), "cf-connect-ip") {
+		alternateDialHost = cudph2.WarpH2AlternateDialHost(dialOverrideHost)
+	}
+	return h2c.NewClientTransport(h2c.ClientDialConfig{
+		TLSConfig:          masqueClientH2TLSConfig(s.Options),
+		DialHostCandidates: cudph2.H2DialHostCandidates(strings.TrimSpace(s.Options.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost),
+		TCPDial:            s.Options.TCPDial,
+		MasqueTCPDialTLS:   s.Options.MasqueTCPDialTLS,
 	})
 }
 
@@ -29,7 +34,7 @@ func masqueClientH2TLSConfig(opts ClientOptions) *tls.Config {
 }
 
 func (s *coreSession) ensureH2TransportCached(ctx context.Context, mu *sync.Mutex, slot **http2.Transport) (*http2.Transport, error) {
-	return cudph2.EnsureTransportCached(ctx, mu, slot, s.Options.TCPDial != nil, func() (*http2.Transport, error) {
+	return h2c.EnsureTransportCached(ctx, mu, slot, s.Options.TCPDial != nil, func() (*http2.Transport, error) {
 		return s.newMasqueClientH2Transport()
 	})
 }
@@ -43,16 +48,16 @@ func (s *coreSession) ensureH2ConnectStreamTransport(ctx context.Context) (*http
 }
 
 func (s *coreSession) closeAllH2ClientTransports() {
-	cudph2.ResetTransportSlot(&s.H2UDPMu, &s.H2UDPTransport)
-	cudph2.ResetTransportSlot(&s.H2ConnectStreamMu, &s.H2ConnectStreamTransport)
+	h2c.ResetTransportSlot(&s.H2UDPMu, &s.H2UDPTransport)
+	h2c.ResetTransportSlot(&s.H2ConnectStreamMu, &s.H2ConnectStreamTransport)
 }
 
 func (s *coreSession) resetH2UDPTransportLockedAssumeMu() {
-	cudph2.ResetTransportSlot(&s.H2UDPMu, &s.H2UDPTransport)
+	h2c.ResetTransportSlot(&s.H2UDPMu, &s.H2UDPTransport)
 }
 
 func (s *coreSession) resetH2ConnectStreamTransportLockedAssumeMu() {
-	cudph2.ResetTransportSlot(&s.H2ConnectStreamMu, &s.H2ConnectStreamTransport)
+	h2c.ResetTransportSlot(&s.H2ConnectStreamMu, &s.H2ConnectStreamTransport)
 }
 
 func (s *coreSession) h2OverlayDialConfig() cudph2.H2OverlayDialConfig {
@@ -62,7 +67,7 @@ func (s *coreSession) h2OverlayDialConfig() cudph2.H2OverlayDialConfig {
 	}
 	opts := s.Options
 	host := masqueQuicDialCandidateHost(opts)
-	return cudph2.H2OverlayDialConfigFromSession(cudph2.OverlaySessionCallbacks{
+	return cudph2.H2OverlayDialConfig{
 		EnsureTransport: func(ctx context.Context) (*http2.Transport, error) {
 			return s.ensureH2UDPTransport(ctx)
 		},
@@ -79,7 +84,7 @@ func (s *coreSession) h2OverlayDialConfig() cudph2.H2OverlayDialConfig {
 			return masqueDialTarget(host, portNum)
 		},
 		ErrTemplateNotConfigured: session.ErrConnectUDPTemplateNotConfigured,
-	})
+	}
 }
 
 func (s *coreSession) dialUDPOverHTTP2(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
