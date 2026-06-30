@@ -6,31 +6,20 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-const h3BidiBootstrapUploadBytes = 4 * 1024 // parity stream.H2BidiBootstrapUploadBytes / docker compose
+// H3BidiBootstrapUploadBytes is one-shot upload DATA before first download read (4 KiB).
+// Parity stream.conn.H2BidiBootstrapUploadBytes.
+const H3BidiBootstrapUploadBytes = 4 * 1024
 
-var h3BootstrapUploadBuf [defaultUploadChunkBytes]byte
-
-// H3BidiBootstrapUploadBytes returns one-shot upload DATA before first download read
-// during WriteTo (iperf -R / docker download-first). Parity H2 bidi bootstrap wake.
-func H3BidiBootstrapUploadBytes() int {
-	return h3BidiBootstrapUploadBytes
-}
+var h3BootstrapUploadBuf [H3BidiBootstrapUploadBytes]byte
 
 func (c *TunnelConn) sendH3BootstrapUploadUnlocked() error {
 	if c == nil || c.h3 == nil {
 		return nil
 	}
-	n := H3BidiBootstrapUploadBytes()
-	if n <= 0 {
-		return nil
-	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {
 		return nil
 	}
-	if n > len(h3BootstrapUploadBuf) {
-		n = len(h3BootstrapUploadBuf)
-	}
-	_, err := writeChunked(c.h3, h3BootstrapUploadBuf[:n], H3UploadFlushPolicy().ChunkBytes)
+	_, err := writeChunked(c.h3, h3BootstrapUploadBuf[:], H3UploadFlushChunkBytes)
 	if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok {
 		_ = f.FlushMasqueCoalesce()
 	}

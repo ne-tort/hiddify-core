@@ -318,8 +318,6 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 	return n, err
 }
 
-const h3HandshakeUploadFlushBytes = 64 * 1024
-
 // readFromH3Thin copies upload bytes to the CONNECT stream (route ReaderFrom / iperf params).
 func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
@@ -349,10 +347,10 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 					}
 				}
 				if ew == nil {
-					if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok && nr < h3HandshakeUploadFlushBytes {
+					if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok && nr < H3UploadFlushChunkBytes {
 						_ = f.FlushMasqueCoalesce()
 					}
-					if c.DownloadActive() && nr < h3HandshakeUploadFlushBytes {
+					if c.DownloadActive() && nr < H3UploadFlushChunkBytes {
 						c.wakeBidiSendAfterUpload()
 					}
 				}
@@ -423,13 +421,13 @@ func (r *tunnelH3Reader) Read(p []byte) (int, error) {
 	if qs := r.c.h3.QUICStream(); qs != nil && quic.MasqueUploadSendStarved(qs) && len(p) > duplexStarvedDownloadReadCap {
 		p = p[:duplexStarvedDownloadReadCap]
 	}
-	if len(p) >= h3HandshakeUploadFlushBytes {
+	if len(p) >= H3UploadFlushChunkBytes {
 		r.c.wakeH3BidiUploadDuringDownload()
 	}
 	n, err := r.c.h3.Read(p)
 	if n > 0 {
 		r.c.noteDownloadDeliveryWake(n)
-		if n < h3HandshakeUploadFlushBytes {
+		if n < H3UploadFlushChunkBytes {
 			r.c.wakeH3BidiUploadDuringDownload()
 		}
 	}

@@ -20,9 +20,9 @@ func TestH3UploadChunkBytesProd(t *testing.T) {
 }
 
 func TestH3QuicConnectUploadChunkParity(t *testing.T) {
-	got := H3UploadFlushPolicy().ChunkBytes
-	if got != defaultUploadChunkBytes {
-		t.Fatalf("h3 policy chunk=%d want %d", got, defaultUploadChunkBytes)
+	got := H3UploadFlushChunkBytes
+	if got != 64*1024 {
+		t.Fatalf("h3 flush chunk=%d want %d", got, 64*1024)
 	}
 	if got != http3.ConnectUploadChunkBytes() {
 		t.Fatalf("h3/http3 chunk parity: h3=%d http3=%d", got, http3.ConnectUploadChunkBytes())

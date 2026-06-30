@@ -4,21 +4,8 @@ import (
 	"io"
 )
 
-const (
-	defaultUploadChunkBytes            = 64 * 1024
-	defaultDuplexUploadChunkBytes      = 64 * 1024
-	duplexSaturatedUploadChunkBytes    = 16 * 1024
-)
-
-// UploadFlushPolicy controls how bulk CONNECT-stream upload is split before hitting the wire.
-type UploadFlushPolicy struct {
-	ChunkBytes int
-}
-
-// H3UploadFlushPolicy returns the active H3 CONNECT-stream upload flush policy.
-func H3UploadFlushPolicy() UploadFlushPolicy {
-	return UploadFlushPolicy{ChunkBytes: defaultUploadChunkBytes}
-}
+// H3UploadFlushChunkBytes splits bulk CONNECT-stream upload before hitting the wire (64 KiB).
+const H3UploadFlushChunkBytes = 64 * 1024
 
 // H3UploadChunkBytes returns CONNECT upload chunk size (single prod profile: 256 KiB).
 func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploadStarted bool) int {
@@ -26,10 +13,6 @@ func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploa
 	_ = downloadDelivered
 	_ = duplexUploadStarted
 	return TunnelWriteToBufLen
-}
-
-func (p UploadFlushPolicy) passthrough() bool {
-	return p.ChunkBytes <= 0
 }
 
 func writeChunked(w io.Writer, p []byte, chunk int) (int, error) {

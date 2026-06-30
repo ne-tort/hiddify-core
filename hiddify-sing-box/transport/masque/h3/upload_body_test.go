@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-func TestH3UploadFlushPolicyDefaultChunk(t *testing.T) {
-	p := H3UploadFlushPolicy()
-	if p.ChunkBytes != defaultUploadChunkBytes {
-		t.Fatalf("default chunk: got %d want %d", p.ChunkBytes, defaultUploadChunkBytes)
+func TestH3UploadFlushChunkBytesProdDefault(t *testing.T) {
+	if H3UploadFlushChunkBytes != 64*1024 {
+		t.Fatalf("default chunk: got %d want %d", H3UploadFlushChunkBytes, 64*1024)
 	}
 }
 

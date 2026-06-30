@@ -100,7 +100,7 @@ func (c *PipeUploadTunnelConn) Write(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := writeChunked(c.writer, p, H3UploadFlushPolicy().ChunkBytes)
+	n, err := writeChunked(c.writer, p, H3UploadFlushChunkBytes)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
@@ -111,7 +111,7 @@ func (c *PipeUploadTunnelConn) ReadFrom(r io.Reader) (int64, error) {
 	if c == nil || c.writer == nil {
 		return 0, io.ErrClosedPipe
 	}
-	n, err := copyChunked(c.writer, r, H3UploadFlushPolicy().ChunkBytes)
+	n, err := copyChunked(c.writer, r, H3UploadFlushChunkBytes)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
