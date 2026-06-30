@@ -23,8 +23,12 @@ func TestH3TunnelFromResponseSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if conn != want {
-		t.Fatalf("conn = %v, want %v", conn, want)
+	shell, ok := conn.(*TunnelConn)
+	if !ok {
+		t.Fatalf("conn type = %T, want *TunnelConn", conn)
+	}
+	if shell.Inner != want {
+		t.Fatalf("inner = %v, want %v", shell.Inner, want)
 	}
 }
 

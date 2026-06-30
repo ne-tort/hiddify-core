@@ -15,11 +15,11 @@ func H3TunnelFromResponse(
 	targetPort uint16,
 	tunnel func(context.Context, *http.Response, string, uint16) (net.Conn, error),
 ) (net.Conn, error) {
-	conn, err := tunnel(ctx, resp, targetHost, targetPort)
+	inner, err := tunnel(ctx, resp, targetHost, targetPort)
 	if err != nil {
 		TraceTCPf("masque tcp connect_stream h3 tunnel err host=%s port=%d err=%v",
 			targetHost, targetPort, err)
 		return nil, err
 	}
-	return conn, nil
+	return NewTunnelConn(inner), nil
 }

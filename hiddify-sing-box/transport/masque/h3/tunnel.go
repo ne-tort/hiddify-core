@@ -9,13 +9,14 @@ import (
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
-// ConnectTunnelFromResponse builds the standard MASQUE H3 TCP tunnel after CONNECT succeeds.
+// ConnectTunnelFromResponse builds the H3 CONNECT tunnel implementation after CONNECT succeeds.
+// Callers in transport/masque/stream wrap with stream.NewTunnelConn for TCP dial error mapping.
 func ConnectTunnelFromResponse(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error) {
 	conn, err := TunnelConnFromCONNECT(ctx, resp, targetHost, targetPort)
 	if err != nil {
 		return nil, errors.Join(strm.Errs.TCPConnectStreamFailed, err)
 	}
-	return strm.NewTunnelConn(conn), nil
+	return conn, nil
 }
 
 // ConnectRequest builds an RFC 9114 CONNECT request (nil Body = tunneled upload on the bidi stream).
