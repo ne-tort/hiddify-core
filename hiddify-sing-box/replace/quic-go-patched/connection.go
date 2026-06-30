@@ -3043,22 +3043,6 @@ func (c *Conn) queueControlFrame(f wire.Frame) {
 
 func (c *Conn) onHasConnectionData() { c.scheduleSending() }
 
-func (c *Conn) masqueSetBidiSendBoost(id protocol.StreamID, active bool) {
-	c.framer.setBidiSendBoost(id, active)
-	if testMasqueBidiBoostHook != nil {
-		testMasqueBidiBoostHook(uint64(id), active)
-	}
-	if active {
-		c.scheduleSending()
-	}
-}
-
-func (c *Conn) masqueRepromoteBidiSendBoost(id protocol.StreamID) {
-	if c.framer.repromoteBidiSendBoost(id) {
-		c.scheduleSending()
-	}
-}
-
 func (c *Conn) masqueSetBidiDuplexFair(id protocol.StreamID, fair bool) {
 	c.framer.setMasqueDuplexFair(id, fair)
 }
@@ -3087,15 +3071,8 @@ func (c *Conn) masqueRepromoteActiveStream(id protocol.StreamID) bool {
 	return false
 }
 
-func (c *Conn) masqueIsBidiSendBoosted(id protocol.StreamID) bool {
-	return c.framer.isBidiSendBoost(id)
-}
-
 func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
-	if c.framer.AddActiveStream(id, str) {
-		// Belt-and-suspenders: re-promote must also nudge send half (parity poke-renotify).
-		str.signalWrite()
-	}
+	c.framer.AddActiveStream(id, str)
 	c.scheduleSending()
 }
 
@@ -3105,7 +3082,7 @@ func (c *Conn) onHasStreamControlFrame(id protocol.StreamID, str streamControlFr
 		if st, ok := sendHandler.(*Stream); ok {
 			// First MAX_STREAM_DATA queue and renotify: nudge send when download-active
 			// (windowed bidi download stall when receive Read queues FC but upload Write blocked).
-			masqueWakeOnControlFrameRenotify(st, c.framer.isBidiSendBoost(id))
+			masqueWakeOnControlFrameRenotify(st)
 		}
 	}
 	c.scheduleSending()

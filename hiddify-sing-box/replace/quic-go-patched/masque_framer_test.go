@@ -13,18 +13,6 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
-func TestMasqueBidiSendBoostEnabledHardcodedOff(t *testing.T) {
-	if MasqueBidiSendBoostEnabled() {
-		t.Fatal("MasqueBidiSendBoostEnabled() must stay off on prod ref-stack hot path")
-	}
-}
-
-func TestMasqueBidiSendBoostMaxFramesConst(t *testing.T) {
-	if got := masqueBidiSendBoostMaxFramesPerPacket(); got != defaultBidiSendBoostMaxFrames {
-		t.Fatalf("masqueBidiSendBoostMaxFramesPerPacket() = %d, want %d", got, defaultBidiSendBoostMaxFrames)
-	}
-}
-
 func TestMasqueSetBidiDownloadActiveNilSafe(t *testing.T) {
 	MasqueSetBidiDownloadActive(nil, true)
 	MasqueSetBidiDownloadActive(nil, false)
@@ -89,44 +77,31 @@ func TestFramerControlFrameRenotify(t *testing.T) {
 	}
 }
 
-// TestFramerBidiSendBoostDisabledFairScheduling (S25): prod boost off — queued order wins
-// even when a later stream is marked in the framer boost map.
-func TestFramerBidiSendBoostDisabledFairScheduling(t *testing.T) {
+// TestFramerFairScheduling (S25): queued order wins — first enqueued stream sends first.
+func TestFramerFairScheduling(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
 	const (
-		firstID protocol.StreamID = 4
-		boostID protocol.StreamID = 12
+		firstID  protocol.StreamID = 4
+		secondID protocol.StreamID = 12
 	)
 	makeFrame := func(id protocol.StreamID, b byte) *wire.StreamFrame {
 		return &wire.StreamFrame{StreamID: id, Data: []byte{b}, DataLenPresent: true}
 	}
 	first := NewMockStreamFrameGetter(ctrl)
 	first.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(firstID, 'a')}, nil, false).AnyTimes()
-	boost := NewMockStreamFrameGetter(ctrl)
-	boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(boostID, 'z')}, nil, false).AnyTimes()
+	second := NewMockStreamFrameGetter(ctrl)
+	second.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(secondID, 'z')}, nil, false).AnyTimes()
 
 	framer.AddActiveStream(firstID, first)
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(boostID, boost)
+	framer.AddActiveStream(secondID, second)
 
 	_, streamFrames, _ := framer.Append(nil, nil, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
 	if len(streamFrames) == 0 {
 		t.Fatal("expected at least one STREAM frame")
 	}
 	if streamFrames[0].Frame.StreamID != firstID {
-		t.Fatalf("with boost disabled, first queued stream must win, got %d want %d", streamFrames[0].Frame.StreamID, firstID)
-	}
-}
-
-// TestFramerHandle0RTTRejectionClearsBidiSendBoost (S56): 0-RTT rejection must drop boost state.
-func TestFramerHandle0RTTRejectionClearsBidiSendBoost(t *testing.T) {
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	framer.setBidiSendBoost(4, true)
-	framer.setBidiSendBoost(8, true)
-	framer.Handle0RTTRejection()
-	if len(framer.bidiSendBoost) != 0 {
-		t.Fatalf("bidiSendBoost len=%d want 0 after 0-RTT rejection", len(framer.bidiSendBoost))
+		t.Fatalf("first queued stream must win, got %d want %d", streamFrames[0].Frame.StreamID, firstID)
 	}
 }
 
@@ -153,24 +128,5 @@ func TestFramerAppendSkipsOrphanStreamQueueID(t *testing.T) {
 	}
 	if streamFrames[0].Frame.StreamID != activeID {
 		t.Fatalf("orphan queue id skipped, got stream %d want %d", streamFrames[0].Frame.StreamID, activeID)
-	}
-}
-
-// TestMasqueSetBidiSendBoostTriggersScheduleSending (S59): framer boost bookkeeping still wakes send loop.
-func TestMasqueSetBidiSendBoostTriggersScheduleSending(t *testing.T) {
-	c := &Conn{
-		sendingScheduled: make(chan struct{}, 1),
-		framer:           newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil)),
-	}
-	c.masqueSetBidiSendBoost(4, true)
-	select {
-	case <-c.sendingScheduled:
-	default:
-		t.Fatal("active bidi boost must schedule sending")
-	}
-	c.masqueSetBidiSendBoost(4, false)
-	select {
-	case <-c.sendingScheduled:
-	default:
 	}
 }

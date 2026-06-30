@@ -194,7 +194,7 @@ func TestMasqueFirstStreamControlFrameQueueWakesDownloadActive(t *testing.T) {
 	defer restore()
 
 	// First queue (renotify=false) — connection.onHasStreamControlFrame always calls helper.
-	masqueWakeOnControlFrameRenotify(st, false)
+	masqueWakeOnControlFrameRenotify(st)
 	if streamWakes != 1 {
 		t.Fatalf("first MAX_STREAM_DATA queue wake calls=%d want 1", streamWakes)
 	}
@@ -228,15 +228,15 @@ func TestMasqueWakeOnControlFrameRenotify(t *testing.T) {
 	restore := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
 	defer restore()
 
-	masqueWakeOnControlFrameRenotify(nil, true)
-	masqueWakeOnControlFrameRenotify(st, false)
+	masqueWakeOnControlFrameRenotify(nil)
+	masqueWakeOnControlFrameRenotify(st)
 	if streamWakes != 1 {
 		t.Fatalf("download-active renotify wake calls=%d want 1", streamWakes)
 	}
 
 	inactive := newStream(ctx, 8, mockSender, fc, false)
 	streamWakes = 0
-	masqueWakeOnControlFrameRenotify(inactive, false)
+	masqueWakeOnControlFrameRenotify(inactive)
 	if streamWakes != 0 {
 		t.Fatalf("inactive non-boost stream must not wake, calls=%d", streamWakes)
 	}

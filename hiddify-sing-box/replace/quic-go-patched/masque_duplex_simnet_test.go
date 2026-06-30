@@ -204,7 +204,7 @@ func runMasqueDuplexDownloadBenchOpts(
 
 func runMasqueDuplexDownloadBenchConfig(t *testing.T, cfg *Config, boostEnv string, mode masqueDuplexDrainMode, clientDownloadActive bool) masqueDuplexBenchResult {
 	t.Helper()
-	_ = boostEnv // prod: MasqueBidiSendBoostEnabled hardcoded off; kept for bench API stability
+	_ = boostEnv // STR-4a14: bidi send boost removed; param kept for bench API stability
 	masqueSimnetTLS()
 
 	clientConn, serverConn, closeSimnet := newMasqueSimnetLink(t)

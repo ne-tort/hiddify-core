@@ -43,7 +43,6 @@ type framer struct {
 
 	activeStreams            map[protocol.StreamID]streamFrameGetter
 	streamQueue              ringbuffer.RingBuffer[protocol.StreamID]
-	bidiSendBoost            map[protocol.StreamID]struct{}
 	masqueDuplexFairStreams  map[protocol.StreamID]struct{}
 	masqueDuplexFairRelayStreams     map[protocol.StreamID]struct{} // server relay: inline MAX_STREAM_DATA after STREAM
 	masqueDuplexFairClientStreams    map[protocol.StreamID]struct{} // client: inline MAX_STREAM_DATA after C2S STREAM
@@ -132,10 +131,6 @@ func (f *framer) Append(
 	if streamBudget > duplexReserve {
 		streamBudget -= duplexReserve
 	}
-	boostFramesLeft := 0
-	if MasqueBidiSendBoostEnabled() {
-		boostFramesLeft = masqueBidiSendBoostMaxFramesPerPacket()
-	}
 	for i := 0; i < streamRounds; i++ {
 		if protocol.MinStreamFrameSize > streamBudget {
 			break
@@ -143,7 +138,7 @@ func (f *framer) Append(
 		if duplexMode && maxLen <= duplexReserve {
 			break
 		}
-		sf, blocked, boosted, hasMore := f.getNextStreamFrame(streamBudget, v)
+		sf, blocked, _ := f.getNextStreamFrame(streamBudget, v)
 		if sf.Frame != nil {
 			streamFrames = append(streamFrames, sf)
 			streamBudget -= sf.Frame.Length(v)
@@ -162,10 +157,6 @@ func (f *framer) Append(
 					controlFrameLen += added
 					maxLen -= added
 				}
-			}
-			if boosted && hasMore && boostFramesLeft > 0 {
-				boostFramesLeft--
-				i--
 			}
 		}
 		// If the stream just became blocked on stream flow control, attempt to pack the
@@ -433,43 +424,12 @@ func (f *framer) WakeActiveSendStreamsWithPendingData() {
 func (f *framer) AddActiveStream(id protocol.StreamID, str streamFrameGetter) (repromoted bool) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
-	if _, ok := f.activeStreams[id]; !ok {
-		if f.isBidiSendBoostLocked(id) {
-			f.streamQueue.PushFront(id)
-		} else {
-			f.streamQueue.PushBack(id)
-		}
-		f.activeStreams[id] = str
+	if _, ok := f.activeStreams[id]; ok {
 		return false
 	}
-	if !MasqueBidiSendBoostEnabled() || !f.isBidiSendBoostLocked(id) {
-		return false
-	}
-	// Re-promote or re-enqueue download-active stream when new DATA arrives while
-	// already active (parity poke-renotify for MAX_STREAM_DATA; connect-stream-h3 KPI ~15 Mbit/s).
-	if !f.promoteActiveStreamLocked(id) {
-		f.streamQueue.PushFront(id)
-	}
-	return true
-}
-
-func (f *framer) setBidiSendBoost(id protocol.StreamID, active bool) {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-	if active {
-		if f.bidiSendBoost == nil {
-			f.bidiSendBoost = make(map[protocol.StreamID]struct{})
-		}
-		_, alreadyBoosted := f.bidiSendBoost[id]
-		f.bidiSendBoost[id] = struct{}{}
-		if !alreadyBoosted && MasqueBidiSendBoostEnabled() {
-			f.promoteActiveStreamLocked(id)
-		}
-		return
-	}
-	if f.bidiSendBoost != nil {
-		delete(f.bidiSendBoost, id)
-	}
+	f.streamQueue.PushBack(id)
+	f.activeStreams[id] = str
+	return false
 }
 
 // promoteActiveStreamLocked moves an already-queued active stream to the queue front
@@ -501,14 +461,6 @@ func (f *framer) promoteActiveStreamLocked(id protocol.StreamID) bool {
 		f.streamQueue.PushBack(sid)
 	}
 	return true
-}
-
-func (f *framer) isBidiSendBoostLocked(id protocol.StreamID) bool {
-	if !MasqueBidiSendBoostEnabled() || f.bidiSendBoost == nil {
-		return false
-	}
-	_, ok := f.bidiSendBoost[id]
-	return ok
 }
 
 func (f *framer) setMasqueDuplexFair(id protocol.StreamID, fair bool) {
@@ -653,21 +605,6 @@ func (f *framer) repromoteActiveStream(id protocol.StreamID) bool {
 	return f.promoteActiveStreamLocked(id)
 }
 
-// repromoteBidiSendBoost moves an already-boosted active stream to the queue front.
-// Returns true when the stream is boosted (schedule send even if not yet active).
-func (f *framer) repromoteBidiSendBoost(id protocol.StreamID) bool {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-	if !f.isBidiSendBoostLocked(id) {
-		return false
-	}
-	if f.promoteActiveStreamLocked(id) {
-		return true
-	}
-	_, ok := f.activeStreams[id]
-	return ok
-}
-
 // AddStreamWithControlFrames registers a stream with pending control frames.
 // Returns true when the stream was already registered (duplicate poke re-notify).
 func (f *framer) AddStreamWithControlFrames(id protocol.StreamID, str streamControlFrameGetter) bool {
@@ -680,13 +617,7 @@ func (f *framer) AddStreamWithControlFrames(id protocol.StreamID, str streamCont
 	return false
 }
 
-func (f *framer) isBidiSendBoost(id protocol.StreamID) bool {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-	return f.isBidiSendBoostLocked(id)
-}
-
-// controlFrameStreamIDs returns stream IDs with pending control frames, bidi-boost first.
+// controlFrameStreamIDs returns stream IDs with pending control frames.
 // Caller must hold controlFrameMutex; pass locked=true when f.mutex is already held.
 func (f *framer) controlFrameStreamIDs(locked bool) []protocol.StreamID {
 	if len(f.streamsWithControlFrames) == 0 {
@@ -696,19 +627,17 @@ func (f *framer) controlFrameStreamIDs(locked bool) []protocol.StreamID {
 		f.mutex.Lock()
 		defer f.mutex.Unlock()
 	}
-	var uploadCreditDue, duplexLimit, boosted, others []protocol.StreamID
+	var uploadCreditDue, duplexLimit, others []protocol.StreamID
 	for id := range f.streamsWithControlFrames {
 		if f.isMasqueDuplexUploadStarvedLocked(id) {
 			uploadCreditDue = append(uploadCreditDue, id)
 		} else if f.isMasqueDuplexLimitLocked(id) {
 			duplexLimit = append(duplexLimit, id)
-		} else if f.isBidiSendBoostLocked(id) {
-			boosted = append(boosted, id)
 		} else {
 			others = append(others, id)
 		}
 	}
-	return append(append(append(uploadCreditDue, duplexLimit...), boosted...), others...)
+	return append(append(uploadCreditDue, duplexLimit...), others...)
 }
 
 // RemoveActiveStream is called when a stream completes.
@@ -721,31 +650,26 @@ func (f *framer) RemoveActiveStream(id protocol.StreamID) {
 	f.mutex.Unlock()
 }
 
-func (f *framer) getNextStreamFrame(maxLen protocol.ByteCount, v protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, bool, bool) {
+func (f *framer) getNextStreamFrame(maxLen protocol.ByteCount, v protocol.Version) (ackhandler.StreamFrame, *wire.StreamDataBlockedFrame, bool) {
 	id := f.streamQueue.PopFront()
 	// This should never return an error. Better check it anyway.
 	// The stream will only be in the streamQueue, if it enqueued itself there.
 	str, ok := f.activeStreams[id]
 	// The stream might have been removed after being enqueued.
 	if !ok {
-		return ackhandler.StreamFrame{}, nil, false, false
+		return ackhandler.StreamFrame{}, nil, false
 	}
-	boosted := f.isBidiSendBoostLocked(id)
 	maxLen += protocol.ByteCount(quicvarint.Len(uint64(maxLen)))
 	frame, blocked, hasMoreData := str.popStreamFrame(maxLen, v)
 	if hasMoreData { // put the stream back in the queue (at the end)
-		if boosted {
-			f.streamQueue.PushFront(id)
-		} else {
-			f.streamQueue.PushBack(id)
-		}
+		f.streamQueue.PushBack(id)
 	} else { // no more data to send. Stream is not active
 		delete(f.activeStreams, id)
 	}
 	// Note that the frame.Frame can be nil:
 	// * if the stream was canceled after it said it had data
 	// * the remaining size doesn't allow us to add another STREAM frame
-	return frame, blocked, boosted, hasMoreData
+	return frame, blocked, hasMoreData
 }
 
 func (f *framer) Handle0RTTRejection() {
@@ -757,9 +681,6 @@ func (f *framer) Handle0RTTRejection() {
 	f.streamQueue.Clear()
 	for id := range f.activeStreams {
 		delete(f.activeStreams, id)
-	}
-	if f.bidiSendBoost != nil {
-		clear(f.bidiSendBoost)
 	}
 	if f.masqueDuplexFairStreams != nil {
 		clear(f.masqueDuplexFairStreams)

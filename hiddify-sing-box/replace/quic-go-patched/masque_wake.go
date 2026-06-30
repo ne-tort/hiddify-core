@@ -456,8 +456,8 @@ func MasqueWakeStreamSend(s *Stream) {
 
 // masqueWakeOnControlFrameRenotify nudges send after duplicate MAX_STREAM_DATA poke when the
 // frame is already queued (AddStreamWithControlFrames renotify). Download-active streams must
-// wake even when MASQUE_QUIC_BIDI_SEND_BOOST=0 so eager WINDOW poke is not stalled on scheduleSending alone.
-func masqueWakeOnControlFrameRenotify(st *Stream, boosted bool) {
+// wake so eager WINDOW poke is not stalled on scheduleSending alone.
+func masqueWakeOnControlFrameRenotify(st *Stream) {
 	if st == nil {
 		return
 	}
@@ -469,7 +469,7 @@ func masqueWakeOnControlFrameRenotify(st *Stream, boosted bool) {
 		// onHasStreamControlFrame already scheduleSending; duplex wake starves sibling upload C2S.
 		return
 	}
-	if MasqueIsBidiDownloadActive(st) || (MasqueBidiSendBoostEnabled() && boosted) {
+	if MasqueIsBidiDownloadActive(st) {
 		MasqueWakeStreamSend(st)
 	}
 }
