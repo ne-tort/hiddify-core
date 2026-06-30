@@ -449,15 +449,7 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 	if device == nil {
 		return net.ErrClosed
 	}
-	metrics := attachLoopInMetrics(b, device)
-	metrics.apply(&opts)
-	metricsCtx, metricsCancel := context.WithCancel(ctx)
-	metrics.startReporter(metricsCtx)
-	defer func() {
-		metricsCancel()
-		metrics.wait()
-	}()
-	conn := metrics.wrapPacketConn(b.packetConn())
+	conn := b.packetConn()
 	if hostKernel {
 		batchDev, ok := device.(cippump.BatchTunnelDevice)
 		if !ok {

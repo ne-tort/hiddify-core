@@ -16,11 +16,6 @@ const (
 
 const loopInBoundUsThreshold = 3.0
 
-// LoopInMetricsEnabled reports Docker/synth iter-budget diagnostics (disabled in prod).
-func LoopInMetricsEnabled() bool {
-	return false
-}
-
 // ClassifyLoopInBound picks dominant stage from per-pkt micro-budgets.
 func ClassifyLoopInBound(st LoopInStats) LoopInBoundClass {
 	if st.Pkts < 100 {
