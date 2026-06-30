@@ -1,9 +1,5 @@
 package pump
 
-import (
-	"fmt"
-)
-
 // LoopInBoundClass labels the dominant LoopIn stage from metrics snapshot.
 type LoopInBoundClass string
 
@@ -35,18 +31,4 @@ func ClassifyLoopInBound(st LoopInStats) LoopInBoundClass {
 	default:
 		return LoopInBoundUnknown
 	}
-}
-
-// FormatLoopInMetricsLine returns a single grep-friendly log line for Docker iter breakdown.
-func FormatLoopInMetricsLine(st LoopInStats, hostAccepted int64, hostReadUs float64) string {
-	pps := 0.0
-	if st.IterUsPerPkt > 0 && st.Pkts > 0 {
-		pps = 1e6 / st.IterUsPerPkt
-	}
-	return fmt.Sprintf(
-		"connect-ip LoopIn metrics: bound=%s pkts=%d iters=%d pps=%.0f read_us/pkt=%.1f write_us/pkt=%.1f flush_us/pkt=%.1f iter_us/pkt=%.1f pkts/iter=%.2f pkts/flush=%.2f host_accepted=%d host_read_us/pkt=%.1f",
-		ClassifyLoopInBound(st), st.Pkts, st.Iters, pps,
-		st.ReadUsPerPkt, st.WriteUsPerPkt, st.FlushUsPerPkt, st.IterUsPerPkt,
-		st.PktsPerIter, st.PktsPerFlush, hostAccepted, hostReadUs,
-	)
 }
