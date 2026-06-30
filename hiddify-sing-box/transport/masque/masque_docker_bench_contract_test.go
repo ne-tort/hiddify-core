@@ -697,8 +697,8 @@ func TestMasqueDockerBenchCISmokeContract(t *testing.T) {
 	)
 }
 
-// TestMasqueDockerBenchConnectUDPPipeUploadContract documents connect-udp-h3 TCP asymmetry:
-// same transport_mode=connect_udp as connect-stream-h3; difference is MASQUE_CONNECT_STREAM_PIPE_UPLOAD.
+// TestMasqueDockerBenchConnectUDPPipeUploadContract documents connect-udp-h3 vs connect-stream-h3
+// profile split (both pipe_upload=False; prod single-bidi HTTP/3 stream).
 func TestMasqueDockerBenchConnectUDPPipeUploadContract(t *testing.T) {
 	t.Parallel()
 	local := readDockerBenchSource(t, "local_profiles.py")

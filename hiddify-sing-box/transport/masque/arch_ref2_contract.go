@@ -23,14 +23,14 @@ var ArchH2OParityAudit = []ArchH2OParityRow{
 		KPINote: "full-duplex tunnel; ceiling is wire FC not relay shape",
 	},
 	{
-		Attr: "proxy.max-buffer-size", H2OValue: "65536", SBValue: "RelayTunnelBufLen=65536",
-		Parity: true, Anchor: "transport/masque/stream/relay.go:RelayTunnelBufLen",
-		KPINote: "H2/H3 copy buffer matches h2o",
+		Attr: "proxy.max-buffer-size", H2OValue: "65536", SBValue: "RelayTunnelBufLen=262144",
+		Parity: false, Anchor: "transport/masque/stream/relay/relay_copy.go:RelayTunnelBufLen",
+		KPINote: "sb 256 KiB bulk uplift; h2o frozen ref stays 64 KiB",
 	},
 	{
-		Attr: "H2 response flush batch", H2OValue: "implicit (tunnel)", SBValue: "RelayTunnelFlushBytes=65536",
-		Parity: true, Anchor: "transport/masque/stream/relay.go:relayTunnelFlushWriter",
-		KPINote: "was 32 KiB; aligned 2026-06-13",
+		Attr: "H2 response flush batch", H2OValue: "implicit (tunnel)", SBValue: "RelayTunnelFlushBytes=262144",
+		Parity: false, Anchor: "transport/masque/stream/relay/relay_copy.go:RelayTunnelFlushBytes",
+		KPINote: "flush batch tracks RelayTunnelBufLen",
 	},
 	{
 		Attr: "H2 download bulk copy", H2OValue: "tunnel io.Copy", SBValue: "io.CopyBuffer after prime",

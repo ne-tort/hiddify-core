@@ -2984,14 +2984,18 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 }
 
 func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			Server:      "masque.local",
-			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			Server:                   "masque.local",
+			ServerPort:               443,
+			TemplateTCP:              "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
+			TCPDial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("unexpected tcp dial")
+			},
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startH2ConnectUploadBootstrapDrain(req)
 			// dialTCPStream attaches Request.Context via connectip.NewH2ExtendedConnectRequestContext:
 			// it deliberately does not inherit dial deadline cancellation on the CONNECT stream body.
 			// Simulate relay-phase timeout with an independent timer on the response body.
@@ -3002,6 +3006,7 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 			}, nil
 		}),
 		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
@@ -3024,21 +3029,26 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 }
 
 func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	relayCtx, relayCancel := context.WithCancel(context.Background())
 	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			Server:      "masque.local",
-			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			Server:                   "masque.local",
+			ServerPort:               443,
+			TemplateTCP:              "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
+			TCPDial: func(context.Context, string, string) (net.Conn, error) {
+				return nil, errors.New("unexpected tcp dial")
+			},
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			startH2ConnectUploadBootstrapDrain(req)
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       &contextBoundReadCloser{ctx: relayCtx},
 			}, nil
 		}),
 		})
+	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH2)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	conn, err := session.dialTCPStream(ctx, M.ParseSocksaddrHostPort("example.com", 443))
@@ -3062,7 +3072,6 @@ func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 }
 
 func TestDialTCPStreamInProcessHTTP3ProxySuccess(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen tcp target: %v", err)
@@ -3456,6 +3465,17 @@ type roundTripperFunc func(req *http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// startH2ConnectUploadBootstrapDrain simulates http2.Transport consuming CONNECT upload bootstrap DATA.
+func startH2ConnectUploadBootstrapDrain(req *http.Request) {
+	if req == nil || req.Body == nil {
+		return
+	}
+	go func() {
+		buf := make([]byte, strm.H2BidiBootstrapUploadBytes())
+		_, _ = io.ReadFull(req.Body, buf)
+	}()
 }
 
 type contextBoundReadCloser struct {

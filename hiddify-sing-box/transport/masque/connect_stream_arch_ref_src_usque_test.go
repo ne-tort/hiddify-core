@@ -46,7 +46,7 @@ func TestArchREFSRCUsqueAudit(t *testing.T) {	if len(ArchREFSRCUsqueAudit) < 6 {
 	if !byID["REF-SRC-USQUE-3-buffer"].Portable {
 		t.Fatal("REF-SRC-USQUE-3: buffer pool pattern should be marked portable (already in sb)")
 	}
-	if ArchREFSRCUsqueRelayBufLen() != strm.RelayTunnelBufLen || strm.RelayTunnelBufLen != 65536 {
+	if ArchREFSRCUsqueRelayBufLen() != strm.RelayTunnelBufLen {
 		t.Fatalf("relay buffer drift: audit=%d stream=%d", ArchREFSRCUsqueRelayBufLen(), strm.RelayTunnelBufLen)
 	}
 	src := archRelayGoAuditSource()

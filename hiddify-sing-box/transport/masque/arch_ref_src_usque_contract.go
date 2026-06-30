@@ -34,7 +34,7 @@ var ArchREFSRCUsqueAudit = []ArchREFSRCUsqueRow{
 	},
 	{
 		ID: "REF-SRC-USQUE-3-relay", Usque: "TCP relay via userspace stack",
-		SB: "stream/relay.go RelayTunnelBufLen 64 KiB (hybrid leg only)", Portable: true,
+		SB: "stream/relay RelayTunnelBufLen 256 KiB (hybrid leg only)", Portable: true,
 	},
 }
 

@@ -19,8 +19,8 @@ func TestArchREF3InvisvHTTPStreamerAudit(t *testing.T) {
 	if h3.BidiDuplexCoordEnabled() {
 		t.Fatal("thin mode must disable duplex_coord")
 	}
-	if h3.TunnelWriteToBufLen() != 64*1024 {
-		t.Fatalf("thin WriteTo buf=%d want 65536", h3.TunnelWriteToBufLen())
+	if h3.TunnelWriteToBufLen() != 256*1024 {
+		t.Fatalf("thin WriteTo buf=%d want 262144", h3.TunnelWriteToBufLen())
 	}
 	t.Logf("REF3-1 audit: %d Invisv parity rows; thin env forces h3_stream + direct WriteTo", len(ArchInvisvThinAudit))
 }

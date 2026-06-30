@@ -34,5 +34,5 @@ const ArchREFSRCInvisvVerdict = "thin dial matches Invisv nil-Body + HTTPStreame
 var ArchREFSRCInvisvSourceNeedles = []string{
 	"http.NewRequestWithContext(ctx, http.MethodConnect, url, nil)",
 	"HTTPStreamer",
-	"tunnelWriteToBufLen = 64 * 1024",
+	"tunnelWriteToBufLen = 256 * 1024",
 }

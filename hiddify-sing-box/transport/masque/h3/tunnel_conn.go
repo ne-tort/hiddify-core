@@ -33,7 +33,7 @@ var tunnelWriteToBufPool = sync.Pool{
 }
 
 // TunnelConn is a full-duplex TCP shim over one HTTP/3 CONNECT stream (RFC 9114 tunneled TCP).
-// Default: Read/Write on *http3.Stream. Optional pipe upload when MASQUE_*_PIPE_UPLOAD=1.
+// Prod: Read/Write on *http3.Stream (nil Body dial).
 type TunnelConn struct {
 	h3     h3ConnectStream
 	reader io.ReadCloser

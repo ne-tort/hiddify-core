@@ -42,10 +42,10 @@ func DialH2Overlay(ctx context.Context, cfg H2OverlayDialConfig, template *urite
 	if cfg.Hook != nil {
 		return cfg.Hook(ctx, template, target)
 	}
-	return dialH2OverlayAsymmetric(ctx, cfg, template, target, 1)
+	return dialH2OverlayAsymmetric(ctx, cfg, template, target)
 }
 
-func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, uploadCount int) (net.PacketConn, error) {
+func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
 	muxKey, err := NewUDPMuxSessionKey()
 	if err != nil {
 		return nil, fmt.Errorf("masque h2: asymmetric mux key: %w", err)
@@ -85,20 +85,13 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 		remoteAddr = ra.RemoteAddr()
 	}
 
-	uploads := make([]net.PacketConn, 0, uploadCount)
-	for i := 0; i < uploadCount; i++ {
-		pc, err := dialH2OverlaySingle(ctx, flowCfg, template, target, streamRoleUpload, muxKey)
-		if err != nil {
-			_ = download.Close()
-			for _, u := range uploads {
-				_ = u.Close()
-			}
-			if sharedTr != nil {
-				CloseClientTransport(sharedTr)
-			}
-			return nil, err
+	upload, err := dialH2OverlaySingle(ctx, flowCfg, template, target, streamRoleUpload, muxKey)
+	if err != nil {
+		_ = download.Close()
+		if sharedTr != nil {
+			CloseClientTransport(sharedTr)
 		}
-		uploads = append(uploads, pc)
+		return nil, err
 	}
 	onClose := func() {
 		if sharedTr != nil {
@@ -106,7 +99,7 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 			sharedTr = nil
 		}
 	}
-	return NewAsymmetricPacketConn(download, uploads, localAddr, remoteAddr, onClose), nil
+	return NewAsymmetricPacketConn(download, []net.PacketConn{upload}, localAddr, remoteAddr, onClose), nil
 }
 
 func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {
