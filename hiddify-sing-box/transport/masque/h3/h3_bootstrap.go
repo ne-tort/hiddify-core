@@ -1,59 +1,19 @@
 package h3
 
 import (
-	"os"
-	"strconv"
-	"strings"
 	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 )
 
-const (
-	envH3BidiBootstrapUpload      = "MASQUE_H3_BIDI_BOOTSTRAP_UPLOAD_BYTES"
-	envH2BidiBootstrapUpload      = "MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES"
-	defaultH3BootstrapUploadBytes = 4 * 1024 // parity stream.H2BidiBootstrapUploadBytes / docker compose
-)
+const h3BidiBootstrapUploadBytes = 4 * 1024 // parity stream.H2BidiBootstrapUploadBytes / docker compose
 
 var h3BootstrapUploadBuf [defaultUploadChunkBytes]byte
 
 // H3BidiBootstrapUploadBytes returns one-shot upload DATA before first download read
 // during WriteTo (iperf -R / docker download-first). Parity H2 bidi bootstrap wake.
-// Reads MASQUE_H3_BIDI_BOOTSTRAP_UPLOAD_BYTES, then MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES.
 func H3BidiBootstrapUploadBytes() int {
-	for _, key := range []string{envH3BidiBootstrapUpload, envH2BidiBootstrapUpload} {
-		if n := parseBootstrapUploadBytes(os.Getenv(key)); n >= 0 {
-			return n
-		}
-	}
-	return defaultH3BootstrapUploadBytes
-}
-
-func parseBootstrapUploadBytes(raw string) int {
-	raw = strings.ToLower(strings.TrimSpace(raw))
-	if raw == "" {
-		return -1
-	}
-	if raw == "0" || raw == "false" || raw == "no" || raw == "off" {
-		return 0
-	}
-	kb, err := strconv.Atoi(raw)
-	if err != nil || kb <= 0 {
-		return defaultH3BootstrapUploadBytes
-	}
-	if kb > 1024 {
-		kb = 1024
-	}
-	return kb * 1024
-}
-
-func h3BootstrapUploadExplicitlyEnabled() bool {
-	for _, key := range []string{envH3BidiBootstrapUpload, envH2BidiBootstrapUpload} {
-		if strings.TrimSpace(os.Getenv(key)) != "" {
-			return true
-		}
-	}
-	return false
+	return h3BidiBootstrapUploadBytes
 }
 
 func (c *TunnelConn) sendH3BootstrapUploadUnlocked() error {

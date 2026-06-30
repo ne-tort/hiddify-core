@@ -230,13 +230,6 @@ type readPacketCtxAdapter struct {
 	read func(context.Context, []byte) (int, error)
 }
 
-func hasReadHostEgressBatch(tunIf tun.Tun) bool {
-	_, ok := tunIf.(interface {
-		ReadHostEgressBatch(context.Context, [][]byte, int) (int, error)
-	})
-	return ok
-}
-
 func (a readPacketCtxAdapter) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	return a.read(ctx, buf)
 }

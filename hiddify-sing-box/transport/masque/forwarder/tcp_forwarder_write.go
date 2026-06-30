@@ -106,11 +106,6 @@ func (f *packetForwarder) tryDrainWriteCh() bool {
 	}
 }
 
-// runDownloadWriteLoop is deprecated; use runEgressLoop (single writer, control-first).
-func (f *packetForwarder) runDownloadWriteLoop(ctx context.Context, done chan struct{}) {
-	f.runEgressLoop(ctx, done)
-}
-
 func (f *packetForwarder) writeLoopStopped() bool {
 	select {
 	case <-f.writeStopped:
@@ -118,11 +113,6 @@ func (f *packetForwarder) writeLoopStopped() bool {
 	default:
 		return false
 	}
-}
-
-// runWriteLoop is deprecated; use runEgressLoop (single writer, control-first).
-func (f *packetForwarder) runWriteLoop(ctx context.Context, done chan struct{}) {
-	f.runEgressLoop(ctx, done)
 }
 
 func (f *packetForwarder) enqueueWrite(pkt []byte) error {

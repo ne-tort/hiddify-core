@@ -83,7 +83,8 @@ func TestGATEConnectIPUploadDODReadAheadBatch2x(t *testing.T) {
 	w.retainNext.Store(true)
 	raCtx, raCancel := context.WithCancel(t.Context())
 	defer raCancel()
-	m := runHostKernelPumpMeter(t, WrapHostEgressReadAhead(raCtx, feed.read), w, 500*time.Millisecond, upload524PumpHarnessOpts{Prod: true, NoObserver: true})
+	readAhead, _ := WrapHostEgressReadAheadBatch(raCtx, feed.read)
+	m := runHostKernelPumpMeter(t, readAhead, w, 500*time.Millisecond, upload524PumpHarnessOpts{Prod: true, NoObserver: true})
 	if m.Writes < 4000 {
 		t.Fatalf("writes=%d want >=4000", m.Writes)
 	}

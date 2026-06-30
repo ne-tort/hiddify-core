@@ -2,17 +2,10 @@ package h3
 
 import "testing"
 
-func TestH3BidiBootstrapUploadBytes(t *testing.T) {
-	t.Setenv(envH2BidiBootstrapUpload, "4")
+func TestH3BidiBootstrapUploadBytesProdConstant(t *testing.T) {
+	t.Setenv("MASQUE_H3_BIDI_BOOTSTRAP_UPLOAD_BYTES", "8")
+	t.Setenv("MASQUE_H2_BIDI_BOOTSTRAP_UPLOAD_BYTES", "4")
 	if got := H3BidiBootstrapUploadBytes(); got != 4*1024 {
-		t.Fatalf("got %d want %d", got, 4*1024)
-	}
-	t.Setenv(envH3BidiBootstrapUpload, "8")
-	if got := H3BidiBootstrapUploadBytes(); got != 8*1024 {
-		t.Fatalf("H3 override: got %d want %d", got, 8*1024)
-	}
-	t.Setenv(envH3BidiBootstrapUpload, "0")
-	if got := H3BidiBootstrapUploadBytes(); got != 0 {
-		t.Fatalf("disabled: got %d want 0", got)
+		t.Fatalf("prod constant ignores env: got %d want %d", got, 4*1024)
 	}
 }

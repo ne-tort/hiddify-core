@@ -330,24 +330,3 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 		flushWake()
 	}
 }
-
-// RunIngressPump runs LoopOut-only (deprecated); prefer RunTunnel. Kept for narrow tests.
-func RunIngressPump(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions) error {
-	if device == nil || conn == nil {
-		return nil
-	}
-	opts = NormalizeTunnelOptions(opts)
-	mtu := opts.MTU
-	if mtu <= 0 {
-		mtu = DefaultTunnelMTU
-	}
-	pool := opts.NetBuffer
-	if pool == nil {
-		pool = NewNetBuffer(mtu)
-	}
-	err := runLoopOut(ctx, device, conn, opts, pool)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	return context.Cause(ctx)
-}

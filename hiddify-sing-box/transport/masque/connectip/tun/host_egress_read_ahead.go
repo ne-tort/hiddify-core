@@ -61,23 +61,6 @@ func cloneHostEgressPkt(src []byte) []byte {
 	return dst
 }
 
-// hostEgressBatchReadAhead overlaps blocking host reads with LoopIn write+flush (upload DoD path).
-type hostEgressBatchReadAhead struct {
-	read  HostEgressBatchReader
-	mu    sync.Mutex
-	cond  *sync.Cond
-	q     [][]byte
-	ready chan struct{}
-	bufs  [][]byte
-}
-
-// WrapHostEgressReadAhead starts a background reader decoupling blocking tun reads from LoopIn.
-// When batch is non-nil, prefer it for RunTunnelBatch (direct multi-pkt dequeue, no per-pkt adapter).
-func WrapHostEgressReadAhead(parent context.Context, inner HostEgressReader) HostEgressReader {
-	read, _ := wrapHostEgressReadAhead(parent, inner)
-	return read
-}
-
 // WrapHostEgressReadAheadBatch returns single-pkt and batch readers sharing one background pump.
 func WrapHostEgressReadAheadBatch(parent context.Context, inner HostEgressReader) (HostEgressReader, HostEgressBatchReader) {
 	return wrapHostEgressReadAhead(parent, inner)
@@ -91,112 +74,6 @@ func wrapHostEgressReadAhead(parent context.Context, inner HostEgressReader) (Ho
 	r.cond = sync.NewCond(&r.mu)
 	go r.pump(parent)
 	return r.read, r
-}
-
-// WrapHostEgressBatchReadAhead overlaps tun batch reads with LoopIn write+flush; LoopIn dequeues up to maxN pkts/iter.
-func WrapHostEgressBatchReadAhead(parent context.Context, read HostEgressBatchReader) HostEgressBatchReader {
-	if read == nil || parent == nil {
-		return nil
-	}
-	maxN := cippump.DefaultLoopInMaxBatch
-	bufs := make([][]byte, maxN)
-	for i := range bufs {
-		bufs[i] = make([]byte, 2048)
-	}
-	r := &hostEgressBatchReadAhead{read: read, ready: make(chan struct{}, 1), bufs: bufs}
-	r.cond = sync.NewCond(&r.mu)
-	go r.pump(parent)
-	return r
-}
-
-func (r *hostEgressBatchReadAhead) pump(ctx context.Context) {
-	nbDrain := cippump.LoopInNonblockingDrainCtx()
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if !r.pumpRead(ctx) {
-			if ctx.Err() != nil {
-				return
-			}
-			runtime.Gosched()
-		}
-		for r.pumpRead(nbDrain) {
-		}
-	}
-}
-
-func (r *hostEgressBatchReadAhead) pumpRead(ctx context.Context) bool {
-	got, err := r.read.ReadBatch(ctx, r.bufs, len(r.bufs))
-	if err != nil || got <= 0 {
-		return false
-	}
-	for i := 0; i < got; i++ {
-		n := ipv4WireLen(r.bufs[i])
-		if n <= 0 {
-			continue
-		}
-		r.enqueueOwned(cloneHostEgressPkt(r.bufs[i][:n]))
-	}
-	return true
-}
-
-func (r *hostEgressBatchReadAhead) enqueue(pkt []byte) {
-	r.enqueueOwned(pkt)
-}
-
-func (r *hostEgressBatchReadAhead) enqueueOwned(pkt []byte) {
-	r.mu.Lock()
-	for len(r.q) >= hostEgressReadAheadMax {
-		r.cond.Wait()
-	}
-	r.q = append(r.q, pkt)
-	r.mu.Unlock()
-	select {
-	case r.ready <- struct{}{}:
-	default:
-	}
-}
-
-func (r *hostEgressBatchReadAhead) tryDequeue(bufs [][]byte, maxN int) int {
-	if maxN > len(bufs) {
-		maxN = len(bufs)
-	}
-	got := 0
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for got < maxN && len(r.q) > 0 {
-		pkt := r.q[0]
-		r.q = r.q[1:]
-		if len(pkt) > len(bufs[got]) {
-			r.q = append([][]byte{pkt}, r.q...)
-			break
-		}
-		copy(bufs[got], pkt)
-		releaseHostEgressPkt(pkt)
-		got++
-	}
-	if got > 0 {
-		r.cond.Signal()
-	}
-	return got
-}
-
-func (r *hostEgressBatchReadAhead) ReadBatch(ctx context.Context, bufs [][]byte, maxN int) (int, error) {
-	if maxN < 1 || len(bufs) == 0 {
-		return 0, nil
-	}
-	for {
-		got := r.tryDequeue(bufs, maxN)
-		if got > 0 {
-			return got, nil
-		}
-		select {
-		case <-ctx.Done():
-			return 0, context.Cause(ctx)
-		case <-r.ready:
-		}
-	}
 }
 
 func (r *hostEgressReadAhead) pump(ctx context.Context) {

@@ -15,7 +15,6 @@ const (
 	// Field/VPS bench parity (REF1-2): 5×200ms tolerates flaky remote QUIC without env.
 	defaultConnectStreamDialMaxAttempts = 5
 	defaultConnectStreamDialBackoffMs   = 200
-	maxConnectStreamDialMaxAttempts     = 8
 )
 
 // ConnectStreamDialMaxAttempts returns H3/H2 CONNECT-stream round-trip retry budget.

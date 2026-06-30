@@ -45,7 +45,7 @@ func TestConnectIPForwarderSRPContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sym := range []string{"runEgressLoop", "runWriteLoop", "runDownloadWriteLoop", "sendPacketNow"} {
+	for _, sym := range []string{"runEgressLoop", "sendPacketNow"} {
 		if !strings.Contains(string(writeSrc), sym) {
 			t.Fatalf("tcp_forwarder_write.go must own %q", sym)
 		}

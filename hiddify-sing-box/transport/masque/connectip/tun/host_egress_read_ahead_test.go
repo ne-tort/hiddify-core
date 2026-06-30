@@ -20,7 +20,10 @@ func TestGATEConnectIPUploadReadAheadBurstOverlap(t *testing.T) {
 	feed2 := newHostSyscallBatchFeed(seg, 2, 15*time.Microsecond)
 	w2 := &mockL3Writer{}
 	w2.retainNext.Store(true)
-	ahead := runHostKernelPumpMeter(t, WrapHostEgressReadAhead(t.Context(), feed2.read), w2, 400*time.Millisecond, upload524PumpHarnessOpts{Prod: true, NoObserver: true})
+	raCtx, raCancel := context.WithCancel(t.Context())
+	defer raCancel()
+	readAhead, _ := WrapHostEgressReadAheadBatch(raCtx, feed2.read)
+	ahead := runHostKernelPumpMeter(t, readAhead, w2, 400*time.Millisecond, upload524PumpHarnessOpts{Prod: true, NoObserver: true})
 
 	if sync.Mbps < 700 {
 		t.Fatalf("sync batch-2x mbps=%.1f want >=700", sync.Mbps)
@@ -53,7 +56,8 @@ func TestGATEConnectIPUploadReadAheadSyscallOverlap(t *testing.T) {
 	defer cancelAhead()
 	raCtx, raCancel := context.WithCancel(t.Context())
 	defer raCancel()
-	aheadM := runHostKernelPumpMeter(t, WrapHostEgressReadAhead(raCtx, hostAhead), wAhead, 500*time.Millisecond, harness)
+	readAhead, _ := WrapHostEgressReadAheadBatch(raCtx, hostAhead)
+	aheadM := runHostKernelPumpMeter(t, readAhead, wAhead, 500*time.Millisecond, harness)
 
 	if syncM.Mbps > Upload524MbpsBandHi {
 		t.Logf("sync already above 524 band: %.1f Mbps", syncM.Mbps)
