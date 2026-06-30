@@ -271,6 +271,23 @@ func TestGATEConnectUDPH3SynthProdUpload(t *testing.T) {
 		"sequenced burst zero-loss upload")
 }
 
+// TestGATEConnectUDPH3SynthStretchUploadSteady enforces upload stretch at steady MTU payload (UDP-5p1).
+// Docker burst parity stays @512B; this gate tracks PPS-tax ceiling toward DoD 1000.
+func TestGATEConnectUDPH3SynthStretchUploadSteady(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	steady := connectudp.SteadyUploadPayloadLenH3()
+	bytes, mbps, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, steady)
+	if err != nil {
+		t.Fatalf("h3 stretch upload steady(%dB): %v", steady, err)
+	}
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload steady(%dB): %.1f Mbit/s (%d bytes)", steady, mbps, bytes)
+	const stretchMinMbps = 500.0
+	if mbps < stretchMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
+		t.Fatalf("%s", synthKPIDiagnostic("L4 connect-udp-h3 prod", "udp_up_steady", mbps, stretchMinMbps,
+			"steady MTU upload stretch; DoD 1000 on instant link"))
+	}
+}
+
 // TestLocalizeConnectUDPH3UploadFloodRx measures unlimited flood rx goodput (loss expected; not a GATE metric).
 func TestLocalizeConnectUDPH3UploadFloodRx(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
