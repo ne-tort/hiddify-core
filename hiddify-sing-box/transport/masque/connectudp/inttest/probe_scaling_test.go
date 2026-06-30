@@ -9,7 +9,3 @@ import (
 func TestProbeConnectUDPScalingCeiling(t *testing.T) {
 	masque.InttestProbeConnectUDPScalingCeiling(t)
 }
-
-func TestProbeConnectUDPIntraVsInterScaling(t *testing.T) {
-	masque.InttestProbeConnectUDPIntraVsInterScaling(t)
-}

@@ -103,20 +103,24 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 }
 
 // TestArchA0ContentionPointsContract (A0-2a): documents known contention anchors —
-// H3UploadFlushPolicy 4 KiB upload chunk, 64 KiB WriteTo drain, 64 KiB bidi window model.
+// H3BidiBootstrapUploadBytes, H3UploadFlushChunkBytes, TunnelWriteToBufLen, 64 KiB bidi window model.
 func TestArchA0ContentionPointsContract(t *testing.T) {
-	const wantUploadChunk = 4 * 1024
-	const wantWriteToBuf = 64 * 1024
+	const wantBootstrapUpload = 4 * 1024
+	const wantUploadFlushChunk = 64 * 1024
+	const wantWriteToBuf = 256 * 1024
 	const wantBidiWindow = 64 * 1024
 
-	if got := h3.H3UploadFlushPolicy().ChunkBytes; got != wantUploadChunk {
-		t.Fatalf("A0-2a upload flush chunk: %d want %d", got, wantUploadChunk)
+	if got := h3.H3BidiBootstrapUploadBytes; got != wantBootstrapUpload {
+		t.Fatalf("A0-2a bidi bootstrap upload: %d want %d", got, wantBootstrapUpload)
+	}
+	if got := h3.H3UploadFlushChunkBytes; got != wantUploadFlushChunk {
+		t.Fatalf("A0-2a upload flush chunk: %d want %d", got, wantUploadFlushChunk)
 	}
 	if h3.DefaultBidiWindowSizeBytes != wantBidiWindow {
 		t.Fatalf("A0-2a bidi window model: %d want %d", h3.DefaultBidiWindowSizeBytes, wantBidiWindow)
 	}
-	if h3.TunnelWriteToBufLen() != wantWriteToBuf {
-		t.Fatalf("A0-2a WriteTo drain buf: %d want %d", h3.TunnelWriteToBufLen(), wantWriteToBuf)
+	if h3.TunnelWriteToBufLen != wantWriteToBuf {
+		t.Fatalf("A0-2a WriteTo drain buf: %d want %d", h3.TunnelWriteToBufLen, wantWriteToBuf)
 	}
 
 	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
@@ -127,8 +131,8 @@ func TestArchA0ContentionPointsContract(t *testing.T) {
 	if !ok || !tc.UsesH3Stream() {
 		t.Fatal("A0-2a prod h3_stream path must use *http3.Stream (UsesH3Stream=true)")
 	}
-	t.Logf("A0-2a contention anchors: uploadChunk=%d writeToBuf=%d bidiWindow=%d prod_h3_stream=on",
-		wantUploadChunk, wantWriteToBuf, wantBidiWindow)
+	t.Logf("A0-2a contention anchors: bootstrapUpload=%d flushChunk=%d writeToBuf=%d bidiWindow=%d prod_h3_stream=on",
+		wantBootstrapUpload, wantUploadFlushChunk, wantWriteToBuf, wantBidiWindow)
 }
 
 // TestArchA0ContentionMatrixC2SDuringS2C (A0-3): who writes C2S while S2C WriteTo drains.
@@ -298,10 +302,10 @@ func TestArchA0OrchestrationBoundary(t *testing.T) {
 		t.Fatal("A0-2b P1 prod path: h3_stream bidi default (UsesH3Stream=true)")
 	}
 
-	// server relay buffer is separate from client WriteTo drain (64 KiB relay vs 64 KiB tunnel WriteTo).
-	if strm.RelayTunnelBufLen != h3.TunnelWriteToBufLen() {
+	// server relay buffer is separate from client WriteTo drain (relay vs tunnel WriteTo sizes).
+	if strm.RelayTunnelBufLen != h3.TunnelWriteToBufLen {
 		t.Logf("A0-2b note: relay buf=%d tunnel WriteTo buf=%d (same size, different layers)",
-			strm.RelayTunnelBufLen, h3.TunnelWriteToBufLen())
+			strm.RelayTunnelBufLen, h3.TunnelWriteToBufLen)
 	}
 	t.Logf("A0-2b orchestration: route→WriteTo markers; session→dial policy; stream→CONNECT; h3→byte path; server relay out-of-scope K-S")
 }

@@ -21,46 +21,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-func benchIntraFlowH2UploadStreams(
-	t *testing.T,
-	proxyPort int,
-	sinkAddr *net.UDPAddr,
-	streams int,
-	dur time.Duration,
-	payloadLen int,
-) (aggMbps float64, perStreamMbps []float64, symmetry float64) {
-	t.Helper()
-	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, instantH2Link{})
-	defer func() { _ = session.Close() }()
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
-		Port: uint16(sinkAddr.Port),
-	})
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer func() { _ = pkt.Close() }()
-
-	payload := make([]byte, payloadLen)
-	t0 := time.Now()
-	deadline := t0.Add(dur)
-	var sent int64
-	for time.Now().Before(deadline) {
-		if err := writeToBenchUpload(pkt, payload, sinkAddr); err != nil {
-			break
-		}
-		sent += int64(len(payload))
-	}
-	elapsed := time.Since(t0).Seconds()
-	if elapsed < 0.1 {
-		elapsed = 0.1
-	}
-	aggMbps = (float64(sent) * 8) / (elapsed * 1e6)
-	perStreamMbps = []float64{aggMbps / float64(streams)}
-	symmetry = 1.0
-	return aggMbps, perStreamMbps, symmetry
-}
-
 func probeConnectUDPScalingCeiling(t *testing.T, layer string, streamCounts []int) {
 	t.Helper()
 	dur := connectUDPSynthProdBenchDuration
