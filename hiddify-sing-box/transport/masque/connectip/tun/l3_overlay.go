@@ -317,7 +317,7 @@ func (b *L3OverlayBridge) rebuildKernelDeviceLocked() {
 			b.noteShortFlow(pkt)
 		},
 	)
-	if b.hostEgressBatch != nil {
+	if b.hostEgressBatch != nil && b.kernel != nil {
 		b.kernel.SetHostEgressBatch(b.hostEgressBatch)
 	}
 }

@@ -37,13 +37,15 @@ func NewKernelTunDevice(
 	if read == nil || write == nil {
 		return nil
 	}
-	return &KernelTunDevice{
+	d := &KernelTunDevice{
 		read:            read,
 		write:           write,
 		nat:             nat,
 		overlayPrefixes: append([]netip.Prefix(nil), overlayPrefixes...),
 		onEgress:        onEgress,
 	}
+	d.readBatch = hostEgressSingleBatch{d: d}
+	return d
 }
 
 // AttachReadObserver wires optional read metrics (tests only; nil in prod).
@@ -84,72 +86,44 @@ func (d *KernelTunDevice) readBatchLocked(ctx context.Context, bufs [][]byte, ma
 	return got, err
 }
 
-// ReadPacket implements pump.TunnelDevice (usque Device.ReadPacket).
+// ReadPacket implements pump.TunnelDevice — delegates to ReadEgressBatch (batch-only prod path).
 func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, error) {
 	if d == nil || d.read == nil {
 		return 0, io.EOF
 	}
-	tunHost := d.nat.TunHost
-	for {
-		d.readMu.Lock()
-		n, err := d.readLocked(ctx, buf)
-		d.readMu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		if n <= 0 {
-			if ctx.Err() != nil {
-				return 0, context.Cause(ctx)
-			}
-			return 0, nil
-		}
-		if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
-			d.readObs.recordSkipped()
-			continue
-		}
-		n = normalizeIPv4EgressLen(buf, n)
-		d.readObs.recordAccepted(n)
-		d.nat.SNATEgressInPlace(buf[:n])
-		fixIPv4TransportChecksum(buf[:n])
-		if d.onEgress != nil {
-			d.onEgress(buf[:n])
-		}
-		return n, nil
+	slot := []cippump.EgressSlot{{Buf: buf}}
+	got, err := d.ReadEgressBatch(ctx, slot, 1)
+	if err != nil {
+		return 0, err
 	}
+	if got <= 0 {
+		if ctx.Err() != nil {
+			return 0, context.Cause(ctx)
+		}
+		return 0, nil
+	}
+	return slot[0].Len, nil
 }
 
-func (d *KernelTunDevice) readOneAccepted(ctx context.Context, buf []byte) (int, error) {
-	tunHost := d.nat.TunHost
-	for {
-		d.readMu.Lock()
-		n, err := d.readLocked(ctx, buf)
-		d.readMu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		if n <= 0 {
-			if ctx.Err() != nil {
-				return 0, context.Cause(ctx)
-			}
-			return 0, nil
-		}
-		if len(buf) >= 1 && buf[0]>>4 != 4 {
-			d.readObs.recordSkipped()
-			continue
-		}
-		if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
-			d.readObs.recordSkipped()
-			continue
-		}
-		n = normalizeIPv4EgressLen(buf, n)
-		d.readObs.recordAccepted(n)
-		d.nat.SNATEgressInPlace(buf[:n])
-		fixIPv4TransportChecksum(buf[:n])
-		if d.onEgress != nil {
-			d.onEgress(buf[:n])
-		}
-		return n, nil
+func (d *KernelTunDevice) acceptEgressBuf(buf []byte) (int, bool) {
+	n := ipv4WireLen(buf)
+	if n <= 0 {
+		d.readObs.recordSkipped()
+		return 0, false
 	}
+	tunHost := d.nat.TunHost
+	if !shouldRelayHostEgress(buf[:n], d.overlayPrefixes, tunHost) {
+		d.readObs.recordSkipped()
+		return 0, false
+	}
+	n = normalizeIPv4EgressLen(buf, n)
+	d.readObs.recordAccepted(n)
+	d.nat.SNATEgressInPlace(buf[:n])
+	fixIPv4TransportChecksum(buf[:n])
+	if d.onEgress != nil {
+		d.onEgress(buf[:n])
+	}
+	return n, true
 }
 
 // normalizeIPv4EgressLen trims trailing buffer slack so TCP checksum matches forwarder trim (IP total length).
@@ -172,7 +146,7 @@ func (d *KernelTunDevice) SetHostEgressBatch(batch HostEgressBatchReader) {
 	d.readBatch = batch
 }
 
-// ReadEgressBatch implements pump.BatchTunnelDevice — batch tun read when wired, else N× single read.
+// ReadEgressBatch implements pump.BatchTunnelDevice (batch-only; default single-read adapter until SetHostEgressBatch).
 func (d *KernelTunDevice) ReadEgressBatch(ctx context.Context, slots []cippump.EgressSlot, maxN int) (int, error) {
 	if d == nil || d.read == nil || maxN <= 0 {
 		return 0, io.EOF
@@ -180,37 +154,10 @@ func (d *KernelTunDevice) ReadEgressBatch(ctx context.Context, slots []cippump.E
 	if maxN > len(slots) {
 		maxN = len(slots)
 	}
-	if d.readBatch != nil {
-		return d.readEgressBatchHost(ctx, slots, maxN)
-	}
-
-	accepted := 0
-	for accepted < maxN {
-		if len(slots[accepted].Buf) == 0 {
-			break
-		}
-		readCtx := ctx
-		if accepted > 0 {
-			readCtx = cippump.LoopInExpiredDrainCtx()
-		}
-		n, err := d.readOneAccepted(readCtx, slots[accepted].Buf)
-		if err != nil {
-			if accepted > 0 {
-				return accepted, nil
-			}
-			return 0, err
-		}
-		if n <= 0 {
-			break
-		}
-		slots[accepted].Len = n
-		accepted++
-	}
-	return accepted, nil
+	return d.readEgressBatchHost(ctx, slots, maxN)
 }
 
 func (d *KernelTunDevice) readEgressBatchHost(ctx context.Context, slots []cippump.EgressSlot, maxN int) (int, error) {
-	tunHost := d.nat.TunHost
 	accepted := 0
 	for accepted < maxN {
 		if len(slots[accepted].Buf) == 0 {
@@ -239,23 +186,11 @@ func (d *KernelTunDevice) readEgressBatchHost(ctx context.Context, slots []cippu
 			break
 		}
 		for i := 0; i < got && accepted < maxN; i++ {
-			n := ipv4WireLen(bufs[i])
-			if n <= 0 {
-				d.readObs.recordSkipped()
+			n, ok := d.acceptEgressBuf(bufs[i])
+			if !ok {
 				continue
 			}
-			if !shouldRelayHostEgress(bufs[i][:n], d.overlayPrefixes, tunHost) {
-				d.readObs.recordSkipped()
-				continue
-			}
-			n = normalizeIPv4EgressLen(bufs[i], n)
 			slots[accepted].Len = n
-			d.readObs.recordAccepted(n)
-			d.nat.SNATEgressInPlace(bufs[i][:n])
-			fixIPv4TransportChecksum(bufs[i][:n])
-			if d.onEgress != nil {
-				d.onEgress(bufs[i][:n])
-			}
 			accepted++
 		}
 	}
