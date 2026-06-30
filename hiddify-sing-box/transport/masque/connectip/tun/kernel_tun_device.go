@@ -217,7 +217,8 @@ func (d *KernelTunDevice) readEgressBatchHost(ctx context.Context, slots []cippu
 			break
 		}
 		remain := maxN - accepted
-		bufs := make([][]byte, remain)
+		var bufsScratch [cippump.DefaultLoopInMaxBatch][]byte
+		bufs := bufsScratch[:remain]
 		for i := range bufs {
 			bufs[i] = slots[accepted+i].Buf
 		}
