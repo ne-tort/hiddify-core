@@ -79,11 +79,6 @@ func (c *TunnelConn) preemptiveArmDuplexQUIC() {
 	c.syncArmRouteBidiDuplex()
 }
 
-func (c *TunnelConn) maybeEnableDuplexFairDefer() {
-	// Client inline fair defer disabled — packs S2C credit after C2S without raising upload
-	// throughput; server relay fair-defer + getControlFrame receive-first handles C2S grant.
-}
-
 func (c *TunnelConn) waitConcurrentUploadAnnounce() {
 	deadline := time.Now().Add(5 * time.Millisecond)
 	if TestDuplexDownloadArmedHook != nil {
@@ -113,9 +108,6 @@ func (c *TunnelConn) beginDuplexDownload() {
 	}
 	c.setBidiDownloadActive(true)
 	if c.h3 != nil {
-		if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
-			c.maybeEnableDuplexFairDefer()
-		}
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSyncDuplexUploadStarved(qs)
 		}
@@ -153,7 +145,6 @@ func (c *TunnelConn) beginDuplexDownload() {
 		}
 		if atomic.LoadInt32(&c.duplexUploadStarted) != 0 {
 			c.upgradeDuplexDownloadActiveQUIC()
-			c.maybeEnableDuplexFairDefer()
 			if qs := c.h3.QUICStream(); qs != nil {
 				quic.MasqueSyncDuplexUploadStarved(qs)
 				quic.MasqueRepromoteDuplexUploadSend(qs)
@@ -198,7 +189,6 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 	}
 	atomic.StoreInt32(&c.duplexUploadStarted, 1)
 	c.upgradeDuplexDownloadActiveQUIC()
-	c.maybeEnableDuplexFairDefer()
 	if c.h3 != nil {
 		if qs := c.h3.QUICStream(); qs != nil {
 			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
@@ -236,7 +226,5 @@ func (c *TunnelConn) noteDownloadDelivered() {
 	if c == nil || !c.DownloadActive() {
 		return
 	}
-	if atomic.CompareAndSwapInt32(&c.downloadDelivered, 0, 1) {
-		c.maybeEnableDuplexFairDefer()
-	}
+	atomic.CompareAndSwapInt32(&c.downloadDelivered, 0, 1)
 }
