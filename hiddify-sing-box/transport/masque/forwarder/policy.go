@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync"
 )
 
 func allowDestIP(addr netip.Addr, allowPrivate bool) error {
@@ -21,36 +22,64 @@ func allowDestIP(addr netip.Addr, allowPrivate bool) error {
 	return nil
 }
 
+var (
+	dialAddrLocalIPsMu sync.RWMutex
+	dialAddrLocalIPs   map[netip.Addr]struct{}
+)
+
+func collectLocalInterfaceAddrs() map[netip.Addr]struct{} {
+	ips := make(map[netip.Addr]struct{})
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ips
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip netip.Addr
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip, _ = netip.AddrFromSlice(v.IP)
+			case *net.IPAddr:
+				ip, _ = netip.AddrFromSlice(v.IP)
+			}
+			ip = ip.Unmap()
+			if ip.IsValid() {
+				ips[ip] = struct{}{}
+			}
+		}
+	}
+	return ips
+}
+
+func localInterfaceAddrs() map[netip.Addr]struct{} {
+	dialAddrLocalIPsMu.RLock()
+	cached := dialAddrLocalIPs
+	dialAddrLocalIPsMu.RUnlock()
+	if cached != nil {
+		return cached
+	}
+	dialAddrLocalIPsMu.Lock()
+	defer dialAddrLocalIPsMu.Unlock()
+	if dialAddrLocalIPs == nil {
+		dialAddrLocalIPs = collectLocalInterfaceAddrs()
+	}
+	return dialAddrLocalIPs
+}
+
 // DialAddr maps the proxied destination to a host TCP/UDP dial target.
 // When the client targets this host's own public/local address (bench iperf on the MASQUE VPS),
 // hairpin via loopback avoids broken same-IP egress that often RSTs CONNECT-IP TCP.
 func DialAddr(dstIP netip.Addr, port uint16) string {
 	if dstIP.IsValid() {
-		ifaces, err := net.Interfaces()
-		if err == nil {
-			for _, iface := range ifaces {
-				addrs, err := iface.Addrs()
-				if err != nil {
-					continue
-				}
-				for _, a := range addrs {
-					var ip netip.Addr
-					switch v := a.(type) {
-					case *net.IPNet:
-						ip, _ = netip.AddrFromSlice(v.IP)
-					case *net.IPAddr:
-						ip, _ = netip.AddrFromSlice(v.IP)
-					}
-					ip = ip.Unmap()
-					if !ip.IsValid() || ip != dstIP {
-						continue
-					}
-					if dstIP.Is6() && !dstIP.Is4In6() {
-						return net.JoinHostPort("::1", strconv.Itoa(int(port)))
-					}
-					return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
-				}
+		if _, local := localInterfaceAddrs()[dstIP]; local {
+			if dstIP.Is6() && !dstIP.Is4In6() {
+				return net.JoinHostPort("::1", strconv.Itoa(int(port)))
 			}
+			return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
 		}
 	}
 	return net.JoinHostPort(dstIP.String(), strconv.Itoa(int(port)))
