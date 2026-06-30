@@ -145,7 +145,7 @@ func InttestGATEConnectUDPH3SynthStabilityUploadSustained(t *testing.T) {
 
 	wallStart := time.Now()
 	benchDur := connectUDPSynthProdBenchDuration
-	bytes, mbps, err := benchConnectUDPPacketUpload(t, pkt, sinkAddr, benchDur, 0, payloadLen)
+	bytes, mbps, err := benchConnectUDPPacketUpload(t, pkt, sinkAddr, benchDur, 0, payloadLen, rxBytes)
 	if err != nil {
 		t.Fatalf("sustained upload failed after %v: %v", time.Since(wallStart), err)
 	}
@@ -154,10 +154,10 @@ func InttestGATEConnectUDPH3SynthStabilityUploadSustained(t *testing.T) {
 		t.Fatalf("sustained upload wall %v > bench %v + slack %v", wall, benchDur, connectUDPSynthStabilityWallSlack)
 	}
 	if bytes == 0 {
-		t.Fatal("sustained upload sent 0 bytes")
+		t.Fatal("sustained upload delivered 0 bytes at sink")
 	}
 	time.Sleep(50 * time.Millisecond)
-	t.Logf("sustained upload: bytes=%d mbps=%.1f rx_bytes=%d (discard sink, hang check only)", bytes, mbps, rxBytes.Load())
+	t.Logf("sustained upload: rx_bytes=%d mbps=%.1f (rx-based goodput)", bytes, mbps)
 }
 
 func InttestGATEConnectUDPH3SynthIntegrityEcho(t *testing.T) {

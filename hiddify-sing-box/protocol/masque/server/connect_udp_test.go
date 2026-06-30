@@ -194,7 +194,6 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 }
 
 func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
-	t.Setenv("MASQUE_SERVER_CONNECT_STREAM_ONLY", "0")
 	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
 	handler, err := BuildMuxHandler(MuxHost{
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},

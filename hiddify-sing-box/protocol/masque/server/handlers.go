@@ -61,19 +61,6 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 	udpPath := SanitizeTemplatePathForHTTPMux(PathFromTemplate(udpTemplateRaw))
 	ipPath := SanitizeTemplatePathForHTTPMux(PathFromTemplate(ipTemplateRaw))
 	mux := http.NewServeMux()
-	if ConnectStreamOnlyServer() {
-		mux.HandleFunc(udpPath, func(w http.ResponseWriter, r *http.Request) {
-			http.NotFound(w, r)
-		})
-		mux.HandleFunc(ipPath, func(w http.ResponseWriter, r *http.Request) {
-			http.NotFound(w, r)
-		})
-		tcpRelaxedAuthority := host.RelaxAuthority(host.Options, TemplateFieldTCP)
-		mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
-			HandleTCPConnectRequest(tcpConnectHost(host), w, r, tcpTemplate, tcpRelaxedAuthority)
-		})
-		return mux, nil
-	}
 	udpProxy := &cudprelay.Proxy{}
 	if host.OnUDPProxyCreated != nil {
 		host.OnUDPProxyCreated(udpProxy)

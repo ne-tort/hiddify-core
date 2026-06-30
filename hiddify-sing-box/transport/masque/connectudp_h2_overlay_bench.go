@@ -40,13 +40,13 @@ func benchConnectUDPH2SessionDirectUpload(
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
-	sink, _ := runUDPSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sink, sinkRx := runUDPSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
 	proxyPort := startInProcessH2UDPConnectProxy(tb)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLinkTB(tb, proxyPort, link)
 	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
 	pkt := dialConnectUDPH2ViaSession(tb, session, waitCtx, target)
-	return benchConnectUDPPacketUpload(tb, pkt, sinkAddr, duration, 0, payloadLen)
+	return benchConnectUDPPacketUpload(tb, pkt, sinkAddr, duration, 0, payloadLen, sinkRx)
 }
 
 func benchConnectUDPH2SessionDirectDownloadFountain(

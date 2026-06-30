@@ -30,7 +30,7 @@ func benchConnectUDPProdProfileH3Upload(
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
-	sink, _ := runUDPSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sink, sinkRx := runUDPSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
 
 	proxyPort := startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
@@ -68,7 +68,7 @@ func benchConnectUDPProdProfileH3Upload(
 	}
 	defer func() { _ = pkt.Close() }()
 
-	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen)
+	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx)
 }
 
 func benchConnectUDPProdProfileH3Download(
@@ -151,7 +151,7 @@ func benchConnectUDPProdProfileH2Upload(
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
-	sink, _ := runUDPSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sink, sinkRx := runUDPSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
@@ -166,7 +166,7 @@ func benchConnectUDPProdProfileH2Upload(
 	}
 	defer func() { _ = pkt.Close() }()
 
-	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen)
+	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx)
 }
 
 func benchConnectUDPProdProfileH2Download(
@@ -353,14 +353,19 @@ func benchConnectUDPPacketUpload(
 	duration time.Duration,
 	targetMbit float64,
 	payloadLen int,
+	sinkRx *atomic.Int64,
 ) (int64, float64, error) {
 	tb.Helper()
+	if sinkRx == nil {
+		return 0, 0, errors.New("benchConnectUDPPacketUpload: sinkRx required for rx-based goodput")
+	}
 	payload := make([]byte, payloadLen)
 	for i := range payload {
 		payload[i] = byte(i % 251)
 	}
 	deadline := time.Now().Add(duration)
 	wall := connectUDPSynthBenchWallDeadline(duration)
+	rxBaseline := sinkRx.Load()
 	var paceSlot time.Time
 	var sent int64
 	for time.Now().Before(deadline) {
@@ -382,11 +387,42 @@ func benchConnectUDPPacketUpload(
 		sent += int64(len(payload))
 		connectudp.PaceSleepUntil(&paceSlot, payloadLen, targetMbit)
 	}
+	delivered := waitUDPSinkDelivered(sinkRx, rxBaseline, sent)
+	if sent > 0 && delivered < sent {
+		tb.Logf("connect-udp upload bench: sent=%d rx=%d loss=%.2f%%", sent, delivered, 100*(1-float64(delivered)/float64(sent)))
+	}
 	secs := duration.Seconds()
 	if secs <= 0 {
 		secs = 1
 	}
-	return sent, float64(sent*8) / secs / 1e6, nil
+	return delivered, float64(delivered*8) / secs / 1e6, nil
+}
+
+func waitUDPSinkDelivered(sinkRx *atomic.Int64, baseline, sent int64) int64 {
+	if sent == 0 {
+		return 0
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var last int64
+	stableAt := time.Time{}
+	for time.Now().Before(deadline) {
+		rx := sinkRx.Load() - baseline
+		if rx >= sent {
+			return rx
+		}
+		if rx == last && rx > 0 {
+			if stableAt.IsZero() {
+				stableAt = time.Now()
+			} else if time.Since(stableAt) >= 100*time.Millisecond {
+				return rx
+			}
+		} else {
+			stableAt = time.Time{}
+			last = rx
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return sinkRx.Load() - baseline
 }
 
 func startUDPFountain(tb testing.TB, laddr *net.UDPAddr) *net.UDPConn {

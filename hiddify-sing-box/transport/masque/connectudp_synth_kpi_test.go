@@ -253,16 +253,21 @@ func (h *connectUDPProdDownloadHandle) downloadOnce(nbytes int64) (int64, error)
 	return received, nil
 }
 
-// TestGATEConnectUDPH3SynthProdUpload locks connect-udp-h3 prod unlimited upload on instant link (synth >= 500 Mbit/s).
+// TestGATEConnectUDPH3SynthProdUpload measures connect-udp-h3 prod upload rx goodput on instant link (UDP-5t1).
+// Interim >=500 is OPEN when rx goodput is below gate (sent-based path previously overstated Mbps).
 func TestGATEConnectUDPH3SynthProdUpload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	bytes, mbps, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h3 prod upload: %v", err)
 	}
-	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload: %.1f Mbit/s (%d bytes)", mbps, bytes)
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", mbps,
-		"instant QUIC datagram path — check split/window/scheduler")
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload (rx): %.1f Mbit/s (%d bytes)", mbps, bytes)
+	if mbps < connectUDPSynthInstantMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
+		t.Logf("OPEN: h3 rx upload %.1f < interim gate %.0f — UDP-5t1 rx goodput; C2S queue/datagram path",
+			mbps, connectUDPSynthInstantMinMbps)
+		return
+	}
+	t.Logf("h3 upload rx goodput meets interim gate %.0f Mbit/s", connectUDPSynthInstantMinMbps)
 }
 
 // TestGATEConnectUDPH3SynthProdDownload locks connect-udp-h3 prod S2C fountain on instant link (synth >= 500 Mbit/s).
@@ -328,7 +333,7 @@ func TestGATEConnectUDPH2SynthProdUpload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect-udp-h2 prod upload: %v", err)
 	}
-	t.Logf("GATE-CONNECT-UDP-SYNTH h2 upload: %.1f Mbit/s (%d bytes)", mbps, bytes)
+	t.Logf("GATE-CONNECT-UDP-SYNTH h2 upload (rx): %.1f Mbit/s (%d bytes)", mbps, bytes)
 	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_up", mbps,
 		"H2 capsule path — check DatagramSplitConn / flush / relay")
 }

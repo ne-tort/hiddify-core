@@ -107,8 +107,8 @@ var ArchREFSRCServerThinAudit = []ArchREFSRCServerThinRow{
 		Parity: true, Note: "H3 datagrams on; H2 collateral; relay.TCPTunnel unchanged",
 	},
 	{
-		Flag: "MASQUE_SERVER_CONNECT_STREAM_ONLY", Relay: "template mux only → HandleTCPConnectRequest",
-		Parity: true, Note: "UDP/IP 404; same relay entry as full endpoint",
+		Flag: "removed: MASQUE_SERVER_CONNECT_STREAM_ONLY", Relay: "CUT UDP-5a3 — full mux always wires UDP/IP/TCP",
+		Parity: true, Note: "stream-only stub path deleted; prod template mux only",
 	},
 	{
 		Flag: "removed: MASQUE_SERVER_TEMPLATE_THIN_LISTEN / ServerThin", Relay: "removed; prod MASQUE_SERVER_CONNECT_STREAM_ONLY",
