@@ -12,7 +12,7 @@ import (
 	cipclient "github.com/sagernet/sing-box/transport/masque/connectip/client"
 	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
 	cudpclient "github.com/sagernet/sing-box/transport/masque/connectudp/client"
-	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	"github.com/sagernet/sing-box/transport/masque/session"
@@ -174,7 +174,7 @@ func (h lifecycleHost) CloseAllH2ClientTransports() {
 }
 
 func (h lifecycleHost) CloseH2MasqueClientTransport(tr *http2.Transport) {
-	cudph2.CloseClientTransport(tr)
+	h2c.CloseClientTransport(tr)
 }
 
 func (h lifecycleHost) StopConnectIPNativeL3Plane() {

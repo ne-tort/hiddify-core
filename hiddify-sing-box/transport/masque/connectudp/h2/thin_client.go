@@ -3,6 +3,7 @@ package h2
 import (
 	"context"
 
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"golang.org/x/net/http2"
 )
 
@@ -28,7 +29,7 @@ func dedicatedOverlayTransport(cfg H2OverlayDialConfig) (H2OverlayDialConfig, fu
 	}
 	onClose := func() {
 		if tr != nil {
-			CloseClientTransport(tr)
+			h2c.CloseClientTransport(tr)
 			tr = nil
 		}
 	}

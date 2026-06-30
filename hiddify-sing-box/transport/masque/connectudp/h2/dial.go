@@ -89,13 +89,13 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 	if err != nil {
 		_ = download.Close()
 		if sharedTr != nil {
-			CloseClientTransport(sharedTr)
+			h2c.CloseClientTransport(sharedTr)
 		}
 		return nil, err
 	}
 	onClose := func() {
 		if sharedTr != nil {
-			CloseClientTransport(sharedTr)
+			h2c.CloseClientTransport(sharedTr)
 			sharedTr = nil
 		}
 	}
