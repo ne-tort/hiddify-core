@@ -248,7 +248,6 @@ func releaseConnectRelayRequestBody(reqBody io.ReadCloser) {
 }
 
 func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.ResponseWriter) io.ReadWriteCloser {
-	logRelayHijackProbe(reqBody, responseWriter)
 	if p, ok := responseWriter.(RelayCONNECTH3Leg); ok {
 		if leg := p.MasqueRelayCONNECTH3Leg(); leg != nil {
 			masqueEnableRelayTunnelData(leg)

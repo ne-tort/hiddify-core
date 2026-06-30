@@ -18,9 +18,3 @@ func TestLocalPrefixWaitEnvContract(t *testing.T) {
 	run("3", 3*time.Second)
 	run("not-a-number", defaultLocalPrefixWait)
 }
-
-func TestNetstackDebugDisabledInProd(t *testing.T) {
-	if NetstackDebugEnabled() {
-		t.Fatal("netstack debug must be off in prod")
-	}
-}

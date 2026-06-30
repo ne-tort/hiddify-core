@@ -3,7 +3,6 @@ package netstack
 import (
 	"errors"
 	"io"
-	"log"
 	"net"
 	"runtime"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	cipgo "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
-	"github.com/sagernet/sing-box/transport/masque/connectip/packetlog"
 )
 
 // WriteNotify implements channel.Notification — schedule exclusive egress drain off the gVisor notify path.
@@ -209,9 +207,6 @@ func (s *Netstack) writePacketWithRetry(outbound []byte) (retained bool, icmp []
 		if obsEventsEnabled() {
 			obsWriteAttempt()
 		}
-		if NetstackDebugEnabled() {
-			log.Printf("masque connect_ip egress: write %s attempt=%d", packetlog.IPv4Summary(outbound), attempt+1)
-		}
 		if xfer, ok := s.session.(PacketWriteTransferSession); ok {
 			retained, icmp, err = xfer.WritePacketFromNetstack(outbound)
 		} else {
@@ -225,9 +220,6 @@ func (s *Netstack) writePacketWithRetry(outbound []byte) (retained bool, icmp []
 			return retained, icmp, nil
 		}
 		lastErr = err
-		if NetstackDebugEnabled() {
-			log.Printf("masque connect_ip egress: write fail %s err=%v", packetlog.IPv4Summary(outbound), err)
-		}
 		if !IsRetryablePacketWriteError(err) {
 			return false, nil, err
 		}

@@ -118,10 +118,6 @@ func (h connectIPTCPDialHost) ReleaseAbandonedIPSession() {
 }
 
 func (h connectIPTCPDialHost) ResetStaleConnectIPPlaneLocked() {
-	if cip.NetstackDebugEnabled() {
-		log.Printf("masque connect_ip plane: reset stale tag=%s ipconn=%t netstack=%t",
-			strings.TrimSpace(h.s.Options.Tag), h.s.IPConn != nil, h.s.TCPNetstack != nil)
-	}
 	ph := h.s.ipPlaneHost()
 	session.CloseConnectIPDataplaneLockedAssumeMu(&h.s.CoreSession, ph)
 	ph.ResetIPH3TransportLockedAssumeMu()

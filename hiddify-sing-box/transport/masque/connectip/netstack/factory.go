@@ -63,20 +63,9 @@ func NewFromBootstrap(ctx context.Context, session PacketSession, boot Bootstrap
 			}
 		}
 		prefixes := boot.PrefixSource.CurrentAssignedPrefixes()
-		if NetstackDebugEnabled() {
-			w := LocalPrefixWait()
-			if len(prefixes) == 0 {
-				w = LocalPrefixWaitForSession(profileV4, profileV6)
-			}
-			NetstackDebugf("masque connect_ip netstack: CurrentAssignedPrefixes count=%d local_prefix_wait_sec=%d", len(prefixes), int(w.Seconds()))
-		}
 		if len(prefixes) == 0 {
 			wait := LocalPrefixWaitForSession(profileV4, profileV6)
-			var err error
-			prefixes, err = WaitForNonEmptyAssignedPrefixes(boot.PrefixSource, wait)
-			if NetstackDebugEnabled() {
-				NetstackDebugf("masque connect_ip netstack: LocalPrefixes after wait count=%d err=%v", len(prefixes), err)
-			}
+			prefixes, _ = WaitForNonEmptyAssignedPrefixes(boot.PrefixSource, wait)
 			if len(prefixes) == 0 {
 				prefixes = boot.PrefixSource.CurrentAssignedPrefixes()
 			}
@@ -108,10 +97,6 @@ func NewFromBootstrap(ctx context.Context, session PacketSession, boot Bootstrap
 		localV6 = prefixV6
 	} else if profileV6.Is6() {
 		localV6 = profileV6
-	}
-	if NetstackDebugEnabled() {
-		NetstackDebugf("masque connect_ip netstack: chosen localIPv4=%s localIPv6=%s mtu=%d prefixV4=%v prefixV6=%v profileV4=%v profileV6=%v",
-			localV4, localV6, mtu, prefixV4.IsValid(), prefixV6.IsValid(), profileV4.IsValid(), profileV6.IsValid())
 	}
 	ns, err := NewNetstack(ctx, session, NetstackOptions{
 		LocalIPv4:             localV4,

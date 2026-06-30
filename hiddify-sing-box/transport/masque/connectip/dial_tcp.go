@@ -3,7 +3,6 @@ package connectip
 import (
 	"context"
 	"errors"
-	"log"
 	"net"
 	"strings"
 	"syscall"
@@ -39,9 +38,6 @@ func DialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr) (ne
 }
 
 func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, allowRetry bool) (net.Conn, error) {
-	if NetstackDebugEnabled() {
-		log.Printf("masque connect_ip tcp: dial request destination=%s", destination.String())
-	}
 	select {
 	case <-ctx.Done():
 		host.ClearHTTPFallbackAfterGiveUp()
@@ -98,9 +94,6 @@ func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, all
 		ns = host.TCPNetstack()
 		if allowRetry {
 			if err := tcpNetstackTerminalError(ns); err != nil {
-				if NetstackDebugEnabled() {
-					log.Printf("masque connect_ip tcp: resetting terminal netstack before dial err=%v", err)
-				}
 				old := ns
 				host.AttachTCPNetstack(nil)
 				host.RecordTCPNetstackReady(false)
@@ -127,19 +120,8 @@ func dialTCP(ctx context.Context, host DialTCPHost, destination M.Socksaddr, all
 		defer cancel()
 	}
 	conn, dialErr := ns.DialContext(dialCtx, dest)
-	if NetstackDebugEnabled() {
-		if dialErr != nil {
-			log.Printf("masque connect_ip tcp: dial result destination=%s err=%v", dest.String(), dialErr)
-		} else if conn != nil {
-			log.Printf("masque connect_ip tcp: dial ok destination=%s local=%s remote=%s",
-				dest.String(), conn.LocalAddr(), conn.RemoteAddr())
-		}
-	}
 	if dialErr != nil {
 		if allowRetry && shouldRetryDialAfterNetstackReset(dialErr) {
-			if NetstackDebugEnabled() {
-				log.Printf("masque connect_ip tcp: resetting netstack after dial failure destination=%s err=%v", dest.String(), dialErr)
-			}
 			host.LockSession()
 			if host.TCPNetstack() == ns {
 				host.AttachTCPNetstack(nil)

@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"context"
 	"errors"
-	"log"
 	"net"
 	"net/netip"
 	"runtime"
@@ -246,9 +245,6 @@ func (s *Netstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
 	defer s.reconcileMu.Unlock()
 	if wantV4.Is4() && wantV4 != s.installedV4 {
 		if err := addStackAddress(s.gStack, int(tcpNetstackNIC), wantV4); err != nil {
-			if NetstackDebugEnabled() {
-				log.Printf("masque connect_ip netstack: reconcile add IPv4 want=%s err=%v", wantV4, err)
-			}
 			low := strings.ToLower(err.Error())
 			if !strings.Contains(low, "duplicate") && !strings.Contains(low, "already") {
 				return
@@ -258,15 +254,9 @@ func (s *Netstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
 			_ = s.gStack.RemoveAddress(tcpNetstackNIC, tcpip.AddrFrom4(s.installedV4.As4()))
 		}
 		s.installedV4 = wantV4
-		if NetstackDebugEnabled() {
-			log.Printf("masque connect_ip netstack: reconciled local IPv4 to %s (peer ADDRESS_ASSIGN)", wantV4)
-		}
 	}
 	if wantV6.Is6() && !wantV6.Is4In6() && wantV6 != s.installedV6 {
 		if err := addStackAddress(s.gStack, int(tcpNetstackNIC), wantV6); err != nil {
-			if NetstackDebugEnabled() {
-				log.Printf("masque connect_ip netstack: reconcile add IPv6 want=%s err=%v", wantV6, err)
-			}
 			low := strings.ToLower(err.Error())
 			if !strings.Contains(low, "duplicate") && !strings.Contains(low, "already") {
 				return
@@ -276,9 +266,6 @@ func (s *Netstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
 			_ = s.gStack.RemoveAddress(tcpNetstackNIC, tcpip.AddrFrom16(s.installedV6.As16()))
 		}
 		s.installedV6 = wantV6
-		if NetstackDebugEnabled() {
-			log.Printf("masque connect_ip netstack: reconciled local IPv6 to %s (peer ADDRESS_ASSIGN)", wantV6)
-		}
 	}
 }
 

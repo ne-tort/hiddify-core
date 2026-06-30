@@ -6,12 +6,10 @@ package masque
 import (
 	"context"
 	"errors"
-	"log"
 	"strings"
 
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	cipingress "github.com/sagernet/sing-box/transport/masque/connectip/pump/ingress"
-	"github.com/sagernet/sing-box/transport/masque/connectip/packetlog"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/session"
@@ -100,14 +98,6 @@ func (h connectIPIngressHost) IngressOnReadFatal(err error) {
 }
 
 func (h connectIPIngressHost) IngressDebugLog(pkt []byte, n int, hasNS bool, inflight bool) {
-	if !cip.NetstackDebugEnabled() {
-		return
-	}
-	if n < 20 {
-		return
-	}
-	log.Printf("masque connect_ip ingress: rx n=%d ns=%v inflight=%d %s",
-		n, hasNS, h.s.ConnectIPTCPInstallInflight.Load(), packetlog.IPv4Summary(pkt[:n]))
 }
 
 func (h connectIPIngressHost) IngressObsEvent(name string) {

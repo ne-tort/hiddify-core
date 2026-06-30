@@ -42,7 +42,6 @@ func init() {
 	cipingress.SetHooks(cipingress.Hooks{
 		CloneInboundFrame:          cipnet.CloneInboundFrame,
 		IsRetryablePacketReadError: IsRetryablePacketReadError,
-		NetstackDebugEnabled:       cipnet.NetstackDebugEnabled,
 		IncPreTCPIngressDropTotal:  IncPreTCPIngressDropTotal,
 	})
 }
@@ -58,7 +57,6 @@ var (
 	NewNetstack        = newNetstackFromRoot
 	CloneInboundFrame  = cipnet.CloneInboundFrame
 	NetstackAuditSource = cipnet.NetstackAuditSource
-	NetstackDebugEnabled = cipnet.NetstackDebugEnabled
 
 	IsBenignEgressTeardownError      = cipnet.IsBenignEgressTeardownError
 	IsConnectIPPlaneFatalForRecycle   = cipnet.IsConnectIPPlaneFatalForRecycle
@@ -72,7 +70,6 @@ var (
 	LocalPrefixWait            = cipnet.LocalPrefixWait
 	LocalPrefixWaitForSession  = cipnet.LocalPrefixWaitForSession
 	ResetLocalPrefixWaitEnvCache = cipnet.ResetLocalPrefixWaitEnvCache
-	ResetNetstackDebugEnvCache   = cipnet.ResetNetstackDebugEnvCache
 	BogusProfileMasqueIfaceAddr = cipnet.BogusProfileMasqueIfaceAddr
 	ParseProfileInterfaceAddress = cipnet.ParseProfileInterfaceAddress
 	PrefixPreferredAddress     = cipnet.PrefixPreferredAddress
@@ -82,10 +79,6 @@ var (
 	RegisterAssignedPrefixesListener = cipnet.RegisterAssignedPrefixesListener
 	AssignedPrefixesListenerCallback = cipnet.AssignedPrefixesListenerCallback
 )
-
-func netstackDebugf(format string, args ...any) {
-	cipnet.NetstackDebugf(format, args...)
-}
 
 func borrowOutboundBuf(n int) []byte {
 	return cipnet.BorrowOutboundPayload(n)

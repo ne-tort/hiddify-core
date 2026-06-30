@@ -3,7 +3,6 @@ package netstack
 import (
 	"context"
 	"errors"
-	"log"
 	"net/netip"
 	"os"
 	"strconv"
@@ -199,23 +198,4 @@ func syntheticConnectIPPlaceholder(addr netip.Addr) bool {
 		return true
 	}
 	return addr == netip.MustParseAddr("fd00::1")
-}
-
-// NetstackDebugEnabled reports whether CONNECT-IP TCP netstack verbose logging is on (prod: off).
-func NetstackDebugEnabled() bool {
-	return false
-}
-
-// ResetNetstackDebugEnvCache is a no-op (debug env removed).
-func ResetNetstackDebugEnvCache() {}
-
-func netstackDebugf(format string, args ...any) {
-	if NetstackDebugEnabled() {
-		log.Printf(format, args...)
-	}
-}
-
-// NetstackDebugf logs when CONNECT-IP TCP netstack debug is enabled.
-func NetstackDebugf(format string, args ...any) {
-	netstackDebugf(format, args...)
 }
