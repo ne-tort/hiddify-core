@@ -37,10 +37,27 @@ func TestCoreSessionConnectUDPEchoInProcess(t *testing.T) {
 	if string(buf[:n]) != string(payload) {
 		t.Fatalf("echo mismatch: got %q want %q", buf[:n], payload)
 	}
-	udpBack, ok := addr.(*net.UDPAddr)
-	if !ok || !udpBack.IP.Equal(echoAddr.IP) || udpBack.Port != echoAddr.Port {
+	if !inttestUDPTargetAddrEqual(addr, echoAddr) {
 		t.Fatalf("unexpected source addr %v want %v", addr, echoAddr)
 	}
+}
+
+func inttestUDPTargetAddrEqual(addr net.Addr, want *net.UDPAddr) bool {
+	if addr == nil || want == nil {
+		return false
+	}
+	if ua, ok := addr.(*net.UDPAddr); ok {
+		return ua.IP.Equal(want.IP) && ua.Port == want.Port
+	}
+	ah, ap, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return false
+	}
+	wh, wp, err := net.SplitHostPort(want.String())
+	if err != nil {
+		return false
+	}
+	return net.ParseIP(ah).Equal(net.ParseIP(wh)) && ap == wp
 }
 
 func TestCoreSessionConnectUDPSplitPayloadEchoInProcess(t *testing.T) {
@@ -80,8 +97,7 @@ func TestCoreSessionConnectUDPSplitPayloadEchoInProcess(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read: %v (got %d bytes)", err, len(got))
 		}
-		udpBack, ok := addr.(*net.UDPAddr)
-		if !ok || !udpBack.IP.Equal(echoAddr.IP) || udpBack.Port != echoAddr.Port {
+		if !inttestUDPTargetAddrEqual(addr, echoAddr) {
 			t.Fatalf("unexpected source addr %v want %v", addr, echoAddr)
 		}
 		got = append(got, buf[:n]...)

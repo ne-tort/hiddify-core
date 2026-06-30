@@ -84,7 +84,7 @@ func NewH3ConnWithConfig(str http3Stream, local, remote net.Addr, cfg H3ConnConf
 	if cfg.LegRole.s2cPrefetchEnabled() {
 		c.prefetch = newH3S2CPrefetchRing()
 	}
-	c.write = newH3C2SWriter(str)
+	c.write = newH3C2SWriter(str, cfg.LegRole.c2sHTTPBatchFlush())
 	if c.drainer != nil && c.prefetch != nil {
 		go c.runS2CPrefetchPump()
 	}

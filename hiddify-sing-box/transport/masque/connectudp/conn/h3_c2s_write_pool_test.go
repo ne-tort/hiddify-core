@@ -10,7 +10,7 @@ import (
 func TestH3C2SWriterReleasesBufOnClosedBeforeEnqueue(t *testing.T) {
 	t.Parallel()
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	w.start()
 	var closed atomic.Bool
 	closed.Store(true)
@@ -35,7 +35,7 @@ func TestH3C2SWriterReleasesBufOnClosedBeforeEnqueue(t *testing.T) {
 func TestH3C2SWriterReleasesBufOnCanceledEnqueue(t *testing.T) {
 	t.Parallel()
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	w.start()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

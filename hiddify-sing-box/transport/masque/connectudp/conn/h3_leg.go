@@ -33,3 +33,10 @@ func H3LegRoleFromStreamRole(streamRole string) H3LegRole {
 func (r H3LegRole) s2cPrefetchEnabled() bool {
 	return r != H3LegUpload
 }
+
+func (r H3LegRole) c2sHTTPBatchFlush() int {
+	if r == H3LegUpload {
+		return h3WriteHTTPBatchFlushUpload
+	}
+	return h3WriteHTTPBatchFlush
+}

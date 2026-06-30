@@ -47,7 +47,7 @@ func (s *asyncH3NoWakeStream) FlushProxiedIPDatagramSend() {
 func TestH3C2SWriterSyncPathNoAsyncQueue(t *testing.T) {
 	t.Parallel()
 	str := &syncH3DatagramStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	if w.flushSender != nil {
 		t.Fatal("sync stream must not enable NoWake batch path")
 	}
@@ -66,7 +66,7 @@ func TestH3C2SWriterSyncPathNoAsyncQueue(t *testing.T) {
 // TestH3C2SWriterAsyncPathNoWakeBatch verifies prod async C2S batches NoWake sends (UDP-M3-04).
 func TestH3C2SWriterAsyncPathNoWakeBatch(t *testing.T) {
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	payload := make([]byte, 64)
 	const n = h3WriteHTTPBatchFlush
 	for i := 0; i < n; i++ {
@@ -86,7 +86,7 @@ func TestH3C2SWriterAsyncPathNoWakeBatch(t *testing.T) {
 // TestH3C2SWriterFlushDrainsPump verifies FlushC2SWrites waits for async pump (UDP-AUDIT G2).
 func TestH3C2SWriterFlushDrainsPump(t *testing.T) {
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	payload := make([]byte, 64)
 	if err := w.writeBytes(context.Background(), nil, payload); err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestH3C2SWriterFlushDrainsPump(t *testing.T) {
 // TestH3C2SWriterAsyncPoolReuse checks write buf pool is returned after pump send (UDP-AUDIT G3).
 func TestH3C2SWriterAsyncPoolReuse(t *testing.T) {
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	payload := make([]byte, 512)
 	const n = 64
 	for i := 0; i < n; i++ {
@@ -116,7 +116,7 @@ func TestH3C2SWriterAsyncPoolReuse(t *testing.T) {
 }
 func TestH3C2SWriterIdleTailFlushPartialBatch(t *testing.T) {
 	str := &asyncH3NoWakeStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	payload := make([]byte, 64)
 	const partial = 5
 	for i := 0; i < partial; i++ {
@@ -141,7 +141,7 @@ func benchmarkH3C2SWrite(b *testing.B, async bool) {
 	b.ResetTimer()
 	if async {
 		str := &asyncH3NoWakeStream{}
-		w := newH3C2SWriter(str)
+		w := newH3C2SWriter(str, 0)
 		for i := 0; i < b.N; i++ {
 			if err := w.writeBytes(ctx, nil, payload); err != nil {
 				b.Fatal(err)
@@ -151,7 +151,7 @@ func benchmarkH3C2SWrite(b *testing.B, async bool) {
 		return
 	}
 	str := &syncH3DatagramStream{}
-	w := newH3C2SWriter(str)
+	w := newH3C2SWriter(str, 0)
 	for i := 0; i < b.N; i++ {
 		if err := w.writeBytes(ctx, nil, payload); err != nil {
 			b.Fatal(err)
@@ -187,7 +187,7 @@ func TestH3ConnC2SProdPathUsesNoWakeWhenAvailable(t *testing.T) {
 
 // TestH3C2SWriterStoreErrStable keeps the stored error after the storeErr stack frame returns (UDP-BUG-07).
 func TestH3C2SWriterStoreErrStable(t *testing.T) {
-	w := newH3C2SWriter(&syncH3DatagramStream{})
+	w := newH3C2SWriter(&syncH3DatagramStream{}, 0)
 	want := errors.New("send failed")
 	w.storeErr(want)
 	for i := 0; i < 64; i++ {

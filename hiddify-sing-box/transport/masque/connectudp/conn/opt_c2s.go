@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	h3WriteQueueCap       = 2048
-	h3WriteHTTPBatchFlush = 32
-	h3WriteCloseDrainWait = 2 * time.Second
-	h3WriteQueueWait      = 700 * time.Millisecond
+	h3WriteQueueCap             = 2048
+	h3WriteHTTPBatchFlush       = 32 // bidi / download legs: duplex-interactive latency
+	h3WriteHTTPBatchFlushUpload = 64 // upload-only leg: align with server proxyConnTryDrainMax
+	h3WriteCloseDrainWait       = 2 * time.Second
+	h3WriteQueueWait            = 700 * time.Millisecond
 )
 
 var h3WriteBufPool = sync.Pool{
@@ -40,11 +41,15 @@ type h3C2SWriter struct {
 	pumpBusy       sync.WaitGroup
 	writeMu        sync.Mutex
 	pendingBatch   int
+	batchFlush     int
 	writeErr       atomic.Pointer[error]
 }
 
-func newH3C2SWriter(str interface{ SendDatagram([]byte) error }) *h3C2SWriter {
-	w := &h3C2SWriter{str: str}
+func newH3C2SWriter(str interface{ SendDatagram([]byte) error }, batchFlush int) *h3C2SWriter {
+	if batchFlush <= 0 {
+		batchFlush = h3WriteHTTPBatchFlush
+	}
+	w := &h3C2SWriter{str: str, batchFlush: batchFlush}
 	if fs, ok := str.(h3DatagramFlushSender); ok {
 		w.flushSender = fs
 	}
@@ -71,7 +76,7 @@ func (w *h3C2SWriter) pump() {
 		}
 		w.pumpBusy.Add(1)
 		batch := [][]byte{data}
-		for len(w.writeCh) > 0 && len(batch) < h3WriteHTTPBatchFlush {
+		for len(w.writeCh) > 0 && len(batch) < w.batchFlush {
 			batch = append(batch, <-w.writeCh)
 		}
 		for _, d := range batch {
@@ -95,7 +100,7 @@ func (w *h3C2SWriter) sendDatagramUnlocked(data []byte) error {
 	}
 	w.writeMu.Lock()
 	w.pendingBatch++
-	shouldFlush := w.pendingBatch >= h3WriteHTTPBatchFlush
+	shouldFlush := w.pendingBatch >= w.batchFlush
 	if shouldFlush {
 		w.pendingBatch = 0
 	}

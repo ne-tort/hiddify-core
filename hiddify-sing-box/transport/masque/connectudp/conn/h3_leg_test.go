@@ -12,6 +12,12 @@ func TestH3LegRoleFromStreamRole(t *testing.T) {
 	if got := H3LegRoleFromStreamRole(""); got != H3LegBidi {
 		t.Fatalf("empty: got %v want %v", got, H3LegBidi)
 	}
+	if H3LegUpload.c2sHTTPBatchFlush() != h3WriteHTTPBatchFlushUpload {
+		t.Fatalf("upload batch flush: got %d want %d", H3LegUpload.c2sHTTPBatchFlush(), h3WriteHTTPBatchFlushUpload)
+	}
+	if H3LegBidi.c2sHTTPBatchFlush() != h3WriteHTTPBatchFlush {
+		t.Fatalf("bidi batch flush: got %d want %d", H3LegBidi.c2sHTTPBatchFlush(), h3WriteHTTPBatchFlush)
+	}
 	if H3LegUpload.s2cPrefetchEnabled() {
 		t.Fatal("upload leg must not run S2C prefetch")
 	}
