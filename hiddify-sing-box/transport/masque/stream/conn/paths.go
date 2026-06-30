@@ -77,6 +77,19 @@ type uploadPathAdapter struct {
 
 func (a *uploadPathAdapter) Write(p []byte) (int, error) { return a.inner.Write(p) }
 
+func (a *uploadPathAdapter) Flush() error {
+	if a == nil || a.inner == nil {
+		return nil
+	}
+	if f, ok := a.inner.(interface{ Flush() error }); ok {
+		return f.Flush()
+	}
+	if fl, ok := a.inner.(interface{ Flush() }); ok {
+		fl.Flush()
+	}
+	return nil
+}
+
 func (a *uploadPathAdapter) Close() error {
 	if a.inner == nil {
 		return nil
@@ -118,7 +131,7 @@ func NewUploadPath(w io.WriteCloser) UploadPath {
 }
 
 // NewTunnelPaths pairs explicit upload/download halves without H2-specific upload policy.
-// Production H2 CONNECT-stream uses h2.NewTunnelPaths for chunked upload.
+// Production H2 CONNECT-stream uses h2.NewTunnelPaths (bulk upload passthrough).
 func NewTunnelPaths(body io.ReadCloser, upload io.WriteCloser) TunnelPaths {
 	return TunnelPaths{
 		Download: NewH2DownloadPath(body),
