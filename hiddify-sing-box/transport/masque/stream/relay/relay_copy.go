@@ -83,6 +83,8 @@ func relayTunnelFlushFinal(out io.Writer, responseWriter http.ResponseWriter) {
 }
 
 func relayTunnelFlushNow(out io.Writer, responseWriter http.ResponseWriter) {
+	// H2 full-duplex relay may flush after the CONNECT handler returns; http2 panics — ignore.
+	defer func() { _ = recover() }()
 	if rw, ok := out.(http.ResponseWriter); ok {
 		_ = http.NewResponseController(rw).Flush()
 	}
