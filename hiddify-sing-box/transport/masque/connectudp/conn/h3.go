@@ -78,6 +78,9 @@ func NewH3Conn(str http3Stream, local, remote net.Addr) *H3Conn {
 	}
 	c.prefetch = newH3S2CPrefetchRing()
 	c.write = newH3C2SWriter(str)
+	if c.drainer != nil {
+		go c.runS2CPrefetchPump()
+	}
 	go func() {
 		defer close(c.readDone)
 		if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) && !c.closed.Load() {

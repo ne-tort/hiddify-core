@@ -2,6 +2,7 @@ package conn
 
 import (
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -55,17 +56,39 @@ func (r *h3S2CPrefetchRing) put(data []byte) bool {
 	return true
 }
 
-func (c *H3Conn) drainTryReceiveIntoPrefetch() {
+func (c *H3Conn) drainTryReceiveIntoPrefetch() int {
 	if c.drainer == nil || c.prefetch == nil {
-		return
+		return 0
 	}
+	drained := 0
 	for i := 0; i < h3ConnTryDrainMax; i++ {
 		data, ok := c.drainer.TryReceiveDatagram()
 		if !ok {
 			break
 		}
+		drained++
 		if !c.prefetch.put(data) {
 			quic.ReleaseMasqueDatagramReceiveBuffer(data)
+		}
+	}
+	return drained
+}
+
+func (c *H3Conn) runS2CPrefetchPump() {
+	const idleBackoff = 25 * time.Microsecond
+	for {
+		select {
+		case <-c.pumpCtx.Done():
+			return
+		default:
+		}
+		if c.drainTryReceiveIntoPrefetch() > 0 {
+			continue
+		}
+		select {
+		case <-c.pumpCtx.Done():
+			return
+		case <-time.After(idleBackoff):
 		}
 	}
 }

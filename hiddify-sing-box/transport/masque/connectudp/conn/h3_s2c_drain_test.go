@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
@@ -59,26 +60,62 @@ func TestH3ConnReadFromDrainsTryReceiveBacklog(t *testing.T) {
 	str := &backlogH3Stream{blockRecv: make(chan struct{})}
 	str.block = [][]byte{
 		ctx0UDPPayload([]byte("a")),
-	}
-	str.try = [][]byte{
 		ctx0UDPPayload([]byte("b")),
-		ctx0UDPPayload([]byte("c")),
 	}
 	c := NewH3Conn(str, masqueAddr{"l"}, masqueAddr{"r"})
 	defer func() { _ = c.Close() }()
 
 	buf := make([]byte, 8)
-	want := []string{"a", "b", "c"}
-	for i, w := range want {
+	n, _, err := c.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read a: %v", err)
+	}
+	if got := string(buf[:n]); got != "a" {
+		t.Fatalf("read a: got %q", got)
+	}
+	str.try = [][]byte{
+		ctx0UDPPayload([]byte("c")),
+	}
+	for _, w := range []string{"b", "c"} {
 		n, _, err := c.ReadFrom(buf)
 		if err != nil {
-			t.Fatalf("read %d: %v", i, err)
+			t.Fatalf("read %s: %v", w, err)
 		}
 		if got := string(buf[:n]); got != w {
-			t.Fatalf("read %d: got %q want %q", i, got, w)
+			t.Fatalf("read %s: got %q", w, got)
 		}
 	}
-	if got := str.recvCalls.Load(); got != 1 {
-		t.Fatalf("blocking ReceiveDatagram calls=%d want 1 (b/c from prefetch drain)", got)
+	if got := str.recvCalls.Load(); got != 2 {
+		t.Fatalf("blocking ReceiveDatagram calls=%d want 2 (c from prefetch drain after b)", got)
+	}
+}
+
+// TestH3ConnS2CPrefetchPumpStagesTryReceive verifies background pump fills prefetch without blocking recv.
+func TestH3ConnS2CPrefetchPumpStagesTryReceive(t *testing.T) {
+	t.Parallel()
+	str := &backlogH3Stream{blockRecv: make(chan struct{})}
+	str.try = [][]byte{
+		ctx0UDPPayload([]byte("pump")),
+	}
+	c := NewH3Conn(str, masqueAddr{"l"}, masqueAddr{"r"})
+	defer func() { _ = c.Close() }()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if str.recvCalls.Load() > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	buf := make([]byte, 8)
+	n, _, err := c.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+	if got := string(buf[:n]); got != "pump" {
+		t.Fatalf("got %q want pump", got)
+	}
+	if got := str.recvCalls.Load(); got != 0 {
+		t.Fatalf("blocking ReceiveDatagram calls=%d want 0 (prefetch pump served read)", got)
 	}
 }
