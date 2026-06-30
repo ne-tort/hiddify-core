@@ -27,3 +27,16 @@ func TestLoopInObserverFlushTiming(t *testing.T) {
 		t.Fatalf("flush timing: %+v", st)
 	}
 }
+
+func TestLoopInObserverNilReceiverNoOp(t *testing.T) {
+	t.Parallel()
+	var obs *LoopInObserver
+	obs.recordRead(time.Millisecond)
+	obs.recordWrite(time.Millisecond)
+	obs.recordPkt()
+	obs.recordFlush(time.Millisecond)
+	obs.endIter()
+	if st := obs.Snapshot(); st.Pkts != 0 || st.Iters != 0 {
+		t.Fatalf("nil observer must stay zero: %+v", st)
+	}
+}

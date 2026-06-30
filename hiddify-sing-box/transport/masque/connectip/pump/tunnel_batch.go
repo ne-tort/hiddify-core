@@ -82,9 +82,7 @@ func runLoopInBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 			rStart = time.Now()
 		}
 		n, err := device.ReadEgressBatch(ctx, slots, maxBatch)
-		if obs != nil {
-			obs.recordRead(time.Since(rStart))
-		}
+		obs.recordRead(time.Since(rStart))
 		if err != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
@@ -110,10 +108,8 @@ func runLoopInBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 				wStart = time.Now()
 			}
 			retained, err := writeLoopInPacket(device, conn, slots[i].Buf[:pktLen])
-			if obs != nil {
-				obs.recordWrite(time.Since(wStart))
-				obs.recordPkt()
-			}
+			obs.recordWrite(time.Since(wStart))
+			obs.recordPkt()
 			if err != nil {
 				return err
 			}
@@ -134,12 +130,8 @@ func runLoopInBatch(ctx context.Context, device BatchTunnelDevice, conn PacketCo
 				flushStart = time.Now()
 			}
 			opts.OnLoopInEnd()
-			if obs != nil {
-				obs.recordFlush(time.Since(flushStart))
-			}
+			obs.recordFlush(time.Since(flushStart))
 		}
-		if obs != nil {
-			obs.endIter()
-		}
+		obs.endIter()
 	}
 }

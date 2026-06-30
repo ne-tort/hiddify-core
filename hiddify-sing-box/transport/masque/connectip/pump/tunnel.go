@@ -122,10 +122,8 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			wStart = time.Now()
 		}
 		retained, err := writeLoopInPacket(device, conn, buf[:n])
-		if obs != nil {
-			obs.recordWrite(time.Since(wStart))
-			obs.recordPkt()
-		}
+		obs.recordWrite(time.Since(wStart))
+		obs.recordPkt()
 		if err != nil {
 			return err
 		}
@@ -146,9 +144,7 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 			rStart = time.Now()
 		}
 		n, err := device.ReadPacket(ctx, buf)
-		if obs != nil {
-			obs.recordRead(time.Since(rStart))
-		}
+		obs.recordRead(time.Since(rStart))
 		if err != nil {
 			if ctx.Err() != nil {
 				return context.Cause(ctx)
@@ -172,13 +168,9 @@ func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts T
 				flushStart = time.Now()
 			}
 			opts.OnLoopInEnd()
-			if obs != nil {
-				obs.recordFlush(time.Since(flushStart))
-			}
+			obs.recordFlush(time.Since(flushStart))
 		}
-		if obs != nil {
-			obs.endIter()
-		}
+		obs.endIter()
 	}
 }
 
