@@ -2,6 +2,7 @@ package tun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -458,10 +459,12 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 	}()
 	conn := metrics.wrapPacketConn(b.packetConn())
 	if hostKernel {
-		if batchDev, ok := device.(cippump.BatchTunnelDevice); ok {
-			batchOpts := b.hostKernelBatchPumpOptions(onLoopInEnd)
-			return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
+		batchDev, ok := device.(cippump.BatchTunnelDevice)
+		if !ok {
+			return errors.New("connect-ip: host-kernel pump requires BatchTunnelDevice")
 		}
+		batchOpts := b.hostKernelBatchPumpOptions(onLoopInEnd)
+		return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
 	}
 	return cippump.RunTunnel(ctx, device, conn, opts)
 }
