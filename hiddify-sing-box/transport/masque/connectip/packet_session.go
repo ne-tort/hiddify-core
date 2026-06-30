@@ -199,11 +199,6 @@ func (s *ClientPacketSession) FlushEgressTransport() {
 	}
 }
 
-// ScheduleEgressFlush is a legacy alias for FlushEgressBatch (netstack OnEgressBatchComplete wiring).
-func (s *ClientPacketSession) ScheduleEgressFlush() {
-	cipegress.ScheduleEgressFlush(s.egressHost())
-}
-
 func (s *ClientPacketSession) Close() error {
 	// The core session owns CONNECT-IP lifecycle. Closing this wrapper must not
 	// tear down the shared underlying conn used by runtime packet-plane.

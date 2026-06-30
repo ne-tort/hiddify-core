@@ -15,11 +15,6 @@ func FlushEgressBatch(h ClientHost) {
 	}
 }
 
-// ScheduleEgressFlush is a legacy alias for FlushEgressBatch (netstack OnEgressBatchComplete wiring).
-func ScheduleEgressFlush(h ClientHost) {
-	FlushEgressBatch(h)
-}
-
 func writePacketDirectNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 	conn := h.PacketConn()
 	if conn == nil {

@@ -30,7 +30,7 @@ func (f tcpNetstackFactory) New(ctx context.Context, session PacketSession, boot
 func NewProductionTCPNetstackFromPacketSession(ctx context.Context, session PacketSession) (TCPNetstack, error) {
 	hooks := NetstackOptions{}
 	if cps, ok := session.(*ClientPacketSession); ok {
-		hooks.OnEgressBatchComplete = cps.ScheduleEgressFlush
+		hooks.OnEgressBatchComplete = cps.FlushEgressBatch
 	}
 	return NewProductionTCPNetstack(ctx, session, SessionBootstrapFrom(session), hooks)
 }

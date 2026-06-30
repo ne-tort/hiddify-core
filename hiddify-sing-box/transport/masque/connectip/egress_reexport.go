@@ -50,10 +50,3 @@ func (h clientPacketEgressHost) WakeAfterDatagram() func() {
 func (s *ClientPacketSession) egressHost() cipegress.ClientHost {
 	return clientPacketEgressHost{s: s}
 }
-
-// Root re-exports from connectip/pump/egress during W-IP-1 subdir migration (IP-1-PR4).
-
-var (
-	FlushClientEgressBatch    = cipegress.FlushEgressBatch
-	ScheduleClientEgressFlush = cipegress.ScheduleEgressFlush
-)
