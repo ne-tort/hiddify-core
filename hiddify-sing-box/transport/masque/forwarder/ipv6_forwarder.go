@@ -52,7 +52,11 @@ func (f *packetForwarder) handleIPv6TCPPacket(ctx context.Context, pkt []byte, l
 	srcAddr := iph.SourceAddress()
 	dstAddr := iph.DestinationAddress()
 	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
-		return
+		repairIPv6TCPChecksum(pkt, l4Off)
+		tc = header.TCP(pkt[l4Off:])
+		if !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
+			return
+		}
 	}
 	flow := tcp4Tuple{
 		srcAddr: srcAddr,

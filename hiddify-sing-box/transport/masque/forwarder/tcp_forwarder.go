@@ -244,3 +244,25 @@ func repairIPv4TCPChecksum(pkt []byte, ihl int) {
 	tcp.SetChecksum(0)
 	tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
 }
+
+func repairIPv6TCPChecksum(pkt []byte, l4Off int) {
+	if len(pkt) < l4Off+header.TCPMinimumSize {
+		return
+	}
+	iph := header.IPv6(pkt)
+	tcp := header.TCP(pkt[l4Off:])
+	doff := int(tcp.DataOffset())
+	if doff < header.TCPMinimumSize || l4Off+doff > len(pkt) {
+		return
+	}
+	tcpLen := uint16(len(pkt) - l4Off)
+	payloadLen := tcpLen - uint16(doff)
+	var payCsum uint16
+	if payloadLen > 0 {
+		payCsum = checksum.Checksum(pkt[l4Off+doff:], 0)
+	}
+	xsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, iph.SourceAddress(), iph.DestinationAddress(), tcpLen)
+	xsum = checksum.Combine(xsum, payCsum)
+	tcp.SetChecksum(0)
+	tcp.SetChecksum(^tcp.CalculateChecksum(xsum))
+}
