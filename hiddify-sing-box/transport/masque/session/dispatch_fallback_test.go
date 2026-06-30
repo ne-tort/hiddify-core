@@ -40,9 +40,7 @@ func (h *dispatchFallbackFakeHost) IsTCPMasqueDirectFallbackEligible(error, cont
 func (h *dispatchFallbackFakeHost) RecordTCPDialSuccess()              {}
 func (h *dispatchFallbackFakeHost) RecordTCPDialFailure()              {}
 func (h *dispatchFallbackFakeHost) RecordTCPDialErrorClass(error)      {}
-func (h *dispatchFallbackFakeHost) RecordTCPFallback()                 {}
-func (h *dispatchFallbackFakeHost) TraceTCPConnectStreamDirectFallback(M.Socksaddr) {
-}
+func (h *dispatchFallbackFakeHost) RecordTCPFallback()            {}
 func (h *dispatchFallbackFakeHost) ListenPacketConnectIP(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("listen connect_ip")
 }

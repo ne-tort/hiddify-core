@@ -54,7 +54,6 @@ type DispatchHost interface {
 	RecordTCPDialFailure()
 	RecordTCPDialErrorClass(err error)
 	RecordTCPFallback()
-	TraceTCPConnectStreamDirectFallback(destination M.Socksaddr)
 
 	ListenPacketConnectIP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
 	ListenPacketConnectUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error)
@@ -82,7 +81,6 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 			return conn, nil
 		}
 		if TCPMasqueDirectFallbackEnabled(s.Options) && host.IsTCPMasqueDirectFallbackEligible(err, ctx) {
-			host.TraceTCPConnectStreamDirectFallback(destination)
 			host.RecordTCPFallback()
 			conn2, dirErr := host.DialDirectTCP(ctx, network, destination)
 			if dirErr != nil {

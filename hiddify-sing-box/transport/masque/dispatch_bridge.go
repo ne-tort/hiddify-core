@@ -56,8 +56,6 @@ func (h dispatchHost) RecordTCPDialErrorClass(err error) { session.RecordTCPDial
 
 func (h dispatchHost) RecordTCPFallback() { session.RecordTCPFallback() }
 
-func (h dispatchHost) TraceTCPConnectStreamDirectFallback(destination M.Socksaddr) {}
-
 func (h dispatchHost) OpenIPSessionLocked(ctx context.Context) (session.IPPacketSession, error) {
 	return h.s.openIPSessionLocked(ctx)
 }
