@@ -519,11 +519,6 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 	return pc
 }
 
-// RunReceiveLoop is deprecated; prod uses RunPump. Kept as alias for tests.
-func (b *L3OverlayBridge) RunReceiveLoop(ctx context.Context) error {
-	return b.RunPump(ctx)
-}
-
 // Close stops L3 overlay bridge.
 func (b *L3OverlayBridge) Close() error {
 	b.mu.Lock()

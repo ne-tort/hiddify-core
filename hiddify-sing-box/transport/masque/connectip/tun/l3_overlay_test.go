@@ -613,7 +613,7 @@ func TestL3OverlayReceiveBatchDrain(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -645,7 +645,7 @@ func TestL3OverlayIngressWakeNote(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -683,7 +683,7 @@ func TestL3OverlayIngressPayloadWake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -723,7 +723,7 @@ func TestL3OverlayHostTunWriteExcludesStackInject(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -762,7 +762,7 @@ func TestL3OverlayStackIngressInjectOnly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -801,7 +801,7 @@ func TestL3OverlayStackIngressHandshakeUsesTun(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -1199,7 +1199,7 @@ func TestL3OverlayIngressPureAckWake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -1246,7 +1246,7 @@ func TestL3OverlayHostTunWriteServerAckDNAT(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- b.RunReceiveLoop(ctx) }()
+	go func() { done <- b.RunPump(ctx) }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for !tunWritten.Load() && time.Now().Before(deadline) {
@@ -1274,7 +1274,7 @@ func TestL3OverlayReceiveBatchWake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- b.RunReceiveLoop(ctx)
+		done <- b.RunPump(ctx)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
