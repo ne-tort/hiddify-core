@@ -139,7 +139,7 @@ func serveH3UploadLeg(w http.ResponseWriter, r *http.Request, str *http3.Stream,
 	go func() {
 		defer wg.Done()
 		defer shutdownStream()
-		if err := relay.proxyConnSend(conn, str); err != nil {
+		if err := relay.proxyConnSend(r.Context(), conn, str); err != nil {
 			log.Printf("h3 asymmetric upload-only relay failed: %v", err)
 		}
 	}()

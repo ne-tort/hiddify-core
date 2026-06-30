@@ -17,7 +17,10 @@ type h3C2SStream interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
-func (s *Proxy) proxyConnSend(conn *net.UDPConn, str h3C2SStream) error {
+func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SStream) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var drainer tryDrainHTTPDatagrams
 	if dr, ok := any(str).(tryDrainHTTPDatagrams); ok {
 		drainer = dr
@@ -67,7 +70,18 @@ func (s *Proxy) proxyConnSend(conn *net.UDPConn, str h3C2SStream) error {
 		return forwarded, nil
 	}
 	for {
-		data, err := str.ReceiveDatagram(context.Background())
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		forwarded, drainErr := drainQueued()
+		if drainErr != nil {
+			return drainErr
+		}
+		if forwarded > 0 {
+			recvBackoff.onProgress()
+			continue
+		}
+		data, err := str.ReceiveDatagram(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil

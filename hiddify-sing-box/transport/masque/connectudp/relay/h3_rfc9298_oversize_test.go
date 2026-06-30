@@ -34,7 +34,7 @@ func TestProxyConnSendRFC9298AbortsOnOversizeUDP(t *testing.T) {
 	payload := make([]byte, 1+frame.MaxProxiedUDPPayloadBytes+1)
 	payload[0] = 0
 	str := &oversizeC2SStream{payload: payload}
-	err = (&Proxy{}).proxyConnSend(conn, str)
+	err = (&Proxy{}).proxyConnSend(context.Background(), conn, str)
 	if !errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
 		t.Fatalf("proxyConnSend: %v want ErrProxiedUDPPayloadTooLarge", err)
 	}

@@ -16,7 +16,7 @@ func TestProdRelayRFC9298TwoLoopShape(t *testing.T) {
 	section := h3RelayProdSource[idxFn:]
 	for _, needle := range []string{
 		"wg.Add(2)",
-		"s.proxyConnSend(conn, str)",
+		"s.proxyConnSend(context.Background(), conn, str)",
 		"proxyConnReceive(conn, str)",
 	} {
 		if !strings.Contains(section, needle) {

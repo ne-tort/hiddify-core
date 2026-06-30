@@ -59,7 +59,7 @@ func TestProxyConnSendSurvivesTransientReceiveDatagram(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- (&Proxy{}).proxyConnSend(conn, stream)
+		done <- (&Proxy{}).proxyConnSend(context.Background(), conn, stream)
 	}()
 
 	select {

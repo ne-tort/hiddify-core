@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -155,7 +156,7 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 	go func() {
 		defer wg.Done()
 		defer shutdownStream()
-		if err := s.proxyConnSend(conn, str); err != nil {
+		if err := s.proxyConnSend(context.Background(), conn, str); err != nil {
 			log.Printf("proxying send side to %s failed: %v", conn.RemoteAddr(), err)
 		}
 	}()
