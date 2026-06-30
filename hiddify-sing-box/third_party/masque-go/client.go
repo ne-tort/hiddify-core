@@ -211,7 +211,9 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 	if err != nil {
 		return nil, rsp, err
 	}
-	return cudpconn.NewH3Conn(rstr, local, remote), rsp, nil
+	return cudpconn.NewH3ConnWithConfig(rstr, local, remote, cudpconn.H3ConnConfig{
+		LegRole: cudpconn.H3LegRoleFromStreamRole(opts.streamRole),
+	}), rsp, nil
 }
 
 // Extract the Proxy-Status next-hop value as a UDPAddr.

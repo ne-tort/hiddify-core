@@ -65,20 +65,27 @@ var _ net.PacketConn = (*H3Conn)(nil)
 
 // NewH3Conn wraps an established HTTP/3 CONNECT-UDP request stream as net.PacketConn.
 func NewH3Conn(str http3Stream, local, remote net.Addr) *H3Conn {
+	return NewH3ConnWithConfig(str, local, remote, H3ConnConfig{})
+}
+
+// NewH3ConnWithConfig wraps CONNECT-UDP with per-leg tuning (asymmetric download vs upload).
+func NewH3ConnWithConfig(str http3Stream, local, remote net.Addr, cfg H3ConnConfig) *H3Conn {
 	c := &H3Conn{
-		str:       str,
-		localAddr: local,
+		str:        str,
+		localAddr:  local,
 		remoteAddr: remote,
-		readDone:  make(chan struct{}),
+		readDone:   make(chan struct{}),
 	}
 	c.readCtx, c.readCtxCancel = context.WithCancel(context.Background())
 	c.pumpCtx, c.pumpCancel = context.WithCancel(context.Background())
 	if dr, ok := str.(tryDrainHTTPDatagrams); ok {
 		c.drainer = dr
 	}
-	c.prefetch = newH3S2CPrefetchRing()
+	if cfg.LegRole.s2cPrefetchEnabled() {
+		c.prefetch = newH3S2CPrefetchRing()
+	}
 	c.write = newH3C2SWriter(str)
-	if c.drainer != nil {
+	if c.drainer != nil && c.prefetch != nil {
 		go c.runS2CPrefetchPump()
 	}
 	go func() {
@@ -128,9 +135,12 @@ func (c *H3Conn) readFromOnce(b []byte) (n int, addr net.Addr, err error, again 
 	}
 
 	var data []byte
-	if pref, ok := c.prefetch.take(); ok {
-		data = pref
-	} else {
+	if c.prefetch != nil {
+		if pref, ok := c.prefetch.take(); ok {
+			data = pref
+		}
+	}
+	if data == nil {
 		data, err = c.str.ReceiveDatagram(ctx)
 		if err != nil {
 			if c.closed.Load() {
