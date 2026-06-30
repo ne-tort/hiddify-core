@@ -60,6 +60,18 @@ func TestDefaultBenchUDPPayloadLen(t *testing.T) {
 	}
 }
 
+func TestPaceIntervalMatchesDockerSender(t *testing.T) {
+	const payloadLen = 512
+	const targetMbit = 8.0
+	got := connectudp.PaceInterval(payloadLen, targetMbit)
+	// Python udp_masque_send.paced_send: interval = (payload_len * 8) / (target_mbit * 1_000_000)
+	wantSec := float64(payloadLen*8) / (targetMbit * 1e6)
+	want := time.Duration(wantSec * float64(time.Second))
+	if got != want {
+		t.Fatalf("PaceInterval=%v want %v", got, want)
+	}
+}
+
 func TestPaceIntervalZeroTarget(t *testing.T) {
 	if got := connectudp.PaceInterval(connectudp.DefaultBenchUDPPayloadLen, 0); got != 0 {
 		t.Fatalf("PaceInterval burst=%v want 0", got)

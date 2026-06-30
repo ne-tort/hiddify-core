@@ -6,6 +6,10 @@ import (
 	masque "github.com/sagernet/sing-box/transport/masque"
 )
 
+func TestGATEConnectUDPDockerSenderPacedParity(t *testing.T) {
+	masque.InttestGATEConnectUDPDockerSenderPacedParity(t)
+}
+
 func TestLocalizeConnectUDPDockerPacedDirectVsSocks5(t *testing.T) {
 	masque.InttestLocalizeConnectUDPDockerPacedDirectVsSocks5(t)
 }

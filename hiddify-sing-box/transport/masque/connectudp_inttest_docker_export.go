@@ -16,6 +16,12 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+// InttestGATEConnectUDPDockerSenderPacedParity locks in-proc sequenced sender vs docker udp_masque_send.py @8 Mbit/s (UDP-5b2).
+func InttestGATEConnectUDPDockerSenderPacedParity(t *testing.T) {
+	t.Helper()
+	InttestLocalizeConnectUDPDockerPacedCompensatedPacing(t)
+}
+
 // InttestLocalizeConnectUDPDockerPacedDirectVsSocks5 localizes docker connect-udp-h3 paced path.
 func InttestLocalizeConnectUDPDockerPacedDirectVsSocks5(t *testing.T) {
 	t.Helper()
