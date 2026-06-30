@@ -15,20 +15,10 @@ const (
 )
 
 var (
-	masqueWakeStreamSendHook                 func()
-	masqueWakeConnSendHook                   func()
-	masqueScheduleSendingHook                func()
-	masqueWakeSendOnReceiveReadEnabled       = true
-	masqueWakeBidiConnOnReceiveReadEnabled   = true // duplex: conn-level send wake for FC interleave
+	masqueWakeStreamSendHook  func()
+	masqueWakeConnSendHook    func()
+	masqueScheduleSendingHook func()
 )
-
-func masqueWakeSendOnReceiveRead() bool {
-	return masqueWakeSendOnReceiveReadEnabled
-}
-
-func masqueWakeBidiConnOnReceiveRead() bool {
-	return masqueWakeBidiConnOnReceiveReadEnabled
-}
 
 // MasquePokeDownloadReceiveWindow queues MAX_STREAM_DATA on a download-active bidi stream.
 // Safe to call repeatedly; re-notifies sender when MAX_STREAM_DATA already queued.
@@ -332,7 +322,7 @@ func masquePokeDownloadReceiveWindow(s *Stream) bool {
 // download-active bidi stream. Mirrors http3.Stream.Read wake for raw quic.Stream paths
 // (Stream.WriteTo / simnet S97) that bypass HTTP/3 framing.
 func masqueWakeAfterDownloadRead(s *Stream, n int) {
-	if n <= 0 || s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
+	if n <= 0 || s == nil || !s.masqueIsDownloadActive() {
 		return
 	}
 	if masqueDuplexGrantPeerDownloadCredit(s) {
@@ -346,7 +336,7 @@ func masqueWakeAfterDownloadRead(s *Stream, n int) {
 // Download-active legs poke S2C credit + duplex wake; upload-only legs still need send
 // scheduler poke (H3-L1c-3 — sustained C2S @ ~80 Mbit/s without downloadActive gate).
 func masqueWakeAfterDownloadWrite(s *Stream, n int) {
-	if n <= 0 || s == nil || !masqueWakeSendOnReceiveRead() {
+	if n <= 0 || s == nil {
 		return
 	}
 	if MasqueIsBidiDuplexUploadStarted(s) {
@@ -372,7 +362,7 @@ func masqueWakeAfterDownloadWrite(s *Stream, n int) {
 // masqueWakeAfterDownloadDelivery pokes WINDOW_UPDATE and schedules send after download bytes
 // reach the consumer (WriteTo delivery parity h3.TunnelConn wakeBidiSendAfterDownloadDelivery).
 func masqueWakeAfterDownloadDelivery(s *Stream) {
-	if s == nil || !s.masqueIsDownloadActive() || !masqueWakeSendOnReceiveRead() {
+	if s == nil || !s.masqueIsDownloadActive() {
 		return
 	}
 	if masqueDuplexGrantPeerDownloadCredit(s) {
@@ -501,13 +491,9 @@ func masqueWakeConnFromStream(s *Stream) {
 	}
 }
 
-// MasqueWakeBidiDuplex schedules stream send work and connection-level send after a bidi
-// download read. Default on; disable conn-level half with MASQUE_QUIC_BIDI_CONN_WAKE=0.
+// MasqueWakeBidiDuplex schedules stream send work and connection-level send after a bidi download read.
 func MasqueWakeBidiDuplex(s *Stream) {
 	MasqueWakeStreamSend(s)
-	if !masqueWakeBidiConnOnReceiveRead() {
-		return
-	}
 	if s == nil || s.sendStr == nil || s.sendStr.sender == nil {
 		return
 	}

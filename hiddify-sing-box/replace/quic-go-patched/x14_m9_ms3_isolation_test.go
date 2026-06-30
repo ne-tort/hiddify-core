@@ -77,12 +77,8 @@ func TestMasqueWakeFileTagsM9AndMs3Hooks(t *testing.T) {
 	}
 }
 
-// TestMasqueWakeConnSendNotGatedByBidiConnWake locks P-UDP/CONNECT-IP M9 conn wake independent of M-S3 env.
+// TestMasqueWakeConnSendNotGatedByBidiConnWake locks P-UDP/CONNECT-IP M9 conn wake independent of M-S3 bidi duplex gate.
 func TestMasqueWakeConnSendNotGatedByBidiConnWake(t *testing.T) {
-	prev := masqueWakeBidiConnOnReceiveReadEnabled
-	t.Cleanup(func() { masqueWakeBidiConnOnReceiveReadEnabled = prev })
-	masqueWakeBidiConnOnReceiveReadEnabled = false
-
 	var connWakes int
 	restore := SetMasqueWakeConnSendHook(func() { connWakes++ })
 	defer restore()
@@ -101,10 +97,6 @@ func TestMasqueWakeConnSendNotGatedByBidiConnWake(t *testing.T) {
 
 // TestMasqueWakeConnSendDatagramCoalescedNotGatedByBidiConnWake locks M9 batched DATAGRAM wake path.
 func TestMasqueWakeConnSendDatagramCoalescedNotGatedByBidiConnWake(t *testing.T) {
-	prev := masqueWakeBidiConnOnReceiveReadEnabled
-	t.Cleanup(func() { masqueWakeBidiConnOnReceiveReadEnabled = prev })
-	masqueWakeBidiConnOnReceiveReadEnabled = false
-
 	var connWakes int
 	restore := SetMasqueWakeConnSendHook(func() { connWakes++ })
 	defer restore()
@@ -130,15 +122,11 @@ func TestMasqueWakeConnSendDatagramCoalescedNotGatedByBidiConnWake(t *testing.T)
 	}
 }
 
-// TestMasqueWakeBidiDuplexConnWakeGated locks M-S3 conn half behind MASQUE_QUIC_BIDI_CONN_WAKE=0.
-func TestMasqueWakeBidiDuplexConnWakeGated(t *testing.T) {
-	prev := masqueWakeBidiConnOnReceiveReadEnabled
-	t.Cleanup(func() { masqueWakeBidiConnOnReceiveReadEnabled = prev })
-	masqueWakeBidiConnOnReceiveReadEnabled = false
-
+// TestMasqueWakeBidiDuplexConnWakeAlwaysOn locks M-S3 conn half always scheduled with stream wake (prod hardcoded on).
+func TestMasqueWakeBidiDuplexConnWakeAlwaysOn(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockSender := NewMockStreamSender(ctrl)
-	mockSender.EXPECT().onHasConnectionData().Times(0)
+	mockSender.EXPECT().onHasConnectionData().Times(1)
 
 	var streamWakes, connWakes int
 	restoreStream := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
@@ -168,7 +156,7 @@ func TestMasqueWakeBidiDuplexConnWakeGated(t *testing.T) {
 	if streamWakes != 1 {
 		t.Fatalf("stream hook calls=%d want 1", streamWakes)
 	}
-	if connWakes != 0 {
-		t.Fatalf("conn hook calls=%d want 0 when BIDI_CONN_WAKE disabled", connWakes)
+	if connWakes != 1 {
+		t.Fatalf("conn hook calls=%d want 1 (prod always-on bidi conn wake)", connWakes)
 	}
 }

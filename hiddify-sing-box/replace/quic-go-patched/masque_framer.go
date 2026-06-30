@@ -85,7 +85,7 @@ func masquePeerUploadCreditQueued(s *Stream) bool {
 }
 
 func masqueScheduleDownloadActiveWake(s *Stream) {
-	if s == nil || !masqueWakeSendOnReceiveRead() {
+	if s == nil {
 		return
 	}
 	MasqueWakeStreamSend(s)
