@@ -223,8 +223,8 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	default:
 		return E.New("masque: invalid tcp_transport: ", tcpTransport)
 	}
-	if tm == option.MasqueTransportModeConnectIP && tcpTransport == option.MasqueTCPTransportConnectStream {
-		return E.New("masque: transport_mode connect_ip with tcp_transport connect_stream is not supported (use tcp_transport connect_ip for native TUN, or transport_mode connect_udp with connect_stream for TCP stream)")
+	if err := TM.RejectConnectIPHybridTransport(tm, tcpTransport); err != nil {
+		return err
 	}
 
 	if strings.TrimSpace(o.TCPMode) != "" {
