@@ -4,12 +4,6 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-var masqueHTTP3WakeSendOnReceiveReadEnabled = true
-
-func masqueWakeSendOnReceiveRead() bool {
-	return masqueHTTP3WakeSendOnReceiveReadEnabled
-}
-
 func masqueWakeSendAfterReceiveRead(str *Stream, n int) {
 	masqueWakeSendAfterBidiProgress(str, n)
 }
@@ -24,7 +18,7 @@ func masqueWakeSendAfterUploadWrite(str *Stream, n int) {
 
 // Prod wake: stream send only during saturated duplex (no S2C WINDOW poke on upload chunks).
 func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
-	if n <= 0 || !masqueWakeSendOnReceiveRead() || str == nil {
+	if n <= 0 || str == nil {
 		return
 	}
 	ds := str.datagramStream
@@ -47,7 +41,7 @@ func masqueWakeSendAfterUploadChunk(str *Stream, n int) {
 }
 
 func masqueWakeSendAfterBidiProgress(str *Stream, n int, active ...func(*quic.Stream) bool) {
-	if n <= 0 || !masqueWakeSendOnReceiveRead() || str == nil {
+	if n <= 0 || str == nil {
 		return
 	}
 	ds := str.datagramStream
