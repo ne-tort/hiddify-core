@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // Native H3 TUN recycle synth (W-IP-TUN IP-TUN-PR4). Mirrors Docker connect-ip-h3-tun phase order without OS tun0.
@@ -16,7 +18,6 @@ const (
 	tunRecycleUploadDur    = masque.ConnectIPNativeSynthBenchDur
 	tunRecycleDownloadDur  = masque.ConnectIPNativeSynthBenchDur
 	tunRecyclePreflightMin = 1.0 // Mbit/s — parity BENCH_CONNECT_IP_TUN_PROBE_MIN_MBIT
-	tunRecycleRacePause    = 2 * time.Second
 )
 
 // RunGATEConnectIPTunNativeH3PostUploadServerRecycleDownload mirrors Docker:

@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // Native H3 upload localize gates (W-IP-7 IP-TEST-09). In-proc server harness in harness.go.

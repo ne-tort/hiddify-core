@@ -325,6 +325,9 @@ func (h ipPlaneHost) connectIPPlaneStaleLocked() bool {
 	defer cancel()
 	var buf [4]byte
 	_, err := h.s.IPConn.ReadPacketWithContext(probeCtx, buf[:])
+	if errors.Is(err, connectip.ErrTransportUnset) {
+		return true
+	}
 	if err == nil {
 		return false
 	}

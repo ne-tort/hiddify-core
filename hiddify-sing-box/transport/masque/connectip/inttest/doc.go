@@ -14,7 +14,8 @@
 
 //
 
-// Run: go test ./transport/masque/connectip/inttest/ -count=1
+// Run default smoke: go test ./transport/masque/connectip/inttest/ -count=1 -timeout 120s
+// Heavy KPI benches: go test -tags masque_inttest_heavy ./transport/masque/connectip/inttest/ -timeout 600s
 
 package inttest
 

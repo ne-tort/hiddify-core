@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // Native H3 upload synth/localize gate runners (W-IP-9 IP-9-PR0).

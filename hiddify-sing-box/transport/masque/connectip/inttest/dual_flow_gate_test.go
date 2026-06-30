@@ -1,4 +1,4 @@
-//go:build with_gvisor
+//go:build masque_inttest_heavy && with_gvisor
 
 package inttest_test
 

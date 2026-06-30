@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/transport/masque/h3"
 	"github.com/yosida95/uritemplate/v3"
 )
 

@@ -1032,6 +1032,9 @@ func (c *Conn) writeToStream() error {
 }
 
 func (c *Conn) receiveProxiedDatagram(ctx context.Context) ([]byte, error) {
+	if !c.transportReady() {
+		return nil, ErrTransportUnset
+	}
 	if c.datagramCapsuleIngress != nil {
 		select {
 		case <-ctx.Done():

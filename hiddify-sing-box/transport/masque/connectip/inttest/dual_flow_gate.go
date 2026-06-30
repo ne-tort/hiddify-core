@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // Dual-flow iperf -R gate (P0): control TCP 1-byte reply concurrent with bulk download on one netstack.

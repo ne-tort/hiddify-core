@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // LIFE-5: bidi cleanup after upload→download→close (native packet plane, CM relay).

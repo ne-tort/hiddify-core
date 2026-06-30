@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest_test
 
 import (

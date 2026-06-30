@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest_test
 
 // Prod-stack synth: LaunchMasqueStack (docker server) + CoreClientFactory H3 + SOCKS/CM.

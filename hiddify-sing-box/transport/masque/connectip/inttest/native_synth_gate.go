@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // Native H3 CONNECT-IP GATE synth runners (W-IP-8 IP-8-PR0). Harness in harness.go + masque native synth helpers.

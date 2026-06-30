@@ -5,5 +5,6 @@
 // GATE tests remain in transport/masque/ (connect_stream_synth_kpi_*, TestGATEDocker*, TestGATEH3*).
 // H3 wake/injector localize tests remain in transport/masque/connect_stream_localize_test.go.
 //
-// Run: go test ./transport/masque/stream/inttest/ -count=1
+// Run default smoke: go test ./transport/masque/stream/inttest/ -count=1 -timeout 60s
+// Heavy KPI benches: go test -tags masque_inttest_heavy ./transport/masque/stream/inttest/ -timeout 600s
 package inttest

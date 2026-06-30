@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // TUN CM synth (W-IP-TUN IP-TUN-PR6): upload→server restart→fresh session→probe→download

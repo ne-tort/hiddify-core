@@ -393,7 +393,7 @@ func TestConnectIPServerWriteErrorClass(t *testing.T) {
 // datagram the client may WritePacket (datagram ceiling) is accepted by server ReadPacket.
 func TestConnectIPClientWriteCeilingServerReadPacketParity(t *testing.T) {
 	t.Parallel()
-	ceiling := cip.DatagramCeilingMax()
+	ceiling := cip.DefaultDatagramCeilingMax
 	maxDatagram := cip.MaxIPv4Datagram(ceiling)
 	wireSlack := cip.DefaultDatagramCeilingMax - cip.MaxIPv4WireBytes
 	if maxDatagram+wireSlack != ceiling {

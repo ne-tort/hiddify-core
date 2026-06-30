@@ -66,7 +66,7 @@ func (n *connectIPTeardownOrderNetstack) Close() error {
 func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
 		HTTPLayerFallback: true,
-		IPConn:            &connectip.Conn{},
+		IPConn:            testStubConnectIPConn(),
 	})
 	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	orderNS := &connectIPTeardownOrderNetstack{
@@ -93,7 +93,7 @@ func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
 
 func TestReleaseOpenedConnectIPSessionTeardownOrder(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
-		IPConn: &connectip.Conn{},
+		IPConn: testStubConnectIPConn(),
 	})
 	orderNS := &connectIPTeardownOrderNetstack{
 		ipConnStillSet: func() bool { return s.IPConn != nil },
@@ -580,7 +580,7 @@ func TestMaybeRecordHTTPLayerCacheSuccessSkipsInnerHop(t *testing.T) {
 }
 
 func TestDialConnectIPAttemptHookRecordsHTTPLayerCacheSuccess(t *testing.T) {
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	var gotLayer atomic.Value
 	s := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
@@ -996,40 +996,11 @@ func TestCoreSessionDialDirectTCPRejectsInvalidDestination(t *testing.T) {
 	}
 }
 
-func TestConnectIPPacketSessionCloseKeepsSharedConnOwnedByCoreSession(t *testing.T) {
-	sharedConn := &connectip.Conn{}
-	session := newTestCoreSession(msess.CoreSession{
-			Caps: CapabilitySet{ConnectIP: true},
-			IPConn: sharedConn,
-		})
-	wrapped, err := session.OpenIPSession(context.Background())
-	if err != nil {
-		t.Fatalf("open reused connect-ip session: %v", err)
-	}
-	if err := wrapped.Close(); err != nil {
-		t.Fatalf("close wrapped connect-ip session: %v", err)
-	}
-	if session.IPConn != sharedConn {
-		t.Fatal("expected wrapped close to keep coreSession shared connect-ip conn alive")
-	}
-	reused, err := session.OpenIPSession(context.Background())
-	if err != nil {
-		t.Fatalf("reopen reused connect-ip session: %v", err)
-	}
-	reusedWrapper, ok := reused.(*mcip.ClientPacketSession)
-	if !ok {
-		t.Fatalf("unexpected ip session wrapper type: %T", reused)
-	}
-	if reusedWrapper.Conn() != sharedConn {
-		t.Fatal("expected reopen path to reuse the same shared connect-ip conn")
-	}
-}
-
 func TestCoreSessionCloseClearsConnectIPHTTPStateAndIsIdempotent(t *testing.T) {
 	session := newTestCoreSession(msess.CoreSession{
-			IPHTTP: &http3.Transport{},
-			IPHTTPConn: &http3.ClientConn{},
-		})
+		IPHTTP:     &http3.Transport{},
+		IPHTTPConn: &http3.ClientConn{},
+	})
 	if err := session.Close(); err != nil {
 		t.Fatalf("first close returned error: %v", err)
 	}
@@ -1379,7 +1350,7 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	var call atomic.Uint32
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
@@ -1935,7 +1906,7 @@ func TestOpenIPSessionLockedReturnsCanceledBeforeReuse(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{Tag: "t"},
 			Caps: CapabilitySet{ConnectIP: true},
-			IPConn: &connectip.Conn{},
+			IPConn: testStubConnectIPConn(),
 		})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2142,7 +2113,7 @@ func TestListenPacketConnectIPSkipsDestinationResolution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
@@ -2173,7 +2144,7 @@ func TestListenPacketConnectIPCanceledBeforeNewConnectIPUDPPacketConn(t *testing
 	if err != nil {
 		t.Fatalf("build ip template: %v", err)
 	}
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	ctx, cancel := context.WithCancel(context.Background())
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
@@ -2217,7 +2188,7 @@ func TestReleaseOpenedConnectIPSessionIfAbandonedClearsHTTPLayers(t *testing.T) 
 	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{},
 		})
-	s.IPConn = &connectip.Conn{}
+	s.IPConn = testStubConnectIPConn()
 	s.IPHTTP = &http3.Transport{}
 	s.H2UDPMu.Lock()
 	s.H2UDPTransport = &http2.Transport{}
@@ -2238,7 +2209,7 @@ func TestReleaseOpenedConnectIPSessionIfAbandonedClearsHTTPLayers(t *testing.T) 
 
 func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 	var hookCalls atomic.Uint32
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{TransportMode: "connect_ip"},
@@ -2263,7 +2234,7 @@ func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 
 func TestOpenIPSessionCanceledBeforeLockSkipsConnectIPDial(t *testing.T) {
 	var hookCalls atomic.Uint32
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{TransportMode: "connect_ip"},

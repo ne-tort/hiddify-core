@@ -28,6 +28,8 @@ const (
 	NativeSynthBenchDur    = 2 * time.Second
 	// NativeProfileLocalIPv4 matches generic-server AssignAddresses (198.18.0.1/32).
 	NativeProfileLocalIPv4 = "198.18.0.1"
+	// tunRecycleRacePause is shared by smoke lifecycle/bidi gates and heavy recycle synth.
+	tunRecycleRacePause = 2 * time.Second
 )
 
 // NativeH3ClientOptions builds ClientOptions for native connect_ip TCP leg on in-proc H3 server.

@@ -22,7 +22,7 @@ import (
 // | dial_tcp netstack factory error   | connectip/dial_tcp.go:71     | yes     |
 // | listenPacket / dial_tcp success   | consumer attaches PacketConn | no      |
 func TestConnectIPAbandonExitPathMatrix(t *testing.T) {
-	okConn := &connectip.Conn{}
+	okConn := testStubConnectIPConn()
 
 	t.Run("listenPacket_cancel_after_open", func(t *testing.T) {
 		templateIP, err := uritemplate.New("https://example.com/masque/ip")

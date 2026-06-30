@@ -1,3 +1,5 @@
+//go:build masque_inttest_heavy
+
 package inttest
 
 // PERF-1b bulk/sync synth gate: native H3 upload→download on same session (DialContext reference).

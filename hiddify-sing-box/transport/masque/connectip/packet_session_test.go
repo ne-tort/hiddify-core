@@ -15,7 +15,7 @@ func TestClientPacketSessionDatagramCeiling(t *testing.T) {
 }
 
 func TestClientPacketSessionCloseKeepsSharedConn(t *testing.T) {
-	sharedConn := &connectip.Conn{}
+	sharedConn := connectip.NewStubIngressConn()
 	session := NewClientPacketSession(ClientPacketSessionConfig{Conn: sharedConn})
 	if err := session.Close(); err != nil {
 		t.Fatalf("close wrapped connect-ip session: %v", err)
@@ -26,7 +26,7 @@ func TestClientPacketSessionCloseKeepsSharedConn(t *testing.T) {
 }
 
 func TestSessionBootstrapFromClientPacketSession(t *testing.T) {
-	sharedConn := &connectip.Conn{}
+	sharedConn := connectip.NewStubIngressConn()
 	session := NewClientPacketSession(ClientPacketSessionConfig{
 		Conn:            sharedConn,
 		DatagramCeiling: 1400,
@@ -46,7 +46,7 @@ func TestSessionBootstrapFromClientPacketSession(t *testing.T) {
 }
 
 func TestUDPBridgeConfigFromClientPacketSession(t *testing.T) {
-	sharedConn := &connectip.Conn{}
+	sharedConn := connectip.NewStubIngressConn()
 	pmtu := NewUDPPMTUState(1200, 512, 1400)
 	session := NewClientPacketSession(ClientPacketSessionConfig{
 		Conn:              sharedConn,
