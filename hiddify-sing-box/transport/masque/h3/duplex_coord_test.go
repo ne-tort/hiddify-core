@@ -12,7 +12,7 @@ func TestBidiDuplexCoordDisabled(t *testing.T) {
 
 func TestTunnelConnPipeUploadUsesDirectWrite(t *testing.T) {
 	var wrote int
-	c := NewTunnelConn(TunnelConnParams{
+	c := NewPipeUploadTunnelConn(PipeUploadTunnelConnParams{
 		Writer: &chunkRecordWriter{fn: func(p []byte) (int, error) {
 			wrote += len(p)
 			return len(p), nil

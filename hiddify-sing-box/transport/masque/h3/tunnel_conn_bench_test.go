@@ -14,7 +14,7 @@ const (
 )
 
 func runTunnelConnWriteToDownloadOnce(data []byte) (int64, error) {
-	c := NewTunnelConn(TunnelConnParams{
+	c := NewPipeUploadTunnelConn(PipeUploadTunnelConnParams{
 		Reader: io.NopCloser(bytes.NewReader(data)),
 		Writer: nopWriteCloser{io.Discard},
 		Local:  &net.TCPAddr{},

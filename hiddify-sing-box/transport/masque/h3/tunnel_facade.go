@@ -25,12 +25,8 @@ func (c *TunnelConn) TunnelPolicySnapshot() TunnelPolicySnapshot {
 	if c == nil {
 		return TunnelPolicySnapshot{Mode: CurrentConnectStreamMode()}
 	}
-	mode := ConnectStreamModeSingleBidi
-	if c.h3 == nil {
-		mode = ConnectStreamModeSingleBidi
-	}
 	return TunnelPolicySnapshot{
-		Mode:            mode,
+		Mode:            ConnectStreamModeSingleBidi,
 		Role:            c.connectStreamRole,
 		RouteBidiDuplex: c.routeBidiDuplex,
 		UsesH3Stream:    c.h3 != nil,

@@ -26,7 +26,7 @@ func TestTunnelConnFromConnectResponseRequiresHTTPStreamer(t *testing.T) {
 
 func TestTunnelConnWriteChunksH3Upload(t *testing.T) {
 	var got []int
-	c := NewTunnelConn(TunnelConnParams{
+	c := NewPipeUploadTunnelConn(PipeUploadTunnelConnParams{
 		Writer: &chunkRecordWriter{fn: func(p []byte) (int, error) {
 			got = append(got, len(p))
 			return len(p), nil
@@ -55,11 +55,11 @@ func TestTunnelConnWriteToBufferLen(t *testing.T) {
 	}
 }
 
-func TestTunnelConnWriteToFast(t *testing.T) {
+func TestPipeUploadTunnelConnWriteToFast(t *testing.T) {
 	t.Parallel()
 	const payload = 512 * 1024
 	data := make([]byte, payload)
-	c := NewTunnelConn(TunnelConnParams{
+	c := NewPipeUploadTunnelConn(PipeUploadTunnelConnParams{
 		Reader: io.NopCloser(bytes.NewReader(data)),
 		Writer: nopWriteCloser{io.Discard},
 		Local:  &net.TCPAddr{},

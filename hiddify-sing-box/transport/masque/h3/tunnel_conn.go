@@ -34,11 +34,8 @@ var tunnelWriteToBufPool = sync.Pool{
 }
 
 // TunnelConn is a full-duplex TCP shim over one HTTP/3 CONNECT stream (RFC 9114 tunneled TCP).
-// Prod: Read/Write on *http3.Stream (nil Body dial).
 type TunnelConn struct {
 	h3     h3ConnectStream
-	reader io.ReadCloser
-	writer io.WriteCloser
 	ctx    context.Context
 	cancel context.CancelFunc
 	local  net.Addr
@@ -68,8 +65,6 @@ type TunnelConn struct {
 // TunnelConnParams configures a TunnelConn over HTTP/3 CONNECT.
 type TunnelConnParams struct {
 	H3Stream     h3ConnectStream
-	Reader       io.ReadCloser
-	Writer       io.WriteCloser
 	Ctx          context.Context
 	Local        net.Addr
 	Remote       net.Addr
@@ -93,8 +88,6 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 	}
 	conn := &TunnelConn{
 		h3:                p.H3Stream,
-		reader:            p.Reader,
-		writer:            p.Writer,
 		ctx:               ctx,
 		cancel:            cancel,
 		local:             p.Local,
@@ -106,7 +99,7 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 	return conn
 }
 
-// UsesH3Stream reports whether upload/download share one *http3.Stream.
+// UsesH3Stream reports whether upload/download share one *http3.Stream (always true for TunnelConn).
 func (c *TunnelConn) UsesH3Stream() bool {
 	return c != nil && c.h3 != nil
 }
@@ -116,15 +109,13 @@ func (c *TunnelConn) stopDownloadDrain() {
 		return
 	}
 	// Unblock runDownloadDrain if it holds readMu in a blocking h3.Read (WriteTo needs the lock).
-	if c.h3 != nil {
-		_ = c.h3.SetReadDeadline(time.Now())
-	}
+	_ = c.h3.SetReadDeadline(time.Now())
 }
 
 // applyH3ReadDeadlineLocked sets or clears the h3 read deadline under readMu.
 // stopDownloadDrain pokes time.Now(); route WriteTo must clear it when readDL is open-ended.
 func (c *TunnelConn) applyH3ReadDeadlineLocked() {
-	if c == nil || c.h3 == nil {
+	if c == nil {
 		return
 	}
 	if !c.readDL.IsZero() {
@@ -135,7 +126,7 @@ func (c *TunnelConn) applyH3ReadDeadlineLocked() {
 }
 
 func (c *TunnelConn) maybeStartDownloadDrain() {
-	if c == nil || c.h3 == nil {
+	if c == nil {
 		return
 	}
 	c.drainOnce.Do(func() {
@@ -193,88 +184,39 @@ func (c *TunnelConn) runDownloadDrain() {
 }
 
 func (c *TunnelConn) Read(p []byte) (int, error) {
-	if c == nil {
-		return 0, io.EOF
-	}
-	if c.h3 != nil {
-		c.stopDownloadDrain()
-		c.activateDownloadReceiveOnRead()
-		c.readMu.Lock()
-		defer c.readMu.Unlock()
-		c.applyH3ReadDeadlineLocked()
-		if err := c.ctx.Err(); err != nil {
-			return 0, err
-		}
-		n, err := c.h3.Read(p)
-		if err != nil {
-			err = errors.Join(ErrTunnelConnFailed, err)
-		}
-		if n > 0 {
-			c.noteDownloadDeliveryWake(n)
-		}
-		return n, err
-	}
-	if c.reader == nil {
+	if c == nil || c.h3 == nil {
 		return 0, io.EOF
 	}
 	c.stopDownloadDrain()
+	c.activateDownloadReceiveOnRead()
 	c.readMu.Lock()
-	dl := c.readDL
-	c.readMu.Unlock()
-	if !dl.IsZero() {
-		if d, ok := c.reader.(interface{ SetReadDeadline(time.Time) error }); ok {
-			_ = d.SetReadDeadline(dl)
-		} else if time.Now().After(dl) {
-			return 0, ErrDeadlineUnsupported
-		}
-	}
+	defer c.readMu.Unlock()
+	c.applyH3ReadDeadlineLocked()
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	n, err := c.reader.Read(p)
+	n, err := c.h3.Read(p)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
+	}
+	if n > 0 {
+		c.noteDownloadDeliveryWake(n)
 	}
 	return n, err
 }
 
 func (c *TunnelConn) Write(p []byte) (int, error) {
-	if c == nil {
+	if c == nil || c.h3 == nil {
 		return 0, io.ErrClosedPipe
 	}
 	if len(p) > 0 {
 		atomic.StoreInt32(&c.uploadTrafficStarted, 1)
-		if c.h3 != nil {
-			if qs := c.h3.QUICStream(); qs != nil {
-				quic.MasqueSetConcurrentUploadPending(qs, true)
-			}
+		if qs := c.h3.QUICStream(); qs != nil {
+			quic.MasqueSetConcurrentUploadPending(qs, true)
 		}
 	}
-	if c.h3 != nil {
-		c.maybeStartDownloadDrainOnUpload()
-		n, err := c.writeH3Thin(p)
-		if err != nil {
-			err = errors.Join(ErrTunnelConnFailed, err)
-		}
-		return n, err
-	}
-	if c.writer == nil {
-		return 0, io.ErrClosedPipe
-	}
-	c.writeMu.Lock()
-	dl := c.writeDL
-	c.writeMu.Unlock()
-	if !dl.IsZero() {
-		if d, ok := c.writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
-			_ = d.SetWriteDeadline(dl)
-		} else if time.Now().After(dl) {
-			return 0, ErrDeadlineUnsupported
-		}
-	}
-	if err := c.ctx.Err(); err != nil {
-		return 0, err
-	}
-	n, err := writeChunked(c.writer, p, H3UploadFlushPolicy().ChunkBytes)
+	c.maybeStartDownloadDrainOnUpload()
+	n, err := c.writeH3Thin(p)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
@@ -282,18 +224,11 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 }
 
 func (c *TunnelConn) ReadFrom(r io.Reader) (int64, error) {
-	if c.h3 != nil {
-		c.maybeStartDownloadDrainOnUpload()
-		n, err := c.readFromH3Thin(r)
-		if err != nil {
-			err = errors.Join(ErrTunnelConnFailed, err)
-		}
-		return n, err
-	}
-	if c.writer == nil {
+	if c == nil || c.h3 == nil {
 		return 0, io.ErrClosedPipe
 	}
-	n, err := copyChunked(c.writer, r, H3UploadFlushPolicy().ChunkBytes)
+	c.maybeStartDownloadDrainOnUpload()
+	n, err := c.readFromH3Thin(r)
 	if err != nil {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
@@ -301,17 +236,14 @@ func (c *TunnelConn) ReadFrom(r io.Reader) (int64, error) {
 }
 
 func (c *TunnelConn) WriteTo(w io.Writer) (int64, error) {
-	if c.h3 != nil {
-		n, err := c.writeH3DownloadToThin(w)
-		if err != nil {
-			err = errors.Join(ErrTunnelConnFailed, err)
-		}
-		return n, err
-	}
-	if c.reader == nil {
+	if c == nil || c.h3 == nil {
 		return 0, io.EOF
 	}
-	return io.Copy(w, c.reader)
+	n, err := c.writeH3DownloadToThin(w)
+	if err != nil {
+		err = errors.Join(ErrTunnelConnFailed, err)
+	}
+	return n, err
 }
 
 // writeH3Thin writes upload bytes directly to the CONNECT stream (Invisv parity).
@@ -365,7 +297,7 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 				_ = f.FlushMasqueCoalesce()
 			}
 		}
-		if n > 0 && !c.DownloadActive() && c.routeBidiDuplex && c.h3 != nil {
+		if n > 0 && !c.DownloadActive() && c.routeBidiDuplex {
 			if qs := c.h3.QUICStream(); qs != nil {
 				quic.MasqueWakeStreamSend(qs)
 			}
@@ -398,7 +330,7 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 			if nw > 0 {
 				c.noteUploadTrafficStarted()
 				total += int64(nw)
-				if c.routeBidiDuplex && c.DownloadActive() && c.h3 != nil {
+				if c.routeBidiDuplex && c.DownloadActive() {
 					atomic.StoreInt32(&c.duplexUploadStarted, 1)
 					if qs := c.h3.QUICStream(); qs != nil {
 						quic.MasqueSetBidiDuplexUploadStarted(qs, true)
@@ -493,6 +425,9 @@ func (r *tunnelH3Reader) Read(p []byte) (int, error) {
 }
 
 func (c *TunnelConn) Close() error {
+	if c == nil {
+		return nil
+	}
 	c.stopDownloadDrain()
 	c.cancel()
 	var err error
@@ -505,12 +440,6 @@ func (c *TunnelConn) Close() error {
 		if closeErr := c.h3.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
-	}
-	if c.reader != nil {
-		err = errors.Join(err, c.reader.Close())
-	}
-	if c.writer != nil {
-		err = errors.Join(err, c.writer.Close())
 	}
 	return err
 }
@@ -536,27 +465,27 @@ func (c *TunnelConn) SetDeadline(t time.Time) error {
 }
 
 func (c *TunnelConn) SetReadDeadline(t time.Time) error {
+	if c == nil {
+		return nil
+	}
 	c.readMu.Lock()
 	c.readDL = t
 	c.readMu.Unlock()
 	if c.h3 != nil {
 		return c.h3.SetReadDeadline(t)
 	}
-	if d, ok := c.reader.(interface{ SetReadDeadline(time.Time) error }); ok {
-		return d.SetReadDeadline(t)
-	}
 	return ErrDeadlineUnsupported
 }
 
 func (c *TunnelConn) SetWriteDeadline(t time.Time) error {
+	if c == nil {
+		return nil
+	}
 	c.writeMu.Lock()
 	c.writeDL = t
 	c.writeMu.Unlock()
 	if c.h3 != nil {
 		return c.h3.SetWriteDeadline(t)
-	}
-	if d, ok := c.writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		return d.SetWriteDeadline(t)
 	}
 	return ErrDeadlineUnsupported
 }
