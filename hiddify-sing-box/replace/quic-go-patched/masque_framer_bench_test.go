@@ -34,20 +34,14 @@ func (s *benchStreamFrameGetter) popStreamFrame(maxBytes protocol.ByteCount, v p
 	return ackhandler.StreamFrame{Frame: f}, nil, true
 }
 
-func newFramerAppendBidiContentionBenchFramer(b *testing.B) *framer {
+func newFramerAppendMultiStreamBenchFramer(b *testing.B) *framer {
 	b.Helper()
-	b.Setenv(envBidiSendBoost, "1")
-	b.Setenv("MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES", "4")
-
 	fr := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
 	const (
-		boostID  protocol.StreamID = 4
-		firstID  protocol.StreamID = 8
-		numPeers                 = 7
+		firstID  protocol.StreamID = 4
+		numPeers                 = 8
 	)
 	chunk := []byte("xy")
-	fr.setBidiSendBoost(boostID, true)
-	fr.AddActiveStream(boostID, &benchStreamFrameGetter{id: boostID, data: chunk})
 	for i := range numPeers {
 		id := firstID + protocol.StreamID(i*4)
 		fr.AddActiveStream(id, &benchStreamFrameGetter{id: id, data: chunk})
@@ -55,10 +49,10 @@ func newFramerAppendBidiContentionBenchFramer(b *testing.B) *framer {
 	return fr
 }
 
-// BenchmarkFramerAppendBidiContention (S28/S105): CPU hotspot at framer.Append under
-// download-boost contention with multiple competing streams.
-func BenchmarkFramerAppendBidiContention(b *testing.B) {
-	fr := newFramerAppendBidiContentionBenchFramer(b)
+// BenchmarkFramerAppendMultiStreamContention (S28/S105): CPU hotspot at framer.Append under
+// fair round-robin with multiple competing streams (prod boost-off path).
+func BenchmarkFramerAppendMultiStreamContention(b *testing.B) {
+	fr := newFramerAppendMultiStreamBenchFramer(b)
 	now := monotime.Now()
 
 	b.ReportAllocs()
@@ -68,15 +62,15 @@ func BenchmarkFramerAppendBidiContention(b *testing.B) {
 	}
 }
 
-// TestMasqueFramerAppendBidiContentionCPUBudget (S105 gate): framer.Append stays within
-// a generous ns/op ceiling under bidi boost contention so scheduling regressions surface in CI.
-func TestMasqueFramerAppendBidiContentionCPUBudget(t *testing.T) {
-	result := testing.Benchmark(BenchmarkFramerAppendBidiContention)
+// TestMasqueFramerAppendMultiStreamCPUBudget (S105 gate): framer.Append stays within
+// a generous ns/op ceiling under multi-stream contention so scheduling regressions surface in CI.
+func TestMasqueFramerAppendMultiStreamCPUBudget(t *testing.T) {
+	result := testing.Benchmark(BenchmarkFramerAppendMultiStreamContention)
 	if result.N == 0 {
 		t.Fatal("benchmark produced zero iterations")
 	}
 	const maxNsPerOp = 50_000.0
 	if float64(result.NsPerOp()) > maxNsPerOp {
-		t.Fatalf("framer.Append bidi contention CPU budget: %.0f ns/op > %.0f ns/op", float64(result.NsPerOp()), maxNsPerOp)
+		t.Fatalf("framer.Append multi-stream CPU budget: %.0f ns/op > %.0f ns/op", float64(result.NsPerOp()), maxNsPerOp)
 	}
 }

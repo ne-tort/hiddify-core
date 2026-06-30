@@ -19,6 +19,12 @@ func TestMasqueBidiSendBoostEnabledHardcodedOff(t *testing.T) {
 	}
 }
 
+func TestMasqueBidiSendBoostMaxFramesConst(t *testing.T) {
+	if got := masqueBidiSendBoostMaxFramesPerPacket(); got != defaultBidiSendBoostMaxFrames {
+		t.Fatalf("masqueBidiSendBoostMaxFramesPerPacket() = %d, want %d", got, defaultBidiSendBoostMaxFrames)
+	}
+}
+
 func TestMasqueSetBidiDownloadActiveNilSafe(t *testing.T) {
 	MasqueSetBidiDownloadActive(nil, true)
 	MasqueSetBidiDownloadActive(nil, false)
@@ -83,225 +89,9 @@ func TestFramerControlFrameRenotify(t *testing.T) {
 	}
 }
 
-func TestFramerBidiSendBoostQueuesFront(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		boostID protocol.StreamID = 4
-		otherID protocol.StreamID = 8
-	)
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(otherID, nil)
-	framer.AddActiveStream(boostID, nil)
-
-	if framer.streamQueue.PeekFront() != boostID {
-		t.Fatalf("boosted stream must be at queue front, got %d want %d", framer.streamQueue.PeekFront(), boostID)
-	}
-	id := framer.streamQueue.PopFront()
-	if id != boostID {
-		t.Fatalf("pop front = %d want %d", id, boostID)
-	}
-}
-
-// TestFramerBidiSendBoostRePromoteOnDuplicateAdd (REF1-2): duplicate onHasStreamData on an
-// already-active download-boost stream must re-promote to queue front between 64 KiB chunks.
-func TestFramerBidiSendBoostRePromoteOnDuplicateAdd(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		boostID protocol.StreamID = 4
-		otherID protocol.StreamID = 8
-	)
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(boostID, nil)
-	framer.AddActiveStream(otherID, nil)
-	if framer.streamQueue.PeekFront() != boostID {
-		t.Fatalf("after first add front=%d want %d", framer.streamQueue.PeekFront(), boostID)
-	}
-	_ = framer.streamQueue.PopFront() // boost dequeued; still in activeStreams
-	if !framer.AddActiveStream(boostID, nil) {
-		t.Fatal("duplicate add on boosted stream must report repromoted")
-	}
-	if framer.streamQueue.PeekFront() != boostID {
-		t.Fatalf("duplicate add must re-enqueue boost to front, got %d want %d",
-			framer.streamQueue.PeekFront(), boostID)
-	}
-}
-
-func TestFramerBidiSendBoostRequeueFront(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	ctrl := gomock.NewController(t)
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const boostID protocol.StreamID = 12
-	f := &wire.StreamFrame{StreamID: boostID, Data: []byte{1}, DataLenPresent: true}
-	str := NewMockStreamFrameGetter(ctrl)
-	str.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: f}, nil, true)
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(boostID, str)
-
-	_, _, boosted, hasMore := framer.getNextStreamFrame(protocol.MaxByteCount, protocol.Version1)
-	if !boosted || !hasMore {
-		t.Fatalf("expected boosted stream with more data, boosted=%v hasMore=%v", boosted, hasMore)
-	}
-	if framer.streamQueue.PeekFront() != boostID {
-		t.Fatalf("boosted stream must requeue to front, got %d", framer.streamQueue.PeekFront())
-	}
-}
-
-// TestFramerBidiBoostWinsUnderContention (S11): with multiple active streams, download-boost
-// wins the first Append dequeue even when non-boost streams were queued first.
-func TestFramerBidiBoostWinsUnderContention(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	ctrl := gomock.NewController(t)
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		firstID  protocol.StreamID = 4
-		secondID protocol.StreamID = 8
-		boostID  protocol.StreamID = 12
-	)
-	makeFrame := func(id protocol.StreamID, b byte) *wire.StreamFrame {
-		return &wire.StreamFrame{StreamID: id, Data: []byte{b}, DataLenPresent: true}
-	}
-	first := NewMockStreamFrameGetter(ctrl)
-	first.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(firstID, 'a')}, nil, false).AnyTimes()
-	second := NewMockStreamFrameGetter(ctrl)
-	second.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(secondID, 'b')}, nil, false).AnyTimes()
-	boost := NewMockStreamFrameGetter(ctrl)
-	boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: makeFrame(boostID, 'z')}, nil, false).AnyTimes()
-
-	framer.AddActiveStream(firstID, first)
-	framer.AddActiveStream(secondID, second)
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(boostID, boost)
-
-	_, streamFrames, _ := framer.Append(nil, nil, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
-	if len(streamFrames) == 0 {
-		t.Fatal("expected at least one STREAM frame")
-	}
-	if streamFrames[0].Frame.StreamID != boostID {
-		t.Fatalf("boosted stream must win under contention, first=%d want %d", streamFrames[0].Frame.StreamID, boostID)
-	}
-
-	t.Run("disabled_fair_rr", func(t *testing.T) {
-		t.Setenv(envBidiSendBoost, "0")
-		framer2 := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-		framer2.AddActiveStream(firstID, first)
-		framer2.AddActiveStream(secondID, second)
-		framer2.setBidiSendBoost(boostID, true)
-		framer2.AddActiveStream(boostID, boost)
-		_, frames, _ := framer2.Append(nil, nil, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
-		if len(frames) == 0 {
-			t.Fatal("expected at least one STREAM frame")
-		}
-		if frames[0].Frame.StreamID != firstID {
-			t.Fatalf("with boost disabled, first queued stream must win, got %d want %d", frames[0].Frame.StreamID, firstID)
-		}
-	})
-}
-
-// TestFramerBidiBoostMultiFramePerPacket (S12): boosted stream may pack multiple STREAM
-// frames per packet before round-robin rotates to competing streams.
-func TestFramerBidiBoostMultiFramePerPacket(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	t.Setenv("MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES", "3")
-	ctrl := gomock.NewController(t)
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		boostID protocol.StreamID = 4
-		otherID protocol.StreamID = 8
-	)
-	smallFrame := func(id protocol.StreamID, b byte) *wire.StreamFrame {
-		return &wire.StreamFrame{StreamID: id, Data: []byte{b}, DataLenPresent: true}
-	}
-	boost := NewMockStreamFrameGetter(ctrl)
-	gomock.InOrder(
-		boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(boostID, 1)}, nil, true),
-		boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(boostID, 2)}, nil, true),
-		boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(boostID, 3)}, nil, false),
-	)
-	other := NewMockStreamFrameGetter(ctrl)
-	other.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(otherID, 'o')}, nil, false).AnyTimes()
-
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(otherID, other)
-	framer.AddActiveStream(boostID, boost)
-
-	_, streamFrames, _ := framer.Append(nil, nil, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
-	if len(streamFrames) < 4 {
-		t.Fatalf("expected boosted triple-pack plus competing stream, got %d frames", len(streamFrames))
-	}
-	for i := 0; i < 3; i++ {
-		if streamFrames[i].Frame.StreamID != boostID {
-			t.Fatalf("frame %d stream=%d want boosted %d", i, streamFrames[i].Frame.StreamID, boostID)
-		}
-	}
-	if streamFrames[3].Frame.StreamID != otherID {
-		t.Fatalf("fourth frame must rotate to competing stream, got %d want %d", streamFrames[3].Frame.StreamID, otherID)
-	}
-}
-
-// TestMasqueBidiSendBoostMaxFramesEnv (S24): MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES caps boosted
-// multi-frame packing per packet.
-func TestMasqueBidiSendBoostMaxFramesEnv(t *testing.T) {
-	cases := []struct {
-		env  string
-		want int
-	}{
-		{"", 256},
-		{"4", 4},
-		{"0", 256},
-		{"bad", 256},
-	}
-	for _, tc := range cases {
-		t.Run(tc.env, func(t *testing.T) {
-			t.Setenv("MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES", tc.env)
-			if got := masqueBidiSendBoostMaxFramesPerPacket(); got != tc.want {
-				t.Fatalf("masqueBidiSendBoostMaxFramesPerPacket() = %d, want %d", got, tc.want)
-			}
-		})
-	}
-
-	t.Setenv(envBidiSendBoost, "1")
-	t.Setenv("MASQUE_QUIC_BIDI_SEND_BOOST_MAX_FRAMES", "2")
-	ctrl := gomock.NewController(t)
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		boostID protocol.StreamID = 4
-		otherID protocol.StreamID = 8
-	)
-	smallFrame := func(id protocol.StreamID, b byte) *wire.StreamFrame {
-		return &wire.StreamFrame{StreamID: id, Data: []byte{b}, DataLenPresent: true}
-	}
-	boost := NewMockStreamFrameGetter(ctrl)
-	gomock.InOrder(
-		boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(boostID, 1)}, nil, true),
-		boost.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(boostID, 2)}, nil, false),
-	)
-	other := NewMockStreamFrameGetter(ctrl)
-	other.EXPECT().popStreamFrame(gomock.Any(), protocol.Version1).Return(ackhandler.StreamFrame{Frame: smallFrame(otherID, 'o')}, nil, false).AnyTimes()
-
-	framer.setBidiSendBoost(boostID, true)
-	framer.AddActiveStream(otherID, other)
-	framer.AddActiveStream(boostID, boost)
-
-	_, streamFrames, _ := framer.Append(nil, nil, protocol.MaxByteCount, monotime.Now(), protocol.Version1)
-	if len(streamFrames) != 3 {
-		t.Fatalf("expected max-frames=2 boosted pair plus competing stream, got %d frames", len(streamFrames))
-	}
-	for i := 0; i < 2; i++ {
-		if streamFrames[i].Frame.StreamID != boostID {
-			t.Fatalf("frame %d stream=%d want boosted %d", i, streamFrames[i].Frame.StreamID, boostID)
-		}
-	}
-	if streamFrames[2].Frame.StreamID != otherID {
-		t.Fatalf("third frame must rotate to competing stream, got %d want %d", streamFrames[2].Frame.StreamID, otherID)
-	}
-}
-
-// TestFramerBidiSendBoostDisabledFairScheduling (S25): with boost disabled, queued order wins
-// even when a later stream is marked download-active.
+// TestFramerBidiSendBoostDisabledFairScheduling (S25): prod boost off — queued order wins
+// even when a later stream is marked in the framer boost map.
 func TestFramerBidiSendBoostDisabledFairScheduling(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "0")
 	ctrl := gomock.NewController(t)
 	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
 	const (
@@ -331,7 +121,6 @@ func TestFramerBidiSendBoostDisabledFairScheduling(t *testing.T) {
 
 // TestFramerHandle0RTTRejectionClearsBidiSendBoost (S56): 0-RTT rejection must drop boost state.
 func TestFramerHandle0RTTRejectionClearsBidiSendBoost(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
 	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
 	framer.setBidiSendBoost(4, true)
 	framer.setBidiSendBoost(8, true)
@@ -367,25 +156,7 @@ func TestFramerAppendSkipsOrphanStreamQueueID(t *testing.T) {
 	}
 }
 
-// TestMasqueBidiBoostLateActivationQueueOrder (S58): marking download-active after enqueue
-// promotes the stream to the queue front.
-func TestMasqueBidiBoostLateActivationQueueOrder(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	const (
-		firstID protocol.StreamID = 4
-		lateID  protocol.StreamID = 8
-	)
-	framer.AddActiveStream(firstID, nil)
-	framer.AddActiveStream(lateID, nil)
-	framer.setBidiSendBoost(lateID, true)
-
-	if framer.streamQueue.PeekFront() != lateID {
-		t.Fatalf("late boost must promote to front, got %d want %d", framer.streamQueue.PeekFront(), lateID)
-	}
-}
-
-// TestMasqueSetBidiSendBoostTriggersScheduleSending (S59): active boost must wake send loop.
+// TestMasqueSetBidiSendBoostTriggersScheduleSending (S59): framer boost bookkeeping still wakes send loop.
 func TestMasqueSetBidiSendBoostTriggersScheduleSending(t *testing.T) {
 	c := &Conn{
 		sendingScheduled: make(chan struct{}, 1),
@@ -401,53 +172,5 @@ func TestMasqueSetBidiSendBoostTriggersScheduleSending(t *testing.T) {
 	select {
 	case <-c.sendingScheduled:
 	default:
-	}
-}
-
-type testControlFrameGetter struct {
-	id   protocol.StreamID
-	done bool
-}
-
-func (g *testControlFrameGetter) getControlFrame(monotime.Time) (ackhandler.Frame, bool, bool) {
-	if g.done {
-		return ackhandler.Frame{}, false, false
-	}
-	g.done = true
-	return ackhandler.Frame{
-		Frame: &wire.MaxStreamDataFrame{
-			StreamID:          g.id,
-			MaximumStreamData: 1 << 20,
-		},
-	}, true, false
-}
-
-// TestFramerBidiBoostControlFramesFirst (REF1-2): under packet budget, boosted stream
-// MAX_STREAM_DATA must pack before non-boost control frames.
-func TestFramerBidiBoostControlFramesFirst(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "1")
-	const (
-		boostID protocol.StreamID = 4
-		otherID protocol.StreamID = 8
-	)
-	framer := newFramer(flowcontrol.NewConnectionFlowController(0, 0, nil, nil, nil))
-	framer.setBidiSendBoost(boostID, true)
-	framer.controlFrameMutex.Lock()
-	framer.streamsWithControlFrames[otherID] = &testControlFrameGetter{id: otherID}
-	framer.streamsWithControlFrames[boostID] = &testControlFrameGetter{id: boostID}
-	framer.controlFrameMutex.Unlock()
-
-	now := monotime.Now()
-	maxLen := protocol.ByteCount(maxStreamControlFrameSize + 1)
-	frames, _ := framer.appendControlFrames(nil, maxLen, now, protocol.Version1, masqueControlFrameAll, nil)
-	if len(frames) != 1 {
-		t.Fatalf("expected 1 control frame, got %d", len(frames))
-	}
-	msd, ok := frames[0].Frame.(*wire.MaxStreamDataFrame)
-	if !ok {
-		t.Fatalf("expected MaxStreamDataFrame, got %T", frames[0].Frame)
-	}
-	if msd.StreamID != boostID {
-		t.Fatalf("boosted stream must win control frame slot, got %d want %d", msd.StreamID, boostID)
 	}
 }

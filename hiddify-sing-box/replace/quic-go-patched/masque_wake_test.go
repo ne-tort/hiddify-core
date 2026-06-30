@@ -166,7 +166,6 @@ func TestMasquePokeDownloadReceiveWindowExportNilSafe(t *testing.T) {
 // TestMasqueFirstStreamControlFrameQueueWakesDownloadActive (REF1-2): first MAX_STREAM_DATA
 // queue from receive Read must MasqueWakeBidiDuplex when download-active — not only renotify.
 func TestMasqueFirstStreamControlFrameQueueWakesDownloadActive(t *testing.T) {
-	t.Setenv(envBidiSendBoost, "0")
 	ctrl := gomock.NewController(t)
 	mockSender := NewMockStreamSender(ctrl)
 	mockSender.EXPECT().onHasStreamControlFrame(gomock.Any(), gomock.Any()).AnyTimes()
@@ -225,7 +224,6 @@ func TestMasqueWakeOnControlFrameRenotify(t *testing.T) {
 	st := newStream(ctx, 4, mockSender, fc, false)
 	MasqueSetBidiDownloadActive(st, true)
 
-	t.Setenv(envBidiSendBoost, "0")
 	streamWakes := 0
 	restore := SetMasqueWakeStreamSendHook(func() { streamWakes++ })
 	defer restore()

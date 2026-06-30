@@ -205,8 +205,8 @@ func runMasqueDuplexDownloadBenchOpts(
 
 func runMasqueDuplexDownloadBenchConfig(t *testing.T, cfg *Config, boostEnv string, mode masqueDuplexDrainMode, clientDownloadActive bool, disableFastWindow bool) masqueDuplexBenchResult {
 	t.Helper()
+	_ = boostEnv // prod: MasqueBidiSendBoostEnabled hardcoded off; kept for bench API stability
 	masqueSimnetTLS()
-	t.Setenv(envBidiSendBoost, boostEnv)
 	if disableFastWindow {
 		t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
 	}
