@@ -189,7 +189,7 @@ func drainMasqueSimnetDownload(str *Stream, mode masqueDuplexDrainMode, end time
 }
 
 func runMasqueDuplexDownloadBench(t *testing.T, boostEnv string, mode masqueDuplexDrainMode) masqueDuplexBenchResult {
-	return runMasqueDuplexDownloadBenchOpts(t, masqueSimnetBenchConfig(), boostEnv, mode, true, true)
+	return runMasqueDuplexDownloadBenchOpts(t, masqueSimnetBenchConfig(), boostEnv, mode, true)
 }
 
 func runMasqueDuplexDownloadBenchOpts(
@@ -198,18 +198,14 @@ func runMasqueDuplexDownloadBenchOpts(
 	boostEnv string,
 	mode masqueDuplexDrainMode,
 	clientDownloadActive bool,
-	disableFastWindow bool,
 ) masqueDuplexBenchResult {
-	return runMasqueDuplexDownloadBenchConfig(t, cfg, boostEnv, mode, clientDownloadActive, disableFastWindow)
+	return runMasqueDuplexDownloadBenchConfig(t, cfg, boostEnv, mode, clientDownloadActive)
 }
 
-func runMasqueDuplexDownloadBenchConfig(t *testing.T, cfg *Config, boostEnv string, mode masqueDuplexDrainMode, clientDownloadActive bool, disableFastWindow bool) masqueDuplexBenchResult {
+func runMasqueDuplexDownloadBenchConfig(t *testing.T, cfg *Config, boostEnv string, mode masqueDuplexDrainMode, clientDownloadActive bool) masqueDuplexBenchResult {
 	t.Helper()
 	_ = boostEnv // prod: MasqueBidiSendBoostEnabled hardcoded off; kept for bench API stability
 	masqueSimnetTLS()
-	if disableFastWindow {
-		t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
-	}
 
 	clientConn, serverConn, closeSimnet := newMasqueSimnetLink(t)
 
@@ -401,7 +397,7 @@ func TestStreamWriteToAutoDownloadActive(t *testing.T) {
 	}
 
 	result := runMasqueDuplexDownloadBenchOpts(
-		t, masqueSimnetBenchConfig(), "1", masqueDuplexDrainWriteTo, false, true,
+		t, masqueSimnetBenchConfig(), "1", masqueDuplexDrainWriteTo, false,
 	)
 	t.Logf("WriteTo auto download-active: %.1f Mbit/s (%d bytes)", result.downloadMbps, result.downloadBytes)
 	assertMasqueSimnetKPIBand(t, result)
@@ -455,7 +451,7 @@ func TestArchA4SimnetL256WriteToKS1(t *testing.T) {
 		t.Skip("simnet L256 K-S1 guard")
 	}
 
-	result := runMasqueDuplexDownloadBenchConfig(t, masqueSimnetL256BenchConfig(), "1", masqueDuplexDrainWriteTo, true, false)
+	result := runMasqueDuplexDownloadBenchConfig(t, masqueSimnetL256BenchConfig(), "1", masqueDuplexDrainWriteTo, true)
 	t.Logf("A4 simnet L256 WriteTo: %.1f Mbit/s (%d bytes) @ RTT %v",
 		result.downloadMbps, result.downloadBytes, result.rtt)
 	if result.downloadBytes < masqueSimnetMinBytes {
@@ -473,7 +469,7 @@ func TestArchA4SimnetL256DuplexWriteToKS2(t *testing.T) {
 		t.Skip("simnet L256 K-S2 guard")
 	}
 
-	result := runMasqueDuplexDownloadBenchConfig(t, masqueSimnetL256BenchConfig(), "1", masqueDuplexDrainWriteTo, true, false)
+	result := runMasqueDuplexDownloadBenchConfig(t, masqueSimnetL256BenchConfig(), "1", masqueDuplexDrainWriteTo, true)
 	t.Logf("A4 simnet L256 duplex WriteTo: %.1f Mbit/s (%d bytes) @ RTT %v",
 		result.downloadMbps, result.downloadBytes, result.rtt)
 	if result.downloadBytes < masqueSimnetMinBytes {
