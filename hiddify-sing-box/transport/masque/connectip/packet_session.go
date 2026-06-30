@@ -64,7 +64,7 @@ func (s *ClientPacketSession) SessionBootstrap() SessionBootstrap {
 		DatagramCeiling:    s.datagramCeiling,
 		OverlayH2:          s.overlayH2,
 		TCPDatagramSlack:   s.tcpDatagramSlack,
-		DatagramCeilingMax: DatagramCeilingMax(),
+		DatagramCeilingMax: DefaultDatagramCeilingMax,
 	}
 }
 
@@ -93,7 +93,7 @@ func UDPBridgeConfigFrom(sess PacketSession) UDPBridgeConfig {
 		OK:                true,
 	}
 	if cfg.DatagramCeiling > 0 {
-		if cap := DatagramCeilingMax(); cfg.DatagramCeiling > cap {
+		if cap := DefaultDatagramCeilingMax; cfg.DatagramCeiling > cap {
 			cfg.DatagramCeiling = cap
 		}
 	}
@@ -102,7 +102,7 @@ func UDPBridgeConfigFrom(sess PacketSession) UDPBridgeConfig {
 
 // SessionBootstrapFrom returns netstack bootstrap metadata when sess is a client packet session.
 func SessionBootstrapFrom(sess PacketSession) SessionBootstrap {
-	boot := SessionBootstrap{DatagramCeilingMax: DatagramCeilingMax()}
+	boot := SessionBootstrap{DatagramCeilingMax: DefaultDatagramCeilingMax}
 	if s, ok := sess.(*ClientPacketSession); ok {
 		return s.SessionBootstrap()
 	}

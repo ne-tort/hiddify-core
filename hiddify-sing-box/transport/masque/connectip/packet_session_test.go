@@ -65,7 +65,7 @@ func TestUDPBridgeConfigFromClientPacketSession(t *testing.T) {
 	if cfg.UDPPayloadHardCap != 1180 {
 		t.Fatalf("unexpected udp hard cap: %d", cfg.UDPPayloadHardCap)
 	}
-	if cfg.DatagramCeiling != DatagramCeilingMax() {
-		t.Fatalf("expected datagram ceiling clamped to max %d, got %d", DatagramCeilingMax(), cfg.DatagramCeiling)
+	if cfg.DatagramCeiling != DefaultDatagramCeilingMax {
+		t.Fatalf("expected datagram ceiling clamped to max %d, got %d", DefaultDatagramCeilingMax, cfg.DatagramCeiling)
 	}
 }

@@ -2,9 +2,9 @@ package connectip
 
 import "testing"
 
-func TestDatagramCeilingMaxDefault(t *testing.T) {
-	if got := DatagramCeilingMax(); got != DefaultDatagramCeilingMax {
-		t.Fatalf("got %d want %d", got, DefaultDatagramCeilingMax)
+func TestDefaultDatagramCeilingMax(t *testing.T) {
+	if DefaultDatagramCeilingMax != 1500 {
+		t.Fatalf("got %d want %d", DefaultDatagramCeilingMax, 1500)
 	}
 }
 
@@ -24,7 +24,7 @@ func TestH3H2NetstackMTUParity(t *testing.T) {
 }
 
 func TestH2MaxCapsulePayloadParity(t *testing.T) {
-	ceilingMax := DatagramCeilingMax()
+	ceilingMax := DefaultDatagramCeilingMax
 	got := H2MaxCapsulePayload(ceilingMax)
 	want := ceilingMax + H3FramingSlack
 	if got != want {

@@ -28,7 +28,7 @@ var ErrOversizedDeclared = errors.New("masque h2 connect-udp oversized capsule d
 
 // MaxCapsulePayload bounds DATAGRAM capsule declared length on the wire (parity with ServeH2ConnectUDP).
 func MaxCapsulePayload() int {
-	return cip.H2MaxCapsulePayload(cip.DatagramCeilingMax())
+	return cip.H2MaxCapsulePayload(cip.DefaultDatagramCeilingMax)
 }
 
 // MaxUDPPayloadPerDatagramCapsule is the largest UDP payload per RFC 9297 DATAGRAM capsule.

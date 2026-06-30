@@ -143,7 +143,7 @@ func TestReadCapsulePayloadPooled(t *testing.T) {
 }
 
 func TestMaxCapsulePayloadMTUParityWithH3(t *testing.T) {
-	ceilingMax := cip.DatagramCeilingMax()
+	ceilingMax := cip.DefaultDatagramCeilingMax
 	if got := MaxCapsulePayload(); got != cip.H2MaxCapsulePayload(ceilingMax) {
 		t.Fatalf("MaxCapsulePayload=%d want %d", got, cip.H2MaxCapsulePayload(ceilingMax))
 	}
@@ -240,7 +240,7 @@ func TestH2ConnectIPCapsuleRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ipPacket) > cip.MaxIPv4Datagram(cip.DatagramCeilingMax()) {
+	if len(ipPacket) > cip.MaxIPv4Datagram(cip.DefaultDatagramCeilingMax) {
 		t.Fatalf("test packet len=%d exceeds forwarder max", len(ipPacket))
 	}
 

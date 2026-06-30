@@ -23,7 +23,7 @@ func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templa
 	if effectiveCeiling < 1280 {
 		effectiveCeiling = 1280
 	}
-	ceilingMax := mcip.DatagramCeilingMax()
+	ceilingMax := mcip.DefaultDatagramCeilingMax
 	if effectiveCeiling > ceilingMax {
 		effectiveCeiling = ceilingMax
 	}
