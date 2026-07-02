@@ -145,8 +145,8 @@ func TestProdRelaySourceHasC2SReleaseAfterUDPWrite(t *testing.T) {
 	if !strings.Contains(c2s, "writePayloadBatch") {
 		t.Fatal("h3 C2S must batch onward UDP writes (masque-go proxyConnSend + linux WriteBatch)")
 	}
-	if !strings.Contains(h3RelayC2SSource, "ReceiveDatagram(context.Background())") {
-		t.Fatal("h3_c2s.go must use ReceiveDatagram(context.Background()) like masque-go proxyConnSend")
+	if !strings.Contains(h3RelayC2SSource, "ReceiveDatagram(ctx)") {
+		t.Fatal("h3_c2s.go must pass relay ctx into ReceiveDatagram for client-disconnect cancel")
 	}
 }
 

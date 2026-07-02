@@ -142,7 +142,7 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		data, err := str.ReceiveDatagram(context.Background())
+		data, err := str.ReceiveDatagram(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return flushC2SBatch()

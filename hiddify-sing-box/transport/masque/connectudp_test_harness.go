@@ -18,6 +18,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	cudpserver "github.com/sagernet/sing-box/protocol/masque/server/connectudp"
+	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
@@ -33,7 +34,7 @@ var connectUDPTestServerHandler = cudpserver.Handler{
 			if allowPrivate {
 				return strings.Trim(strings.TrimSpace(host), "[]"), nil
 			}
-			return "", fmt.Errorf("private target denied")
+			return "", connectudp.ErrPrivateTargetDenied
 		},
 		AllowTCPPort: func(_ string, _, _ []uint16) bool { return true },
 		CapsuleProtocolHeaderValue: func() string {

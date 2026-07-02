@@ -294,5 +294,6 @@ func (c *H3Conn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *H3Conn) SetWriteDeadline(time.Time) error {
+	// No-op: masque-go upstream does not enforce write deadlines on proxied UDP (QUIC DATAGRAM sync send).
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -19,7 +20,7 @@ func ResolveTCPTargetForDial(ctx context.Context, host string, allowPrivateTarge
 	trimmedHost := strings.Trim(strings.TrimSpace(host), "[]")
 	lowerHost := strings.ToLower(trimmedHost)
 	if lowerHost == "" || lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".local") {
-		return "", E.New("private target denied")
+		return "", connectudp.ErrPrivateTargetDenied
 	}
 	addr, err := netip.ParseAddr(trimmedHost)
 	if err != nil {
@@ -33,7 +34,7 @@ func ResolveTCPTargetForDial(ctx context.Context, host string, allowPrivateTarge
 		var chosen string
 		for _, rip := range resolved {
 			if rip.IsLoopback() || rip.IsPrivate() || rip.IsMulticast() || rip.IsLinkLocalUnicast() || rip.IsLinkLocalMulticast() || rip.IsUnspecified() {
-				return "", E.New("private target denied")
+				return "", connectudp.ErrPrivateTargetDenied
 			}
 			if chosen == "" {
 				chosen = rip.String()
@@ -45,7 +46,7 @@ func ResolveTCPTargetForDial(ctx context.Context, host string, allowPrivateTarge
 		return chosen, nil
 	}
 	if addr.IsLoopback() || addr.IsPrivate() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified() {
-		return "", E.New("private target denied")
+		return "", connectudp.ErrPrivateTargetDenied
 	}
 	return addr.String(), nil
 }

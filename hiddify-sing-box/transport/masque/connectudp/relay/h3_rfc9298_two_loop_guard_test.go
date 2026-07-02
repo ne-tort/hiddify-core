@@ -16,7 +16,7 @@ func TestProdRelayRFC9298TwoLoopShape(t *testing.T) {
 	section := h3RelayProdSource[idxFn:]
 	for _, needle := range []string{
 		"wg.Add(3)",
-		"relayCtx, cancelRelay := context.WithCancel(context.Background())",
+		"relayCtx, cancelRelay := context.WithCancel(ctx)",
 		"s.proxyConnSend(relayCtx, conn, str)",
 		"proxyConnReceive(relayCtx, conn, str)",
 		"frame.SkipRequestStreamCapsules",

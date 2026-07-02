@@ -34,9 +34,13 @@ type Proxy struct {
 	closers  map[io.Closer]struct{}
 }
 
-
 // Proxy dials a connected UDP socket and proxies the CONNECT-UDP request.
 func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
+	return s.ProxyWithContext(context.Background(), w, r)
+}
+
+// ProxyWithContext proxies CONNECT-UDP with a cancellable relay scope (client disconnect).
+func (s *Proxy) ProxyWithContext(ctx context.Context, w http.ResponseWriter, r *frame.Request) error {
 	s.mx.Lock()
 	if s.closed {
 		s.mx.Unlock()
@@ -76,11 +80,11 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 		return err
 	}
 
-	return s.ProxyConnectedSocket(w, r, conn)
+	return s.ProxyConnectedSocket(ctx, w, r, conn)
 }
 
 // ProxyConnectedSocket proxies on an existing connected UDP socket (masque-go ProxyConnectedSocket shape).
-func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, conn *net.UDPConn) error {
+func (s *Proxy) ProxyConnectedSocket(ctx context.Context, w http.ResponseWriter, _ *frame.Request, conn *net.UDPConn) error {
 	TuneMasqueUDPSocketBuffers(conn)
 
 	s.mx.Lock()
@@ -113,7 +117,7 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 
 	defer beginRelaySessionStats("h3-bidi")()
 
-	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	relayCtx, cancelRelay := context.WithCancel(ctx)
 	defer cancelRelay()
 
 	var wg sync.WaitGroup

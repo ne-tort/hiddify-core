@@ -77,10 +77,7 @@ func targetPolicyHTTPStatus(err error) int {
 	if err == nil {
 		return http.StatusOK
 	}
-	if errors.Is(err, errTargetPortDenied) {
-		return http.StatusForbidden
-	}
-	if strings.Contains(err.Error(), "private target denied") {
+	if errors.Is(err, errTargetPortDenied) || errors.Is(err, connectudp.ErrPrivateTargetDenied) {
 		return http.StatusForbidden
 	}
 	var addrErr *net.AddrError
@@ -114,10 +111,13 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 				} else if errors.Is(err, cudprelay.ErrDuplicateH3DownloadSession) {
 					w.WriteHeader(http.StatusConflict)
 				}
+				return
 			}
 			return
 		}
-		_ = udpProxy.Proxy(w, parsed)
+		if err := udpProxy.ProxyWithContext(r.Context(), w, parsed); err != nil {
+			return
+		}
 		return
 	}
 	protoFn := h.Hooks.ExtendedMasqueTunnelProtocol
