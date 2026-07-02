@@ -41,26 +41,9 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 
 	var payloadBatch [h3C2SUDPSendBatchMax][]byte
 	batchCount := 0
-	flushC2SBatch := func() error {
-		if batchCount == 0 {
-			return nil
-		}
-		n := batchCount
-		if err := writer.writePayloadBatch(payloadBatch[:n]); err != nil {
-			return err
-		}
-		batchCount = 0
-		return nil
-	}
-	flushC2SBatchIfReady := func(force bool) error {
-		if batchCount == 0 {
-			return nil
-		}
-		if !force && batchCount < h3C2SUDPFlushMinBatch() {
-			return nil
-		}
-		return flushC2SBatch()
-	}
+
+	var drainAll func() error
+	var flushC2SBatch func() error
 
 	relayEnqueue := func(raw []byte) error {
 		udpPayload, ok, perr := relayHTTPDatagramUDPPayload(raw)
@@ -108,7 +91,8 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		}
 		return nil
 	}
-	drainAll := func() error {
+
+	drainAll = func() error {
 		if drainer == nil {
 			return nil
 		}
@@ -123,6 +107,37 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		}
 		return nil
 	}
+
+	flushC2SBatch = func() error {
+		for batchCount > 0 {
+			n := batchCount
+			if n > h3C2SOnwardFlushChunk {
+				n = h3C2SOnwardFlushChunk
+			}
+			if err := writer.writePayloadBatch(payloadBatch[:n]); err != nil {
+				return err
+			}
+			if tail := batchCount - n; tail > 0 {
+				copy(payloadBatch[:tail], payloadBatch[n:batchCount])
+			}
+			batchCount -= n
+			if err := drainAll(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	flushC2SBatchIfReady := func(force bool) error {
+		if batchCount == 0 {
+			return nil
+		}
+		if !force && batchCount < h3C2SUDPFlushMinBatch() {
+			return nil
+		}
+		return flushC2SBatch()
+	}
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
