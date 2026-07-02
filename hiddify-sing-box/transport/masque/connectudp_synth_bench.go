@@ -69,6 +69,7 @@ func benchConnectUDPProdProfileH3Upload(
 		return 0, 0, err
 	}
 	defer func() { _ = pkt.Close() }()
+	route.TuneUDPPacketConn(pkt)
 
 	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx, true)
 }

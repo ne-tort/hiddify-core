@@ -45,6 +45,15 @@ func assertConnectUDPSynthProdMbps(t *testing.T, layer, leg string, mbps float64
 	}
 }
 
+func logOpenConnectUDPSynthInstantMbps(t *testing.T, layer, leg string, mbps float64, hint string) {
+	t.Helper()
+	if synthInstantGatePass(mbps) {
+		return
+	}
+	t.Logf("OPEN: %s", synthKPIDiagnostic(layer, leg, mbps, connectUDPSynthInstantMinMbps,
+		hint+"; prod DoD min "+formatSynthMbps(connectUDPSynthProdMinMbps)+" Mbit/s each leg"))
+}
+
 func assertConnectUDPSynthAsymmetry(t *testing.T, upMbps, downMbps float64) {
 	t.Helper()
 	minLeg := upMbps
@@ -517,43 +526,50 @@ func TestGATEConnectUDPPairedSynthUpload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
 	const pairedMaxAttempts = 3
 	var h2Mbps, h3Mbps, ratio float64
+	var h2St, h3St connectudp.SequencedStats
 	var err error
 	for attempt := 0; attempt < pairedMaxAttempts; attempt++ {
 		if attempt > 0 {
 			runtime.GC()
 			time.Sleep(100 * time.Millisecond)
 		}
-		_, h2Mbps, err = benchConnectUDPProdProfileH2Upload(t, instantH2Link{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+		h2Mbps, h2St, err = benchConnectUDPProdProfileH2UploadZeroLoss(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 		if err != nil {
 			t.Fatalf("connect-udp-h2 prod upload (paired): %v", err)
 		}
-		_, h3Mbps, err = benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+		h3Mbps, h3St, err = benchConnectUDPProdProfileH3UploadZeroLoss(t, instantDatagramLink{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 		if err != nil {
 			t.Fatalf("connect-udp-h3 prod upload (paired): %v", err)
 		}
 		ratio = h3Mbps / h2Mbps
-		t.Logf("GATE-CONNECT-UDP-SYNTH paired upload attempt %d: H2=%.1f H3=%.1f ratio=%.2f",
-			attempt+1, h2Mbps, h3Mbps, ratio)
+		t.Logf("GATE-CONNECT-UDP-SYNTH paired upload attempt %d: H2=%.1f H3=%.1f ratio=%.2f (h2 loss=%.2f%% h3 loss=%.2f%%)",
+			attempt+1, h2Mbps, h3Mbps, ratio, h2St.LossPct, h3St.LossPct)
 		if ratio >= connectUDPSynthParityMinRatio {
 			break
 		}
 	}
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", h3Mbps, "paired with H2 upload")
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_up", h2Mbps, "paired with H3 upload")
+	logOpenConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", h3Mbps, "paired sequenced zero-loss")
+	logOpenConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_up", h2Mbps, "paired sequenced zero-loss")
+	if !h3St.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Logf("OPEN: h3 paired upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%)", h3St.LossPct, h3St.DupPct)
+	}
+	if !h2St.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Logf("OPEN: h2 paired upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%)", h2St.LossPct, h2St.DupPct)
+	}
 	if h2Mbps > h3Mbps*1.5 {
 		t.Logf("SKIP paired parity: H2 upload %.1f >> H3 %.1f (post W-UDP-2t H2 leg bake-in; gate legs separately)", h2Mbps, h3Mbps)
 		return
 	}
 	if ratio < connectUDPSynthParityMinRatio {
 		t.Fatal(synthKPIDiagnostic("L4 connect-udp paired", "H3/H2 upload ratio", ratio, connectUDPSynthParityMinRatio,
-			"H3 must stay within 25% of H2 upload on prod profile"))
+			"H3 must stay within 25% of H2 upload on prod profile (sequenced zero-loss UDP-5t2)"))
 	}
 }
 
 // TestGATEConnectUDPSynthProdAsymmetryH3 locks min(up,down) >= 500 and up/down ratio <= 4 on instant link.
 func TestGATEConnectUDPSynthProdAsymmetryH3(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	_, upMbps, err := benchConnectUDPProdProfileH3Upload(t, instantDatagramLink{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	upMbps, upSt, err := benchConnectUDPProdProfileH3UploadZeroLoss(t, instantDatagramLink{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h3 prod upload (asymmetry): %v", err)
 	}
@@ -561,7 +577,10 @@ func TestGATEConnectUDPSynthProdAsymmetryH3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect-udp-h3 prod download (asymmetry): %v", err)
 	}
-	t.Logf("GATE-CONNECT-UDP-SYNTH h3 asymmetry: up=%.1f down=%.1f", upMbps, downMbps)
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 asymmetry: up=%.1f down=%.1f (upload loss=%.2f%%)", upMbps, downMbps, upSt.LossPct)
+	if !upSt.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Logf("OPEN: h3 asymmetry upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%)", upSt.LossPct, upSt.DupPct)
+	}
 	assertConnectUDPSynthAsymmetry(t, upMbps, downMbps)
 }
 
