@@ -623,7 +623,7 @@ func benchConnectUDPPacketUploadSequenced(
 		connectudp.FlushPacketConnWrites(pkt)
 		time.Sleep(10 * time.Millisecond)
 	}
-	waitSequencedSinkDelivered(seqSink, sent)
+	waitSequencedSinkDelivered(pkt, seqSink, sent)
 	time.Sleep(750 * time.Millisecond) // bulk TLS + async onward tail after upload drain
 	tailSlack := connectUDPSynthUploadTailSlackPkts
 	if targetMbit > 0 && payloadLen >= connectudp.SteadyUploadPayloadLenH3() {
@@ -703,7 +703,7 @@ func benchConnectUDPPacketUpload(
 }
 
 // waitSequencedSinkDelivered waits for all sequenced probes after upload drain (docker burst parity).
-func waitSequencedSinkDelivered(sink *connectudp.SequencedSink, sent int) {
+func waitSequencedSinkDelivered(pkt net.PacketConn, sink *connectudp.SequencedSink, sent int) {
 	if sink == nil || sent == 0 {
 		return
 	}
@@ -711,6 +711,9 @@ func waitSequencedSinkDelivered(sink *connectudp.SequencedSink, sent int) {
 	for time.Now().Before(deadline) {
 		if connectudp.SequencedSinkRxCount(sink) >= sent {
 			return
+		}
+		if pkt != nil {
+			connectudp.FlushPacketConnWrites(pkt)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

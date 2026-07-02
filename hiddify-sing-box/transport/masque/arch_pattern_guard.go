@@ -81,6 +81,8 @@ const (
 	connectUDPSynthUploadTailSlackPktsPacedSteady = 96
 	// connectUDPSynthUploadDrainTimeout bounds in-proc synth upload drain (not docker TLS 30s).
 	connectUDPSynthUploadDrainTimeout = 2 * time.Second
+	// connectUDPSynthPaced512ZeroLossTargetMbps is paced @512B zero-loss GATE (headroom below localize ceiling ~397).
+	connectUDPSynthPaced512ZeroLossTargetMbps = 380.0
 	// connectUDPEchoDownloadPrimeDepth: in-flight cap for unlimited bg WriteTo + prime depth (pipeline localize shape).
 	connectUDPEchoDownloadPrimeDepth = 128
 	// connectUDPEchoBoundedPipelineDepth: primary prod-shaped echo gate (3ck ACTIVATED 2026-06-24).

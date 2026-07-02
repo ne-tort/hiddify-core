@@ -262,22 +262,51 @@ func (h *connectUDPProdDownloadHandle) downloadOnce(nbytes int64) (int64, error)
 	return received, nil
 }
 
-// TestGATEConnectUDPH3SynthProdUpload locks connect-udp-h3 prod upload on instant link (UDP-5t2 sequenced zero-loss + rx goodput).
+// TestGATEConnectUDPH3SynthProdUpload locks unlimited flood rx goodput on instant link (UDP-5t2).
+// Zero-loss @512B unlimited exceeds paced ceiling (~397 Mbit/s); see TestGATEConnectUDPH3SynthProdUploadPaced512ZeroLoss.
 func TestGATEConnectUDPH3SynthProdUpload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
+	dropsBefore := connectudp.SnapshotDataplaneDrops()
 	mbps, st, err := benchConnectUDPProdProfileH3UploadZeroLoss(t, instantDatagramLink{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h3 prod upload: %v", err)
 	}
+	if d := connectudp.SnapshotDataplaneDrops().Delta(dropsBefore); d.HasDrops() {
+		t.Logf("dataplane drops during h3 unlimited upload: streamQ=%d quicRcvQ=%d unknownStream=%d h3Send=%d",
+			d.StreamDatagramQueue, d.QuicDatagramRcvQueue, d.UnknownStreamDatagram, d.TransientHTTPDatagramSend)
+	}
 	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload (sequenced rx): %.1f Mbit/s rx=%d/%d loss=%.2f%%",
 		mbps, st.RxPkts, st.SentPkts, st.LossPct)
 	if !st.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
-		t.Logf("OPEN: h3 upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%) — C2S queue/datagram path",
+		t.Logf("OPEN: h3 upload zero-loss gate failed (loss=%.2f%% dup=%.2f%%) — unlimited flood > paced ceiling",
 			st.LossPct, st.DupPct)
+		logOpenConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", mbps, "unlimited flood rx goodput")
 		return
 	}
 	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_up", mbps,
 		"sequenced burst zero-loss upload")
+}
+
+// TestGATEConnectUDPH3SynthProdUploadPaced512ZeroLoss locks paced @512B zero-loss (Docker burst parity shape).
+func TestGATEConnectUDPH3SynthProdUploadPaced512ZeroLoss(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	target := connectUDPSynthPaced512ZeroLossTargetMbps
+	mbps, st, err := benchConnectUDPProdProfileH3UploadZeroLossPaced(
+		t, instantDatagramLink{}, dur, connectudp.DefaultBenchUDPPayloadLen, target)
+	if err != nil {
+		t.Fatalf("connect-udp-h3 paced512 upload: %v", err)
+	}
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload paced512@%.0f: %.1f Mbit/s rx=%d/%d loss=%.2f%%",
+		target, mbps, st.RxPkts, st.SentPkts, st.LossPct)
+	if !st.BurstZeroLossOK(connectudp.DefaultBenchUDPPayloadLen, connectudp.DefaultBurstMinRxRatio) {
+		t.Fatalf("h3 paced512 upload zero-loss failed: rx=%d/%d loss=%.4f%% dup=%.2f%%",
+			st.RxPkts, st.SentPkts, st.LossPct, st.DupPct)
+	}
+	minMbps := connectudp.MinPacedGoodputMbit(target)
+	if mbps < minMbps {
+		t.Fatalf("%s", synthKPIDiagnostic("L4 connect-udp-h3 prod", "udp_up_paced512", mbps, minMbps,
+			"paced 512B zero-loss burst toward instant 500"))
+	}
 }
 
 // TestGATEConnectUDPH3SynthStretchUploadSteady enforces upload stretch at steady MTU payload (UDP-5p1).
