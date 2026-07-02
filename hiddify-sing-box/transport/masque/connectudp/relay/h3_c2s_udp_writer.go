@@ -9,7 +9,6 @@ const h3C2SUDPSendBatchMax = 128
 const h3C2SUDPFlushMinBatchLinux = 8
 
 // h3C2SOnwardFlushChunk interleaves HTTP/3 DATAGRAM drain during onward bursts (masque-go sync loop parity).
-// 1 = drain after every onward payload under burst (minimize streamDatagramQueue drops on Windows).
 const h3C2SOnwardFlushChunk = 1
 
 type h3C2SUDPWriter struct {

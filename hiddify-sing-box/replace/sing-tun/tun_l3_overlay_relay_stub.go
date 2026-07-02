@@ -4,3 +4,5 @@ package tun
 
 // SetL3OverlayKernelRelay is a no-op off Linux (host-kernel relay is Linux Docker path).
 func (t *NativeTun) SetL3OverlayKernelRelay(enabled bool) {}
+
+func (t *NativeTun) l3OverlayKernelRelay() bool { return false }

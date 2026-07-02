@@ -1,4 +1,4 @@
-//go:build with_gvisor
+//go:build linux && with_gvisor
 
 package masque
 
