@@ -47,7 +47,7 @@ func finishConnectUDPPacedProbeUpload(pkt net.PacketConn, viaSocks bool) {
 		time.Sleep(2 * time.Second)
 		return
 	}
-	_ = connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout)
+	_ = connectudp.DrainPacketConnUpload(pkt, connectUDPSynthUploadDrainTimeout)
 }
 
 func benchConnectUDPPacedSinkGoodput(
@@ -153,7 +153,6 @@ func startConnectUDPH2MasqueSessionWithLink(t *testing.T, proxyPort int, link h2
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {

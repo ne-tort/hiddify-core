@@ -13,10 +13,31 @@ import (
 // (END_STREAM). Without this, upload on the CONNECT stream can be torn down while the tunnel
 // is still active. Same idea as connect-ip-go DialHTTP2 (h2ExtendedConnectDuplexBody).
 type ExtendedConnectUploadBody struct {
-	Pipe     io.Reader
-	consumed atomic.Int64
-	wireSent atomic.Int64
+	Pipe   io.Reader
+	Writer ConnectUploadPipeWriter
+	consumed  atomic.Int64
+	wireSent  atomic.Int64
+	bulkArmed atomic.Bool
+	// writerLive: Invisv/connect-ip-go — http2 END_STREAM follows PacketConn lifecycle, not pipe EOF flakes.
+	writerLive atomic.Bool
 }
+
+// BeginUploadWriterLive marks the upload leg open until MarkUploadWriterDone (dial-time).
+func (b *ExtendedConnectUploadBody) BeginUploadWriterLive() {
+	if b != nil {
+		b.writerLive.Store(true)
+	}
+}
+
+// MarkUploadWriterDone signals http2 to half-close the CONNECT upload stream (PacketConn.Close).
+func (b *ExtendedConnectUploadBody) MarkUploadWriterDone() {
+	if b != nil {
+		b.writerLive.Store(false)
+	}
+}
+
+// uploadBulkArmConsumedMin: arm bulk TLS batching after first real UDP payload (not Prime empty capsule).
+const uploadBulkArmConsumedMin = 512
 
 func (b *ExtendedConnectUploadBody) Read(p []byte) (int, error) {
 	if b == nil || b.Pipe == nil {
@@ -29,6 +50,26 @@ func (b *ExtendedConnectUploadBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// MasqueUploadWriterOpen reports whether the client upload pipe writer is still open.
+func (b *ExtendedConnectUploadBody) MasqueUploadWriterOpen() bool {
+	if b == nil {
+		return false
+	}
+	if b.writerLive.Load() {
+		return true
+	}
+	if b.Writer != nil {
+		return b.Writer.MasqueUploadWriterOpen()
+	}
+	if b.Pipe == nil {
+		return false
+	}
+	if w, ok := b.Pipe.(interface{ MasqueUploadWriterOpen() bool }); ok {
+		return w.MasqueUploadWriterOpen()
+	}
+	return false
+}
+
 // MasqueUploadBuffered implements golang.org/x/net/http2 masqueUploadBuffered (upload pipe depth).
 func (b *ExtendedConnectUploadBody) MasqueUploadBuffered() int {
 	if b == nil || b.Pipe == nil {
@@ -37,13 +78,37 @@ func (b *ExtendedConnectUploadBody) MasqueUploadBuffered() int {
 	if u, ok := b.Pipe.(interface{ MasqueUploadBuffered() int }); ok {
 		return u.MasqueUploadBuffered()
 	}
-	return -1
+	return 0
+}
+
+// UploadPipeCap implements golang.org/x/net/http2 masqueUploadPipeCap for shallow upload pipes.
+func (b *ExtendedConnectUploadBody) UploadPipeCap() int {
+	if b == nil || b.Pipe == nil {
+		return 0
+	}
+	if u, ok := b.Pipe.(interface{ UploadPipeCap() int }); ok {
+		return u.UploadPipeCap()
+	}
+	return 0
+}
+
+// SetMasqueUploadFlowWake forwards flow-control wake to the shallow upload pipe reader.
+func (b *ExtendedConnectUploadBody) SetMasqueUploadFlowWake(fn func()) {
+	if b == nil || b.Pipe == nil {
+		return
+	}
+	if t, ok := b.Pipe.(interface{ SetMasqueUploadFlowWake(func()) }); ok {
+		t.SetMasqueUploadFlowWake(fn)
+	}
 }
 
 // MasqueUploadWireAck implements golang.org/x/net/http2 masqueUploadWireAck (post-Flush DATA ack).
 func (b *ExtendedConnectUploadBody) MasqueUploadWireAck(n int) {
 	if b != nil && n > 0 {
 		b.wireSent.Add(int64(n))
+		if b.consumed.Load() >= uploadBulkArmConsumedMin {
+			b.bulkArmed.Store(true)
+		}
 	}
 }
 
@@ -52,6 +117,22 @@ func (b *ExtendedConnectUploadBody) UploadWireSent() int64 {
 		return 0
 	}
 	return b.wireSent.Load()
+}
+
+// UploadBootstrapPending reports unconsumed-on-wire pipe bytes (Invisv bootstrap discriminator).
+func (b *ExtendedConnectUploadBody) UploadBootstrapPending() bool {
+	if b == nil {
+		return false
+	}
+	return b.consumed.Load() > b.wireSent.Load()
+}
+
+// UploadBulkArmed reports sustained upload (bulk TLS flush owns pacing after first user payload).
+func (b *ExtendedConnectUploadBody) UploadBulkArmed() bool {
+	if b == nil {
+		return false
+	}
+	return b.bulkArmed.Load()
 }
 
 // AwaitUploadWireSent blocks until at least n TLS upload bytes are flushed (ConnectUploadWireAck).

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
 	msess "github.com/sagernet/sing-box/transport/masque/session"
@@ -44,7 +45,7 @@ func TestGATEConnectIPNativeL3SameSessionReopenAfterUploadSynth(t *testing.T) {
 	var postReopenConn atomic.Pointer[connectip.Conn]
 	cs := &coreSession{
 		CoreSession: msess.CoreSession{
-			Options:    ClientOptions{TransportMode: "connect_ip"},
+			Options:    ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			TemplateIP: templateIP,
 			Caps:       CapabilitySet{ConnectIP: true},
 			IPConn:     &connectip.Conn{},

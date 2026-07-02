@@ -3,43 +3,54 @@ package h2
 import (
 	"io"
 	"testing"
-	"time"
 )
 
-func TestExtendedConnectUploadBodyAwaitConsumed(t *testing.T) {
+// UploadBootstrapPending reports unconsumed-on-wire pipe bytes (http2 bulk bootstrap gate).
+func TestExtendedConnectUploadBodyUploadBootstrapPending(t *testing.T) {
+	t.Parallel()
 	pr, pw := io.Pipe()
-	t.Cleanup(func() {
-		_ = pw.Close()
-		_ = pr.Close()
-	})
+	defer func() { _ = pr.Close() }()
+	defer func() { _ = pw.Close() }()
 	body := &ExtendedConnectUploadBody{Pipe: pr}
-	go func() {
-		buf := make([]byte, 4096)
-		_, _ = body.Read(buf)
-	}()
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		_, _ = pw.Write(make([]byte, 4096))
-	}()
-	if err := body.AwaitUploadConsumed(4096, time.Second); err != nil {
-		t.Fatalf("AwaitUploadConsumed: %v", err)
+	if body.UploadBootstrapPending() {
+		t.Fatal("idle body: bootstrap should not be pending")
+	}
+	go func() { _, _ = pw.Write([]byte("xy")) }()
+	buf := make([]byte, 8)
+	_, _ = body.Read(buf)
+	if !body.UploadBootstrapPending() {
+		t.Fatal("after read before wire ack: bootstrap pending")
+	}
+	body.MasqueUploadWireAck(2)
+	if body.UploadBootstrapPending() {
+		t.Fatal("after wire ack caught up: bootstrap not pending")
 	}
 }
 
-func TestH2ExtendedConnectUploadBodyCloseIsNoop(t *testing.T) {
-	pr, pw := io.Pipe()
-	t.Cleanup(func() {
-		_ = pw.Close()
-		_ = pr.Close()
-	})
-	body := &ExtendedConnectUploadBody{Pipe: pr}
-	if err := body.Close(); err != nil {
-		t.Fatal(err)
+func TestExtendedConnectUploadBodyUploadBulkArmed(t *testing.T) {
+	t.Parallel()
+	body := &ExtendedConnectUploadBody{}
+	body.consumed.Store(uploadBulkArmConsumedMin)
+	body.MasqueUploadWireAck(64)
+	if !body.UploadBulkArmed() {
+		t.Fatal("expected bulk armed after user-payload wire ack")
 	}
-	go func() { _, _ = pw.Write([]byte{'x'}) }()
-	buf := make([]byte, 1)
-	n, err := body.Read(buf)
-	if err != nil || n != 1 || buf[0] != 'x' {
-		t.Fatalf("Read after Body.Close noop: n=%d err=%v buf=%q", n, err, buf[:n])
+}
+
+func TestExtendedConnectUploadBodyMasqueUploadBufferedShallowPipe(t *testing.T) {
+	t.Parallel()
+	pr, pw := NewConnectUploadShallowPipe()
+	defer func() { _ = pr.Close() }()
+	defer func() { _ = pw.Close() }()
+	body := &ExtendedConnectUploadBody{Pipe: pr}
+	if got := body.MasqueUploadBuffered(); got != 0 {
+		t.Fatalf("idle buffered=%d want 0", got)
+	}
+	if got := body.UploadPipeCap(); got != connectUploadShallowPipeBuf {
+		t.Fatalf("cap=%d want %d", got, connectUploadShallowPipeBuf)
+	}
+	_, _ = pw.Write([]byte("xy"))
+	if got := body.MasqueUploadBuffered(); got != 2 {
+		t.Fatalf("after write buffered=%d want 2", got)
 	}
 }

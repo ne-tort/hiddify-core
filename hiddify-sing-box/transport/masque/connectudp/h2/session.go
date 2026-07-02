@@ -16,17 +16,14 @@ var ErrDuplicateDownloadSession = errors.New("masque h2: duplicate asymmetric do
 // ErrMissingMuxKey is returned when asymmetric legs omit Masque-Udp-Mux-Key.
 var ErrMissingMuxKey = errors.New("masque h2: missing Masque-Udp-Mux-Key")
 
-// DefaultSessionRegistry is the process-wide H2 CONNECT-UDP asymmetric session registry.
-// Prefer a per-server Handler.H2SessionRegistry instance in production.
 var DefaultSessionRegistry = NewSessionRegistry()
 
-// SessionRegistry tracks asymmetric CONNECT-UDP sessions (H3 Proxy.closers parity).
+// SessionRegistry tracks asymmetric CONNECT-UDP sessions.
 type SessionRegistry struct {
 	mu       sync.Mutex
 	sessions map[sessionKey]*h2Session
 }
 
-// NewSessionRegistry builds an isolated asymmetric session registry.
 func NewSessionRegistry() *SessionRegistry {
 	return &SessionRegistry{sessions: make(map[sessionKey]*h2Session)}
 }
@@ -34,17 +31,16 @@ func NewSessionRegistry() *SessionRegistry {
 type h2Session struct {
 	mu sync.Mutex
 
-	conn      *net.UDPConn
-	downlinkW *H2ResponseWriter
+	conn       *net.UDPConn
+	downlinkW  *H2ResponseWriter
 	downlinkOK bool
+
+	ready    chan struct{}
+	readyOnce sync.Once
+	refs      int
 
 	onwardMu sync.Mutex
 	onward   *cudprelay.OnwardUDPWriter
-
-	ready     chan struct{}
-	readyOnce sync.Once
-
-	refs int
 }
 
 func (s *h2Session) signalReady() {
@@ -90,49 +86,57 @@ func (s *h2Session) writeDownlinkICMP() error {
 	return w.WriteUDPPayloadAsCapsules(nil)
 }
 
-func (s *h2Session) onwardWriter() *sessionOnwardWriter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.onward == nil && s.conn != nil {
-		s.onward = cudprelay.NewOnwardUDPWriter(s.conn)
-	}
-	return &sessionOnwardWriter{mu: &s.onwardMu, w: s.onward}
+func (s *h2Session) onwardWriter() cudprelay.H2UplinkOnward {
+	return &sessionOnwardWriter{mu: &s.onwardMu, sess: s}
 }
 
-// sessionOnwardWriter serializes onward UDP writes from N upload legs on one session.
 type sessionOnwardWriter struct {
-	mu *sync.Mutex
-	w  *cudprelay.OnwardUDPWriter
+	mu   *sync.Mutex
+	sess *h2Session
 }
 
-func (o *sessionOnwardWriter) Queue(payload []byte) (icmp bool, err error) {
-	if o == nil || o.w == nil {
+func (o *sessionOnwardWriter) writer() *cudprelay.OnwardUDPWriter {
+	if o == nil || o.sess == nil {
+		return nil
+	}
+	o.sess.mu.Lock()
+	defer o.sess.mu.Unlock()
+	if o.sess.onward == nil && o.sess.conn != nil {
+		o.sess.onward = cudprelay.NewOnwardUDPWriter(o.sess.conn)
+	}
+	return o.sess.onward
+}
+
+func (o *sessionOnwardWriter) Queue(payload []byte) (bool, error) {
+	w := o.writer()
+	if w == nil {
 		return false, errors.New("masque h2: session onward writer unavailable")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.w.Queue(payload)
+	return w.Queue(payload)
 }
 
-func (o *sessionOnwardWriter) Flush() (icmp bool, err error) {
-	if o == nil || o.w == nil {
+func (o *sessionOnwardWriter) Flush() (bool, error) {
+	w := o.writer()
+	if w == nil {
 		return false, nil
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.w.Flush()
+	return w.Flush()
 }
 
-func (o *sessionOnwardWriter) SendBurstViews(wire []byte, count, wireLen, payloadOff int) (icmp bool, err error) {
-	if o == nil || o.w == nil {
+func (o *sessionOnwardWriter) SendBurstViews(wire []byte, count, wireLen, payloadOff int) (bool, error) {
+	w := o.writer()
+	if w == nil {
 		return false, errors.New("masque h2: session onward writer unavailable")
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.w.SendBurstViews(wire, count, wireLen, payloadOff)
+	return w.SendBurstViews(wire, count, wireLen, payloadOff)
 }
 
-// lookupDownloadSession returns a pre-registered asymmetric download session (UDP-SRV-06 register-before-200).
 func (reg *SessionRegistry) lookupDownloadSession(key sessionKey) (*h2Session, *H2ResponseWriter, bool) {
 	if reg == nil {
 		reg = DefaultSessionRegistry
@@ -151,7 +155,6 @@ func (reg *SessionRegistry) lookupDownloadSession(key sessionKey) (*h2Session, *
 	return sess, sess.downlinkW, true
 }
 
-// HasActiveDownload reports whether a download leg is already registered for key.
 func (reg *SessionRegistry) HasActiveDownload(key sessionKey) bool {
 	if reg == nil {
 		reg = DefaultSessionRegistry
@@ -168,7 +171,6 @@ func (reg *SessionRegistry) HasActiveDownload(key sessionKey) bool {
 	return active
 }
 
-// RegisterDownload opens or rejects a download leg for key (409 on duplicate).
 func (reg *SessionRegistry) RegisterDownload(key sessionKey, conn *net.UDPConn, downlinkW *H2ResponseWriter) (*h2Session, error) {
 	if reg == nil {
 		reg = DefaultSessionRegistry
@@ -195,7 +197,6 @@ func (reg *SessionRegistry) RegisterDownload(key sessionKey, conn *net.UDPConn, 
 	return sess, nil
 }
 
-// AttachUpload waits for the download leg and bumps ref count.
 func (reg *SessionRegistry) AttachUpload(key sessionKey) (*h2Session, error) {
 	if reg == nil {
 		reg = DefaultSessionRegistry
@@ -219,7 +220,6 @@ func (reg *SessionRegistry) AttachUpload(key sessionKey) (*h2Session, error) {
 	return nil, fmt.Errorf("masque h2: asymmetric upload leg timed out waiting for download session target=%s", key.target)
 }
 
-// Release decrements refs and removes the session when zero.
 func (reg *SessionRegistry) Release(key sessionKey) {
 	if reg == nil {
 		reg = DefaultSessionRegistry

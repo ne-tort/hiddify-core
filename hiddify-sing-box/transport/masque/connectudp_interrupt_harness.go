@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/common/interrupt"
-	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -98,7 +97,6 @@ func openConnectUDPH3PacketOnProxy(t *testing.T, proxyPort int) (net.PacketConn,
 	session, err := NewConnectUDPTestSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

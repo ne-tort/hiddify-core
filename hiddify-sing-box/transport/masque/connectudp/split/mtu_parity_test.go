@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/sagernet/sing-box/option"
-	cip "github.com/sagernet/sing-box/transport/masque/connectip"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	h3c "github.com/sagernet/sing-box/transport/masque/h3"
 )
@@ -14,7 +14,7 @@ import (
 // in DatagramSplitConn. H2 RFC 9297 capsules split at MaxUDPPayloadPerDatagramCapsule
 // (ceiling+slack−1); masque-go H3 path drops/rejects >1500 on wire, H2 never needs drop.
 func TestDatagramSplitMTUCeilingParityH2H3(t *testing.T) {
-	ceiling := cip.DatagramCeilingMax()
+	ceiling := cudprelay.ProdRelayMaxUDPPayloadBytes
 
 	h3Max := h3c.UDPWriteMax(ceiling, 65535)
 	if h3Max != ceiling-h3c.UDPDatagramWriteSlack {
@@ -25,10 +25,6 @@ func TestDatagramSplitMTUCeilingParityH2H3(t *testing.T) {
 	}
 
 	h2Step := h2c.MaxUDPPayloadPerDatagramCapsule()
-	if h2Step != cip.H2MaxCapsulePayload(ceiling)-1 {
-		t.Fatalf("H2 per-capsule UDP max=%d want H2MaxCapsulePayload-1=%d",
-			h2Step, cip.H2MaxCapsulePayload(ceiling)-1)
-	}
 	if h2Step <= h3Max {
 		t.Fatalf("H2 capsule chunk %d must exceed H3 datagram max %d (H2 uses slack on wire)", h2Step, h3Max)
 	}

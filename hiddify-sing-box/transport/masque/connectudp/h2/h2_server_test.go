@@ -99,107 +99,65 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 	}
 }
 
-func TestH2ResponseWriterFountainProfileNoDebounceTimer(t *testing.T) {
+func TestH2ResponseWriterBidiImmediateFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
-	payload := []byte("x")
-	for i := 0; i < h2DownlinkBulkEnterHits+2; i++ {
-		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(H2DownlinkCoalesceMaxDelay / 4)
-	}
-	// Fountain bulkImmediateFlush: never arm debounce timer (W-UDP-2 Phase C).
-	if w.flushTimer != nil {
-		t.Fatal("fountain profile must not arm downlink debounce timer")
-	}
-}
-
-// TestH2ResponseWriterTimerArmsOnce verifies prod timer on interactive downlink: armed on first
-// sub-threshold append, not reset on each append (debounced reset capped fountain ~400 Mbit/s).
-func TestH2ResponseWriterTimerArmsOnce(t *testing.T) {
-	rec := &flushCountResponseWriter{}
-	w := &H2ResponseWriter{ResponseWriter: rec}
-	payload := []byte("x")
+	w := newH2DownlinkWriter(rec, LegProfileBidi)
 	for i := 0; i < 5; i++ {
-		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(H2DownlinkCoalesceMaxDelay / 4)
-	}
-	if got := rec.flushes.Load(); got < 1 {
-		t.Fatalf("one-shot timer should flush after first idle, flushes=%d want >=1", got)
-	}
-}
-
-// TestH2ResponseWriterFountainBulkStillCoalesces512 guards fountain flood @512 B still batches to 32KiB.
-func TestH2ResponseWriterFountainBulkStillCoalesces512(t *testing.T) {
-	rec := &flushCountResponseWriter{}
-	w := &H2ResponseWriter{
-		ResponseWriter:     rec,
-		bulkImmediateFlush: true,
-		bulkDownlink:       true,
-		rapidDownlinkHits:  h2DownlinkBulkEnterHits,
-		lastDownlinkAt:     time.Now(),
-	}
-	payload := bytes.Repeat([]byte{'f'}, 512)
-	const perFlush = H2DownlinkCoalesceThreshold / 512
-	for i := 0; i < perFlush; i++ {
-		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
+		if err := w.WriteUDPPayloadAsCapsules([]byte("x")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("512B fountain flood must batch to one flush at 32KiB, flushes=%d want 1", got)
+	if got := rec.flushes.Load(); got != 5 {
+		t.Fatalf("bidi h2o immediate flush: flushes=%d want 5", got)
 	}
 }
 
-// TestH2ResponseWriterFountainFlushOnBulkExit verifies spaced echo exits bulk and flushes partial pending.
-func TestH2ResponseWriterFountainFlushOnBulkExit(t *testing.T) {
+func TestH2ResponseWriterICMPImmediateFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
 	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
-	chunk := bytes.Repeat([]byte{'b'}, 4096)
-	for i := 0; i < h2DownlinkBulkEnterHits+1; i++ {
-		if err := w.WriteUDPPayloadAsCapsules(chunk); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(h2DownlinkBulkEnterGap / 2)
-	}
-	time.Sleep(h2DownlinkBulkExitGap + time.Millisecond)
-	echo := []byte("echo")
-	if err := w.WriteUDPPayloadAsCapsules(echo); err != nil {
+	if err := w.WriteUDPPayloadAsCapsules(nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := rec.flushes.Load(); got < 1 {
-		t.Fatalf("bulk exit must flush pending, flushes=%d", got)
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("ICMP empty datagram: flushes=%d want 1 (h2o immediate)", got)
 	}
 }
 
-// wire bytes at H2DownlinkCoalesceThreshold instead of flushing per UDP read.
-func TestServeH2DownlinkCoalesceBatchesFlush(t *testing.T) {
+func TestH2ResponseWriterFountainBulkBatchesFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := &H2ResponseWriter{
-		ResponseWriter:    rec,
-		bulkDownlink:      true,
-		rapidDownlinkHits: h2DownlinkBulkEnterHits,
-		lastDownlinkAt:    time.Now(),
-	}
-	const chunk = 4096
-	const nChunks = H2DownlinkCoalesceThreshold/chunk + 2
-	payload := bytes.Repeat([]byte{'u'}, chunk)
-	for i := 0; i < nChunks; i++ {
-		if err := w.WriteUDPPayloadAsCapsules(payload); err != nil {
+	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	payload := bytes.Repeat([]byte{'x'}, 512)
+	perWire := h2c.DatagramCapsule512WireLen
+	need := (H2DownlinkBulkFlushBytes / perWire) + 1
+	for i := 0; i < need; i++ {
+		if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("mid-burst flushes=%d want 1 at %d B threshold", got, H2DownlinkCoalesceThreshold)
+		t.Fatalf("byte threshold flush: flushes=%d want 1", got)
+	}
+	if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
+		t.Fatal(err)
 	}
 	if err := w.FlushPending(); err != nil {
 		t.Fatal(err)
 	}
 	if got := rec.flushes.Load(); got != 2 {
-		t.Fatalf("final flushes=%d want 2 (%d B batch + remainder)", got, H2DownlinkCoalesceThreshold)
+		t.Fatalf("tail flush: flushes=%d want 2", got)
+	}
+}
+
+func TestH2ResponseWriterFountainProfileNoDebounceTimer(t *testing.T) {
+	rec := &flushCountResponseWriter{}
+	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	payload := bytes.Repeat([]byte{'y'}, 512)
+	if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("fountain must not time-flush: flushes=%d want 0", got)
 	}
 }
 

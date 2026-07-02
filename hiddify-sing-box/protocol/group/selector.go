@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/monitoring"
 	C "github.com/sagernet/sing-box/constant"
@@ -131,9 +132,12 @@ func (s *Selector) SelectOutbound(tag string) bool {
 		return false
 	}
 
-	if s.selected.Swap(detour) == detour {
+	prev := s.selected.Swap(detour)
+	if prev == detour {
 		return true
 	}
+	CM.NotifyConnectIPPlaneDeselected(prev)
+	CM.NotifyConnectUDPPlaneDeselected(prev)
 	if s.Tag() != "" {
 		cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
 		if cacheFile != nil {

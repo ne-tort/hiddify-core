@@ -25,7 +25,7 @@ func (h *stubHopHost) DialAttempt(ctx context.Context, destination M.Socksaddr) 
 }
 
 func (h *stubHopHost) TryHTTPFallbackSwitch(err error) bool             { return false }
-func (h *stubHopHost) HTTPLayerFallbackEnabled() bool                 { return false }
+func (h *stubHopHost) HTTPLayerAutoEnabled() bool                 { return false }
 func (h *stubHopHost) IsAuthFailure(err error) bool                   { return false }
 func (h *stubHopHost) ClearHTTPFallbackAfterGiveUp()                  {}
 func (h *stubHopHost) RebuildOverlayTransport()                       {}

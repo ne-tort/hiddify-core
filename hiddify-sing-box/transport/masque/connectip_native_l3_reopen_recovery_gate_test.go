@@ -9,6 +9,7 @@ import (
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/option"
 	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
 	msess "github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/yosida95/uritemplate/v3"
@@ -42,7 +43,7 @@ func TestGATEConnectIPNativeL3ReopenOpenFailureRecovery(t *testing.T) {
 
 	cs := &coreSession{
 		CoreSession: msess.CoreSession{
-			Options:    ClientOptions{TransportMode: "connect_ip"},
+			Options:    ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			TemplateIP: templateIP,
 			Caps:       CapabilitySet{ConnectIP: true},
 			IPConn:     &connectip.Conn{},

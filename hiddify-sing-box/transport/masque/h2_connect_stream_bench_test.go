@@ -49,7 +49,6 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
 		})
 	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -138,7 +137,6 @@ func TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead(t *testing.T) {
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
 	})
 	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -213,7 +211,6 @@ func TestH2ConnectStreamTCPUploadServerBannerNoConcurrentRead(t *testing.T) {
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
 	})
 	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {

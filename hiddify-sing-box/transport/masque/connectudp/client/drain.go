@@ -23,7 +23,7 @@ func FlushPacketConnWrites(conn net.PacketConn) {
 	}
 }
 
-// DrainPacketConnUpload flushes coalesced upload and awaits HTTP/2 TLS flush (H2 burst/docker parity).
+// DrainPacketConnUpload flushes coalesced upload and awaits HTTP/2 TLS / H3 datagram send drain.
 func DrainPacketConnUpload(conn net.PacketConn, timeout time.Duration) error {
 	var drainer interface {
 		AwaitUploadDrain(time.Duration) error
@@ -45,8 +45,23 @@ func DrainPacketConnUpload(conn net.PacketConn, timeout time.Duration) error {
 		cur = next
 	}
 	FlushPacketConnWrites(conn)
-	if drainer != nil {
-		return drainer.AwaitUploadDrain(timeout)
+	if drainer == nil {
+		return nil
 	}
-	return nil
+	deadline := time.Now().Add(timeout)
+	for attempt := 0; attempt < 3; attempt++ {
+		rem := time.Until(deadline)
+		if rem <= 0 {
+			break
+		}
+		if err := drainer.AwaitUploadDrain(rem); err == nil {
+			return nil
+		}
+		FlushPacketConnWrites(conn)
+	}
+	rem := time.Until(deadline)
+	if rem <= 0 {
+		return drainer.AwaitUploadDrain(0)
+	}
+	return drainer.AwaitUploadDrain(rem)
 }

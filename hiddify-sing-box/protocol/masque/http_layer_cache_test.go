@@ -21,7 +21,7 @@ func TestEffectiveMasqueConnectIPRespectsExplicitHTTPLayers(t *testing.T) {
 				Server:     "edge.example",
 				ServerPort: 443,
 			},
-			TransportMode: option.MasqueTransportModeConnectIP,
+			Mode:      option.MasqueDataplaneConnectIP,
 			HTTPLayer:     layer,
 		}
 	}
@@ -41,10 +41,9 @@ func TestEffectiveMasqueHTTPLayerTTLExpiryDropsCacheEntry(t *testing.T) {
 			Server:     fmt.Sprintf("expire-%s.example.invalid", tag),
 			ServerPort: 8443,
 		},
-		TransportMode:     option.MasqueTransportModeConnectIP,
+		Mode:              option.MasqueDataplaneConnectIP,
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(25 * time.Millisecond),
-		HTTPLayerFallback: false,
 	}
 	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH3 {
 		t.Fatalf("cold start: expected h3, got %q", got)
@@ -67,10 +66,9 @@ func TestEffectiveMasqueConnectIPAutoStartsH3UnlessCached(t *testing.T) {
 			Server:     fmt.Sprintf("cache-%s.example.invalid", tag),
 			ServerPort: 8443,
 		},
-		TransportMode:     option.MasqueTransportModeConnectIP,
+		Mode:              option.MasqueDataplaneConnectIP,
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
-		HTTPLayerFallback: true,
 	}
 	if got := EffectiveMasqueClientHTTPLayer(tag, base, nil, 0); got != option.MasqueHTTPLayerH3 {
 		t.Fatalf("auto cold start without cache entry: expected h3, got %q", got)
@@ -89,7 +87,6 @@ func TestMasqueHTTPLayerCacheKeyUsesEntryHopNotTopLevelServer(t *testing.T) {
 			Server:     "legacy-top.example",
 			ServerPort: 443,
 		},
-		HTTPLayerFallback: true,
 	}
 	chain := []cm.ChainHop{
 		{Tag: "mid", Via: "entry", Server: "mid.example", Port: 443},
@@ -114,7 +111,6 @@ func TestRecordMasqueHTTPLayerSuccessIgnoresExplicitLayer(t *testing.T) {
 			ServerPort: 8444,
 		},
 		HTTPLayer:         option.MasqueHTTPLayerH3,
-		HTTPLayerFallback: true,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
 	}
 	RecordMasqueHTTPLayerSuccess(tag, explicitH3, option.MasqueHTTPLayerH2, masqueHTTPLayerDialIdentityFromChain(nil, explicitH3))
@@ -132,7 +128,6 @@ func TestMasqueHTTPLayerCacheDialPortOverrideSeparatesEntries(t *testing.T) {
 		},
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
-		HTTPLayerFallback: true,
 	}
 	const altPort uint16 = 2408
 	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH3 {
@@ -161,7 +156,6 @@ func TestRecordMasqueHTTPLayerSuccessDoesNotAliasInnerHopToEntryKey(t *testing.T
 		},
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
-		HTTPLayerFallback: true,
 	}
 	chain := []cm.ChainHop{
 		{Tag: "entry", Via: "", Server: fmt.Sprintf("entry-%s.example.invalid", tag), Port: 443},
@@ -228,10 +222,9 @@ func TestInvalidateMasqueHTTPLayerCacheForTagResetsAutoLayer(t *testing.T) {
 			Server:     fmt.Sprintf("inv-%s.example.invalid", tag),
 			ServerPort: 8443,
 		},
-		TransportMode:     option.MasqueTransportModeConnectIP,
+		Mode:              option.MasqueDataplaneConnectIP,
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
-		HTTPLayerFallback: false,
 	}
 	if got := EffectiveMasqueClientHTTPLayer(tag, o, nil, 0); got != option.MasqueHTTPLayerH3 {
 		t.Fatalf("cold start: expected h3, got %q", got)

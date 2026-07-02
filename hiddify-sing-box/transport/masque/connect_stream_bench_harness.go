@@ -170,7 +170,6 @@ func dialH2ConnectStreamBench(tb testing.TB, targetPort uint16) net.Conn {
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
 	})
 	s.Options.TCPDial = func(ctx context.Context, network, addr string) (net.Conn, error) {

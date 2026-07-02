@@ -253,6 +253,20 @@ func FlushRequestBody(w io.Writer) {
 
 // AppendDatagramCapsuleWire serializes one RFC 9297 DATAGRAM capsule without flushing.
 func AppendDatagramCapsuleWire(w io.Writer, udpPayload []byte) error {
+	if len(udpPayload) == 512 {
+		wire := make([]byte, DatagramCapsule512WireLen)
+		copy(wire[:len(datagramCapsule512Prefix)], datagramCapsule512Prefix)
+		copy(wire[len(datagramCapsule512Prefix):], udpPayload)
+		_, err := w.Write(wire)
+		return err
+	}
+	if len(udpPayload) == maxUDPCapsuleBenchPayloadLen {
+		wire := make([]byte, DatagramCapsuleMaxWireLen)
+		copy(wire[:len(datagramCapsuleMaxPrefix)], datagramCapsuleMaxPrefix)
+		copy(wire[len(datagramCapsuleMaxPrefix):], udpPayload)
+		_, err := w.Write(wire)
+		return err
+	}
 	dgramLen := 1 + len(udpPayload)
 	hdrLen := quicvarint.Len(uint64(CapsuleTypeDatagram)) + quicvarint.Len(uint64(dgramLen))
 	total := hdrLen + dgramLen
@@ -282,6 +296,51 @@ var datagramCapsule512Prefix = func() []byte {
 
 // DatagramCapsule512WireLen is the on-wire byte length of one 512 B UDP DATAGRAM capsule (synth bench shape).
 var DatagramCapsule512WireLen = len(datagramCapsule512Prefix) + 512
+
+var (
+	maxUDPCapsuleBenchPayloadLen = MaxUDPPayloadPerDatagramCapsule()
+	datagramCapsuleMaxPrefix     = func() []byte {
+		wire := appendDatagramCapsuleWireBytes(nil, make([]byte, maxUDPCapsuleBenchPayloadLen))
+		return append([]byte(nil), wire[:len(wire)-maxUDPCapsuleBenchPayloadLen]...)
+	}()
+	// DatagramCapsuleMaxWireLen is on-wire bytes for one max-MTU UDP DATAGRAM capsule (stretch gate shape).
+	DatagramCapsuleMaxWireLen = len(datagramCapsuleMaxPrefix) + maxUDPCapsuleBenchPayloadLen
+)
+
+// DatagramCapsule512UDPPayloadOffset is the byte offset of the UDP payload inside a synth 512 B wire capsule.
+func DatagramCapsule512UDPPayloadOffset() int {
+	return len(datagramCapsule512Prefix)
+}
+
+// DatagramCapsuleWireLen returns RFC 9297 on-wire bytes for one DATAGRAM capsule (ctx 0 + udpPayload).
+func DatagramCapsuleWireLen(udpPayload []byte) int {
+	if len(udpPayload) == 512 {
+		return DatagramCapsule512WireLen
+	}
+	if len(udpPayload) == maxUDPCapsuleBenchPayloadLen {
+		return DatagramCapsuleMaxWireLen
+	}
+	dgramLen := 1 + len(udpPayload)
+	return quicvarint.Len(uint64(CapsuleTypeDatagram)) + quicvarint.Len(uint64(dgramLen)) + dgramLen
+}
+
+// UDPPayloadWireLen returns total on-wire bytes after splitting udpPayload into DATAGRAM capsules.
+func UDPPayloadWireLen(udpPayload []byte) int {
+	if len(udpPayload) == 0 {
+		return DatagramCapsuleWireLen(nil)
+	}
+	n := 0
+	step := MaxUDPPayloadPerDatagramCapsule()
+	for offset := 0; offset < len(udpPayload); {
+		end := offset + step
+		if end > len(udpPayload) {
+			end = len(udpPayload)
+		}
+		n += DatagramCapsuleWireLen(udpPayload[offset:end])
+		offset = end
+	}
+	return n
+}
 
 // CountLeadingDatagramCapsule512Wire counts consecutive synth-shape 512 B capsules at the start of wire.
 func CountLeadingDatagramCapsule512Wire(wire []byte) int {

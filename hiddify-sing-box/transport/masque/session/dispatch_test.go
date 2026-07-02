@@ -15,12 +15,15 @@ func TestIsTCPNetwork(t *testing.T) {
 	}
 }
 
-func TestNormalizeTCPTransport(t *testing.T) {
-	if got := NormalizeTCPTransport(option.MasqueTCPTransportConnectStream); got != option.MasqueTCPTransportConnectStream {
-		t.Fatalf("connect_stream: got %q", got)
+func TestDataplaneUsesConnectIP(t *testing.T) {
+	if DataplaneUsesConnectIP(option.MasqueDataplaneConnectIP) != true {
+		t.Fatal("connect_ip dataplane")
 	}
-	if got := NormalizeTCPTransport(""); got != option.MasqueTCPTransportAuto {
-		t.Fatalf("empty: got %q", got)
+	if DataplaneUsesConnectIP(option.MasqueDataplaneDefault) {
+		t.Fatal("default must not use connect_ip plane")
+	}
+	if DataplaneUsesConnectIP("") {
+		t.Fatal("empty must not use connect_ip plane")
 	}
 }
 

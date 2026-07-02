@@ -7,6 +7,9 @@ import (
 )
 
 func TestSteadyUploadPayloadLenH3(t *testing.T) {
+	if got := connectudp.SteadyUploadPayloadLenH3(); got != 1372 {
+		t.Fatalf("SteadyUploadPayloadLenH3=%d want 1372 (connectip wire band)", got)
+	}
 	if got := connectudp.SteadyUploadPayloadLenH3(); got < connectudp.DefaultBenchUDPPayloadLen {
 		t.Fatalf("SteadyUploadPayloadLenH3=%d < bench %d", got, connectudp.DefaultBenchUDPPayloadLen)
 	}

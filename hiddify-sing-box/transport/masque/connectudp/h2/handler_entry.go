@@ -137,6 +137,13 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 			return
 		}
 	}
+	if role == StreamRoleUpload {
+		if waitErr := WaitDownloadSessionBeforeOK(r, addr.String(), sessions); waitErr != nil {
+			_ = writeProxyStatus(waitErr)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+	}
 
 	if err := writeProxyStatus(nil); err != nil {
 		closeH2OnwardConn(conn)
@@ -149,6 +156,18 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 		capsuleVal = cfg.CapsuleProtocolHeaderValue()
 	}
 	w.Header().Set(http3.CapsuleProtocolHeader, capsuleVal)
+	if role == StreamRoleUpload {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		if err := ServeH2FromRequest(w, r, conn, addr.String(), sessions); err != nil {
+			if IsDuplicateDownloadSession(err) {
+				return
+			}
+		}
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()

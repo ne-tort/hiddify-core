@@ -53,7 +53,6 @@ func dialConnectStreamOverH3Proxy(t *testing.T, targetPort uint16) net.Conn {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
@@ -97,7 +96,6 @@ func TestHTTPLayerFallbackConnectStreamWriteToParity(t *testing.T) {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        option.MasqueTCPTransportConnectStream,
 	})
 	if err != nil {
 		t.Fatalf("new h2 session: %v", err)

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
-	"github.com/sagernet/sing-box/option"
 	cudpserver "github.com/sagernet/sing-box/protocol/masque/server/connectudp"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
@@ -47,7 +46,7 @@ func connectUDPTestTargetPolicy() cudpserver.TargetPolicy {
 	return cudpserver.TargetPolicy{AllowPrivateTargets: true}
 }
 
-func serveConnectUDPProdHandler(w http.ResponseWriter, r *http.Request, udpTemplate *uritemplate.Template, udpProxy *cudprelay.Proxy) {
+func serveConnectUDPProdHandler(w http.ResponseWriter, r *http.Request, udpTemplate *uritemplate.Template, udpProxy *cudprelay.Proxy, handler ...cudpserver.Handler) {
 	req, err := cudpframe.ParseRequest(r, udpTemplate)
 	if err != nil {
 		if pe, ok := err.(*cudpframe.RequestParseError); ok {
@@ -57,7 +56,11 @@ func serveConnectUDPProdHandler(w http.ResponseWriter, r *http.Request, udpTempl
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	connectUDPTestServerHandler.HandleConnectUDP(w, r, req, udpProxy, connectUDPTestTargetPolicy())
+	h := connectUDPTestServerHandler
+	if len(handler) > 0 {
+		h = handler[0]
+	}
+	h.HandleConnectUDP(w, r, req, udpProxy, connectUDPTestTargetPolicy())
 }
 
 func newConnectUDPH3ProdListenPacket(tb testing.TB, target M.Socksaddr) (net.PacketConn, func()) {
@@ -77,7 +80,6 @@ func newConnectUDPH3ProdListenPacketWithRegister(
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -128,9 +130,11 @@ func runUDPSink(t testing.TB, addr *net.UDPAddr) (*net.UDPConn, *atomic.Int64) {
 		t.Fatalf("listen sink udp: %v", err)
 	}
 	t.Cleanup(func() { c.Close() })
+	const sinkReadBuf = 64 * 1024
+	_ = c.SetReadBuffer(4 << 20)
 	var received atomic.Int64
 	go func() {
-		buf := make([]byte, 2048)
+		buf := make([]byte, sinkReadBuf)
 		for {
 			n, _, err := c.ReadFrom(buf)
 			if err != nil {
@@ -197,6 +201,16 @@ func registerMasqueUDPProxyHandler(t testing.TB, mux *http.ServeMux, proxyPort i
 
 func startInProcessMasqueUDPProxyWithRelay(t testing.TB) int {
 	t.Helper()
+	return startInProcessMasqueUDPProxyWithRelayPolicy(t, cudprelay.RelayPayloadProd)
+}
+
+func startInProcessMasqueUDPProxyWithRelayPolicy(t testing.TB, policy cudprelay.RelayPayloadPolicy) int {
+	t.Helper()
+	prev := cudprelay.RelayPayloadPolicyCurrent()
+	cudprelay.SetRelayPayloadPolicy(policy)
+	if policy != prev {
+		t.Cleanup(func() { cudprelay.SetRelayPayloadPolicy(prev) })
+	}
 	return startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
 		registerMasqueUDPProxyHandler(t, mux, proxyPort)
 	})
@@ -231,7 +245,6 @@ func startConnectUDPMasqueSession(tb testing.TB, proxyPort int) ClientSession {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

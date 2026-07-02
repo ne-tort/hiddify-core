@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -45,7 +46,7 @@ func TestBenchS2CRelayIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial sink: %v", err)
 	}
-	tuneMasqueUDPSocketBuffers(relayConn)
+	TuneMasqueUDPSocketBuffers(relayConn)
 
 	stop := make(chan struct{})
 	var writerWG sync.WaitGroup
@@ -68,7 +69,7 @@ func TestBenchS2CRelayIsolated(t *testing.T) {
 	mock := &mockDatagramSender{}
 	recvDone := make(chan error, 1)
 	go func() {
-		recvDone <- proxyConnReceive(relayConn, mock)
+		recvDone <- proxyConnReceive(context.Background(), relayConn, mock)
 	}()
 
 	time.Sleep(benchDur)

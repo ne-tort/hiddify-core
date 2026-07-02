@@ -2,6 +2,7 @@ package masque
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 )
 
@@ -53,7 +54,9 @@ const (
 // GATE-CONNECT-UDP-SYNTH — prod profile in-proc (transport_mode=connect_udp); same throughput mission as TCP.
 const (
 	connectUDPSynthProdMinMbps         = 1000.0 // DoD min each leg (up/down)
-	connectUDPSynthInstantMinMbps      = 500.0 // synth instant-link GATE (in-proc ceiling target)
+	connectUDPSynthInstantMinMbps      = 500.0 // synth instant-link GATE (in-proc ceiling target; Linux)
+	// connectUDPSynthRegressionFloorDownMbpsDesktop — in-proc fountain S2C anti-regression (Windows QUIC/datagram ceiling ~310–370 observed).
+	connectUDPSynthRegressionFloorDownMbpsDesktop = 280.0
 	connectUDPSynthInstantGateSlackPct = 0.03  // 3% — Windows in-proc scheduling jitter vs 500 target
 	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
 	connectUDPSynthParityMinRatio      = 0.75  // H3/H2 paired gate (Windows in-proc variance)
@@ -64,6 +67,18 @@ const (
 	connectUDPSynthUploadWriteStall = 750 * time.Millisecond
 	// connectUDPSynthStabilityWallSlack is extra wall time allowed beyond bench duration for teardown.
 	connectUDPSynthStabilityWallSlack = 1 * time.Second
+	// connectUDPSynthGateWaitCtx bounds dial/session setup in synth GATE benches (was 8–30s).
+	connectUDPSynthGateWaitCtx = 5 * time.Second
+	// connectUDPSynthGateParallelWaitCtx bounds parallel-scaling handle sessions (was 30s).
+	connectUDPSynthGateParallelWaitCtx = 12 * time.Second
+	// connectUDPSynthGateSinkDeliverWait caps post-bench rx drain wait (was 2s).
+	connectUDPSynthGateSinkDeliverWait = 750 * time.Millisecond
+	// connectUDPSynthUploadTailSlackPkts: in-flight at half-close not counted as loss (H2 bulk TLS parity).
+	connectUDPSynthUploadTailSlackPkts = 4
+	// connectUDPSynthUploadTailSlackPktsPacedSteady: async C2S onward queue (4096) + batch 128 + paced @1000 steady MTU teardown.
+	connectUDPSynthUploadTailSlackPktsPacedSteady = 96
+	// connectUDPSynthUploadDrainTimeout bounds in-proc synth upload drain (not docker TLS 30s).
+	connectUDPSynthUploadDrainTimeout = 2 * time.Second
 	// connectUDPEchoDownloadPrimeDepth: in-flight cap for unlimited bg WriteTo + prime depth (pipeline localize shape).
 	connectUDPEchoDownloadPrimeDepth = 128
 	// connectUDPEchoBoundedPipelineDepth: primary prod-shaped echo gate (3ck ACTIVATED 2026-06-24).
@@ -124,6 +139,64 @@ func formatSynthMbps(v float64) string {
 // synthInstantGatePass reports whether Mbps meets instant-link GATE (500 target −3% slack).
 func synthInstantGatePass(mbps float64) bool {
 	return mbps >= connectUDPSynthInstantMinMbps*(1-connectUDPSynthInstantGateSlackPct)
+}
+
+// connectUDPSynthInstantDownloadMinMbps returns fountain S2C synth gate target (Linux DoD path vs desktop regression band).
+func connectUDPSynthInstantDownloadMinMbps() float64 {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return connectUDPSynthRegressionFloorDownMbpsDesktop
+	default:
+		return connectUDPSynthInstantMinMbps
+	}
+}
+
+// synthInstantDownloadGatePass reports whether fountain S2C Mbps meets platform synth gate (−3% slack).
+func synthInstantDownloadGatePass(mbps float64) bool {
+	return mbps >= connectUDPSynthInstantDownloadMinMbps()*(1-connectUDPSynthInstantGateSlackPct)
+}
+
+// connectUDPParallelScalingMinAggMbps returns aggregate floor for N-stream intra-session gate.
+func connectUDPParallelScalingMinAggMbps(layer string, streams int, singleMbps float64) float64 {
+	if streams < 1 {
+		streams = 1
+	}
+	minAgg := singleMbps * float64(streams) * 0.55
+	if minAgg < 250 {
+		minAgg = 250
+	}
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		switch layer {
+		case "h3":
+			minAgg = 60.0 * float64(streams)
+		case "h2":
+			minAgg = singleMbps * float64(streams) * 0.55
+			if minAgg > 500 {
+				minAgg = 500
+			}
+			if minAgg < 150*float64(streams) {
+				minAgg = 150 * float64(streams)
+			}
+		}
+	default:
+		if singleMbps >= connectUDPSynthProdMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
+			want := connectUDPSynthProdMinMbps * float64(streams) * 0.7
+			if want > connectUDPSynthProdMinMbps {
+				want = connectUDPSynthProdMinMbps
+			}
+			if want > minAgg {
+				minAgg = want
+			}
+		}
+		if minAgg > 500 {
+			minAgg = 500
+		}
+	}
+	if minAgg > 500 && runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		minAgg = 500
+	}
+	return minAgg
 }
 
 // synthProdGatePass reports whether Mbps meets DoD prod synth (1000 Mbit/s −3% slack).

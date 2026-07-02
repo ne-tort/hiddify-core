@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"errors"
 	"net"
 	"strings"
 
@@ -20,16 +19,9 @@ func IsTCPNetwork(network string) bool {
 	}
 }
 
-// NormalizeTCPTransport maps option tcp_transport to a known MASQUE TCP dataplane mode.
-func NormalizeTCPTransport(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case option.MasqueTCPTransportConnectStream:
-		return option.MasqueTCPTransportConnectStream
-	case option.MasqueTCPTransportConnectIP:
-		return option.MasqueTCPTransportConnectIP
-	default:
-		return option.MasqueTCPTransportAuto
-	}
+// DataplaneUsesConnectIP reports whether UDP and TCP use the CONNECT-IP plane.
+func DataplaneUsesConnectIP(dataplaneMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(dataplaneMode), option.MasqueDataplaneConnectIP)
 }
 
 // TCPMasqueDirectFallbackEnabled is true when explicit masque-or-direct + direct_explicit policy is set.
@@ -73,37 +65,8 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 		return nil, context.Cause(ctx)
 	default:
 	}
-	switch NormalizeTCPTransport(s.Options.TCPTransport) {
-	case option.MasqueTCPTransportConnectStream:
-		conn, err := host.DialTCPStream(ctx, destination)
-		if err == nil {
-			host.RecordTCPDialSuccess()
-			return conn, nil
-		}
-		if TCPMasqueDirectFallbackEnabled(s.Options) && host.IsTCPMasqueDirectFallbackEligible(err, ctx) {
-			host.RecordTCPFallback()
-			conn2, dirErr := host.DialDirectTCP(ctx, network, destination)
-			if dirErr != nil {
-				host.RecordTCPDialFailure()
-				host.RecordTCPDialErrorClass(dirErr)
-				host.ClearHTTPFallbackAfterGiveUp()
-				return nil, dirErr
-			}
-			host.RecordTCPDialSuccess()
-			return conn2, nil
-		}
-		host.RecordTCPDialFailure()
-		host.RecordTCPDialErrorClass(err)
-		host.ClearHTTPFallbackAfterGiveUp()
-		return nil, err
-	case option.MasqueTCPTransportConnectIP:
-		if !strings.EqualFold(strings.TrimSpace(s.Options.TransportMode), option.MasqueTransportModeConnectIP) {
-			err := errors.Join(host.ErrTCPOverConnectIPRequiresConnectIPMode(), errors.New("tcp_transport connect_ip requires transport_mode connect_ip"))
-			host.RecordTCPDialFailure()
-			host.RecordTCPDialErrorClass(err)
-			host.ClearHTTPFallbackAfterGiveUp()
-			return nil, err
-		}
+	switch {
+	case DataplaneUsesConnectIP(s.Options.DataplaneMode):
 		conn, err := host.DialConnectIPTCP(ctx, destination)
 		if err == nil {
 			host.RecordTCPDialSuccess()
@@ -126,14 +89,31 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, err
 	default:
+		conn, err := host.DialTCPStream(ctx, destination)
+		if err == nil {
+			host.RecordTCPDialSuccess()
+			return conn, nil
+		}
+		if TCPMasqueDirectFallbackEnabled(s.Options) && host.IsTCPMasqueDirectFallbackEligible(err, ctx) {
+			host.RecordTCPFallback()
+			conn2, dirErr := host.DialDirectTCP(ctx, network, destination)
+			if dirErr != nil {
+				host.RecordTCPDialFailure()
+				host.RecordTCPDialErrorClass(dirErr)
+				host.ClearHTTPFallbackAfterGiveUp()
+				return nil, dirErr
+			}
+			host.RecordTCPDialSuccess()
+			return conn2, nil
+		}
 		host.RecordTCPDialFailure()
-		host.RecordTCPDialErrorClass(host.ErrTCPPathNotImplemented())
+		host.RecordTCPDialErrorClass(err)
 		host.ClearHTTPFallbackAfterGiveUp()
-		return nil, host.ErrTCPPathNotImplemented()
+		return nil, err
 	}
 }
 
-// DispatchListenPacket opens CONNECT-IP UDP or CONNECT-UDP depending on transport_mode.
+// DispatchListenPacket opens CONNECT-IP UDP or CONNECT-UDP depending on dataplane mode.
 func DispatchListenPacket(s *CoreSession, host DispatchHost, ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	select {
 	case <-ctx.Done():
@@ -141,7 +121,7 @@ func DispatchListenPacket(s *CoreSession, host DispatchHost, ctx context.Context
 		return nil, context.Cause(ctx)
 	default:
 	}
-	if strings.EqualFold(strings.TrimSpace(s.Options.TransportMode), option.MasqueTransportModeConnectIP) {
+	if DataplaneUsesConnectIP(s.Options.DataplaneMode) {
 		return host.ListenPacketConnectIP(ctx, destination)
 	}
 	return host.ListenPacketConnectUDP(ctx, destination)

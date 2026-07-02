@@ -17,12 +17,10 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-const transportModeConnectIP = "connect_ip"
+const masqueDataplaneConnectIP = "connect_ip"
 
-// connectIPEagerOpenIPSessionAtStart opens CONNECT-IP during Runtime.Start when transport_mode is connect_ip.
-func connectIPEagerOpenIPSessionAtStart(transportMode, tcpTransport string) bool {
-	_ = tcpTransport
-	return strings.EqualFold(strings.TrimSpace(transportMode), transportModeConnectIP)
+func connectIPEagerOpenIPSessionAtStart(dataplaneMode string) bool {
+	return strings.EqualFold(strings.TrimSpace(dataplaneMode), masqueDataplaneConnectIP)
 }
 
 // wrapStartRouterCancel marks context.Canceled on the Runtime.Start path as lifecycle-classified for
@@ -49,6 +47,7 @@ type Runtime interface {
 	Capabilities() T.CapabilitySet
 	Close() error
 	CloseConnectIPPlane()
+	CloseConnectUDPPlane()
 }
 
 type RuntimeOptions struct {
@@ -57,7 +56,7 @@ type RuntimeOptions struct {
 	// DialPeer overrides the QUIC/UDP dial host when non-empty (see transport/masque.ClientOptions.DialPeer).
 	DialPeer              string
 	ServerPort            uint16
-	TransportMode         string
+	DataplaneMode         string
 	TemplateUDP           string
 	TemplateIP            string
 	ConnectIPScopeTarget  string
@@ -65,7 +64,6 @@ type RuntimeOptions struct {
 	TemplateTCP           string
 	FallbackPolicy        string
 	TCPMode               string
-	TCPTransport          string
 	ServerToken           string
 	ClientBasicUsername   string
 	ClientBasicPassword   string
@@ -88,7 +86,7 @@ type RuntimeOptions struct {
 
 	TCPDial                  T.MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
-	HTTPLayerFallback        bool
+	HTTPLayerAuto            bool
 	HTTPLayerSuccess         func(layer string, id T.HTTPLayerCacheDialIdentity)
 }
 
@@ -165,7 +163,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			Server:                      strings.TrimSpace(r.options.Server),
 			DialPeer:                    strings.TrimSpace(r.options.DialPeer),
 			ServerPort:                  r.options.ServerPort,
-			TransportMode:               r.options.TransportMode,
+			DataplaneMode:               r.options.DataplaneMode,
 			TemplateUDP:                 r.options.TemplateUDP,
 			TemplateIP:                  r.options.TemplateIP,
 			ConnectIPScopeTarget:        r.options.ConnectIPScopeTarget,
@@ -173,7 +171,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			TemplateTCP:                 r.options.TemplateTCP,
 			FallbackPolicy:              r.options.FallbackPolicy,
 			TCPMode:                     r.options.TCPMode,
-			TCPTransport:                r.options.TCPTransport,
 			ServerToken:                 strings.TrimSpace(r.options.ServerToken),
 			ClientBasicUsername:         strings.TrimSpace(r.options.ClientBasicUsername),
 			ClientBasicPassword:         r.options.ClientBasicPassword,
@@ -185,7 +182,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			QUICDial:                    r.options.QUICDial,
 			TCPDial:                     r.options.TCPDial,
 			MasqueEffectiveHTTPLayer:    r.options.MasqueEffectiveHTTPLayer,
-			HTTPLayerFallback:           r.options.HTTPLayerFallback,
+			HTTPLayerAuto:               r.options.HTTPLayerAuto,
 			HTTPLayerSuccess:            r.options.HTTPLayerSuccess,
 			WarpMasqueClientCert:        r.options.WarpMasqueClientCert,
 			WarpMasquePinnedPubKey:      r.options.WarpMasquePinnedPubKey,
@@ -207,7 +204,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 		return err
 	}
 	r.session = session
-	if connectIPEagerOpenIPSessionAtStart(r.options.TransportMode, r.options.TCPTransport) {
+	if connectIPEagerOpenIPSessionAtStart(r.options.DataplaneMode) {
 		ipPlane, err := session.OpenIPSession(ctx)
 		if err != nil {
 			_ = session.Close()
@@ -391,6 +388,16 @@ func (r *runtimeImpl) CloseConnectIPPlane() {
 	r.mu.Unlock()
 	if c, ok := sess.(interface{ CloseConnectIPPlane() }); ok {
 		c.CloseConnectIPPlane()
+	}
+}
+
+// CloseConnectUDPPlane tears down CONNECT-UDP QUIC/H2 transport without closing the MASQUE session (LIFE-3).
+func (r *runtimeImpl) CloseConnectUDPPlane() {
+	r.mu.Lock()
+	sess := r.session
+	r.mu.Unlock()
+	if c, ok := sess.(interface{ CloseConnectUDPPlane() }); ok {
+		c.CloseConnectUDPPlane()
 	}
 }
 

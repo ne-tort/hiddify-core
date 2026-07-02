@@ -67,7 +67,7 @@ func TestTeardownOverlayHTTPLockedAssumeMu(t *testing.T) {
 
 func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 	s := &CoreSession{
-		HTTPLayerFallback: true,
+		HTTPLayerAuto: true,
 		IPConn:            connectip.NewStubIngressConn(),
 	}
 	StoreUDPHTTPLayer(s, option.MasqueHTTPLayerH3)

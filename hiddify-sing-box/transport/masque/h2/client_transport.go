@@ -30,6 +30,9 @@ func ClientTLSConfig(base *tls.Config, serverName string) *tls.Config {
 	}
 	cfg := base.Clone()
 	cfg.NextProtos = []string{http2.NextProtoTLS}
+	if cfg.ServerName == "" && serverName != "" {
+		cfg.ServerName = serverName
+	}
 	return cfg
 }
 

@@ -7,6 +7,18 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/connectudp/probe"
 )
 
+func TestSequencedSinkRxCount(t *testing.T) {
+	const runID = uint32(3)
+	sink := probe.NewSequencedSink(runID)
+	if sink.RxCount() != 0 {
+		t.Fatal("expected empty rx")
+	}
+	sink.Record(probe.BuildProbePayload(0, runID, connectudp.DefaultBenchUDPPayloadLen))
+	if got := sink.RxCount(); got != 1 {
+		t.Fatalf("rx=%d want 1", got)
+	}
+}
+
 func TestUDPProbeAnalyzeNoLoss(t *testing.T) {
 	const (
 		runID      = uint32(42)
@@ -82,5 +94,43 @@ func TestUDPProbeAnalyzeLoss(t *testing.T) {
 	}
 	if st.LossPct != 50 {
 		t.Fatalf("loss_pct=%.2f want 50", st.LossPct)
+	}
+}
+
+func TestUDPProbeAnalyzeSeqSetCountOnlyFalsePositive(t *testing.T) {
+	const (
+		runID      = uint32(11)
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+		sent       = 100
+	)
+	sink := probe.NewSequencedSink(runID)
+	for i := range sent {
+		sink.Record(probe.BuildProbePayload(uint64(1000+i), runID, payloadLen))
+	}
+	st := sink.Analyze(sent, payloadLen)
+	if st.LossPct != 0 || st.RxPkts != sent {
+		t.Fatalf("count-only loss=%.2f rx=%d want 0/%d", st.LossPct, st.RxPkts, sent)
+	}
+	if st.SeqSetOK {
+		t.Fatal("SeqSetOK true for wrong seq range")
+	}
+	if st.BurstZeroLossOK(payloadLen, probe.DefaultBurstMinRxRatio) {
+		t.Fatal("BurstZeroLossOK should fail when seq set incomplete")
+	}
+}
+
+func TestUDPProbeAnalyzeSeqSetComplete(t *testing.T) {
+	const (
+		runID      = uint32(12)
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+		sent       = 64
+	)
+	sink := probe.NewSequencedSink(runID)
+	for i := range sent {
+		sink.Record(probe.BuildProbePayload(uint64(i), runID, payloadLen))
+	}
+	st := sink.Analyze(sent, payloadLen)
+	if !st.SeqSetOK {
+		t.Fatal("SeqSetOK false for sequential 0..sent-1")
 	}
 }

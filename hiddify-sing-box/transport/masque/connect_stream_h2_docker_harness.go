@@ -31,8 +31,6 @@ func benchConnectStreamH2InProcUploadMbps(t *testing.T, link h2TransportLink, du
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
-		TCPTransport:             option.MasqueTCPTransportConnectStream,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial:                  tcpDial,

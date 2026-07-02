@@ -1,4 +1,4 @@
-﻿package masque
+package masque
 
 import (
 	"context"
@@ -82,7 +82,6 @@ func startConnectStreamUploadHarness(tb testing.TB, link bidiLink, opts ...conne
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		_ = targetLn.Close()
@@ -148,7 +147,6 @@ func startConnectStreamDownloadHarness(tb testing.TB, link bidiLink, opts ...con
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		_ = targetLn.Close()
@@ -216,7 +214,6 @@ func startConnectStreamParallelPool(tb testing.TB, link bidiLink) *connectStream
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		_ = targetLn.Close()

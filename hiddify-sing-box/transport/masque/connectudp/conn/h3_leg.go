@@ -1,10 +1,8 @@
 package conn
 
-import (
-	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
-)
+import cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 
-// H3LegRole tags asymmetric CONNECT-UDP legs on the client (UDP-5p2c).
+// H3LegRole tags asymmetric CONNECT-UDP legs on the client (metadata only).
 type H3LegRole uint8
 
 const (
@@ -13,7 +11,7 @@ const (
 	H3LegUpload
 )
 
-// H3ConnConfig tunes per-leg client behavior for asymmetric CONNECT-UDP.
+// H3ConnConfig tags asymmetric CONNECT-UDP legs on the client.
 type H3ConnConfig struct {
 	LegRole H3LegRole
 }
@@ -28,15 +26,4 @@ func H3LegRoleFromStreamRole(streamRole string) H3LegRole {
 	default:
 		return H3LegBidi
 	}
-}
-
-func (r H3LegRole) s2cPrefetchEnabled() bool {
-	return r != H3LegUpload
-}
-
-func (r H3LegRole) c2sHTTPBatchFlush() int {
-	if r == H3LegUpload {
-		return h3WriteHTTPBatchFlushUpload
-	}
-	return h3WriteHTTPBatchFlush
 }

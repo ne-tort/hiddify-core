@@ -7,6 +7,7 @@ import (
 
 	connectip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go"
+	"github.com/sagernet/sing-box/option"
 	msess "github.com/sagernet/sing-box/transport/masque/session"
 )
 
@@ -20,7 +21,7 @@ func TestGATEConnectIPPlaneSessionRecycleProdLatch(t *testing.T) {
 func testGATECMIngressPlaneSessionRecycleProdLatch(t *testing.T) {
 	t.Parallel()
 	cs := newTestCoreSession(msess.CoreSession{
-		Options: ClientOptions{TransportMode: "connect_ip"},
+		Options: ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 		Caps:    CapabilitySet{ConnectIP: true},
 		IPConn:  &connectip.Conn{},
 	})

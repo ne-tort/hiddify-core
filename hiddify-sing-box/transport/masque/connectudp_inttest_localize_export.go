@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -40,7 +39,6 @@ func InttestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -81,7 +79,6 @@ func InttestLocalizeConnectUDPH3EchoDockerAbsoluteFloor(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -125,7 +122,6 @@ func InttestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
 		session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
-			TransportMode:       option.MasqueTransportModeConnectUDP,
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		})
 		if err != nil {
@@ -157,8 +153,7 @@ func InttestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenPacket fountain: %v", err)
 	}
-	primeUDPBench(t, fountainPkt, fountainAddr)
-	_, fountainMbps, err := benchConnectUDPPacketReceiveOnly(t, fountainPkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, fountainMbps, err := benchConnectUDPH3FountainS2C(t, fountainPkt, fountainAddr, dur, connectudp.DefaultBenchUDPPayloadLen, false)
 	if err != nil {
 		t.Fatalf("fountain receive: %v", err)
 	}
@@ -224,8 +219,7 @@ func InttestLocalizeConnectUDPH2EchoDuplexGapWithFountain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenPacket fountain: %v", err)
 	}
-	primeUDPBench(t, fountainPkt, fountainAddr)
-	_, fountainMbps, err := benchConnectUDPPacketReceiveOnly(t, fountainPkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, fountainMbps, err := benchConnectUDPFountainS2C(t, fountainPkt, fountainAddr, dur, connectudp.DefaultBenchUDPPayloadLen, false)
 	_ = fountainPkt.Close()
 	if err != nil {
 		t.Fatalf("fountain receive: %v", err)

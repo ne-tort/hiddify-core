@@ -24,8 +24,7 @@ type connectIPIngressHost struct {
 }
 
 func (h connectIPIngressHost) IngressTransportModeOK() bool {
-	tm := strings.TrimSpace(h.s.Options.TransportMode)
-	if tm != "" && !strings.EqualFold(tm, "connect_ip") {
+	if dm := strings.TrimSpace(h.s.Options.DataplaneMode); dm != "" && !session.DataplaneUsesConnectIP(dm) {
 		return false
 	}
 	return h.s.IPConn != nil && h.s.ipIngressPacketReader.Load() != nil

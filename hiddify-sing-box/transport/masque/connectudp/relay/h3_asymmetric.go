@@ -1,9 +1,9 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -13,6 +13,7 @@ import (
 	"github.com/quic-go/quic-go/quicvarint"
 	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
@@ -56,7 +57,7 @@ func serveH3DownloadLeg(w http.ResponseWriter, r *http.Request, str *http3.Strea
 		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
-	tuneMasqueUDPSocketBuffers(conn)
+	TuneMasqueUDPSocketBuffers(conn)
 
 	if _, err := reg.RegisterH3Download(key, conn); err != nil {
 		_ = conn.Close()
@@ -69,7 +70,13 @@ func serveH3DownloadLeg(w http.ResponseWriter, r *http.Request, str *http3.Strea
 	}
 	defer reg.ReleaseH3(key)
 
+	defer beginRelaySessionStats("h3-download-leg")()
+
 	w.Header().Set(http3.CapsuleProtocolHeader, frame.CapsuleProtocolHeaderValue)
+	if err := addProxyStatusNextHop(w, parsed.Host, parsed.Target); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return err
+	}
 	w.WriteHeader(http.StatusOK)
 
 	var closeStream sync.Once
@@ -84,20 +91,23 @@ func serveH3DownloadLeg(w http.ResponseWriter, r *http.Request, str *http3.Strea
 	defer shutdownStream()
 	defer shutdownUDP()
 
+	go func() {
+		<-r.Context().Done()
+		shutdownUDP()
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer shutdownStream()
-		if err := proxyConnReceive(conn, str); err != nil {
-			log.Printf("h3 asymmetric download-leg S2C relay from %s failed: %v", conn.RemoteAddr(), err)
+		if err := proxyConnReceive(r.Context(), conn, str); err != nil {
+			diag.Logf("h3 asymmetric download-leg S2C relay from %s failed: %v", conn.RemoteAddr(), err)
 		}
 	}()
-
+	// masque-go ProxyConnectedSocket: skip blocks on main until client closes; relay goroutine runs first.
 	if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) {
-		log.Printf("h3 asymmetric download skip capsules: %v", err)
+		diag.Logf("h3 asymmetric download skip capsules: %v", err)
 	}
-	shutdownStream()
 	shutdownUDP()
 	wg.Wait()
 	return nil
@@ -122,6 +132,10 @@ func serveH3UploadLeg(w http.ResponseWriter, r *http.Request, str *http3.Stream,
 	}
 
 	w.Header().Set(http3.CapsuleProtocolHeader, frame.CapsuleProtocolHeaderValue)
+	if err := addProxyStatusNextHop(w, r.Host, key.target); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return err
+	}
 	w.WriteHeader(http.StatusOK)
 
 	var closeStream sync.Once
@@ -132,21 +146,24 @@ func serveH3UploadLeg(w http.ResponseWriter, r *http.Request, str *http3.Stream,
 		})
 	}
 	defer shutdownStream()
+	defer beginRelaySessionStats("h3-upload-leg")()
 
 	relay := &Proxy{}
+	relayCtx, cancelRelay := context.WithCancel(r.Context())
+	defer cancelRelay()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer shutdownStream()
-		if err := relay.proxyConnSend(r.Context(), conn, str); err != nil {
-			log.Printf("h3 asymmetric upload-only relay failed: %v", err)
+		if err := relay.proxyConnSend(relayCtx, conn, str); err != nil {
+			diag.Logf("h3 asymmetric upload-only relay failed: %v", err)
 		}
 	}()
-
 	if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) {
-		log.Printf("h3 asymmetric upload skip capsules: %v", err)
+		diag.Logf("h3 asymmetric upload skip capsules: %v", err)
 	}
+	cancelRelay()
 	shutdownStream()
 	wg.Wait()
 	return nil

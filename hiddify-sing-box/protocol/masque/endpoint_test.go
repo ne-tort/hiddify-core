@@ -43,7 +43,6 @@ func TestWarpEndpointStartupErrorIsObservable(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-fail", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {
@@ -68,7 +67,6 @@ func TestWarpEndpointDependenciesIncludeProfileDetour(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-deps", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			DialerOptions: option.DialerOptions{Detour: "detour-a"},
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{Detour: "detour-b"},
 	})
@@ -86,7 +84,6 @@ func TestWarpEndpointCompatibilityValidation(t *testing.T) {
 	_, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-compat", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityZeroTrust,
@@ -98,7 +95,6 @@ func TestWarpEndpointCompatibilityValidation(t *testing.T) {
 	_, err = NewWarpEndpoint(context.TODO(), nil, nil, "wm-compat-2", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityZeroTrust,
@@ -111,7 +107,6 @@ func TestWarpEndpointCompatibilityValidation(t *testing.T) {
 	_, err = NewWarpEndpoint(context.TODO(), nil, nil, "wm-compat-3", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityConsumer,
@@ -192,7 +187,6 @@ func TestEndpointReadinessAfterStart(t *testing.T) {
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "m1", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com"},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 	})
 	if err != nil {
 		t.Fatalf("new endpoint: %v", err)
@@ -217,7 +211,6 @@ func TestWarpEndpointParityBootstrapHook(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm1", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {
@@ -249,24 +242,22 @@ func TestNewEndpointRejectInvalidChainVia(t *testing.T) {
 	}
 }
 
-func TestEndpointTransportModes(t *testing.T) {
+func TestEndpointDataplaneModes(t *testing.T) {
 	modes := []string{
-		option.MasqueTransportModeAuto,
-		option.MasqueTransportModeConnectUDP,
-		option.MasqueTransportModeConnectIP,
+		option.MasqueDataplaneDefault,
+		option.MasqueDataplaneConnectIP,
 	}
 	for _, mode := range modes {
 		epRaw, err := NewEndpoint(context.TODO(), nil, nil, "mode-"+mode, option.MasqueEndpointOptions{
 			ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 			HopPolicy:     option.MasqueHopPolicySingle,
-			TransportMode: mode,
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
+			Mode: mode,
 		})
 		if err != nil {
 			t.Fatalf("new endpoint for mode %s: %v", mode, err)
 		}
 		ep := epRaw.(*Endpoint)
-		if mode == option.MasqueTransportModeConnectIP {
+		if mode == option.MasqueDataplaneConnectIP {
 			// connect_ip now eagerly initializes IP-plane at Start and requires
 			// a reachable MASQUE CONNECT-IP server; this unit test only validates
 			// option wiring and mode acceptance.
@@ -280,13 +271,13 @@ func TestEndpointTransportModes(t *testing.T) {
 
 func TestServerModeValidation(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "srv1", option.MasqueEndpointOptions{
-		Mode: option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 	})
 	if err == nil {
 		t.Fatal("expected validation error for missing listen/tls in server mode")
 	}
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "srv2", option.MasqueEndpointOptions{
-		Mode:        option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -302,7 +293,7 @@ func TestServerModeValidation(t *testing.T) {
 		t.Fatal("expected server endpoint implementation in server mode")
 	}
 	_, err = NewEndpoint(context.TODO(), nil, nil, "srv3", option.MasqueEndpointOptions{
-		Mode:          option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:        "127.0.0.1",
 		ListenPort:    8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -310,13 +301,12 @@ func TestServerModeValidation(t *testing.T) {
 			CertificatePath: "cert.pem",
 			KeyPath:         "key.pem",
 		},
-		TransportMode: option.MasqueTransportModeConnectUDP,
 	})
 	if err == nil {
 		t.Fatal("expected server mode to reject client transport fields")
 	}
 	_, err = NewEndpoint(context.TODO(), nil, nil, "srv4", option.MasqueEndpointOptions{
-		Mode:        option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -333,7 +323,7 @@ func TestServerModeValidation(t *testing.T) {
 
 func TestEndpointServerModeRejectsConnectIPScopeFields(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "server-reject-scope", option.MasqueEndpointOptions{
-		Mode:                 option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:               "127.0.0.1",
 		ListenPort:           8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -371,15 +361,26 @@ func TestEndpointRejectsInvalidMTU(t *testing.T) {
 	}
 }
 
+func TestEndpointRejectsRemovedTransportMode(t *testing.T) {
+	_, err := NewEndpoint(context.TODO(), nil, nil, "removed-transport-mode", option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
+		HopPolicy:     option.MasqueHopPolicySingle,
+		TransportMode: "connect_udp",
+	})
+	if err == nil {
+		t.Fatal("expected removed transport_mode to be rejected")
+	}
+}
+
 func TestEndpointRejectsInvalidRawEnums(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "invalid-raw", option.MasqueEndpointOptions{
 		ServerOptions:  option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:      option.MasqueHopPolicySingle,
-		TransportMode:  "bad_mode",
+		Mode:           "bad_mode",
 		FallbackPolicy: option.MasqueFallbackPolicyStrict,
 	})
 	if err == nil {
-		t.Fatal("expected invalid transport_mode error")
+		t.Fatal("expected invalid mode error")
 	}
 }
 
@@ -394,7 +395,6 @@ func TestEndpointRejectsInvalidRawTCPAndFallbackEnums(t *testing.T) {
 				ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 				HopPolicy:     option.MasqueHopPolicySingle,
 				TCPMode:       "bad_mode",
-				TCPTransport:  option.MasqueTCPTransportConnectStream,
 			},
 		},
 		{
@@ -402,16 +402,15 @@ func TestEndpointRejectsInvalidRawTCPAndFallbackEnums(t *testing.T) {
 			opts: option.MasqueEndpointOptions{
 				ServerOptions:  option.ServerOptions{Server: "example.com", ServerPort: 443},
 				HopPolicy:      option.MasqueHopPolicySingle,
-				TCPTransport:   option.MasqueTCPTransportConnectStream,
 				FallbackPolicy: "bad_fallback",
 			},
 		},
 		{
-			name: "invalid tcp_transport",
+			name: "removed tcp_transport",
 			opts: option.MasqueEndpointOptions{
 				ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 				HopPolicy:     option.MasqueHopPolicySingle,
-				TCPTransport:  "bad_transport",
+				TCPTransport:  "connect_stream",
 			},
 		},
 	}
@@ -430,25 +429,22 @@ func TestEndpointWhitespaceRawEnumsUseDefaults(t *testing.T) {
 		Mode:           "   ",
 		ServerOptions:  option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:      option.MasqueHopPolicySingle,
-		TransportMode:  "   ",
 		FallbackPolicy: "   ",
 		TCPMode:        "   ",
-		TCPTransport:   option.MasqueTCPTransportConnectStream,
 	})
 	if err != nil {
 		t.Fatalf("expected whitespace raw enums to normalize to defaults, got %v", err)
 	}
 }
 
-func TestEndpointRejectsInvalidModeEnum(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "invalid-mode", option.MasqueEndpointOptions{
+func TestEndpointRejectsInvalidDataplaneModeEnum(t *testing.T) {
+	_, err := NewEndpoint(context.TODO(), nil, nil, "invalid-dataplane-mode", option.MasqueEndpointOptions{
 		Mode:          "bad_mode",
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 	})
 	if err == nil {
-		t.Fatal("expected invalid mode error")
+		t.Fatal("expected invalid dataplane mode error")
 	}
 }
 
@@ -480,7 +476,6 @@ func TestEndpointClientModeRejectsAllowPrivateTargets(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "client-allow-private-targets", option.MasqueEndpointOptions{
 		ServerOptions:       option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:           option.MasqueHopPolicySingle,
-		TCPTransport:        option.MasqueTCPTransportConnectStream,
 		AllowPrivateTargets: true,
 	})
 	if err == nil {
@@ -493,55 +488,47 @@ func TestEndpointClientModeAllowsServerToken(t *testing.T) {
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		ServerToken:   "shared-token",
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 	})
 	if err != nil {
 		t.Fatalf("expected client mode to allow server_token for auth contract, got %v", err)
 	}
 }
 
-func TestEndpointAllowsAutoTCPTransportDefaultsToConnectStreamInClientMode(t *testing.T) {
+func TestEndpointDefaultDataplaneModeAccepted(t *testing.T) {
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-auto-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TCPTransport:  option.MasqueTCPTransportAuto,
 	})
 	if err != nil {
-		t.Fatalf("expected tcp_transport=auto to default to connect_stream, got %v", err)
+		t.Fatalf("expected default dataplane mode, got %v", err)
 	}
 	ep, ok := epRaw.(*Endpoint)
 	if !ok || ep == nil {
 		t.Fatalf("expected *Endpoint, got %T", epRaw)
 	}
-	if ep.options.TCPTransport != option.MasqueTCPTransportConnectStream {
-		t.Fatalf("expected tcp_transport connect_stream, got %q", ep.options.TCPTransport)
-	}
+	if normalizeDataplaneMode(ep.options.Mode) != option.MasqueDataplaneDefault { t.Fatalf("expected default dataplane mode, got %q", ep.options.Mode) }
 }
 
-func TestEndpointAllowsImplicitTCPTransportDefaultsToConnectStream(t *testing.T) {
+func TestEndpointMinimalClientAccepted(t *testing.T) {
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-implicit-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 	})
 	if err != nil {
-		t.Fatalf("expected implicit tcp_transport to default to connect_stream, got %v", err)
+		t.Fatalf("expected minimal client config, got %v", err)
 	}
 	ep, ok := epRaw.(*Endpoint)
 	if !ok || ep == nil {
 		t.Fatalf("expected *Endpoint, got %T", epRaw)
 	}
-	if ep.options.TCPTransport != option.MasqueTCPTransportConnectStream {
-		t.Fatalf("expected tcp_transport connect_stream, got %q", ep.options.TCPTransport)
-	}
+	if normalizeDataplaneMode(ep.options.Mode) != option.MasqueDataplaneDefault { t.Fatalf("expected default dataplane mode, got %q", ep.options.Mode) }
 }
 
-func TestEndpointClearsTemplateIPWhenTransportModeConnectUDP(t *testing.T) {
+func TestEndpointClearsTemplateIPInDefaultMode(t *testing.T) {
 	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-connect-udp-strip-template-ip", option.MasqueEndpointOptions{
 		ServerOptions:   option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:       option.MasqueHopPolicySingle,
-		TransportMode:   option.MasqueTransportModeConnectUDP,
 		TemplateIP:      "https://example.com:443/masque/ip",
-		TCPTransport:    option.MasqueTCPTransportConnectStream,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -559,7 +546,6 @@ func TestEndpointRejectsClientTemplateTCPWithoutPlaceholders(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "client-template-tcp", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		TemplateTCP:   "https://example.com/masque/tcp",
 	})
 	if err == nil {
@@ -571,7 +557,6 @@ func TestEndpointRejectsClientTemplateUDPWithoutPlaceholders(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "client-template-udp", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		TemplateUDP:   "https://example.com/masque/udp",
 	})
 	if err == nil {
@@ -581,7 +566,7 @@ func TestEndpointRejectsClientTemplateUDPWithoutPlaceholders(t *testing.T) {
 
 func TestEndpointRejectsServerTemplateUDPWithoutPlaceholders(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "server-template-udp", option.MasqueEndpointOptions{
-		Mode:        option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -598,7 +583,7 @@ func TestEndpointRejectsServerTemplateUDPWithoutPlaceholders(t *testing.T) {
 
 func TestEndpointRejectsServerTemplatePathCollisions(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "server-template-path-collision", option.MasqueEndpointOptions{
-		Mode:        option.MasqueModeServer,
+		Role: option.MasqueRoleServer,
 		Listen:      "127.0.0.1",
 		ListenPort:  8443,
 		InboundTLS: &option.InboundTLSOptions{
@@ -614,24 +599,22 @@ func TestEndpointRejectsServerTemplatePathCollisions(t *testing.T) {
 	}
 }
 
-func TestEndpointRejectsConnectIPTCPTransportWithoutConnectIPTransportMode(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "connect-ip-tcp-no-transport", option.MasqueEndpointOptions{
+func TestEndpointRejectsRemovedTCPTransport(t *testing.T) {
+	_, err := NewEndpoint(context.TODO(), nil, nil, "removed-tcp-transport", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  option.MasqueTCPTransportConnectIP,
+		TCPTransport:  "connect_ip",
 	})
 	if err == nil {
-		t.Fatal("expected tcp_transport connect_ip to require transport_mode connect_ip")
+		t.Fatal("expected removed tcp_transport to be rejected")
 	}
 }
 
-func TestEndpointAllowsConnectIPTCPTransportWithConnectIPTransportMode(t *testing.T) {
-	ep, err := NewEndpoint(context.TODO(), nil, nil, "connect-ip-tcp-ok", option.MasqueEndpointOptions{
+func TestEndpointAllowsConnectIPMode(t *testing.T) {
+	ep, err := NewEndpoint(context.TODO(), nil, nil, "connect-ip-ok", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TransportMode: option.MasqueTransportModeConnectIP,
-		TCPTransport:  option.MasqueTCPTransportConnectIP,
+		Mode:          option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -641,16 +624,15 @@ func TestEndpointAllowsConnectIPTCPTransportWithConnectIPTransportMode(t *testin
 	}
 }
 
-func TestEndpointScopeFieldsRequireConnectIPTransportMode(t *testing.T) {
+func TestEndpointScopeFieldsRequireConnectIPMode(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "scope-without-connect-ip", option.MasqueEndpointOptions{
 		ServerOptions:         option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:             option.MasqueHopPolicySingle,
-		TransportMode:         option.MasqueTransportModeConnectUDP,
 		ConnectIPScopeTarget:  "10.0.0.0/8",
 		ConnectIPScopeIPProto: 17,
 	})
 	if err == nil {
-		t.Fatal("expected connect_ip_scope_* to be rejected when transport_mode!=connect_ip")
+		t.Fatal("expected connect_ip_scope_* to be rejected when mode!=connect_ip")
 	}
 }
 
@@ -658,8 +640,7 @@ func TestEndpointScopeFieldsRequireTemplateIPFlowVariables(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "scope-missing-template-vars", option.MasqueEndpointOptions{
 		ServerOptions:         option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:             option.MasqueHopPolicySingle,
-		TransportMode:         option.MasqueTransportModeConnectIP,
-		TCPTransport:          option.MasqueTCPTransportConnectStream,
+		Mode:                  option.MasqueDataplaneConnectIP,
 		TemplateIP:            "https://example.com/masque/ip",
 		ConnectIPScopeTarget:  "10.0.0.0/8",
 		ConnectIPScopeIPProto: 17,
@@ -872,7 +853,6 @@ func TestWarpEndpointCloseBeforeAsyncStartCompletes(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-close-race", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {
@@ -899,7 +879,6 @@ func TestWarpEndpointStartupInProgressIsTransportInit(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-in-progress", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {
@@ -928,7 +907,6 @@ func TestWarpEndpointListenPacketStartupInProgressIsTransportInit(t *testing.T) 
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-listen-in-progress", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {
@@ -957,7 +935,6 @@ func TestWarpEndpointListenPacketStartupFailedPreservesCause(t *testing.T) {
 	epRaw, err := NewWarpEndpoint(context.TODO(), nil, nil, "wm-listen-startup-failed", option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			HopPolicy:    option.MasqueHopPolicySingle,
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 	})
 	if err != nil {

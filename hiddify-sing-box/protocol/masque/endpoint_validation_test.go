@@ -15,8 +15,6 @@ func TestValidateMasqueOptionsClientMinimal(t *testing.T) {
 			Server:     "masque.example",
 			ServerPort: 443,
 		},
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 	}
 	if err := validateMasqueOptions(opts); err != nil {
 		t.Fatalf("expected ok: %v", err)
@@ -26,7 +24,6 @@ func TestValidateMasqueOptionsClientMinimal(t *testing.T) {
 func TestValidateMasqueOptionsRejectsUdpTimeout(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 	}
 	opts.UDPTimeout = badoption.Duration(5 * time.Second)
 	if err := validateMasqueOptions(opts); err == nil {
@@ -37,8 +34,6 @@ func TestValidateMasqueOptionsRejectsUdpTimeout(t *testing.T) {
 func TestValidateMasqueConnectUDPIPIllegal(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		TemplateIP:    "https://x/ip",
 	}
 	if err := validateMasqueOptions(opts); err == nil {
@@ -49,7 +44,6 @@ func TestValidateMasqueConnectUDPIPIllegal(t *testing.T) {
 func TestValidateMasqueOptionsHopsRequiresChain(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		HopPolicy:     option.MasqueHopPolicySingle,
 		Hops: []option.MasqueChainHopOptions{
 			{Tag: "a", ServerOptions: option.ServerOptions{Server: "relay.example", ServerPort: 443}},
@@ -64,7 +58,6 @@ func TestValidateWarpMasqueConsumerRequiresPairedTokenAndID(t *testing.T) {
 	noID := option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			ServerOptions: option.ServerOptions{Server: "bootstrap.warp.invalid", ServerPort: 443},
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityConsumer,
@@ -77,7 +70,6 @@ func TestValidateWarpMasqueConsumerRequiresPairedTokenAndID(t *testing.T) {
 	noTok := option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			ServerOptions: option.ServerOptions{Server: "bootstrap.warp.invalid", ServerPort: 443},
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityConsumer,
@@ -90,7 +82,6 @@ func TestValidateWarpMasqueConsumerRequiresPairedTokenAndID(t *testing.T) {
 	ok := option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			ServerOptions: option.ServerOptions{Server: "bootstrap.warp.invalid", ServerPort: 443},
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility: option.WarpMasqueCompatibilityConsumer,
@@ -203,8 +194,6 @@ func TestClassifyMasqueFailure(t *testing.T) {
 func TestValidateMasqueHTTPLayerH2VersusQuicExperimental(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		HTTPLayer:     option.MasqueHTTPLayerH2,
 		QUICExperimental: &option.MasqueQUICExperimentalOptions{
 			Enabled: true,
@@ -215,22 +204,56 @@ func TestValidateMasqueHTTPLayerH2VersusQuicExperimental(t *testing.T) {
 	}
 }
 
-func TestValidateMasqueOptionsRejectsConnectIPHybrid(t *testing.T) {
+func TestValidateMasqueOptionsRejectsRemovedFields(t *testing.T) {
+	cases := []struct {
+		name string
+		opts option.MasqueEndpointOptions
+	}{
+		{
+			name: "transport_mode",
+			opts: option.MasqueEndpointOptions{
+				ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
+				TransportMode: "connect_udp",
+			},
+		},
+		{
+			name: "tcp_transport",
+			opts: option.MasqueEndpointOptions{
+				ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
+				TCPTransport:  "connect_stream",
+			},
+		},
+		{
+			name: "http_layer_fallback",
+			opts: option.MasqueEndpointOptions{
+				ServerOptions:     option.ServerOptions{Server: "x", ServerPort: 443},
+				HTTPLayerFallback: true,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateMasqueOptions(tc.opts); err == nil {
+				t.Fatalf("expected removed field %s to be rejected", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateMasqueOptionsAllowsConnectIPMode(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectIP,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
+		Mode:          option.MasqueDataplaneConnectIP,
 	}
-	if err := validateMasqueOptions(opts); err == nil {
-		t.Fatal("expected error: connect_ip + connect_stream")
+	if err := validateMasqueOptions(opts); err != nil {
+		t.Fatalf("expected connect_ip mode to validate: %v", err)
 	}
 }
 
 func TestValidateMasqueHTTPLayerH2AllowsConnectIP(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectIP,
-		TCPTransport:  option.MasqueTCPTransportConnectIP,
+		Mode:          option.MasqueDataplaneConnectIP,
 		HTTPLayer:     option.MasqueHTTPLayerH2,
 	}
 	if err := validateMasqueOptions(opts); err != nil {
@@ -241,8 +264,6 @@ func TestValidateMasqueHTTPLayerH2AllowsConnectIP(t *testing.T) {
 func TestValidateMasqueHTTPLayerH2AllowsTCPConnectStream(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  option.MasqueTCPTransportConnectStream,
 		HTTPLayer:     option.MasqueHTTPLayerH2,
 	}
 	if err := validateMasqueOptions(opts); err != nil {
@@ -253,8 +274,6 @@ func TestValidateMasqueHTTPLayerH2AllowsTCPConnectStream(t *testing.T) {
 func TestValidateMasqueOptionsRejectsCacheTTLWithoutAutoHTTPLayer(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions:     option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode:     option.MasqueTransportModeConnectUDP,
-		TCPTransport:      option.MasqueTCPTransportConnectStream,
 		HTTPLayer:         option.MasqueHTTPLayerH2,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
 	}
@@ -266,8 +285,6 @@ func TestValidateMasqueOptionsRejectsCacheTTLWithoutAutoHTTPLayer(t *testing.T) 
 func TestValidateMasqueOptionsAllowsCacheTTLWithAutoHTTPLayer(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions:     option.ServerOptions{Server: "x", ServerPort: 443},
-		TransportMode:     option.MasqueTransportModeConnectUDP,
-		TCPTransport:      option.MasqueTCPTransportConnectStream,
 		HTTPLayer:         option.MasqueHTTPLayerAuto,
 		HTTPLayerCacheTTL: badoption.Duration(5 * time.Minute),
 	}
@@ -289,7 +306,6 @@ func TestValidateWarpMasqueRejectInvalidDataplanePortStrategy(t *testing.T) {
 	opts := option.WarpMasqueEndpointOptions{
 		MasqueEndpointOptions: option.MasqueEndpointOptions{
 			ServerOptions: option.ServerOptions{Server: "bootstrap.warp.invalid", ServerPort: 443},
-			TCPTransport:  option.MasqueTCPTransportConnectStream,
 		},
 		Profile: option.WarpMasqueProfileOptions{
 			Compatibility:         option.WarpMasqueCompatibilityConsumer,
@@ -303,17 +319,15 @@ func TestValidateWarpMasqueRejectInvalidDataplanePortStrategy(t *testing.T) {
 
 func TestValidateMasqueConnectStreamClientContract(t *testing.T) {
 	t.Parallel()
-	ok := applyMasqueClientMasqueDefaults(optionMasqueClient(option.MasqueTCPTransportConnectStream, ""))
+	ok := applyMasqueClientMasqueDefaults(optionMasqueClient(""))
 	if err := validateMasqueOptions(ok); err != nil {
 		t.Fatalf("expected ok: %v", err)
 	}
 }
 
-func optionMasqueClient(tcpTransport, templateTCP string) option.MasqueEndpointOptions {
+func optionMasqueClient(templateTCP string) option.MasqueEndpointOptions {
 	return option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "masque.example", ServerPort: 443},
-		TransportMode: option.MasqueTransportModeConnectUDP,
-		TCPTransport:  tcpTransport,
 		TemplateTCP:   templateTCP,
 	}
 }

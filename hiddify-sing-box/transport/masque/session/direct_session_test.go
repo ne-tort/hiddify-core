@@ -28,28 +28,14 @@ func TestDirectSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
 	}
 }
 
-func TestDirectSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing.T) {
-	s, err := NewDirectSession(context.Background(), ClientOptions{TCPTransport: "auto"})
-	if err != nil {
-		t.Fatalf("NewDirectSession: %v", err)
-	}
-	_, err = s.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected direct session tcp_transport=auto to fail with deterministic path-not-implemented error")
-	}
-	if !errors.Is(err, DirectBackendErrs.TCPPathNotImplemented) {
-		t.Fatalf("expected TCPPathNotImplemented, got: %v", err)
-	}
-}
-
 func TestDirectSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
-	s, err := NewDirectSession(context.Background(), ClientOptions{TCPTransport: "connect_ip"})
+	s, err := NewDirectSession(context.Background(), ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP})
 	if err != nil {
 		t.Fatalf("NewDirectSession: %v", err)
 	}
 	_, err = s.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
-		t.Fatal("expected direct session tcp_transport=connect_ip to fail as TUN-only TCP path")
+		t.Fatal("expected direct session mode connect_ip to fail as TUN-only TCP path")
 	}
 	if !errors.Is(err, DirectBackendErrs.TCPOverConnectIP) {
 		t.Fatalf("expected TCPOverConnectIP, got: %v", err)
@@ -73,7 +59,7 @@ func TestDirectSessionListenPacketReturnsCanceledBeforeBind(t *testing.T) {
 }
 
 func TestDirectSessionDialContextReturnsCanceledBeforeHostResolve(t *testing.T) {
-	s, err := NewDirectSession(context.Background(), ClientOptions{TCPTransport: option.MasqueTCPTransportConnectStream})
+	s, err := NewDirectSession(context.Background(), ClientOptions{})
 	if err != nil {
 		t.Fatalf("NewDirectSession: %v", err)
 	}
@@ -121,7 +107,7 @@ func TestDirectSessionOpenIPSessionReturnsCapabilityBoundary(t *testing.T) {
 }
 
 func TestDirectSessionDialContextRejectsInvalidDestination(t *testing.T) {
-	s, err := NewDirectSession(context.Background(), ClientOptions{TCPTransport: "connect_stream"})
+	s, err := NewDirectSession(context.Background(), ClientOptions{})
 	if err != nil {
 		t.Fatalf("NewDirectSession: %v", err)
 	}

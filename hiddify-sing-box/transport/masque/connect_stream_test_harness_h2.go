@@ -62,8 +62,6 @@ func newConnectStreamH2ProdSessionWithTCPDial(t *testing.T, proxyPort int, tcpDi
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
-		TCPTransport:             option.MasqueTCPTransportConnectStream,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial:                  tcpDial,
@@ -425,7 +423,6 @@ func dialH2ConnectStreamBenchTCPWindowed(tb testing.TB, proxyPort, targetPort in
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-			TCPTransport:        option.MasqueTCPTransportConnectStream,
 		},
 	})
 	link := benchWindowedBidiLinkStrict()

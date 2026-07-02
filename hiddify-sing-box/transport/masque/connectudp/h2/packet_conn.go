@@ -2,7 +2,6 @@ package h2
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,7 +23,6 @@ type PacketConnConfig struct {
 	Resp          *http.Response
 	LocalAddr     net.Addr
 	RemoteAddr    net.Addr
-	AsyncDownlink bool // background body reader; caller may RunDownlinkPump
 	UploadOnly    bool // C2S leg; drain response body (asymmetric upload pool)
 	LegProfile    LegProfile
 	UploadWireAck h2c.ConnectUploadWireAck
@@ -38,47 +36,25 @@ type PacketConn struct {
 	resp     *http.Response
 
 	respBodyBuf *bufio.Reader
-	// downlinkPending holds unconsumed RFC9297 wire bytes (parity relayH2ConnectUDPUplink scan).
+	// downlinkPending holds unconsumed RFC9297 wire bytes (h2o scan-loop buffer).
 	downlinkPending []byte
-	// downlinkQueue holds parsed UDP payload views into downlinkPending (zero-copy; drained before pending reuse).
+	// downlinkQueue holds parsed UDP payloads ready for ReadFrom (copied before pending trim).
 	downlinkQueue [][]byte
 
 	writeMu sync.Mutex
 	readMu  sync.Mutex
-	// bodyReadMu serializes bufio reads (async pump vs sync ReadFrom).
+	// bodyReadMu serializes bufio reads on the response body.
 	bodyReadMu sync.Mutex
-	// downlinkReady wakes ReadFrom when the async pump appends body bytes.
-	downlinkReady sync.Cond
 
-	asyncDownlink   bool
 	uploadOnly      bool
 	legProfile      LegProfile
-	downlinkPumpErr error
-	downlinkPumpDone bool
-
-	// uploadPending holds encoded RFC9297 wire bytes (server H2ResponseWriter parity).
-	uploadPending     bytes.Buffer
-	uploadFlushTimer  *time.Timer
-	uploadFlushTimerC chan struct{}
-
-	pumpOnce sync.Once
-	pumpActive atomic.Bool
-
-	// downlinkReadBuf reused for body reads (avoid per-ReadFrom heap alloc).
 	downlinkReadBuf []byte
 
 	deadlines    split.ConnDeadlines
 	closed       atomic.Bool
 	closeOnce    sync.Once
 	duplexActive atomic.Bool
-	// payloadWritePending: last WriteTo carried UDP payload — next ReadFrom uses sync S2C (echo/interactive).
 	payloadWritePending atomic.Bool
-
-	lastUploadAt    time.Time
-	rapidUploadHits int
-	bulkUpload      bool
-	// writesSinceRead counts payload WriteTo since last ReadFrom (upload-only never resets → coalesce after first flush).
-	writesSinceRead int
 
 	primeOnce sync.Once
 	primeErr  error
@@ -86,12 +62,14 @@ type PacketConn struct {
 	uploadWireAck       h2c.ConnectUploadWireAck
 	uploadWireCommitted atomic.Int64
 
+	uploadDrainOnce sync.Once
+
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	onClose    func()
 }
 
-// NewPacketConn builds a CONNECT-UDP packet conn. When AsyncDownlink is set, call RunDownlinkPump.
+// NewPacketConn builds a CONNECT-UDP packet conn (R8 thin sync downlink — UDP-6MIG-10).
 func NewPacketConn(cfg PacketConnConfig) *PacketConn {
 	c := &PacketConn{
 		reqPipeR:      cfg.ReqPipeR,
@@ -99,13 +77,11 @@ func NewPacketConn(cfg PacketConnConfig) *PacketConn {
 		resp:          cfg.Resp,
 		localAddr:     cfg.LocalAddr,
 		remoteAddr:    cfg.RemoteAddr,
-		asyncDownlink: cfg.AsyncDownlink,
 		uploadOnly:    cfg.UploadOnly,
 		legProfile:    cfg.LegProfile,
 		uploadWireAck: cfg.UploadWireAck,
 		onClose:       cfg.OnClose,
 	}
-	c.downlinkReady.L = &c.readMu
 	return c
 }
 
@@ -117,13 +93,11 @@ func (c *PacketConn) RemoteAddr() net.Addr { return c.remoteAddr }
 
 func (c *PacketConn) SetDeadline(t time.Time) error {
 	c.deadlines.SetDeadline(t)
-	c.downlinkReady.Broadcast()
 	return nil
 }
 
 func (c *PacketConn) SetReadDeadline(t time.Time) error {
 	c.deadlines.SetReadDeadline(t)
-	c.downlinkReady.Broadcast()
 	return nil
 }
 
@@ -138,11 +112,14 @@ func (c *PacketConn) Close() error {
 			return
 		}
 		c.closed.Store(true)
-		c.downlinkReady.Broadcast()
 		c.writeMu.Lock()
-		c.stopUploadFlushTimerLocked()
 		c.writeMu.Unlock()
 		c.FlushC2SWrites()
+		if c.uploadWireAck != nil {
+			if done, ok := c.uploadWireAck.(interface{ MarkUploadWriterDone() }); ok {
+				done.MarkUploadWriterDone()
+			}
+		}
 		// Upload half: close writer then pipe reader (Extended CONNECT duplex teardown).
 		if c.reqBody != nil {
 			_ = c.reqBody.Close()
@@ -154,7 +131,6 @@ func (c *PacketConn) Close() error {
 		if c.resp != nil && c.resp.Body != nil {
 			_ = c.resp.Body.Close()
 		}
-		c.downlinkReady.Broadcast()
 		if c.onClose != nil {
 			c.onClose()
 		}
@@ -162,17 +138,18 @@ func (c *PacketConn) Close() error {
 	return nil
 }
 
-// FlushC2SWrites drains coalesced upload wire without closing (docker probe / SOCKS chain parity H3Conn).
+// FlushC2SWrites unblocks the io.Pipe upload pump at upload end (Invisv CreateTCPStream drain shape).
+// Steady WriteTo stays one flushed capsule per call.
 func (c *PacketConn) FlushC2SWrites() {
-	if c == nil || c.closed.Load() {
+	if c == nil || c.closed.Load() || c.reqBody == nil || c.uploadWireCommitted.Load() <= 0 {
 		return
 	}
 	c.writeMu.Lock()
-	wire := c.takeUploadPendingLocked()
-	c.writeMu.Unlock()
-	if len(wire) > 0 {
-		_ = c.flushUploadWire(wire)
+	defer c.writeMu.Unlock()
+	if c.closed.Load() || c.reqBody == nil {
+		return
 	}
+	_ = h2c.WriteDatagramCapsule(c.reqBody, nil)
 }
 
 func (c *PacketConn) AwaitUploadDrain(timeout time.Duration) error {
@@ -180,14 +157,17 @@ func (c *PacketConn) AwaitUploadDrain(timeout time.Duration) error {
 		return nil
 	}
 	c.FlushC2SWrites()
-	if c.uploadWireAck == nil {
-		return nil
-	}
 	n := c.uploadWireCommitted.Load()
-	if n <= 0 {
-		return nil
+	c.writeMu.Lock()
+	if c.reqBody != nil {
+		_ = c.reqBody.Close()
+		c.reqBody = nil
 	}
-	return c.uploadWireAck.AwaitUploadWireSent(n, timeout)
+	c.writeMu.Unlock()
+	if c.uploadWireAck != nil && n > 0 {
+		return c.uploadWireAck.AwaitUploadWireSent(n, timeout)
+	}
+	return nil
 }
 
 func (c *PacketConn) noteUploadWireCommitted(n int) {
@@ -204,23 +184,9 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
 	}
 	hadPayloadWrite := c.payloadWritePending.Load()
-	if c.asyncDownlink {
-		if hadPayloadWrite {
-			c.payloadWritePending.Store(false)
-		} else {
-			c.ensureDownlinkPump()
-		}
-	} else if c.downlinkNeedsAsyncPump() {
-		c.ensureDownlinkPump()
-	}
 	// SOCKS UDP ASSOCIATE may block in ReadFrom before any downlink; do not arm duplex coalesce yet.
 	if hadPayloadWrite {
 		c.duplexActive.Store(true)
-		c.writeMu.Lock()
-		c.bulkUpload = false
-		c.rapidUploadHits = 0
-		c.writesSinceRead = 0
-		c.writeMu.Unlock()
 		if err := c.flushUploadPendingForRead(); err != nil {
 			return 0, nil, err
 		}
@@ -249,11 +215,6 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	if n > 0 {
 		c.duplexActive.Store(true)
-		c.writeMu.Lock()
-		c.bulkUpload = false
-		c.rapidUploadHits = 0
-		c.writesSinceRead = 0
-		c.writeMu.Unlock()
 	}
 	return n, c.remoteAddr, nil
 }
@@ -276,15 +237,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		return 0, os.ErrDeadlineExceeded
 	}
 	if len(p) == 0 {
-		pending := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
-		if err := c.flushUploadWire(pending); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-				return 0, err
-			}
-			_ = c.Close()
-			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
-		}
 		if err := c.writeEmptyDatagramCapsule(); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
@@ -294,56 +247,16 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		}
 		return 0, nil
 	}
-	var encErr error
-	if len(p) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		h2c.AppendDatagramCapsuleBuffer(&c.uploadPending, p)
-	} else {
-		encErr = h2c.AppendUDPPayloadAsDatagramCapsules(&c.uploadPending, p)
-	}
-	if encErr != nil {
-		c.writeMu.Unlock()
-		if errors.Is(encErr, io.EOF) || errors.Is(encErr, io.ErrClosedPipe) {
-			return 0, encErr
+	c.writeMu.Unlock()
+	if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			return 0, err
 		}
-		if errors.Is(encErr, os.ErrDeadlineExceeded) || errors.Is(encErr, context.Canceled) {
-			return 0, encErr
+		if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return 0, err
 		}
 		_ = c.Close()
-		return 0, fmt.Errorf("masque h2 dataplane connect-udp encode body: %w", encErr)
-	}
-	if !c.duplexActive.Load() {
-		c.noteUploadArrivalLocked(time.Now())
-	}
-	c.writesSinceRead++
-	var wire []byte
-	switch {
-	case c.uploadOnly && c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load():
-		wire = c.takeUploadPendingLocked()
-	case c.uploadFlushInteractiveLocked():
-		wire = c.takeUploadPendingLocked()
-	case c.uploadPending.Len() >= c.uploadCoalesceThreshold():
-		wire = c.takeUploadPendingLocked()
-	case !c.duplexActive.Load() && !c.bulkUpload && c.writesSinceRead == 1:
-		// First C2S datagram before ReadFrom (pipeline-1 / roundtrip @512B): never defer into ReadFrom flush.
-		wire = c.takeUploadPendingLocked()
-	default:
-		// Bulk coalesce timer: skip on upload leg profile (sync threshold flush only).
-		if !c.legProfile.uploadNoCoalesceTimer() && (c.duplexActive.Load() || c.bulkUpload) {
-			c.armUploadFlushTimerLocked()
-		}
-	}
-	c.writeMu.Unlock()
-	if len(wire) > 0 {
-		if err := c.flushUploadWire(wire); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-				return 0, err
-			}
-			_ = c.Close()
-			return 0, fmt.Errorf("masque h2 dataplane connect-udp flush body: %w", err)
-		}
-	}
-	if c.asyncDownlink && !c.duplexActive.Load() {
-		c.ensureDownlinkPump()
+		return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 	}
 	if len(p) > 0 {
 		c.payloadWritePending.Store(true)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	T "github.com/sagernet/sing-box/transport/masque"
@@ -421,8 +422,7 @@ func TestRuntimeDegradedNotReadyPreservesCapabilityClassForTCPBoundary(t *testin
 
 func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {
 	rt := NewRuntime(testFactory{session: &testSession{ip: &testIPSession{}}}, RuntimeOptions{
-		TransportMode: "connect_ip",
-		TCPTransport:  "connect_ip",
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("start runtime: %v", err)
@@ -436,17 +436,16 @@ func TestRuntimeConnectIPStartOpensIPPlane(t *testing.T) {
 	}
 }
 
-func TestRuntimeConnectIPHybridDefersIPPlaneUntilOpen(t *testing.T) {
+func TestRuntimeDefaultDataplaneDefersIPPlaneUntilOpen(t *testing.T) {
 	ts := &testSession{ip: &testIPSession{}}
 	rt := NewRuntime(testFactory{session: ts}, RuntimeOptions{
-		TransportMode: "connect_ip",
-		TCPTransport:  "connect_stream",
+		DataplaneMode: option.MasqueDataplaneDefault,
 	})
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("start runtime: %v", err)
 	}
 	if ts.openIPCalls.Load() != 0 {
-		t.Fatalf("hybrid start must not open CONNECT-IP eagerly, open calls=%d", ts.openIPCalls.Load())
+		t.Fatalf("default dataplane start must not open CONNECT-IP eagerly, open calls=%d", ts.openIPCalls.Load())
 	}
 	ip, err := rt.OpenIPSession(context.Background())
 	if err != nil {
@@ -463,7 +462,7 @@ func TestRuntimeConnectIPHybridDefersIPPlaneUntilOpen(t *testing.T) {
 func TestRuntimeOpenIPCanceledBeforeCachedIPPlaneReturn(t *testing.T) {
 	ts := &testSession{ip: &testIPSession{}}
 	rt := NewRuntime(testFactory{session: ts}, RuntimeOptions{
-		TransportMode: "connect_ip",
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err := rt.Start(context.Background()); err != nil {
 		t.Fatalf("start runtime: %v", err)
@@ -554,7 +553,7 @@ func TestRuntimeMalformedScopedFlowClassifiedAsCapability(t *testing.T) {
 	rt := NewRuntime(T.CoreClientFactory{}, RuntimeOptions{
 		Server:               "example.com",
 		ServerPort:           443,
-		TransportMode:        "connect_ip",
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
 		ConnectIPScopeTarget: "not-a-prefix",
 	})
@@ -599,7 +598,7 @@ func TestRuntimeConnectIPOpenSessionPolicyRejectClassifiedAsPolicy(t *testing.T)
 	rt := NewRuntime(testFactory{session: &testSession{
 		ipErr: session.ErrPolicyFallbackDenied,
 	}}, RuntimeOptions{
-		TransportMode: transportModeConnectIP,
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	startErr := rt.Start(context.Background())
 	if !errors.Is(startErr, session.ErrPolicyFallbackDenied) {

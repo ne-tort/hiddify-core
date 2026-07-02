@@ -21,11 +21,10 @@ func TestPacketConnReadDeadlineDoesNotCloseConn(t *testing.T) {
 		_ = bodyPr.Close()
 	})
 	c := NewPacketConn(PacketConnConfig{
-		ReqBody:       bodyPw,
-		Resp:          &http.Response{Body: bodyPr},
-		LocalAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
-		RemoteAddr:    &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
-		AsyncDownlink: true,
+		ReqBody:    bodyPw,
+		Resp:       &http.Response{Body: bodyPr},
+		LocalAddr:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
 	})
 	t.Cleanup(func() { _ = c.Close() })
 
@@ -53,11 +52,10 @@ func TestAsymmetricPacketConnReadDeadlineSurvivesUploadWrite(t *testing.T) {
 		_ = bodyPr.Close()
 	})
 	download := NewPacketConn(PacketConnConfig{
-		ReqBody:       bodyPw,
-		Resp:          &http.Response{Body: bodyPr},
-		LocalAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2},
-		RemoteAddr:    &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
-		AsyncDownlink: true,
+		ReqBody:    bodyPw,
+		Resp:       &http.Response{Body: bodyPr},
+		LocalAddr:  &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 2},
+		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
 	})
 	upload := &stubUploadPacketConn{local: download.LocalAddr()}
 	c := NewAsymmetricPacketConn(download, []net.PacketConn{upload}, download.LocalAddr(), download.RemoteAddr(), nil)

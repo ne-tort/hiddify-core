@@ -44,7 +44,7 @@ func (h *dialHopChainFake) TryHTTPFallbackSwitch(err error) bool {
 	return h.fallbackOnAttempt[idx]
 }
 
-func (h *dialHopChainFake) HTTPLayerFallbackEnabled() bool {
+func (h *dialHopChainFake) HTTPLayerAutoEnabled() bool {
 	return h.httpFallback
 }
 

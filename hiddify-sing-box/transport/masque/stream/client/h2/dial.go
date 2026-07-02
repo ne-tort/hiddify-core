@@ -44,10 +44,15 @@ func NewHooks(w Wire) strm.DialH2Hooks {
 		newReqCtx = w.NewRequestContext
 	}
 	return strm.DialH2Hooks{
-		NewRequestContext:    newReqCtx,
-		NewConnectUploadPipe: h2c.NewConnectUploadPipe,
+		NewRequestContext: newReqCtx,
+		NewConnectUploadPipe: func() (io.ReadCloser, io.WriteCloser) {
+			r, w := h2c.NewConnectUploadPipe()
+			return r, w
+		},
 		NewConnectUploadBody: func(uploadR io.Reader) io.Reader {
-			return &h2c.ExtendedConnectUploadBody{Pipe: uploadR}
+			body := &h2c.ExtendedConnectUploadBody{Pipe: uploadR}
+			body.BeginUploadWriterLive()
+			return body
 		},
 		SetAuthHeader:      w.SetAuth,
 		RequestURL:         w.RequestURL,

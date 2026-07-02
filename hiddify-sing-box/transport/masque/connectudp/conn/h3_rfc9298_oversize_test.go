@@ -7,8 +7,17 @@ import (
 	"testing"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
+
+func ctx0UDPPayload(payload []byte) []byte {
+	prefix := quicvarint.Append(nil, 0)
+	raw := quic.AcquireMasqueDatagramRecvBuf(len(prefix) + len(payload))
+	copy(raw, prefix)
+	copy(raw[len(prefix):], payload)
+	return raw[:len(prefix)+len(payload)]
+}
 
 type oversizeAbortStream struct {
 	payload  []byte

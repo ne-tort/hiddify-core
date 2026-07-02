@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
@@ -31,7 +32,7 @@ func TestConnectIPAbandonExitPathMatrix(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		s := newTestCoreSession(session.CoreSession{
-			Options:    ClientOptions{TransportMode: "connect_ip"},
+			Options:    ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			TemplateIP: templateIP,
 			Caps:       CapabilitySet{ConnectIP: true},
 		})
@@ -75,7 +76,7 @@ func TestConnectIPAbandonExitPathMatrix(t *testing.T) {
 			t.Fatalf("build ip template: %v", err)
 		}
 		s := newTestCoreSession(session.CoreSession{
-			Options:    ClientOptions{TransportMode: "connect_ip"},
+			Options:    ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			TemplateIP: templateIP,
 			Caps:       CapabilitySet{ConnectIP: true},
 		})

@@ -64,7 +64,7 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	logger := log.NewNOPFactory().NewLogger("masque-e2e")
 
 	epRaw, err := NewServerEndpoint(context.Background(), nil, logger, "masque-e2e-srv", option.MasqueEndpointOptions{
-		Mode:       option.MasqueModeServer,
+		Mode:       option.MasqueRoleServer,
 		Listen:     "127.0.0.1",
 		ListenPort: uint16(srvPort),
 		InboundTLS: &option.InboundTLSOptions{
@@ -108,8 +108,7 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	session, err := (TM.CoreClientFactory{}).NewSession(waitCtx, TM.ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(srvPort),
-		TransportMode:            option.MasqueTransportModeConnectIP,
-		TCPTransport:             option.MasqueTCPTransportConnectIP,
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 		TemplateIP:               base + "/masque/ip",
 		TemplateUDP:              base + "/masque/udp/{target_host}/{target_port}",
 		TemplateTCP:              base + "/masque/tcp/{target_host}/{target_port}",

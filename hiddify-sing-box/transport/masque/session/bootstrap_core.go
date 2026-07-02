@@ -12,10 +12,11 @@ import (
 // BootstrapCoreSession fills CoreSession fields shared by the masque coreSession wrapper.
 // udpLayer is the normalized overlay layer ("h2"|"h3") for UDPHTTPLayer.
 func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templateTCP *uritemplate.Template) (CoreSession, string) {
-	tcpTransport := NormalizeTCPTransport(options.TCPTransport)
-	tm := strings.ToLower(strings.TrimSpace(options.TransportMode))
-	tcpCapable := tcpTransport == option.MasqueTCPTransportConnectStream ||
-		(tcpTransport == option.MasqueTCPTransportConnectIP && tm == option.MasqueTransportModeConnectIP)
+	dm := strings.ToLower(strings.TrimSpace(options.DataplaneMode))
+	if dm == "" {
+		dm = option.MasqueDataplaneDefault
+	}
+	tcpCapable := true
 	effectiveCeiling := int(options.ConnectIPDatagramCeiling)
 	if effectiveCeiling <= 0 {
 		effectiveCeiling = mcip.DefaultDatagramCeilingMax
@@ -61,7 +62,7 @@ func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templa
 		ConnectIPTCPDatagramSlack:  mcip.TCPHTTP3DatagramSlack,
 		MasqueUDPWriteMax:          masqueUDPWriteMax,
 		ConnectIPPMTUState:         NewConnectIPPMTUState(initialPayload, 512, initialPayload),
-		HTTPLayerFallback:          options.HTTPLayerFallback,
+		HTTPLayerAuto:              options.HTTPLayerAuto,
 	}
 	return cs, udpLayer
 }

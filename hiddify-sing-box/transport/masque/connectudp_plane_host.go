@@ -63,7 +63,8 @@ func (h connectUDPPlaneHost) DialH3(ctx context.Context, client *qmasque.Client,
 	if h.s.udpDial != nil {
 		return h.s.udpDial(ctx, client, template, target)
 	}
-	return dialConnectUDPH3Asymmetric(ctx, client, template, target)
+	// masque-go DialAddr: single bidi CONNECT-UDP stream (UDP-REF-H3-02). Asymmetric legs remain via dialConnectUDPH3Asymmetric for localize.
+	return cudpclient.DialH3Production(ctx, nil, client, template, target)
 }
 
 func (h connectUDPPlaneHost) RecordHTTPLayerSuccess(layer string) {

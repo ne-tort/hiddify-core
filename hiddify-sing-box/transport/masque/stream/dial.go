@@ -12,7 +12,7 @@ import (
 type DialHopChainHost interface {
 	DialAttempt(ctx context.Context, destination M.Socksaddr) (net.Conn, error)
 	TryHTTPFallbackSwitch(err error) bool
-	HTTPLayerFallbackEnabled() bool
+	HTTPLayerAutoEnabled() bool
 	IsAuthFailure(err error) bool
 	ClearHTTPFallbackAfterGiveUp()
 	RebuildOverlayTransport()
@@ -48,7 +48,7 @@ func DialWithHopChain(ctx context.Context, host DialHopChainHost, destination M.
 		}
 
 		authFail := host.IsAuthFailure(lastErr)
-		churnEligible := host.HTTPLayerFallbackEnabled() && !authFail && ctx.Err() == nil &&
+		churnEligible := host.HTTPLayerAutoEnabled() && !authFail && ctx.Err() == nil &&
 			!errors.Is(lastErr, context.Canceled) && !errors.Is(lastErr, context.DeadlineExceeded)
 		if churnEligible {
 			host.RebuildOverlayTransport()

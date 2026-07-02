@@ -45,13 +45,12 @@ func writeToWithStallGuard(tb testing.TB, pkt net.PacketConn, p []byte, addr net
 		}
 		return nil
 	case <-time.After(stall):
-		_ = pkt.Close() // unblock stuck WriteTo goroutine (fail-fast tests must not leak)
 		return fmt.Errorf("WriteTo stalled >%v (H3 SetWriteDeadline is no-op on datagram path)", stall)
 	}
 }
 
 // writeToBenchUpload sends on unlimited synth benches without per-packet goroutine overhead.
-// Stall guard stays on paced/stability paths; sustained GATE uses direct WriteTo (parity parallel scaling).
+// Stall guard stays on paced/stability paths and GATE unlimited hammer (gateFailFast).
 func writeToBenchUpload(pkt net.PacketConn, p []byte, addr net.Addr) error {
 	if pw, ok := pkt.(interface {
 		WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error
@@ -95,7 +94,6 @@ func writePacketWithStallGuard(tb testing.TB, pkt net.PacketConn, pw interface {
 	case r := <-ch:
 		return r.err
 	case <-time.After(stall):
-		_ = pkt.Close()
 		return fmt.Errorf("WritePacket stalled >%v (H3 SetWriteDeadline is no-op on datagram path)", stall)
 	}
 }
@@ -116,7 +114,6 @@ func readFromWithStallGuard(tb testing.TB, pkt net.PacketConn, buf []byte, stall
 	case r := <-ch:
 		return r.n, r.addr, r.err
 	case <-time.After(stall):
-		_ = pkt.Close()
 		return 0, nil, fmt.Errorf("ReadFrom stalled >%v", stall)
 	}
 }
@@ -143,23 +140,22 @@ func readProbeWithStallGuard(tb testing.TB, pkt net.PacketConn, buf []byte, want
 	}
 }
 
-// primeUDPBench sends one fountain/prime datagram with fail-fast stall guard (H3 WriteTo ignores deadline).
-func primeUDPBench(tb testing.TB, pkt net.PacketConn, addr net.Addr) {
-	tb.Helper()
-	prime := make([]byte, connectudp.DefaultBenchUDPPayloadLen)
-	if err := writeToWithStallGuard(tb, pkt, prime, addr, connectUDPSynthUploadWriteStall); err != nil {
-		tb.Fatalf("prime WriteTo: %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
+// readFromBenchDownload receives on unlimited synth benches without per-packet goroutine overhead.
+// Stall guard stays on paced/stability paths (parity writeToBenchUpload).
+func readFromBenchDownload(pkt net.PacketConn, buf []byte) (int, net.Addr, error) {
+	return pkt.ReadFrom(buf)
 }
 
-// primeUDPBenchErr is primeUDPBench for bench helpers that return errors.
-func primeUDPBenchErr(tb testing.TB, pkt net.PacketConn, addr net.Addr) error {
+// primeFountainReceiveBenchErr primes a UDP fountain for S2C-only receive benches (no stall-guard goroutine on WriteTo).
+func primeFountainReceiveBenchErr(tb testing.TB, pkt net.PacketConn, addr net.Addr) error {
 	tb.Helper()
 	prime := make([]byte, connectudp.DefaultBenchUDPPayloadLen)
-	if err := writeToWithStallGuard(tb, pkt, prime, addr, connectUDPSynthUploadWriteStall); err != nil {
+	if err := writeToBenchUpload(pkt, prime, addr); err != nil {
 		return fmt.Errorf("prime WriteTo: %w", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	connectudp.FlushPacketConnWrites(pkt)
+	_ = connectudp.DrainPacketConnUpload(pkt, 200*time.Millisecond)
+	// Fountain blast + server proxyConnReceive need a tick after first C2S (quic wake / onward UDP).
+	time.Sleep(100 * time.Millisecond)
 	return nil
 }

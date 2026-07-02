@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
@@ -34,7 +34,6 @@ type Proxy struct {
 	refCount sync.WaitGroup
 	closers  map[io.Closer]struct{}
 }
-
 
 func dnsErrorToProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
 	if dnsError.Timeout() {
@@ -93,7 +92,7 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 		return err
 	}
 
-	tuneMasqueUDPSocketBuffers(conn)
+	TuneMasqueUDPSocketBuffers(conn)
 
 	if err = writeProxyStatus(nil); err != nil {
 		conn.Close()
@@ -104,9 +103,9 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 	return s.ProxyConnectedSocket(w, r, conn)
 }
 
-// ProxyConnectedSocket proxies on an existing connected UDP socket.
+// ProxyConnectedSocket proxies on an existing connected UDP socket (masque-go ProxyConnectedSocket shape).
 func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, conn *net.UDPConn) error {
-	tuneMasqueUDPSocketBuffers(conn)
+	TuneMasqueUDPSocketBuffers(conn)
 
 	s.mx.Lock()
 	if s.closed {
@@ -136,59 +135,47 @@ func (s *Proxy) ProxyConnectedSocket(w http.ResponseWriter, _ *frame.Request, co
 	w.Header().Set(http3.CapsuleProtocolHeader, frame.CapsuleProtocolHeaderValue)
 	w.WriteHeader(http.StatusOK)
 
+	defer beginRelaySessionStats("h3-bidi")()
+
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	defer cancelRelay()
+
 	var wg sync.WaitGroup
-	var closeStream sync.Once
-	var closeUDP sync.Once
-
-	shutdownStream := func() {
-		closeStream.Do(func() {
-			str.CancelRead(quic.StreamErrorCode(http3.ErrCodeConnectError))
-			_ = str.Close()
-		})
-	}
-
-	shutdownUDP := func() {
-		closeUDP.Do(func() { _ = conn.Close() })
-	}
-
-	wg.Add(2)
-
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		defer shutdownStream()
-		if err := s.proxyConnSend(context.Background(), conn, str); err != nil {
-			log.Printf("proxying send side to %s failed: %v", conn.RemoteAddr(), err)
+		if err := s.proxyConnSend(relayCtx, conn, str); err != nil {
+			diag.Logf("proxying send side to %s failed: %v", conn.RemoteAddr(), err)
 		}
+		_ = str.Close()
 	}()
-
 	go func() {
 		defer wg.Done()
-		defer shutdownStream()
-		defer shutdownUDP()
-		if err := proxyConnReceive(conn, str); err != nil {
+		if err := proxyConnReceive(relayCtx, conn, str); err != nil {
 			s.mx.Lock()
 			closed := s.closed
 			s.mx.Unlock()
 			if !closed {
-				log.Printf("proxying receive side to %s failed: %v", conn.RemoteAddr(), err)
+				diag.Logf("proxying receive side to %s failed: %v", conn.RemoteAddr(), err)
 			}
 		}
+		_ = str.Close()
 	}()
-
-	if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) {
-		s.mx.Lock()
-		closed := s.closed
-		s.mx.Unlock()
-		if !closed {
-			log.Printf("reading from request stream failed: %v", err)
+	go func() {
+		defer wg.Done()
+		if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) {
+			s.mx.Lock()
+			closed := s.closed
+			s.mx.Unlock()
+			if !closed {
+				diag.Logf("reading from request stream failed: %v", err)
+			}
 		}
-	}
-
-	shutdownStream()
-	shutdownUDP()
+		cancelRelay()
+		_ = str.Close()
+		_ = conn.Close()
+	}()
 	wg.Wait()
-	shutdownStream()
-	shutdownUDP()
 
 	s.mx.Lock()
 	if s.closers != nil {

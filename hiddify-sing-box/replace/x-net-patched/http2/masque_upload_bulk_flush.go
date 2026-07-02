@@ -12,7 +12,9 @@ func masqueBulkFlushThreshold() int { return 256 << 10 }
 
 func masqueBulkFlushMinPending() int { return 32 << 10 }
 
-func masqueBulkFlushMaxDelay() time.Duration { return 8 * time.Millisecond }
+// masqueBulkFlushMaxDelay bounds time below byte threshold before TLS flush (io.Pipe upload).
+// 3ms plateau ~620 Mbit/s maxCapsule on Windows synth (io.Pipe handoff identity); 2ms/4ms no delta.
+func masqueBulkFlushMaxDelay() time.Duration { return 3 * time.Millisecond }
 
 func masqueShouldBulkFlushNow(pendingAck int, sawEOF bool) bool {
 	if pendingAck <= 0 {
@@ -40,6 +42,14 @@ func masqueUploadBodyUsesBulkFlush(body io.ReadCloser) bool {
 	if body == nil || !masqueUploadBulkFlushEnabled() {
 		return false
 	}
-	_, ok := body.(masqueUploadWireAck)
-	return ok
+	if _, ok := body.(masqueUploadWireAck); !ok {
+		return false
+	}
+	// CONNECT-UDP shallow pipe ≤64KiB: per-capsule TLS flush (h2o parity). >64KiB enables bulk batching.
+	if cap, ok := body.(masqueUploadPipeCap); ok {
+		if c := cap.UploadPipeCap(); c > 0 && c <= 64<<10 {
+			return false
+		}
+	}
+	return true
 }

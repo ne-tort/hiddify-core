@@ -38,8 +38,7 @@ func NativeH3ClientOptions(proxyPort int) masque.ClientOptions {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TransportMode:       "connect_ip",
-		TCPTransport:        "connect_ip",
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 		ProfileLocalIPv4:    NativeProfileLocalIPv4,
 	}
 }

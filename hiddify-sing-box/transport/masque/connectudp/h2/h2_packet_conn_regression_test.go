@@ -133,7 +133,7 @@ func TestPacketConnClosesOnWriteBodyError(t *testing.T) {
 	n, err := c.WriteTo(payload, nil)
 	require.Error(t, err)
 	require.Equal(t, 0, n)
-	require.Contains(t, err.Error(), "flush body")
+	require.Contains(t, err.Error(), "write body")
 	require.True(t, c.IsClosed())
 }
 
@@ -364,7 +364,7 @@ func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
 		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(downlink.Bytes()))},
 		ReqBody:    capWC,
 		RemoteAddr: NewUDPAddr("127.0.0.1:53"),
-		LegProfile: LegProfileEchoBidi,
+		LegProfile: LegProfileDownloadFountain,
 	})
 	buf := make([]byte, 8)
 	n, _, err := c.ReadFrom(buf)
@@ -372,6 +372,7 @@ func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
 	require.Equal(t, 1, n)
 	require.Equal(t, byte('z'), buf[0])
 
+	c.duplexActive.Store(true)
 	capWC.buf.Reset()
 	payload := bytes.Repeat([]byte{'u'}, 512)
 	wn, err := c.WriteTo(payload, nil)
@@ -388,4 +389,34 @@ func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
 	require.NoError(t, perr)
 	require.True(t, ok)
 	require.Equal(t, payload, got)
+}
+
+// TestDownlinkQueueSurvivesPendingRealloc verifies queued UDP survives pending trim + append (h2o scan loop).
+func TestDownlinkQueueSurvivesPendingRealloc(t *testing.T) {
+	c := NewPacketConn(PacketConnConfig{
+		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(nil))},
+		RemoteAddr: NewUDPAddr("127.0.0.1:1"),
+	})
+	first := bytes.Repeat([]byte{'a'}, 512)
+	second := bytes.Repeat([]byte{'b'}, 512)
+	w1 := appendDatagramCapsule512WireForTest(t, first)
+	w2 := appendDatagramCapsule512WireForTest(t, second)
+	c.downlinkPending = append(c.downlinkPending[:0], w1...)
+	buf := make([]byte, 512)
+	n, _, err := c.tryParseOneDatagramInto(buf)
+	require.NoError(t, err)
+	require.Equal(t, 512, n)
+	require.Equal(t, first, buf)
+	c.downlinkPending = append(c.downlinkPending, w2...)
+	n, _, err = c.tryParseOneDatagramInto(buf)
+	require.NoError(t, err)
+	require.Equal(t, 512, n)
+	require.Equal(t, second, buf)
+}
+
+func appendDatagramCapsule512WireForTest(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var wire bytes.Buffer
+	require.NoError(t, h2c.AppendDatagramCapsuleWire(&wire, payload))
+	return wire.Bytes()
 }

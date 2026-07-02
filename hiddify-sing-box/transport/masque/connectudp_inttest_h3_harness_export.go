@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -26,45 +25,62 @@ func InttestBenchConnectUDPH3FountainDirect(t *testing.T) {
 
 func InttestLocalizeConnectUDPH3DownloadFountainDirectDial(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	_, directMbps, err := benchConnectUDPH3DirectDownloadFountain(t, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("direct fountain: %v", err)
-	}
-	t.Logf("LOCALIZE h3 fountain direct DialH3Production: %.1f Mbit/s", directMbps)
+	payloadLen := connectudp.DefaultBenchUDPPayloadLen
 
-	fountain := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	fountainAddr := fountain.LocalAddr().(*net.UDPAddr)
 	proxyPort := startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
 		registerMasqueUDPProxyHandler(t, mux, proxyPort)
 	})
+
+	// ListenPacket first on shared proxy (H2 localize parity). Each path needs its own fountain:
+	// startUDPFountain arms blast to the first prime source only.
+	fountainSession := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	fountainSessionAddr := fountainSession.LocalAddr().(*net.UDPAddr)
 	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
-	defer func() { _ = session.Close() }()
 	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(fountainAddr.IP.String()),
-		Port: uint16(fountainAddr.Port),
+		Addr: netip.MustParseAddr(fountainSessionAddr.IP.String()),
+		Port: uint16(fountainSessionAddr.Port),
 	})
 	if err != nil {
+		_ = session.Close()
 		t.Fatalf("ListenPacket: %v", err)
 	}
-	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	_, sessionMbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, sessionMbps, err := benchConnectUDPH3FountainS2C(t, pkt, fountainSessionAddr, dur, payloadLen, false)
+	_ = pkt.Close()
+	_ = session.Close()
 	if err != nil {
 		t.Fatalf("session fountain: %v", err)
 	}
 	t.Logf("LOCALIZE h3 fountain CoreSession ListenPacket: %.1f Mbit/s", sessionMbps)
+
+	fountainDirect := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	fountainDirectAddr := fountainDirect.LocalAddr().(*net.UDPAddr)
+	target := net.JoinHostPort(fountainDirectAddr.IP.String(), strconv.Itoa(fountainDirectAddr.Port))
+	directPkt := dialH3ConnectUDPDirect(t, proxyPort, target)
+	_, directMbps, err := benchConnectUDPH3FountainS2C(t, directPkt, fountainDirectAddr, dur, payloadLen, false)
+	if err != nil {
+		t.Fatalf("direct fountain: %v", err)
+	}
+	t.Logf("LOCALIZE h3 fountain direct DialH3Production: %.1f Mbit/s", directMbps)
+
 	ratio := directMbps / sessionMbps
-	t.Logf("LOCALIZE h3 fountain direct/session ratio: %.2f", ratio)
+	if ratio < 1 {
+		ratio = sessionMbps / directMbps
+	}
+	t.Logf("LOCALIZE h3 fountain direct/session gap: direct=%.1f session=%.1f ratio=%.2f (want <=1.15 when both>=300)",
+		directMbps, sessionMbps, ratio)
+	if sessionMbps >= 300 && directMbps >= 300 && ratio > 1.15 {
+		t.Fatalf("ListenPacket vs DialH3Production fountain gap (direct=%.1f session=%.1f ratio=%.2f) — session/wrapper overhead or divergent wire path",
+			directMbps, sessionMbps, ratio)
+	}
 }
 
 func InttestLocalizeConnectUDPH3EchoDirectDialVsListenPacket(t *testing.T) {
@@ -81,7 +97,6 @@ func InttestLocalizeConnectUDPH3EchoDirectDialVsListenPacket(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

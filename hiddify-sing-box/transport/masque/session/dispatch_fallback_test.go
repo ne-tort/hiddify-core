@@ -37,9 +37,9 @@ func (h *dispatchFallbackFakeHost) DialDirectTCP(context.Context, string, M.Sock
 func (h *dispatchFallbackFakeHost) IsTCPMasqueDirectFallbackEligible(error, context.Context) bool {
 	return false
 }
-func (h *dispatchFallbackFakeHost) RecordTCPDialSuccess()              {}
-func (h *dispatchFallbackFakeHost) RecordTCPDialFailure()              {}
-func (h *dispatchFallbackFakeHost) RecordTCPDialErrorClass(error)      {}
+func (h *dispatchFallbackFakeHost) RecordTCPDialSuccess()         {}
+func (h *dispatchFallbackFakeHost) RecordTCPDialFailure()         {}
+func (h *dispatchFallbackFakeHost) RecordTCPDialErrorClass(error) {}
 func (h *dispatchFallbackFakeHost) RecordTCPFallback()            {}
 func (h *dispatchFallbackFakeHost) ListenPacketConnectIP(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("listen connect_ip")
@@ -67,9 +67,9 @@ func TestDispatchExitPathsClearHTTPFallbackLatch(t *testing.T) {
 		}
 	})
 
-	t.Run("stream failure", func(t *testing.T) {
+	t.Run("default stream failure", func(t *testing.T) {
 		host := &dispatchFallbackFakeHost{}
-		s := &session.CoreSession{Options: session.ClientOptions{TCPTransport: option.MasqueTCPTransportConnectStream}}
+		s := &session.CoreSession{Options: session.ClientOptions{}}
 		_, err := session.DispatchDialContext(s, host, ctx, "tcp", dest)
 		if err == nil {
 			t.Fatal("expected error")
@@ -79,30 +79,17 @@ func TestDispatchExitPathsClearHTTPFallbackLatch(t *testing.T) {
 		}
 	})
 
-	t.Run("connect_ip mode mismatch", func(t *testing.T) {
+	t.Run("connect_ip tcp failure", func(t *testing.T) {
 		host := &dispatchFallbackFakeHost{}
 		s := &session.CoreSession{Options: session.ClientOptions{
-			TCPTransport:  option.MasqueTCPTransportConnectIP,
-			TransportMode: option.MasqueTransportModeConnectUDP,
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 		}}
 		_, err := session.DispatchDialContext(s, host, ctx, "tcp", dest)
 		if err == nil {
 			t.Fatal("expected error")
 		}
 		if host.fallbackCleared != 1 {
-			t.Fatalf("expected latch clear on connect_ip mode mismatch, got %d", host.fallbackCleared)
-		}
-	})
-
-	t.Run("auto transport not implemented", func(t *testing.T) {
-		host := &dispatchFallbackFakeHost{}
-		s := &session.CoreSession{Options: session.ClientOptions{TCPTransport: option.MasqueTCPTransportAuto}}
-		_, err := session.DispatchDialContext(s, host, ctx, "tcp", dest)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-		if host.fallbackCleared != 1 {
-			t.Fatalf("expected latch clear on auto transport, got %d", host.fallbackCleared)
+			t.Fatalf("expected latch clear on connect_ip tcp failure, got %d", host.fallbackCleared)
 		}
 	})
 

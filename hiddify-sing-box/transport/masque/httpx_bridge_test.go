@@ -54,8 +54,6 @@ func TestCoreSessionDialUsesFakeHTTPLayer(t *testing.T) {
 		Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
-			TransportMode:            option.MasqueTransportModeConnectUDP,
-			TCPTransport:             option.MasqueTCPTransportConnectStream,
 			TCPMode:                  option.MasqueTCPModeStrictMasque,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
@@ -112,7 +110,6 @@ func TestBindHookLayerTCPRoundTripSuccessPath(t *testing.T) {
 		Options: ClientOptions{
 			Server:                   "example.com",
 			ServerPort:               443,
-			TCPTransport:             option.MasqueTCPTransportConnectStream,
 			TCPMode:                  option.MasqueTCPModeStrictMasque,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},

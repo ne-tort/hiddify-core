@@ -3,13 +3,13 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"log"
 	"net"
 	"strings"
 
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/quic-go/quic-go"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -51,12 +51,20 @@ func dialH2(ctx context.Context, host DialHost, obs ObservabilityInput, template
 	if template == nil {
 		return nil, host.ErrTemplateNotConfigured()
 	}
-	logTarget, dialAddr := ConnectObservabilityFields(obs)
-	log.Printf("masque_http_layer_attempt layer=h2 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+	var logTarget, dialAddr string
+	if diag.Enabled() {
+		logTarget, dialAddr = ConnectObservabilityFields(obs)
+		diag.Logf("masque_http_layer_attempt layer=h2 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+	}
 	pc, err := host.DialOverHTTP2(ctx, template, target)
 	if err == nil {
 		host.RecordHTTPLayerSuccess(option.MasqueHTTPLayerH2)
-		log.Printf("masque_http_layer_chosen layer=h2 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+		if diag.Enabled() {
+			if logTarget == "" && dialAddr == "" {
+				logTarget, dialAddr = ConnectObservabilityFields(obs)
+			}
+			diag.Logf("masque_http_layer_chosen layer=h2 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+		}
 		host.ResetHTTPFallbackBudgetAfterSuccess()
 	}
 	return pc, err
@@ -71,12 +79,20 @@ func dialH3(ctx context.Context, host DialHost, obs ObservabilityInput, client *
 	if template == nil {
 		return nil, host.ErrTemplateNotConfigured()
 	}
-	logTarget, dialAddr := ConnectObservabilityFields(obs)
-	log.Printf("masque_http_layer_attempt layer=h3 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+	var logTarget, dialAddr string
+	if diag.Enabled() {
+		logTarget, dialAddr = ConnectObservabilityFields(obs)
+		diag.Logf("masque_http_layer_attempt layer=h3 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+	}
 	pc, err := host.DialH3(ctx, client, template, target)
 	if err == nil {
 		host.RecordHTTPLayerSuccess(option.MasqueHTTPLayerH3)
-		log.Printf("masque_http_layer_chosen layer=h3 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+		if diag.Enabled() {
+			if logTarget == "" && dialAddr == "" {
+				logTarget, dialAddr = ConnectObservabilityFields(obs)
+			}
+			diag.Logf("masque_http_layer_chosen layer=h3 tag=%s connect_udp=1 target=%s dial=%s", host.Tag(), logTarget, dialAddr)
+		}
 		host.ResetHTTPFallbackBudgetAfterSuccess()
 	}
 	return pc, err

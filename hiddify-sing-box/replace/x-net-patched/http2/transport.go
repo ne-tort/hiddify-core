@@ -439,6 +439,7 @@ type clientStream struct {
 	reqBody              io.ReadCloser
 	reqBodyContentLength int64         // -1 means unknown
 	reqBodyClosed        chan struct{} // guarded by cc.mu; non-nil on Close, closed when done
+	masqueExtendedConnect bool         // RFC 8441 Extended CONNECT (captured at RoundTrip)
 
 	// owned by writeRequest:
 	sentEndStream bool // sent an END_STREAM flag to the peer
@@ -478,7 +479,7 @@ func (cs *clientStream) abortStreamLocked(err error) {
 		cs.abortErr = err
 		close(cs.abort)
 	})
-	if cs.reqBody != nil {
+	if cs.reqBody != nil && !masquePreserveConnectUploadPump(cs.reqBody) {
 		cs.closeReqBodyLocked()
 	}
 	// TODO(dneil): Clean up tests where cs.cc.cond is nil.
@@ -492,7 +493,7 @@ func (cs *clientStream) abortRequestBodyWrite() {
 	cc := cs.cc
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	if cs.reqBody != nil && cs.reqBodyClosed == nil {
+	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masquePreserveConnectUploadPump(cs.reqBody) {
 		cs.closeReqBodyLocked()
 		cc.cond.Broadcast()
 	}
@@ -1321,6 +1322,7 @@ func (cc *ClientConn) roundTrip(req *http.Request, streamf func(*clientStream)) 
 		isHead:               req.Method == "HEAD",
 		reqBody:              req.Body,
 		reqBodyContentLength: actualContentLength(req),
+		masqueExtendedConnect: reqIsMasqueExtendedCONNECT(req),
 		trace:                httptrace.ContextClientTrace(ctx),
 		peerClosed:           make(chan struct{}),
 		abort:                make(chan struct{}),
@@ -1443,10 +1445,7 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 
 	// wait for setting frames to be received, a server can change this value later,
 	// but we just wait for the first settings frame
-	var isExtendedConnect bool
-	if req.Method == "CONNECT" && req.Header.Get(":protocol") != "" {
-		isExtendedConnect = true
-	}
+	var isExtendedConnect = cs.masqueExtendedConnect
 
 	// Acquire the new-request lock by writing to reqHeaderMu.
 	// This lock guards the critical section covering allocating a new stream ID
@@ -1539,7 +1538,9 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 			}
 		}
 
-		if err = cs.writeRequestBody(req); err != nil {
+		if masqueExtendedCONNECTUploadDuplex(isExtendedConnect, cs.reqBody, cs.reqBodyContentLength) {
+			// Invisv duplex: sustained upload pump runs in writeRequestMasqueDuplex below.
+		} else if err = cs.writeRequestBody(req); err != nil {
 			if err != errStopReqBodyWrite {
 				traceWroteRequest(cs.trace, err)
 				return err
@@ -1550,6 +1551,10 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 	}
 
 	traceWroteRequest(cs.trace, err)
+
+	if masqueExtendedCONNECTUploadDuplex(isExtendedConnect, cs.reqBody, cs.reqBodyContentLength) {
+		return cs.writeRequestMasqueDuplex(req, ctx)
+	}
 
 	var respHeaderTimer <-chan time.Time
 	var respHeaderRecv chan struct{}
@@ -1579,6 +1584,91 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 			return errRequestCanceled
 		}
 	}
+}
+
+// writeRequestMasqueDuplex pumps the upload leg until writer half-close (connect-ip-go / Invisv).
+// Response END_STREAM does not stop the request-body pump.
+func (cs *clientStream) writeRequestMasqueDuplex(req *http.Request, ctx context.Context) error {
+	cc := cs.cc
+	cs.bindMasqueUploadFlowWake()
+
+	for masqueUploadWriterOpen(cs.reqBody) || masqueUploadPumpActive(cs.reqBody) {
+		err := cs.writeRequestBody(req)
+		if err != nil {
+			if err != errStopReqBodyWrite {
+				return err
+			}
+			if !masqueUploadWriterOpen(cs.reqBody) && !masqueUploadPumpActive(cs.reqBody) {
+				break
+			}
+			// Invisv io.Pipe: wait for upload pipe data or flow-control wake (avoid busy spin).
+			cc.mu.Lock()
+			select {
+			case <-cs.abort:
+				err = cs.abortErr
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-cs.reqCancel:
+				err = errRequestCanceled
+			default:
+				cc.cond.Wait()
+				err = nil
+			}
+			cc.mu.Unlock()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if !cs.sentEndStream {
+		if err := cs.writeRequestBody(req); err != nil && err != errStopReqBodyWrite {
+			return err
+		}
+	}
+
+	var respHeaderTimer <-chan time.Time
+	var respHeaderRecv chan struct{}
+	if d := cc.responseHeaderTimeout(); d != 0 {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		respHeaderTimer = timer.C
+		respHeaderRecv = cs.respHeaderRecv
+	}
+	for {
+		select {
+		case <-cs.peerClosed:
+			return nil
+		case <-respHeaderTimer:
+			return errTimeout
+		case <-respHeaderRecv:
+			respHeaderRecv = nil
+			respHeaderTimer = nil
+		case <-cs.abort:
+			return cs.abortErr
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-cs.reqCancel:
+			return errRequestCanceled
+		}
+	}
+}
+
+// bindMasqueUploadFlowWake unblocks awaitFlowControl when shallow upload pipe receives data.
+func (cs *clientStream) bindMasqueUploadFlowWake() {
+	body := cs.reqBody
+	if body == nil {
+		return
+	}
+	setter, ok := body.(interface{ SetMasqueUploadFlowWake(func()) })
+	if !ok {
+		return
+	}
+	cc := cs.cc
+	setter.SetMasqueUploadFlowWake(func() {
+		cc.mu.Lock()
+		cc.cond.Broadcast()
+		cc.mu.Unlock()
+	})
 }
 
 func (cs *clientStream) encodeAndWriteHeaders(req *http.Request) error {
@@ -1655,7 +1745,7 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 	// while still writing request body
 	cc.mu.Lock()
 	mustCloseBody := false
-	if cs.reqBody != nil && cs.reqBodyClosed == nil {
+	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masquePreserveConnectUploadPump(cs.reqBody) {
 		mustCloseBody = true
 		cs.reqBodyClosed = make(chan struct{})
 	}
@@ -1871,6 +1961,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 
 	// Scratch buffer for reading into & writing from.
 	bulkFlush := masqueUploadBodyUsesBulkFlush(body)
+	preserve := masquePreserveConnectUploadPump(body)
 	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
 	if bulkFlush {
 		scratchLen = masqueUploadReadBufferLen(scratchLen, maxFrameSize)
@@ -1885,13 +1976,17 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 		defer bufPools[index].Put(&buf)
 	}
 
-	var sawEOF bool
 	var pendingAck int
 	var firstPendingAt time.Time
-	for !sawEOF {
+uploadBodyLoop:
+	for {
+		sentEnd = false
+		var sawEOF bool
+		for !sawEOF {
 		if bulkFlush && pendingAck > 0 {
 			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
 				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt) ||
+				masqueShouldBootstrapUploadFlush(body, pendingAck) ||
 				masqueShouldFlushBeforeBlockingRead(body, pendingAck)
 			if flush {
 				cc.wmu.Lock()
@@ -1908,99 +2003,140 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 				}
 			}
 		}
-		n, err := body.Read(buf)
-		if hasContentLen {
-			remainLen -= int64(n)
-			if remainLen == 0 && err == nil {
-				// The request body's Content-Length was predeclared and
-				// we just finished reading it all, but the underlying io.Reader
-				// returned the final chunk with a nil error (which is one of
-				// the two valid things a Reader can do at EOF). Because we'd prefer
-				// to send the END_STREAM bit early, double-check that we're actually
-				// at EOF. Subsequent reads should return (0, EOF) at this point.
-				// If either value is different, we return an error in one of two ways below.
-				var scratch [1]byte
-				var n1 int
-				n1, err = body.Read(scratch[:])
-				remainLen -= int64(n1)
+		for {
+			n, err := body.Read(buf)
+			if hasContentLen {
+				remainLen -= int64(n)
+				if remainLen == 0 && err == nil {
+					var scratch [1]byte
+					var n1 int
+					n1, err = body.Read(scratch[:])
+					remainLen -= int64(n1)
+				}
+				if remainLen < 0 {
+					err = errReqBodyTooLong
+					return err
+				}
 			}
-			if remainLen < 0 {
-				err = errReqBodyTooLong
-				return err
-			}
-		}
-		if err != nil {
-			cc.mu.Lock()
-			bodyClosed := cs.reqBodyClosed != nil
-			cc.mu.Unlock()
-			switch {
-			case bodyClosed:
-				return errStopReqBodyWrite
-			case err == io.EOF:
-				sawEOF = true
-				err = nil
-			default:
-				return err
-			}
-		}
-
-		remain := buf[:n]
-		for len(remain) > 0 && err == nil {
-			var allowed int32
-			allowed, err = cs.awaitFlowControl(len(remain))
 			if err != nil {
-				return err
+				cc.mu.Lock()
+				bodyClosed := cs.reqBodyClosed != nil && !masquePreserveConnectUploadPump(body)
+				cc.mu.Unlock()
+				switch {
+				case bodyClosed:
+					return errStopReqBodyWrite
+				case err == io.EOF:
+					if preserve && masqueUploadWriterOpen(body) {
+						err = nil
+						continue
+					}
+					sawEOF = true
+					err = nil
+				default:
+					return err
+				}
 			}
-			cc.wmu.Lock()
-			data := remain[:allowed]
-			remain = remain[allowed:]
-			sentEnd = sawEOF && len(remain) == 0 && !hasTrailers
-			err = cc.fr.WriteData(cs.ID, sentEnd, data)
-			if err == nil {
-				if bulkFlush && !sentEnd {
-					pendingAck += len(data)
-				} else {
-					ack := pendingAck + len(data)
+
+			remain := buf[:n]
+			for len(remain) > 0 && err == nil {
+				if bulkFlush && pendingAck > 0 {
+					cc.mu.Lock()
+					flowAvail := cs.flow.available()
+					cc.mu.Unlock()
+					if flowAvail == 0 {
+						cc.wmu.Lock()
+						ack := pendingAck
+						pendingAck = 0
+						err = cc.bw.Flush()
+						if err == nil {
+							masqueAckUploadWireSent(body, ack)
+							firstPendingAt = time.Time{}
+						}
+						cc.wmu.Unlock()
+						if err != nil {
+							return err
+						}
+					}
+				}
+				var allowed int32
+				allowed, err = cs.awaitFlowControl(len(remain))
+				if err != nil {
+					return err
+				}
+				cc.wmu.Lock()
+				data := remain[:allowed]
+				remain = remain[allowed:]
+				sentEnd = sawEOF && len(remain) == 0 && !hasTrailers && pendingAck == 0 &&
+					!cs.sentEndStream && (!preserve || !masqueUploadWriterOpen(body))
+				err = cc.fr.WriteData(cs.ID, sentEnd, data)
+				if err == nil {
+					if sentEnd {
+						cs.sentEndStream = true
+					}
+					if bulkFlush && !sentEnd {
+						pendingAck += len(data)
+					} else {
+						ack := pendingAck + len(data)
+						pendingAck = 0
+						err = cc.bw.Flush()
+						if err == nil {
+							masqueAckUploadWireSent(body, ack)
+						}
+					}
+				}
+				cc.wmu.Unlock()
+			}
+			if bulkFlush && err == nil {
+				if pendingAck > 0 && firstPendingAt.IsZero() {
+					firstPendingAt = time.Now()
+				}
+				flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
+					masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt)
+				if flush {
+					cc.wmu.Lock()
+					ack := pendingAck
 					pendingAck = 0
-					// TODO(bradfitz): per-DATA flush is for latency; MASQUE bulk upload batches.
 					err = cc.bw.Flush()
 					if err == nil {
 						masqueAckUploadWireSent(body, ack)
+						firstPendingAt = time.Time{}
 					}
+					cc.wmu.Unlock()
 				}
 			}
-			cc.wmu.Unlock()
-		}
-		if bulkFlush && err == nil {
-			if pendingAck > 0 && firstPendingAt.IsZero() {
-				firstPendingAt = time.Now()
+			if err != nil {
+				return err
 			}
-			// Bulk upload batches to masqueBulkFlushThreshold; do not flush on every <4KiB
-			// pipe read (Linux Docker partial reads were ~3× slower than batched flush).
-			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
-				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt)
-			if flush {
-				cc.wmu.Lock()
-				ack := pendingAck
-				pendingAck = 0
-				err = cc.bw.Flush()
-				if err == nil {
-					masqueAckUploadWireSent(body, ack)
-					firstPendingAt = time.Time{}
-				}
-				cc.wmu.Unlock()
+			if sawEOF {
+				break
+			}
+			if !bulkFlush {
+				break
+			}
+			b, ok := body.(masqueUploadBuffered)
+			if !ok || b.MasqueUploadBuffered() <= 0 {
+				break
 			}
 		}
 		if err != nil {
 			return err
 		}
+		}
+		if preserve && (masqueUploadWriterOpen(body) || masqueUploadPumpActive(body)) {
+			continue uploadBodyLoop
+		}
+		break uploadBodyLoop
 	}
 
 	if sentEnd {
-		// Already sent END_STREAM (which implies we have no
-		// trailers) and flushed, because currently all
-		// WriteData frames above get a flush. So we're done.
+		if preserve && masqueUploadWriterOpen(body) {
+			goto uploadBodyLoop
+		}
 		return nil
+	}
+
+	if preserve && masqueUploadWriterOpen(body) {
+		goto uploadBodyLoop
 	}
 
 	// Since the RoundTrip contract permits the caller to "mutate or reuse"
@@ -2031,6 +2167,9 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	} else {
 		err = cc.fr.WriteData(cs.ID, true, nil)
 	}
+	if err == nil {
+		cs.sentEndStream = true
+	}
 	if ferr := cc.bw.Flush(); ferr != nil && err == nil {
 		err = ferr
 	}
@@ -2050,7 +2189,7 @@ func (cs *clientStream) awaitFlowControl(maxBytes int) (taken int32, err error) 
 		if cc.closed {
 			return 0, errClientConnClosed
 		}
-		if cs.reqBodyClosed != nil {
+		if cs.reqBodyClosed != nil && !masquePreserveConnectUploadPump(cs.reqBody) {
 			return 0, errStopReqBodyWrite
 		}
 		select {

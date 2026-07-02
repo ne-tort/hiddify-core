@@ -1,17 +1,13 @@
 package h2
 
-import "net/http"
-
-// LegProfile selects CONNECT-UDP hot-path shape per stream role (W-UDP-2t).
+// LegProfile tags asymmetric stream role.
+// Upload: thin immediate C2S. DownloadFountain: S2C bulk threshold flush. Bidi: h2o 1:1 immediate S2C.
 type LegProfile uint8
 
 const (
-	// LegProfileUpload: asymmetric C2S leg — thin upload, no downlink pump.
 	LegProfileUpload LegProfile = iota
-	// LegProfileDownloadFountain: S2C receive / fountain — blocking read, bulk server flush.
 	LegProfileDownloadFountain
-	// LegProfileEchoBidi: full-duplex bidi — pump, coalesce, interactive read-wake.
-	LegProfileEchoBidi
+	LegProfileBidi
 )
 
 func legProfileForStreamRole(role streamRole) LegProfile {
@@ -21,36 +17,6 @@ func legProfileForStreamRole(role streamRole) LegProfile {
 	case streamRoleDownload:
 		return LegProfileDownloadFountain
 	default:
-		return LegProfileEchoBidi
+		return LegProfileBidi
 	}
-}
-
-func (p LegProfile) uploadImmediateFlush() bool {
-	return p == LegProfileUpload
-}
-
-// uploadNoCoalesceTimer disables debounced upload flush; bulk still coalesces synchronously.
-func (p LegProfile) uploadNoCoalesceTimer() bool {
-	return p == LegProfileUpload
-}
-
-func (p LegProfile) usesAsyncDownlinkPump() bool {
-	return p == LegProfileDownloadFountain || p == LegProfileEchoBidi
-}
-
-// serverDownlinkBulkImmediateFlush: fountain S2C — flush in bulk FSM without debounce timer.
-func (p LegProfile) serverDownlinkBulkImmediateFlush() bool {
-	return p == LegProfileDownloadFountain
-}
-
-func newH2DownlinkWriter(w http.ResponseWriter, profile LegProfile) *H2ResponseWriter {
-	return &H2ResponseWriter{
-		ResponseWriter:     w,
-		bulkImmediateFlush: profile.serverDownlinkBulkImmediateFlush(),
-	}
-}
-
-// NewDownlinkResponseWriter builds the server S2C writer for asymmetric download legs.
-func NewDownlinkResponseWriter(w http.ResponseWriter) *H2ResponseWriter {
-	return newH2DownlinkWriter(w, LegProfileDownloadFountain)
 }

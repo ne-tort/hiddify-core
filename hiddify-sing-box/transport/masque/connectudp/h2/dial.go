@@ -3,22 +3,29 @@ package h2
 import (
 	"context"
 	"fmt"
-	"log"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
+
+// connectUDPNoXNetBulkPipe reports ≤64KiB cap so x/net masque_upload_bulk_flush stays off CONNECT-UDP (REF-H2-02).
+type connectUDPNoXNetBulkPipe struct {
+	io.ReadCloser
+}
+
+func (connectUDPNoXNetBulkPipe) UploadPipeCap() int { return 64 << 10 }
 
 // H2OverlayDialConfig wires production H2 CONNECT-UDP dial from package masque.
 type H2OverlayDialConfig struct {
@@ -50,32 +57,9 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 	if err != nil {
 		return nil, fmt.Errorf("masque h2: asymmetric mux key: %w", err)
 	}
-	var sharedTr *http2.Transport
-	var sharedErr error
-	var sharedOnce sync.Once
-	sharedEnsure := func(ctx context.Context) (*http2.Transport, error) {
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		default:
-		}
-		if cfg.NewTransport != nil {
-			sharedOnce.Do(func() {
-				sharedTr, sharedErr = cfg.NewTransport()
-			})
-			if sharedErr != nil {
-				return nil, sharedErr
-			}
-			return sharedTr, nil
-		}
-		return cfg.EnsureTransport(ctx)
-	}
-	// One TCP pool per UDPFlow; download + upload legs are separate H2 streams on it.
-	flowCfg := cfg
-	flowCfg.NewTransport = nil
-	flowCfg.EnsureTransport = sharedEnsure
-
-	download, err := dialH2OverlaySingle(ctx, flowCfg, template, target, streamRoleDownload, muxKey)
+	// Separate TCP/H2 client per leg (UDP-6MIG-11). Sharing one conn leaves a single
+	// upload body pump @ unlimited hammer — upload pipe fills with no server reader.
+	download, err := dialH2OverlaySingle(ctx, cfg, template, target, streamRoleDownload, muxKey)
 	if err != nil {
 		return nil, err
 	}
@@ -85,21 +69,12 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 		remoteAddr = ra.RemoteAddr()
 	}
 
-	upload, err := dialH2OverlaySingle(ctx, flowCfg, template, target, streamRoleUpload, muxKey)
+	upload, err := dialH2OverlaySingle(ctx, cfg, template, target, streamRoleUpload, muxKey)
 	if err != nil {
 		_ = download.Close()
-		if sharedTr != nil {
-			h2c.CloseClientTransport(sharedTr)
-		}
 		return nil, err
 	}
-	onClose := func() {
-		if sharedTr != nil {
-			h2c.CloseClientTransport(sharedTr)
-			sharedTr = nil
-		}
-	}
-	return NewAsymmetricPacketConn(download, []net.PacketConn{upload}, localAddr, remoteAddr, onClose), nil
+	return NewAsymmetricPacketConn(download, []net.PacketConn{upload}, localAddr, remoteAddr, nil), nil
 }
 
 func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {
@@ -137,13 +112,30 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 		return nil, err
 	}
 
-	pipeR, pipeW := h2c.NewConnectUploadPipe()
-	uploadBody := &h2c.ExtendedConnectUploadBody{Pipe: pipeR}
+	uploadOnly := role == streamRoleUpload
+	var pipeR io.ReadCloser
+	var pipeW h2c.ConnectUploadPipeWriter
+	var uploadBody *h2c.ExtendedConnectUploadBody
+	var reqBody io.WriteCloser
+	if uploadOnly {
+		// Shallow uploadPipe decouples C2S from writeRequestBody; END_STREAM deferred until writer half-close.
+		pipeR, pipeW = h2c.NewConnectUploadShallowPipe()
+		pipeR = connectUDPNoXNetBulkPipe{ReadCloser: pipeR}
+		uploadBody = &h2c.ExtendedConnectUploadBody{Pipe: pipeR, Writer: pipeW}
+		uploadBody.BeginUploadWriterLive()
+		reqBody = pipeW
+	}
 	streamCtx, stopReqCtxRelay := httpx.NewH2ExtendedConnectRequestContext(ctx)
 	defer stopReqCtxRelay(false)
-	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, uploadBody)
+	var reqBodyReader io.Reader
+	if uploadBody != nil {
+		reqBodyReader = uploadBody
+	}
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, reqBodyReader)
 	if err != nil {
-		_ = pipeW.Close()
+		if pipeW != nil {
+			_ = pipeW.Close()
+		}
 		return nil, fmt.Errorf("masque h2: new connect-udp request: %w", err)
 	}
 	req.Header = make(http.Header)
@@ -161,11 +153,15 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 	if u.Host != "" {
 		req.Host = u.Host
 	}
-	req.ContentLength = -1
+	if uploadOnly {
+		req.ContentLength = -1
+	}
 
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
-		_ = pipeW.Close()
+		if pipeW != nil {
+			_ = pipeW.Close()
+		}
 		proto := strings.TrimSpace(cfg.WarpConnectIPProtocol)
 		primaryHost := strings.TrimSpace(cfg.QUICDialCandidateHost)
 		altHost := ""
@@ -173,18 +169,22 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 			altHost = WarpH2AlternateDialHost(primaryHost)
 		}
 		if altHost != "" && IsH2ExtendedConnectUnsupportedByPeer(err) {
-			log.Printf("masque h2 cf-connect-ip: connect-udp tcp uses sibling %s of quic dataplane %s; peer omits RFC8441 SETTINGS_ENABLE_CONNECT_PROTOCOL tag=%s",
+			diag.Logf("masque h2 cf-connect-ip: connect-udp tcp uses sibling %s of quic dataplane %s; peer omits RFC8441 SETTINGS_ENABLE_CONNECT_PROTOCOL tag=%s",
 				altHost, primaryHost, strings.TrimSpace(cfg.Tag))
 		}
 		return nil, fmt.Errorf("masque h2: roundtrip: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		_ = pipeW.Close()
+		if pipeW != nil {
+			_ = pipeW.Close()
+		}
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("masque h2: CONNECT-UDP status %d", resp.StatusCode)
 	}
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
-		_ = pipeW.Close()
+		if pipeW != nil {
+			_ = pipeW.Close()
+		}
 		_ = resp.Body.Close()
 		return nil, ctxErr
 	}
@@ -197,29 +197,24 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 		raddr = NewUDPAddr(net.JoinHostPort(nh.IP.String(), strconv.Itoa(nh.Port)))
 	}
 
-	uploadOnly := role == streamRoleUpload
 	profile := legProfileForStreamRole(role)
-	asyncDownlink := !uploadOnly
 	pc := NewPacketConn(PacketConnConfig{
 		ReqPipeR:      pipeR,
-		ReqBody:       NewRequestBodyWriter(pipeW),
+		ReqBody:       reqBody,
 		Resp:          resp,
 		LocalAddr:     NewUDPAddr(dialAddr),
 		RemoteAddr:    raddr,
-		AsyncDownlink: asyncDownlink,
 		UploadOnly:    uploadOnly,
 		LegProfile:    profile,
 		UploadWireAck: uploadBody,
 		OnClose:       transportOnClose,
 	})
-	if err := pc.Prime(); err != nil {
-		_ = pc.Close()
-		return nil, err
-	}
 	if uploadOnly {
+		if err := pc.Prime(); err != nil {
+			_ = pc.Close()
+			return nil, err
+		}
 		pc.startUploadOnlyDrain()
-	} else {
-		pc.ensureDownlinkPump()
 	}
 	return pc, nil
 }

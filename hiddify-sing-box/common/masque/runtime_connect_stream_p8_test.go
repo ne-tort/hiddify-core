@@ -32,7 +32,6 @@ func TestRuntimeConnectStreamDialP8FloorAfterExperimental(t *testing.T) {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 		QUICExperimental: T.QUICExperimentalOptions{
 			Enabled:                    true,
 			InitialStreamReceiveWindow: 4096,

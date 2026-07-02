@@ -17,7 +17,7 @@ func TestOverlayFallbackConcurrentLifecycleCloseRace(t *testing.T) {
 	for range 64 {
 		s := &coreSession{
 			CoreSession: session.CoreSession{
-				HTTPLayerFallback: true,
+				HTTPLayerAuto: true,
 				IPConn:            &connectip.Conn{},
 			},
 		}

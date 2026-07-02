@@ -8,6 +8,7 @@ import (
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/option"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
 	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
@@ -127,7 +128,7 @@ func testGATECMIngressSessionCloseMidBulkNoLeak(t *testing.T) {
 	}
 
 	cs := newTestCoreSession(msess.CoreSession{
-		Options: ClientOptions{TransportMode: "connect_ip"},
+		Options: ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 		Caps:    CapabilitySet{ConnectIP: true},
 		IPConn:  ps.Conn(),
 	})

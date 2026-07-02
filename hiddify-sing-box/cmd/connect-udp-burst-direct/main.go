@@ -74,7 +74,6 @@ func main() {
 	opts := TM.ClientOptions{
 		Server:              serverHost,
 		ServerPort:          uint16(serverPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		TemplateUDP:         tplRaw,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true, ServerName: sni},
 		TCPDial:             baseDial,

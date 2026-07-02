@@ -3,9 +3,8 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 const (
-	MasqueTransportModeAuto       = "auto"
-	MasqueTransportModeConnectUDP = "connect_udp"
-	MasqueTransportModeConnectIP  = "connect_ip"
+	MasqueDataplaneDefault   = "default"
+	MasqueDataplaneConnectIP = "connect_ip"
 )
 
 const (
@@ -14,8 +13,8 @@ const (
 )
 
 const (
-	MasqueModeClient = "client"
-	MasqueModeServer = "server"
+	MasqueRoleClient = "client"
+	MasqueRoleServer = "server"
 )
 
 const (
@@ -28,13 +27,7 @@ const (
 	MasqueTCPModeMasqueOrDirect = "masque_or_direct"
 )
 
-const (
-	MasqueTCPTransportAuto          = "auto"
-	MasqueTCPTransportConnectIP       = "connect_ip"
-	MasqueTCPTransportConnectStream   = "connect_stream"
-)
-
-// Masque server TCP relay mode (mode=server only).
+// Masque server TCP relay mode (role=server only).
 const (
 	MasqueTCPRelayTemplate = "template"
 )
@@ -99,8 +92,13 @@ type MasqueEndpointOptions struct {
 	ServerOptions
 	DialerOptions
 
+	// Role is client (default) or server.
+	Role string `json:"role,omitempty"`
+	// Mode selects the client dataplane: default (UDP→CONNECT-UDP, TCP→CONNECT-stream) or connect_ip (UDP+TCP over CONNECT-IP).
+	Mode string `json:"mode,omitempty"`
+	// Parsed only so validateMasqueOptions can reject removed JSON keys.
 	TransportMode string `json:"transport_mode,omitempty"`
-	Mode          string `json:"mode,omitempty"`
+	TCPTransport    string `json:"tcp_transport,omitempty"`
 	// TemplateUDP is a URI template for CONNECT-UDP. Use a full https://… URL, or a path-only form
 	// starting with / (e.g. /masque/udp/{target_host}/{target_port}); path-only templates get
 	// https://<server>:<server_port> (client) or https://<derived listen authority> (server) prefixed.
@@ -125,13 +123,9 @@ type MasqueEndpointOptions struct {
 	// legacy unbracketed wire form. When false, the client may still retry once with brackets after
 	// HTTP 400 if the TCP target resolves to IPv6 (see transport/masque dialTCPStreamAttempt).
 	TCPIPv6PathBracket bool `json:"tcp_ipv6_path_bracket,omitempty"`
-	FallbackPolicy        string `json:"fallback_policy,omitempty"`
-	TCPMode               string `json:"tcp_mode,omitempty"`
-	// TCPTransport selects how outbound TCP is carried:
-	//   connect_stream — HTTP/3 CONNECT-stream to template_tcp / default /masque/tcp/…;
-	//   connect_ip     — IPv4 TCP via gVisor tcpip stack over CONNECT-IP (requires transport_mode connect_ip).
-	TCPTransport string `json:"tcp_transport,omitempty"`
-	// InboundTLS is sing-box inbound TLS (same schema as other inbounds). Required for mode=server when terminating TLS.
+	FallbackPolicy string `json:"fallback_policy,omitempty"`
+	TCPMode        string `json:"tcp_mode,omitempty"`
+	// InboundTLS is sing-box inbound TLS (same schema as other inbounds). Required for role=server when terminating TLS.
 	InboundTLS *InboundTLSOptions `json:"tls,omitempty"`
 	// OutboundTLS is sing-box outbound TLS for mode=client (SNI, certs, utls on TCP paths, etc.). Required for generic masque client; warp_masque may use a minimal placeholder until bootstrap refines dialing.
 	OutboundTLS *OutboundTLSOptions `json:"outbound_tls,omitempty"`
@@ -147,6 +141,9 @@ type MasqueEndpointOptions struct {
 	AllowPrivateTargets bool                    `json:"allow_private_targets,omitempty"`
 	AllowedTargetPorts  []uint16                `json:"allowed_target_ports,omitempty"`
 	BlockedTargetPorts  []uint16                `json:"blocked_target_ports,omitempty"`
+	// ConnectUDPRelayPayloadPolicy is server-only relay MTU cap for proxied UDP: prod (default, 1500 B)
+	// or rfc_interop (65527 B). Process-wide when multiple masque endpoints are configured.
+	ConnectUDPRelayPayloadPolicy string `json:"connect_udp_relay_payload_policy,omitempty"`
 	HopPolicy           string                  `json:"hop_policy,omitempty"`
 	Hops                []MasqueChainHopOptions `json:"hops,omitempty"`
 
@@ -155,11 +152,12 @@ type MasqueEndpointOptions struct {
 	MTU              uint32                         `json:"mtu,omitempty"`
 	Workers          int                            `json:"workers,omitempty"`
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
-	// HTTPLayer selects the outer CONNECT-UDP/control plane: h3 (QUIC/H3 default), h2 (TLS+H2 RFC 8441), auto (effective order at runtime).
-	HTTPLayer         string             `json:"http_layer,omitempty"`
-	HTTPLayerFallback bool `json:"http_layer_fallback,omitempty"`
-	// HTTPLayerCacheTTL is read only when HTTPLayer is auto (in-memory TTL for last chosen h2/h3).
+	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
+	HTTPLayer string `json:"http_layer,omitempty"`
+	// HTTPLayerCacheTTL overrides the in-memory TTL for http_layer auto (default 5m).
 	HTTPLayerCacheTTL badoption.Duration `json:"http_layer_cache_ttl,omitempty"`
+	// Parsed only so validateMasqueOptions can reject removed JSON keys.
+	HTTPLayerFallback bool `json:"http_layer_fallback,omitempty"`
 }
 
 type MasqueQUICExperimentalOptions struct {

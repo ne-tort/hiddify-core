@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
 type refusingUDPWriter struct {
@@ -23,7 +25,7 @@ func TestC2SRelayUDPWriteRefusedRelaysICMP(t *testing.T) {
 	var icmpPayload []byte
 	relay := func() error {
 		icmpRelayed.Store(true)
-		icmpPayload = append([]byte(nil), contextIDZero...)
+		icmpPayload = append([]byte(nil), frame.ContextIDZeroWire...)
 		return nil
 	}
 	conn := &refusingUDPWriter{err: syscall.ECONNREFUSED}
@@ -33,8 +35,8 @@ func TestC2SRelayUDPWriteRefusedRelaysICMP(t *testing.T) {
 	if !icmpRelayed.Load() {
 		t.Fatal("expected ICMP relay on ECONNREFUSED onward write")
 	}
-	if !bytes.Equal(icmpPayload, contextIDZero) {
-		t.Fatalf("ICMP datagram %v want ctx0 %v", icmpPayload, contextIDZero)
+	if !bytes.Equal(icmpPayload, frame.ContextIDZeroWire) {
+		t.Fatalf("ICMP datagram %v want ctx0 %v", icmpPayload, frame.ContextIDZeroWire)
 	}
 }
 

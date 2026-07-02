@@ -65,7 +65,7 @@ func (n *connectIPTeardownOrderNetstack) Close() error {
 
 func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
-		HTTPLayerFallback: true,
+		HTTPLayerAuto: true,
 		IPConn:            testStubConnectIPConn(),
 	})
 	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
@@ -278,7 +278,6 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
-			TCPTransport:             "connect_stream",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
 			HopOrder: []HopOptions{
@@ -287,7 +286,6 @@ func TestDialTCPStreamAdvancesHopChainAfterRetries(t *testing.T) {
 		},
 			HopIndex: 0,
 			Caps: CapabilitySet{ConnectTCP: true},
-			HTTPLayerFallback: false,
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			mu.Lock()
 			dialHosts = append(dialHosts, req.Host)
@@ -338,7 +336,6 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 			Options: ClientOptions{
 			Server:                   "hop1.example",
 			ServerPort:               443,
-			TCPTransport:             "connect_stream",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
 			HopOrder: []HopOptions{
@@ -347,7 +344,7 @@ func TestDialTCPStreamDoesNotAdvanceHopOnLocalConfigError(t *testing.T) {
 		},
 			HopIndex: 0,
 			Caps: CapabilitySet{ConnectTCP: true},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 		})
 	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	_, _, tcp, err := buildTemplates(ClientOptions{
@@ -585,7 +582,7 @@ func TestDialConnectIPAttemptHookRecordsHTTPLayerCacheSuccess(t *testing.T) {
 	s := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 			Server:        "example.com",
 			ServerPort:    443,
 			HTTPLayerSuccess: func(layer string, id HTTPLayerCacheDialIdentity) {
@@ -764,81 +761,48 @@ func TestTransportMalformedScopedFlowBoundaryParity(t *testing.T) {
 	}
 }
 
-func TestCoreClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
-	streamSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		Server:       "example.com",
-		ServerPort:   443,
-		TCPTransport: "connect_stream",
+func TestCoreClientFactoryCapabilitiesByDataplaneMode(t *testing.T) {
+	defaultSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
+		Server:     "example.com",
+		ServerPort: 443,
 	})
 	if err != nil {
-		t.Fatalf("new connect_stream session: %v", err)
+		t.Fatalf("new default session: %v", err)
 	}
-	if !streamSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_stream session to advertise ConnectTCP")
+	if !defaultSession.Capabilities().ConnectTCP {
+		t.Fatal("expected default session to advertise ConnectTCP")
+	}
+	if !defaultSession.Capabilities().ConnectUDP {
+		t.Fatal("expected default session to advertise ConnectUDP")
 	}
 
-	ipSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		Server:       "example.com",
-		ServerPort:   443,
-		TCPTransport: "connect_ip",
+	connectIPSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
+		Server:        "example.com",
+		ServerPort:    443,
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {
 		t.Fatalf("new connect_ip session: %v", err)
 	}
-	if ipSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_ip tcp without transport_mode=connect_ip to disable ConnectTCP")
-	}
-
-	tcpOverIPSession, err := (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		Server:        "example.com",
-		ServerPort:    443,
-		TransportMode: "connect_ip",
-		TCPTransport:  "connect_ip",
-	})
-	if err != nil {
-		t.Fatalf("new tcp connect_ip session: %v", err)
-	}
-	if !tcpOverIPSession.Capabilities().ConnectTCP {
-		t.Fatal("expected connect_ip+transport connect_ip session to advertise ConnectTCP")
-	}
-
-	_, err = (CoreClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		Server:        "example.com",
-		ServerPort:    443,
-		TransportMode: "connect_ip",
-		TCPTransport:  "connect_stream",
-	})
-	if err == nil {
-		t.Fatal("expected connect_ip+connect_stream combo to be rejected")
-	}
-	if !strings.Contains(err.Error(), "connect_stream") {
-		t.Fatalf("unexpected hybrid rejection error: %v", err)
+	if !connectIPSession.Capabilities().ConnectTCP {
+		t.Fatal("expected connect_ip session to advertise ConnectTCP")
 	}
 }
 
-func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
-	streamSession, err := (DirectClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		TCPTransport: "connect_stream",
-	})
+func TestDirectClientFactoryCapabilitiesByDataplaneMode(t *testing.T) {
+	defaultSession, err := (DirectClientFactory{}).NewSession(context.TODO(), ClientOptions{})
 	if err != nil {
-		t.Fatalf("new direct connect_stream session: %v", err)
+		t.Fatalf("new direct default session: %v", err)
 	}
-	if !streamSession.Capabilities().ConnectTCP {
-		t.Fatal("expected direct connect_stream session to advertise ConnectTCP")
+	if !defaultSession.Capabilities().ConnectTCP {
+		t.Fatal("expected direct default session to advertise ConnectTCP")
 	}
-
-	autoSession, err := (DirectClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		TCPTransport: "auto",
-	})
-	if err != nil {
-		t.Fatalf("new direct auto session: %v", err)
-	}
-	if autoSession.Capabilities().ConnectTCP {
-		t.Fatal("expected direct auto session to disable ConnectTCP")
+	if !defaultSession.Capabilities().ConnectUDP {
+		t.Fatal("expected direct default session to advertise ConnectUDP")
 	}
 
 	ipSession, err := (DirectClientFactory{}).NewSession(context.TODO(), ClientOptions{
-		TCPTransport: "connect_ip",
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {
 		t.Fatalf("new direct connect_ip session: %v", err)
@@ -846,12 +810,17 @@ func TestDirectClientFactoryConnectTCPCapabilityByTransport(t *testing.T) {
 	if ipSession.Capabilities().ConnectTCP {
 		t.Fatal("expected direct connect_ip session to disable ConnectTCP in TUN-only mode")
 	}
+	if ipSession.Capabilities().ConnectUDP {
+		t.Fatal("expected direct connect_ip session to disable ConnectUDP")
+	}
+	if !ipSession.Capabilities().ConnectIP {
+		t.Fatal("expected direct connect_ip session to advertise ConnectIP")
+	}
 }
 
 func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
 	session := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TCPTransport: "connect_stream",
 		},
 		})
 	_, err := session.DialContext(context.Background(), "udp", M.ParseSocksaddrHostPort("example.com", 443))
@@ -869,39 +838,18 @@ func TestCoreSessionDialContextRejectsNonTCPNetwork(t *testing.T) {
 	}
 }
 
-func TestCoreSessionDialContextAutoTransportReturnsPathNotImplemented(t *testing.T) {
-	session := newTestCoreSession(msess.CoreSession{
-			Options: ClientOptions{
-			TCPTransport: "auto",
-		},
-		})
-	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
-	if err == nil {
-		t.Fatal("expected tcp_transport=auto to fail with deterministic path-not-implemented error")
-	}
-	if !errors.Is(err, msess.ErrTCPPathNotImplemented) {
-		t.Fatalf("expected msess.ErrTCPPathNotImplemented, got: %v", err)
-	}
-	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
-		t.Fatalf("expected capability class for auto transport path reject, got: %s", got)
-	}
-}
-
 func TestCoreSessionDialContextConnectIPReturnsTUNOnlyBoundary(t *testing.T) {
 	session := newTestCoreSession(msess.CoreSession{
-			Options: ClientOptions{
-			TCPTransport: "connect_ip",
+		Options: ClientOptions{
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 		},
-		})
+	})
 	_, err := session.DialContext(context.Background(), "tcp", M.ParseSocksaddrHostPort("example.com", 443))
 	if err == nil {
-		t.Fatal("expected tcp_transport=connect_ip to fail as TUN-only TCP path")
-	}
-	if !errors.Is(err, msess.ErrTCPOverConnectIP) {
-		t.Fatalf("expected msess.ErrTCPOverConnectIP, got: %v", err)
+		t.Fatal("expected mode connect_ip to fail as TUN-only TCP path without netstack")
 	}
 	if got := msess.ClassifyError(err); got != msess.ErrorClassCapability {
-		t.Fatalf("expected capability class for connect_ip tcp reject, got: %s", got)
+		t.Fatalf("expected capability class for connect_ip tcp reject, got: %s (%v)", got, err)
 	}
 }
 
@@ -1079,7 +1027,6 @@ func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				t.Fatalf("unexpected TCP dial on mocked CONNECT-UDP path")
@@ -1088,7 +1035,7 @@ func TestHTTPFallbackBudgetResetsAfterSuccessfulUDPDial(t *testing.T) {
 		},
 			TemplateUDP: templateUDP,
 			Caps: CapabilitySet{ConnectUDP: true},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 			UDPClient: &qmasque.Client{},
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
@@ -1117,7 +1064,6 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				return nil, errors.New("tcp dial stub")
@@ -1125,7 +1071,7 @@ func TestListenPacketHTTPFallbackRunsAfterReconnectDialSwitchableFailure(t *test
 		},
 			TemplateUDP: templateUDP,
 			Caps: CapabilitySet{ConnectUDP: true, ConnectIP: false},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 			UDPClient: &qmasque.Client{},
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	udpDial: func(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
@@ -1173,7 +1119,6 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 	testSess = func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-				TransportMode:            "connect_udp",
 				MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 				TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 					return nil, errors.New("tcp dial stub")
@@ -1181,7 +1126,6 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 			},
 			TemplateUDP:       templateUDP,
 			Caps:              CapabilitySet{ConnectUDP: true, ConnectIP: false},
-			HTTPLayerFallback: false,
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, h2UDPConnectHook: func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error) {
 			if testSess.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
@@ -1221,14 +1165,13 @@ func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t
 			Server:                   "example.com",
 			ServerPort:               443,
 			TemplateTCP:              "https://example.com/masque/tcp/{target_host}/{target_port}",
-			TransportMode:            "connect_udp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				return nil, errors.New("tcp dial stub")
 			},
 		},
 			Caps: CapabilitySet{ConnectTCP: true},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 		})
 	session.TCPRoundTripper = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if session.currentUDPHTTPLayer() == option.MasqueHTTPLayerH3 {
@@ -1272,12 +1215,12 @@ func TestOpenIPSessionFailureClearsHTTPFallbackLatchForNextAttempt(t *testing.T)
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode:            "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
 			TemplateIP: templateIP,
 			Caps: CapabilitySet{ConnectIP: true},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			if !useHTTP2 {
@@ -1307,12 +1250,12 @@ func TestOpenIPSessionHTTPFallbackRunsAfterIPH3ReconnectDialSwitchableFailure(t 
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode:            "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		},
 			TemplateIP: templateIP,
 			Caps: CapabilitySet{ConnectIP: true},
-			HTTPLayerFallback: true,
+			HTTPLayerAuto: true,
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			n := call.Add(1)
@@ -1355,7 +1298,7 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode:            "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
 				return nil, errors.New("tcp dial stub")
@@ -1363,7 +1306,6 @@ func TestOpenIPSessionH2TransportChurnBeforeHopPivot(t *testing.T) {
 		},
 			TemplateIP: templateIP,
 			Caps: CapabilitySet{ConnectIP: true},
-			HTTPLayerFallback: false,
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(ctx context.Context, useHTTP2 bool) (*connectip.Conn, error) {
 			if !useHTTP2 {
@@ -2117,7 +2059,7 @@ func TestListenPacketConnectIPSkipsDestinationResolution(t *testing.T) {
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 		},
 			TemplateIP: templateIP,
 			Caps: CapabilitySet{ConnectIP: true},
@@ -2149,7 +2091,7 @@ func TestListenPacketConnectIPCanceledBeforeNewConnectIPUDPPacketConn(t *testing
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: "connect_ip",
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 		},
 			TemplateIP: templateIP,
 			Caps: CapabilitySet{ConnectIP: true},
@@ -2212,7 +2154,7 @@ func TestListenPacketConnectIPCanceledBeforeOpenIPSessions(t *testing.T) {
 	okConn := testStubConnectIPConn()
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
-			Options: ClientOptions{TransportMode: "connect_ip"},
+			Options: ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			Caps: CapabilitySet{ConnectIP: true},
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
@@ -2237,7 +2179,7 @@ func TestOpenIPSessionCanceledBeforeLockSkipsConnectIPDial(t *testing.T) {
 	okConn := testStubConnectIPConn()
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
-			Options: ClientOptions{TransportMode: "connect_ip"},
+			Options: ClientOptions{DataplaneMode: option.MasqueDataplaneConnectIP},
 			Caps: CapabilitySet{ConnectIP: true},
 		})
 		cs := &coreSession{CoreSession: s.CoreSession, 	dialConnectIPAttemptHook: func(context.Context, bool) (*connectip.Conn, error) {
@@ -2266,7 +2208,6 @@ func TestListenPacketCanceledSkipsUDPDialHook(t *testing.T) {
 	s := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
 			UDPClient: &qmasque.Client{},
 			TemplateUDP: templateUDP,
@@ -2299,7 +2240,6 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 	s := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
 			UDPClient: &qmasque.Client{},
 			TemplateUDP: templateUDP,
@@ -2323,7 +2263,6 @@ func TestListenPacketConnectUDPCanceledBeforeResolveDestination(t *testing.T) {
 func TestDialContextCanceledBeforeTCPBranches(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TCPTransport: option.MasqueTCPTransportConnectStream,
 		},
 		})
 	s.HTTPFallbackConsumed.Store(true)
@@ -2342,8 +2281,7 @@ func TestDialConnectIPTCPCanceledClearsHTTPFallbackLatch(t *testing.T) {
 	s := newTestCoreSession(msess.CoreSession{
 			Caps: CapabilitySet{ConnectIP: true},
 			Options: ClientOptions{
-			TransportMode: option.MasqueTransportModeConnectIP,
-			TCPTransport:  option.MasqueTCPTransportConnectIP,
+			DataplaneMode: option.MasqueDataplaneConnectIP,
 			Server:        "127.0.0.1",
 			ServerPort:    443,
 		},
@@ -2372,7 +2310,6 @@ func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 	session := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: "connect_udp",
 		},
 			UDPClient: &qmasque.Client{},
 			TemplateUDP: templateUDP,
@@ -2459,7 +2396,6 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:   "connect_stream",
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
@@ -2489,7 +2425,6 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:   "connect_stream",
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
@@ -2514,7 +2449,6 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 			Server:         "masque.local",
 			ServerPort:     443,
 			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
-			TCPTransport:   "connect_stream",
 			TCPMode:        option.MasqueTCPModeStrictMasque,
 			FallbackPolicy: option.MasqueFallbackPolicyStrict,
 		},
@@ -2755,7 +2689,6 @@ func TestListenPacketUDPChainEndJoinsCauseWhenCanceledAtHopExhaustion(t *testing
 	s := func() *coreSession {
 		s := newTestCoreSession(msess.CoreSession{
 			Options: ClientOptions{
-			TransportMode: option.MasqueTransportModeConnectUDP,
 		},
 			UDPClient: &qmasque.Client{},
 			TemplateUDP: templateUDP,
@@ -3097,7 +3030,6 @@ func TestDialTCPStreamInProcessHTTP3ProxySuccess(t *testing.T) {
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport: "connect_stream",
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)
@@ -3135,7 +3067,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyAuthAndPolicyStatusesMapToAuthClass(t *
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
 				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-				TCPTransport: "connect_stream",
 			})
 			if err != nil {
 				t.Fatalf("new session: %v", err)
@@ -3169,7 +3100,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyNonAuthStatusMapsToDialClass(t *testing
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
 				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-				TCPTransport: "connect_stream",
 			})
 			if err != nil {
 				t.Fatalf("new session: %v", err)
@@ -3203,7 +3133,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableRoundTripErrorKeepsBudgetAndDi
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport: "connect_stream",
 		QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			if atomic.AddInt32(&attempts, 1) < 3 {
 				return nil, retryableErr
@@ -3242,7 +3171,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableApplicationErrorKeepsBudgetAnd
 		Server:       "127.0.0.1",
 		ServerPort:   uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport: "connect_stream",
 		QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			if atomic.AddInt32(&attempts, 1) < 3 {
 				return nil, retryableErr
@@ -3298,7 +3226,6 @@ func TestDialTCPStreamInProcessHTTP3ProxyRetryableIdleAndNoRecentNetworkActivity
 				Server:       "127.0.0.1",
 				ServerPort:   uint16(proxyPort),
 				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-				TCPTransport: "connect_stream",
 				QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 					if atomic.AddInt32(&attempts, 1) < 3 {
 						return nil, retryableErr

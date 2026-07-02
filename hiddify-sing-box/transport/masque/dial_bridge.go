@@ -62,9 +62,6 @@ func resolveDestinationHost(destination M.Socksaddr) (string, error) {
 	return strm.ResolveDestinationHost(destination)
 }
 
-func normalizeTCPTransport(mode string) string {
-	return session.NormalizeTCPTransport(mode)
-}
 
 func isTCPMasqueDirectFallbackEligible(err error, ctx context.Context) bool {
 	return session.TCPMasqueDirectFallbackEligible(err, ctx)

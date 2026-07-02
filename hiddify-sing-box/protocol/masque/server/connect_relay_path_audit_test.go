@@ -6,16 +6,16 @@ import (
 	"testing"
 )
 
-//go:embed connect_stream.go
+//go:embed connectstream/handler.go
 var connectStreamRelayAuditSource string
 
-// TestArchREF2ServerRelayPathParity (REF2-5): template handler uses relay.TCPForward entry.
+// TestArchREF2ServerRelayPathParity (REF2-5): CONNECT-stream handler uses relay.TCPForward entry.
 func TestArchREF2ServerRelayPathParity(t *testing.T) {
 	t.Parallel()
 	src := struct {
 		name, body, relayAnchor string
 	}{
-		"connect_stream.go", connectStreamRelayAuditSource, "relay.TCPForward",
+		"connectstream/handler.go", connectStreamRelayAuditSource, "relay.TCPForward",
 	}
 	if !strings.Contains(src.body, src.relayAnchor) {
 		t.Fatalf("%s: missing relay anchor %q", src.name, src.relayAnchor)

@@ -34,8 +34,6 @@ func newConnectStreamH3ProdSession(t *testing.T, proxyPort int) (ClientSession, 
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
-		TCPTransport:             option.MasqueTCPTransportConnectStream,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 	})
@@ -60,8 +58,6 @@ func newConnectStreamH3DockerLiveSession(t *testing.T) ClientSession {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   host,
 		ServerPort:               8443,
-		TransportMode:            option.MasqueTransportModeConnectUDP,
-		TCPTransport:             option.MasqueTCPTransportConnectStream,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		MasqueQUICCryptoTLS:      &tls.Config{ServerName: host, InsecureSkipVerify: true},
 	})
@@ -100,7 +96,6 @@ func dialH3ConnectStreamBench(tb testing.TB, targetPort int) net.Conn {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		tb.Fatalf("new session: %v", err)

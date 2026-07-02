@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	cudpclient "github.com/sagernet/sing-box/transport/masque/connectudp/client"
 	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
@@ -26,7 +27,7 @@ func dialH3ConnectUDPDirect(tb testing.TB, proxyPort int, target string) net.Pac
 	clientTLS.ServerName = "127.0.0.1"
 	client := cudpclient.NewQUICClient(cudpclient.QUICClientConfig{
 		TLSClientConfig: clientTLS,
-		QUICConfig:      h3t.NewPacketPlaneQUICConfig(),
+		QUICConfig:      h3t.QUICConfigForDial(h3t.QUICDialProfile{}),
 	})
 	rawTpl := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
 	tpl, err := uritemplate.New(rawTpl)
@@ -40,10 +41,12 @@ func dialH3ConnectUDPDirect(tb testing.TB, proxyPort int, target string) net.Pac
 		tb.Fatalf("DialH3Production: %v", err)
 	}
 	tb.Cleanup(func() { _ = raw.Close() })
-	return cudpsplit.NewDatagramSplitConn(raw, cudpsplit.DatagramSplitOptions{
+	pkt := cudpsplit.NewDatagramSplitConn(raw, cudpsplit.DatagramSplitOptions{
 		MaxPayload: connectudp.DefaultBenchUDPPayloadLen,
 		HTTPLayer:  option.MasqueHTTPLayerH3,
 	})
+	route.TuneUDPPacketConn(pkt)
+	return pkt
 }
 
 func benchConnectUDPH3DirectDownloadFountainWithProxy(
@@ -63,10 +66,7 @@ func benchConnectUDPH3DirectDownloadFountainWithProxy(
 	})
 	target := net.JoinHostPort(fountainAddr.IP.String(), strconv.Itoa(fountainAddr.Port))
 	pkt := dialH3ConnectUDPDirect(tb, proxyPort, target)
-	if err := primeUDPBenchErr(tb, pkt, fountainAddr); err != nil {
-		return 0, 0, err
-	}
-	return benchConnectUDPPacketReceiveOnly(tb, pkt, duration, payloadLen)
+	return benchConnectUDPH3FountainS2C(tb, pkt, fountainAddr, duration, payloadLen, false)
 }
 
 func benchConnectUDPH3DirectDownloadFountain(
@@ -75,5 +75,69 @@ func benchConnectUDPH3DirectDownloadFountain(
 	payloadLen int,
 ) (int64, float64, error) {
 	return benchConnectUDPH3DirectDownloadFountainWithProxy(tb, registerMasqueUDPProxyHandler, duration, payloadLen)
+}
+
+// benchConnectUDPH3DirectUploadZeroLoss measures bidi DialH3Production upload (localize vs asymmetric ListenPacket).
+func benchConnectUDPH3DirectUploadZeroLoss(
+	tb testing.TB,
+	duration time.Duration,
+	payloadLen int,
+) (float64, connectudp.SequencedStats, error) {
+	tb.Helper()
+	const runID = uint32(0xC0FFEE03)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sinkConn, seqSink := runUDPSequencedSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+	proxyPort := startInProcessMasqueUDPProxy(tb, func(mux *http.ServeMux, proxyPort int) {
+		registerMasqueUDPProxyHandler(tb, mux, proxyPort)
+	})
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	pkt := dialH3ConnectUDPDirect(tb, proxyPort, target)
+	return benchConnectUDPPacketUploadSequenced(tb, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen, true)
+}
+
+// benchConnectUDPH3AsymmetricUploadZeroLoss measures explicit asymmetric legs (UDP-5p2b localize only).
+func benchConnectUDPH3AsymmetricUploadZeroLoss(
+	tb testing.TB,
+	duration time.Duration,
+	payloadLen int,
+) (float64, connectudp.SequencedStats, error) {
+	tb.Helper()
+	const runID = uint32(0xC0FFEE04)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sinkConn, seqSink := runUDPSequencedSink(tb, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+	proxyPort := startInProcessMasqueUDPProxy(tb, func(mux *http.ServeMux, proxyPort int) {
+		registerMasqueUDPProxyHandler(tb, mux, proxyPort)
+	})
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	clientTLS := connectUDPTestTLS.Clone()
+	clientTLS.InsecureSkipVerify = true
+	clientTLS.ServerName = "127.0.0.1"
+	client := cudpclient.NewQUICClient(cudpclient.QUICClientConfig{
+		TLSClientConfig: clientTLS,
+		QUICConfig:      h3t.QUICConfigForDial(h3t.QUICDialProfile{}),
+	})
+	rawTpl := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
+	tpl, err := uritemplate.New(rawTpl)
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
+	defer cancel()
+	raw, err := dialConnectUDPH3Asymmetric(ctx, client, tpl, target)
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = raw.Close() }()
+	pkt := cudpsplit.NewDatagramSplitConn(raw, cudpsplit.DatagramSplitOptions{
+		MaxPayload: payloadLen,
+		HTTPLayer:  option.MasqueHTTPLayerH3,
+	})
+	return benchConnectUDPPacketUploadSequenced(tb, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen, true)
 }
 

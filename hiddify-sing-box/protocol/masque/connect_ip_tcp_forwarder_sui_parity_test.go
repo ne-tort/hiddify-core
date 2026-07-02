@@ -17,23 +17,12 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// TestConnectIPTCPForwarderSuiParityConstants locks CLIENT-SERVER-CONTRACTS invariants so the
-// sing-box server path used by s-ui cannot drift from transport/masque/forwarder (single impl).
-func TestConnectIPTCPForwarderSuiParityConstants(t *testing.T) {
+// TestConnectIPTCPForwarderSuiParityDatagramCeiling locks forwarder vs client CONNECT-IP MTU constants.
+func TestConnectIPTCPForwarderSuiParityDatagramCeiling(t *testing.T) {
 	t.Parallel()
-	if server.ConnectIPMaxICMPRelay != 8 {
-		t.Fatalf("ConnectIPMaxICMPRelay=%d want 8", server.ConnectIPMaxICMPRelay)
-	}
-	if server.ConnectIPMaxParseDropPerRead != 64 {
-		t.Fatalf("ConnectIPMaxParseDropPerRead=%d want 64", server.ConnectIPMaxParseDropPerRead)
-	}
-	if fwd.WriteQueueDepth != 512 {
-		t.Fatalf("forwarder WriteQueueDepth=%d want 512", fwd.WriteQueueDepth)
-	}
-	ceiling := cip.DatagramCeilingMax()
-	maxIPv4 := cip.MaxIPv4Datagram(ceiling)
-	if maxIPv4 != fwd.DefaultDatagramCeilingMax-fwd.DatagramSlack {
-		t.Fatalf("client MaxIPv4Datagram=%d forwarder max=%d", maxIPv4, fwd.DefaultDatagramCeilingMax-fwd.DatagramSlack)
+	maxIPv4 := cip.MaxIPv4Datagram(cip.DefaultDatagramCeilingMax)
+	if maxIPv4 != fwd.MaxIPv4WireBytes {
+		t.Fatalf("client MaxIPv4Datagram=%d forwarder max=%d", maxIPv4, fwd.MaxIPv4WireBytes)
 	}
 }
 

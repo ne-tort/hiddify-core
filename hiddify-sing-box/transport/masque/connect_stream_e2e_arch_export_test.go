@@ -176,7 +176,6 @@ func runArchE2EConnectStreamL3WriteToBench(t *testing.T, logPrefix string) {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err != nil {
 		t.Fatalf("new session: %v", err)

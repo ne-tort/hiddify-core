@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	M "github.com/sagernet/sing/common/metadata"
@@ -104,7 +103,6 @@ func InttestLocalizeConnectUDPH3DownloadPipelineDepth(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -150,7 +148,6 @@ func InttestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -165,13 +162,12 @@ func InttestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 		t.Fatalf("ListenPacket: %v", err)
 	}
 	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	_, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, mbps, err := benchConnectUDPH3FountainS2C(t, pkt, fountainAddr, dur, connectudp.DefaultBenchUDPPayloadLen, false)
 	if err != nil {
 		t.Fatalf("receive-only: %v", err)
 	}
 	t.Logf("LOCALIZE connect-udp-h3 download fountain-flood (S2C-only): %.1f Mbit/s", mbps)
-	if !synthInstantGatePass(mbps) {
+	if !synthInstantDownloadGatePass(mbps) {
 		t.Logf("OPEN: S2C-only below synth gate — receive/datagram path ceiling, not echo contention")
 	}
 }
@@ -231,7 +227,6 @@ func InttestLocalizeConnectUDPH3Pipeline1ProdShape(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -340,8 +335,7 @@ func InttestLocalizeConnectUDPH2DownloadFountain(t *testing.T) {
 		t.Fatalf("ListenPacket: %v", err)
 	}
 	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	_, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, mbps, err := benchConnectUDPFountainS2C(t, pkt, fountainAddr, dur, connectudp.DefaultBenchUDPPayloadLen, false)
 	if err != nil {
 		t.Fatalf("fountain receive: %v", err)
 	}
@@ -371,8 +365,7 @@ func InttestLocalizeConnectUDPH2DownloadFountainMaxCapsule(t *testing.T) {
 		t.Fatalf("ListenPacket: %v", err)
 	}
 	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	_, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, maxPayload)
+	_, mbps, err := benchConnectUDPFountainS2C(t, pkt, fountainAddr, dur, maxPayload, false)
 	if err != nil {
 		t.Fatalf("fountain receive max capsule: %v", err)
 	}
@@ -399,8 +392,7 @@ func InttestLocalizeConnectUDPH2DownloadFountainPayloadScaling(t *testing.T) {
 			t.Fatalf("ListenPacket: %v", err)
 		}
 		defer func() { _ = pkt.Close() }()
-		primeUDPBench(t, pkt, fountainAddr)
-		_, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, payloadLen)
+		_, mbps, err := benchConnectUDPFountainS2C(t, pkt, fountainAddr, dur, payloadLen, false)
 		if err != nil {
 			t.Fatalf("fountain receive payloadLen=%d: %v", payloadLen, err)
 		}
@@ -540,7 +532,7 @@ func InttestLocalizeConnectUDPH2UploadDirectDialVsListenPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("h2 overlay direct upload: %v", err)
 	}
-	_, listenMbps, err := benchConnectUDPProdProfileH2Upload(t, instantH2Link{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
+	_, listenMbps, err := benchConnectUDPProdProfileH2UploadViaListenPacket(t, instantH2Link{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("h2 ListenPacket upload: %v", err)
 	}
@@ -572,8 +564,7 @@ func InttestLocalizeConnectUDPH2DownloadFountainDirectDialVsListenPacket(t *test
 	if err != nil {
 		t.Fatalf("ListenPacket: %v", err)
 	}
-	primeUDPBench(t, pkt, fountainAddr)
-	_, listenMbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	_, listenMbps, err := benchConnectUDPFountainS2C(t, pkt, fountainAddr, dur, connectudp.DefaultBenchUDPPayloadLen, false)
 	_ = pkt.Close()
 	_ = session.Close()
 	if err != nil {

@@ -10,9 +10,6 @@ import (
 type CoreClientFactory struct{}
 
 func (CoreClientFactory) NewSession(ctx context.Context, options ClientOptions) (ClientSession, error) {
-	if err := RejectConnectIPHybridTransport(options.TransportMode, options.TCPTransport); err != nil {
-		return nil, err
-	}
 	return buildCoreSession(ctx, options)
 }
 

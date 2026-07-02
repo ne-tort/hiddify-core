@@ -1,172 +1,103 @@
 package h2
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
 const (
-	// H2ServerUDPReadBuf is the server relay UDP recv buffer: must hold a full kernel
-	// datagram; net.UDPConn.Read truncates without error when the buffer is smaller than the packet.
-	H2ServerUDPReadBuf = 65535
-	// H2ResponseBodyBufSize coalesces HTTP/2 CONNECT-UDP response-body reads for RFC 9297 capsule parsing.
+	H2ServerUDPReadBuf    = 65535
 	H2ResponseBodyBufSize = 256 * 1024
-	// H2DownlinkCoalesceThreshold batches server downlink capsule wire bytes before FlushResponse.
-	H2DownlinkCoalesceThreshold = 32 * 1024
-	// H2DownlinkCoalesceMaxDelay bounds latency when a single small datagram stays below threshold.
-	H2DownlinkCoalesceMaxDelay = 2 * time.Millisecond
-	// h2DownlinkBulkEnterGap: UDP reads closer than this count toward bulk coalesce (fountain flood).
-	h2DownlinkBulkEnterGap = 50 * time.Microsecond
-	// h2DownlinkBulkExitGap: spaced reads leave bulk mode (echo / pipeline-1 RTT).
-	h2DownlinkBulkExitGap = 500 * time.Microsecond
-	// h2DownlinkBulkEnterHits: consecutive rapid arrivals before bulk coalesce arms.
-	h2DownlinkBulkEnterHits = 4
+	// H2DownlinkBulkFlushBytes batches S2C RFC9297 wire before one HTTP/2 flush (capsule.go batch + G42).
+	H2DownlinkBulkFlushBytes = 32 * 1024
 )
 
-// H2ResponseWriter serializes downlink capsule writes (immediate flush default — h2o/R4 thin path).
+// H2ResponseWriter writes DATAGRAM capsules on the CONNECT-UDP response body.
+// Fountain: relay UDP drain + Append* with byte threshold flush. ICMP/bidi Write: h2o 1:1 immediate.
 type H2ResponseWriter struct {
 	http.ResponseWriter
+	profile           LegProfile
 	mu                sync.Mutex
-	pending           bytes.Buffer
-	flushTimer        *time.Timer
-	flushTimerC       chan struct{}
-	lastDownlinkAt    time.Time
-	rapidDownlinkHits int
-	bulkDownlink      bool
-	immediateFlush    bool
-	bulkImmediateFlush bool
+	pendingSinceFlush int
 }
 
-func (w *H2ResponseWriter) noteDownlinkArrivalLocked(now time.Time) {
-	if !w.lastDownlinkAt.IsZero() {
-		gap := now.Sub(w.lastDownlinkAt)
-		switch {
-		case gap <= h2DownlinkBulkEnterGap:
-			w.rapidDownlinkHits++
-			if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
-				w.bulkDownlink = true
-			}
-		case gap >= h2DownlinkBulkExitGap:
-			w.bulkDownlink = false
-			w.rapidDownlinkHits = 0
-		default:
-			w.rapidDownlinkHits = 0
-		}
-	}
-	w.lastDownlinkAt = now
-}
-
-// WriteUDPPayloadAsCapsules frames udpPayload as RFC 9297 DATAGRAM capsules on the HTTP/2 response body.
 func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if len(udpPayload) == 0 {
-		if err := w.flushPendingLocked(); err != nil {
-			return err
-		}
-		return h2c.WriteDatagramCapsule(w.ResponseWriter, nil)
-	}
-	wasBulk := w.bulkDownlink
-	w.noteDownlinkArrivalLocked(time.Now())
-	exitedBulk := wasBulk && !w.bulkDownlink
-	var encErr error
-	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		h2c.AppendDatagramCapsuleBuffer(&w.pending, udpPayload)
-	} else {
-		encErr = h2c.AppendUDPPayloadAsDatagramCapsules(&w.pending, udpPayload)
-	}
-	if encErr != nil {
-		return encErr
-	}
-	if exitedBulk && w.bulkImmediateFlush {
-		return w.flushPendingLocked()
-	}
-	if w.immediateFlush {
-		return w.flushPendingLocked()
-	}
-	if w.bulkDownlink && w.bulkImmediateFlush {
-		if w.pending.Len() >= H2DownlinkCoalesceThreshold {
-			return w.flushPendingLocked()
-		}
-		if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
-			return nil // bulk without debounce timer until threshold
-		}
-		return w.flushPendingLocked()
-	}
-	if !w.bulkDownlink {
-		return w.flushPendingLocked()
-	}
-	if w.pending.Len() >= H2DownlinkCoalesceThreshold {
-		return w.flushPendingLocked()
-	}
-	if w.rapidDownlinkHits >= h2DownlinkBulkEnterHits {
-		w.armFlushTimerLocked()
-		return nil
-	}
-	return w.flushPendingLocked()
+	return w.writeCapsulesImmediateLocked(udpPayload)
 }
 
-// FlushPending pushes buffered downlink capsules (called on relay shutdown).
-func (w *H2ResponseWriter) FlushPending() error {
+// AppendUDPPayloadAsCapsules appends RFC9297 wire; flushes at H2DownlinkBulkFlushBytes (no debounce timer).
+func (w *H2ResponseWriter) AppendUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.flushPendingLocked()
-}
-
-func (w *H2ResponseWriter) armFlushTimerLocked() {
-	if w.flushTimer != nil {
-		return
+	if len(udpPayload) == 0 {
+		return w.writeCapsulesImmediateLocked(nil)
 	}
-	w.flushTimerC = make(chan struct{})
-	timerC := w.flushTimerC
-	w.flushTimer = time.AfterFunc(H2DownlinkCoalesceMaxDelay, func() {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if w.flushTimerC != timerC {
-			return
-		}
-		w.stopFlushTimerLocked()
-		_ = w.flushPendingLocked()
-	})
-}
-
-func (w *H2ResponseWriter) stopFlushTimerLocked() {
-	if w.flushTimer != nil {
-		w.flushTimer.Stop()
-		w.flushTimer = nil
-	}
-	w.flushTimerC = nil
-}
-
-func (w *H2ResponseWriter) flushPendingLocked() error {
-	w.stopFlushTimerLocked()
-	if w.pending.Len() == 0 {
-		return nil
-	}
-	wire := w.pending.Bytes()
-	w.pending.Reset()
-	if _, err := h2c.WriteAll(w.ResponseWriter, wire); err != nil {
+	if err := w.appendCapsulesLocked(udpPayload); err != nil {
 		return err
 	}
-	h2c.FlushResponse(w.ResponseWriter)
+	if w.pendingSinceFlush >= H2DownlinkBulkFlushBytes {
+		return w.flushLocked()
+	}
 	return nil
 }
 
-// ServeH2 relays UDP payloads over an established HTTP/2 CONNECT-UDP stream using
-// RFC 9297 DATAGRAM capsules (same wire format as dialUDPOverHTTP2 on the client).
-// The caller must set response headers and WriteHeader(http.StatusOK) before calling this.
+func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
+	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
+		if err := h2c.AppendDatagramCapsuleWire(w.ResponseWriter, udpPayload); err != nil {
+			return err
+		}
+	} else if err := h2c.AppendUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload); err != nil {
+		return err
+	}
+	w.pendingSinceFlush += h2c.UDPPayloadWireLen(udpPayload)
+	return nil
+}
+
+func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error {
+	w.pendingSinceFlush = 0
+	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
+		return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
+	}
+	return h2c.WriteUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload)
+}
+
+func (w *H2ResponseWriter) flushLocked() error {
+	h2c.FlushResponse(w.ResponseWriter)
+	w.pendingSinceFlush = 0
+	return nil
+}
+
+func (w *H2ResponseWriter) FlushPending() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pendingSinceFlush <= 0 {
+		return nil
+	}
+	return w.flushLocked()
+}
+
+func newH2DownlinkWriter(w http.ResponseWriter, profile LegProfile) *H2ResponseWriter {
+	return &H2ResponseWriter{ResponseWriter: w, profile: profile}
+}
+
+func NewDownlinkResponseWriter(w http.ResponseWriter) *H2ResponseWriter {
+	return newH2DownlinkWriter(w, LegProfileDownloadFountain)
+}
+
+// ServeH2 relays UDP over HTTP/2 CONNECT-UDP (h2o event-loop semantics: 2 goroutines).
 func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	if w == nil || r == nil || conn == nil {
 		return errors.New("masque h2: connect-udp relay: nil argument")
 	}
-	downlinkW := newH2DownlinkWriter(w, LegProfileEchoBidi)
+	downlinkW := newH2DownlinkWriter(w, LegProfileBidi)
 	var wg sync.WaitGroup
 	var closeUDP sync.Once
 	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
@@ -189,11 +120,15 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	onward := &cudprelay.DirectH2OnwardWriter{W: cudprelay.NewOnwardUDPWriter(conn)}
 	onICMP := func() error { return downlinkW.WriteUDPPayloadAsCapsules(nil) }
 
+	relayCtx, cancelRelay := context.WithCancel(r.Context())
+	defer cancelRelay()
+
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		defer shutdownRelay()
 		defer closeUDPConn()
+		defer cancelRelay()
 		upErr = cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalDownlinkReady, onICMP)
 	}()
 	go func() {
@@ -203,10 +138,13 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		defer func() { _ = downlinkW.FlushPending() }()
 		select {
 		case <-downlinkReady:
-		case <-r.Context().Done():
+		case <-relayCtx.Done():
 			return
 		}
-		downErr = cudprelay.RelayH2ConnectDownlink(r.Context(), conn, H2ServerUDPReadBuf, downlinkW)
+		// h2o connect.c: flush S2C after each onward UDP drain batch (bidi echo path).
+		downErr = cudprelay.RelayH2ConnectDownlink(relayCtx, conn, H2ServerUDPReadBuf, downlinkW, H2DownlinkBulkFlushBytes, func(payloads [][]byte) bool {
+			return true
+		})
 	}()
 	wg.Wait()
 	joined := errors.Join(upErr, downErr)

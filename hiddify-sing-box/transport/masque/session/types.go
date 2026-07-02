@@ -51,15 +51,14 @@ type ClientOptions struct {
 	// Masque HTTPS templates and default URIs continue to use Server (typically a hostname).
 	DialPeer              string
 	ServerPort            uint16
-	TransportMode         string
-	TemplateUDP           string
+	DataplaneMode             string
+	TemplateUDP               string
 	TemplateIP            string
 	ConnectIPScopeTarget  string
 	ConnectIPScopeIPProto uint8
 	TemplateTCP           string
 	FallbackPolicy        string
 	TCPMode               string
-	TCPTransport          string
 	ServerToken           string
 	// ClientBasicUsername / ClientBasicPassword: optional RFC 7617 Basic for CONNECT-stream / CONNECT-IP / H2 CONNECT-UDP.
 	ClientBasicUsername string
@@ -74,7 +73,7 @@ type ClientOptions struct {
 	QUICDial                 QUICDialFunc
 	TCPDial                  MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
-	HTTPLayerFallback        bool
+	HTTPLayerAuto            bool
 	HTTPLayerSuccess         func(layer string, id HTTPLayerCacheDialIdentity)
 	// WarpMasque fields: Cloudflare consumer MASQUE / usque dataplane parity (optional for generic masque).
 	WarpMasqueClientCert        tls.Certificate

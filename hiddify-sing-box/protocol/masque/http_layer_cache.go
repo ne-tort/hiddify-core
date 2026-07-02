@@ -11,6 +11,18 @@ import (
 	TM "github.com/sagernet/sing-box/transport/masque"
 )
 
+const defaultMasqueHTTPLayerCacheTTL = 5 * time.Minute
+
+func masqueHTTPLayerCacheTTL(o option.MasqueEndpointOptions) time.Duration {
+	if normalizeHTTPLayer(o.HTTPLayer) != option.MasqueHTTPLayerAuto {
+		return 0
+	}
+	if ttl := o.HTTPLayerCacheTTL.Build(); ttl > 0 {
+		return ttl
+	}
+	return defaultMasqueHTTPLayerCacheTTL
+}
+
 type httpLayerCacheEntry struct {
 	layer string
 	until time.Time
@@ -110,24 +122,18 @@ func masqueHTTPLayerCacheKey(tag string, o option.MasqueEndpointOptions, id TM.H
 	if port == 0 {
 		port = 443
 	}
-	policy := "fb0"
-	if o.HTTPLayerFallback {
-		policy = "fb1"
-	}
-	return fmt.Sprintf("%s|%s|%d|%s|%s|%s", strings.TrimSpace(tag), srv, port, sni, hopTag, policy)
+	return fmt.Sprintf("%s|%s|%d|%s|%s", strings.TrimSpace(tag), srv, port, sni, hopTag)
 }
 
 // EffectiveMasqueClientHTTPLayer returns the concrete outer HTTP stack for the client path (h3 or h2).
 // CONNECT-IP uses the same layer policy as CONNECT-UDP (Extended CONNECT over H3+QUIC or H2+TLS/TCP).
-// "auto" consults the TTL cache when configured, otherwise starts on h3 per product default.
-// dialPortOverride: pass 0 to use the entry hop / options port; pass the actual MASQUE TLS dial port
-// when it is chosen at runtime (warp_masque dataplane candidates).
+// "auto" consults the TTL cache (default 5m), otherwise starts on h3.
 func EffectiveMasqueClientHTTPLayer(tag string, o option.MasqueEndpointOptions, chain []cm.ChainHop, dialPortOverride uint16) string {
 	layer := normalizeHTTPLayer(o.HTTPLayer)
 	if layer != option.MasqueHTTPLayerAuto {
 		return layer
 	}
-	ttl := o.HTTPLayerCacheTTL.Build()
+	ttl := masqueHTTPLayerCacheTTL(o)
 	if ttl > 0 {
 		id := masqueHTTPLayerDialIdentityFromChain(chain, o)
 		if dialPortOverride != 0 {
@@ -148,7 +154,7 @@ func RecordMasqueHTTPLayerSuccess(tag string, o option.MasqueEndpointOptions, ch
 	if chosen != option.MasqueHTTPLayerH2 && chosen != option.MasqueHTTPLayerH3 {
 		return
 	}
-	ttl := o.HTTPLayerCacheTTL.Build()
+	ttl := masqueHTTPLayerCacheTTL(o)
 	if ttl <= 0 {
 		return
 	}

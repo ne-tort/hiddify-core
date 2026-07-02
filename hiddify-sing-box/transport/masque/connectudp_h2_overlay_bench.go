@@ -46,7 +46,7 @@ func benchConnectUDPH2SessionDirectUpload(
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLinkTB(tb, proxyPort, link)
 	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
 	pkt := dialConnectUDPH2ViaSession(tb, session, waitCtx, target)
-	return benchConnectUDPPacketUpload(tb, pkt, sinkAddr, duration, 0, payloadLen, sinkRx)
+	return benchConnectUDPPacketUpload(tb, pkt, sinkAddr, duration, 0, payloadLen, sinkRx, false)
 }
 
 func benchConnectUDPH2SessionDirectDownloadFountain(
@@ -65,10 +65,7 @@ func benchConnectUDPH2SessionDirectDownloadFountain(
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLinkTB(tb, proxyPort, link)
 	target := net.JoinHostPort(fountainAddr.IP.String(), strconv.Itoa(fountainAddr.Port))
 	pkt := dialConnectUDPH2ViaSession(tb, session, waitCtx, target)
-	if err := primeUDPBenchErr(tb, pkt, fountainAddr); err != nil {
-		return 0, 0, err
-	}
-	return benchConnectUDPPacketReceiveOnly(tb, pkt, duration, payloadLen)
+	return benchConnectUDPFountainS2C(tb, pkt, fountainAddr, duration, payloadLen, false)
 }
 
 // benchConnectUDPH2OverlayDirectUpload is an alias for the prod session dial path (STRUCT-12).

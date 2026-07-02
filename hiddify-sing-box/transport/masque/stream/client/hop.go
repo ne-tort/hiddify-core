@@ -34,7 +34,7 @@ func (h SessionHopHost) TryHTTPFallbackSwitch(err error) bool {
 	return false
 }
 
-func (h SessionHopHost) HTTPLayerFallbackEnabled() bool {
+func (h SessionHopHost) HTTPLayerAutoEnabled() bool {
 	if h.FallbackEnabled != nil {
 		return h.FallbackEnabled()
 	}

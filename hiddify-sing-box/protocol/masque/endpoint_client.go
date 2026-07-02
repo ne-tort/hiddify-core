@@ -40,7 +40,7 @@ type Endpoint struct {
 
 // NewEndpoint creates a generic `type: masque` outbound endpoint using explicit server/hops + CM.Runtime.
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
-	if normalizeMode(options.Mode) == option.MasqueModeServer {
+	if normalizeRole(options.Role) == option.MasqueRoleServer {
 		return NewServerEndpoint(ctx, router, logger, tag, options)
 	}
 	options = applyMasqueClientMasqueDefaults(options)
@@ -112,7 +112,10 @@ func (e *Endpoint) Close() error {
 	return rt.Close()
 }
 
-var _ CM.ConnectIPPlaneDeselector = (*Endpoint)(nil)
+var (
+	_ CM.ConnectIPPlaneDeselector = (*Endpoint)(nil)
+	_ CM.ConnectUDPPlaneDeselector = (*Endpoint)(nil)
+)
 
 // CloseConnectIPPlaneOnDeselect tears down CONNECT-IP plane when selector switches away (LIFE-3).
 func (e *Endpoint) CloseConnectIPPlaneOnDeselect() {
@@ -123,6 +126,17 @@ func (e *Endpoint) CloseConnectIPPlaneOnDeselect() {
 		return
 	}
 	rt.CloseConnectIPPlane()
+}
+
+// CloseConnectUDPPlaneOnDeselect tears down CONNECT-UDP plane when selector switches away (LIFE-3).
+func (e *Endpoint) CloseConnectUDPPlaneOnDeselect() {
+	e.mu.RLock()
+	rt := e.runtime
+	e.mu.RUnlock()
+	if rt == nil {
+		return
+	}
+	rt.CloseConnectUDPPlane()
 }
 
 func (e *Endpoint) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
@@ -236,7 +250,7 @@ func (e *Endpoint) startRuntime() {
 		Tag:                      e.Tag(),
 		Server:                   server,
 		ServerPort:               port,
-		TransportMode:            normalizeTransportMode(e.options.TransportMode),
+		DataplaneMode:            normalizeDataplaneMode(e.options.Mode),
 		TemplateUDP:              e.options.TemplateUDP,
 		TemplateIP:               e.options.TemplateIP,
 		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
@@ -246,7 +260,6 @@ func (e *Endpoint) startRuntime() {
 		TemplateTCP:              e.options.TemplateTCP,
 		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
 		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
-		TCPTransport:             normalizeTCPTransport(e.options.TCPTransport),
 		ServerToken:              e.options.ServerToken,
 		ClientBasicUsername:      e.options.ClientBasicUsername,
 		ClientBasicPassword:      e.options.ClientBasicPassword,
@@ -258,7 +271,7 @@ func (e *Endpoint) startRuntime() {
 		QUICDial:                 quicDial,
 		TCPDial:                  tcpDial,
 		MasqueEffectiveHTTPLayer: effectiveHL,
-		HTTPLayerFallback:        e.options.HTTPLayerFallback,
+		HTTPLayerAuto:            normalizeHTTPLayer(e.options.HTTPLayer) == option.MasqueHTTPLayerAuto,
 		HTTPLayerSuccess:         recordHL,
 		TCPIPv6PathBracket:       e.options.TCPIPv6PathBracket,
 	})

@@ -49,8 +49,8 @@ type ServerEndpoint struct {
 
 func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MasqueEndpointOptions) (adapter.Endpoint, error) {
 	o := options
-	if normalizeMode(o.Mode) != option.MasqueModeServer {
-		o.Mode = option.MasqueModeServer
+	if normalizeRole(o.Role) != option.MasqueRoleServer {
+		o.Role = option.MasqueRoleServer
 	}
 	if err := validateMasqueOptions(o); err != nil {
 		return nil, err

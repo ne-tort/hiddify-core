@@ -2,6 +2,7 @@ package h2
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -61,34 +62,36 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 		})
 	}
 
-	var upErr, downErr error
-	signalReady := func() { sess.signalReady() }
-	onward := sess.onwardWriter()
-	onICMP := func() error { return downlinkW.WriteUDPPayloadAsCapsules(nil) }
+	var downErr error
+
+	go func() {
+		<-r.Context().Done()
+		closeUDPConn()
+		shutdownRelay()
+	}()
 
 	wg.Add(2)
+	// Asymmetric download: S2C only. C2S capsules belong on the upload leg (H3 download-leg parity).
 	go func() {
 		defer wg.Done()
 		defer shutdownRelay()
-		defer closeUDPConn()
-		upErr = cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalReady, onICMP)
+		_, _ = io.Copy(io.Discard, r.Body)
 	}()
 	go func() {
 		defer wg.Done()
 		defer shutdownRelay()
 		defer closeUDPConn()
-		defer func() { _ = downlinkW.FlushPending() }()
 		select {
 		case <-sess.ready:
 		case <-r.Context().Done():
 			return
 		}
-		downErr = cudprelay.RelayH2ConnectDownlink(r.Context(), conn, H2ServerUDPReadBuf, downlinkW)
+		// Asymmetric download: immediate 1:1 S2C (pre-batch relay parity; batch Append stalls echo-duplex).
+		downErr = cudprelay.RelayH2ConnectDownlinkImmediate(r.Context(), conn, H2ServerUDPReadBuf, downlinkW)
 	}()
 	wg.Wait()
-	joined := errors.Join(upErr, downErr)
 	_ = http.NewResponseController(w).Flush()
-	return joined
+	return downErr
 }
 
 func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, reg *SessionRegistry) error {
@@ -109,7 +112,6 @@ func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, re
 			}
 		})
 	}
-	defer shutdownRelay()
 
 	signalReady := func() { sess.signalReady() }
 	onward := sess.onwardWriter()
@@ -118,7 +120,12 @@ func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, re
 	if err := sess.waitReady(r.Context().Done()); err != nil {
 		return err
 	}
-	upErr := cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalReady, onICMP)
-	_ = http.NewResponseController(w).Flush()
-	return upErr
+
+	go func() {
+		<-r.Context().Done()
+		shutdownRelay()
+	}()
+
+	defer shutdownRelay()
+	return cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalReady, onICMP)
 }

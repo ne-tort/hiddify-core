@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
-	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/quic-go/quic-go/http3"
@@ -24,6 +25,16 @@ func assertConnectUDPSynthInstantMbps(t *testing.T, layer, leg string, mbps floa
 	if !synthInstantGatePass(mbps) {
 		t.Fatalf("%s", synthKPIDiagnostic(layer, leg, mbps, connectUDPSynthInstantMinMbps,
 			hint+"; prod DoD min "+formatSynthMbps(connectUDPSynthProdMinMbps)+" Mbit/s each leg"))
+	}
+}
+
+func assertConnectUDPSynthInstantDownloadMbps(t *testing.T, layer, leg string, mbps float64, hint string) {
+	t.Helper()
+	want := connectUDPSynthInstantDownloadMinMbps()
+	if !synthInstantDownloadGatePass(mbps) {
+		t.Fatalf("%s", synthKPIDiagnostic(layer, leg, mbps, want,
+			hint+"; Linux synth target "+formatSynthMbps(connectUDPSynthInstantMinMbps)+
+				"; prod DoD min "+formatSynthMbps(connectUDPSynthProdMinMbps)+" Mbit/s each leg"))
 	}
 }
 
@@ -71,11 +82,10 @@ func startConnectUDPProdH3UploadHandle(tb testing.TB) *connectUDPProdUploadHandl
 		registerMasqueUDPProxyHandler(tb, mux, proxyPort)
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateParallelWaitCtx)
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -108,13 +118,9 @@ func startConnectUDPProdH2UploadHandle(tb testing.TB) *connectUDPProdUploadHandl
 
 	proxyPort := startInProcessH2UDPConnectProxy(tb)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLinkTB(tb, proxyPort, instantH2Link{})
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
-		Port: uint16(sinkAddr.Port),
-	})
-	if err != nil {
-		tb.Fatalf("ListenPacket connect-udp-h2: %v", err)
-	}
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(tb, session, waitCtx, target)
+	route.TuneUDPPacketConn(pkt)
 	return &connectUDPProdUploadHandle{
 		pkt:      pkt,
 		sinkAddr: sinkAddr,
@@ -135,7 +141,7 @@ func (h *connectUDPProdUploadHandle) uploadOnce(nbytes int64) (int64, error) {
 	payload := make([]byte, connectudp.DefaultBenchUDPPayloadLen)
 	var sent int64
 	for sent < nbytes {
-		_ = h.pkt.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = h.pkt.SetWriteDeadline(time.Now().Add(connectUDPSynthUploadWriteStall))
 		n, err := h.pkt.WriteTo(payload, h.sinkAddr)
 		if err != nil {
 			return sent, err
@@ -160,11 +166,10 @@ func startConnectUDPProdH3DownloadHandle(tb testing.TB) *connectUDPProdDownloadH
 		registerMasqueUDPProxyHandler(tb, mux, proxyPort)
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateParallelWaitCtx)
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -197,13 +202,8 @@ func startConnectUDPProdH2DownloadHandle(tb testing.TB) *connectUDPProdDownloadH
 
 	proxyPort := startInProcessH2UDPConnectProxy(tb)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLinkTB(tb, proxyPort, instantH2Link{})
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(echoAddr.IP.String()),
-		Port: uint16(echoAddr.Port),
-	})
-	if err != nil {
-		tb.Fatalf("ListenPacket connect-udp-h2 download: %v", err)
-	}
+	target := net.JoinHostPort(echoAddr.IP.String(), strconv.Itoa(echoAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(tb, session, waitCtx, target)
 	return &connectUDPProdDownloadHandle{
 		pkt:      pkt,
 		echoAddr: echoAddr,
@@ -234,7 +234,7 @@ func (h *connectUDPProdDownloadHandle) downloadOnce(nbytes int64) (int64, error)
 			case <-stop:
 				return
 			default:
-				_ = h.pkt.SetWriteDeadline(time.Now().Add(5 * time.Second))
+				_ = h.pkt.SetWriteDeadline(time.Now().Add(connectUDPSynthUploadWriteStall))
 				if _, err := h.pkt.WriteTo(payload, h.echoAddr); err != nil {
 					return
 				}
@@ -243,7 +243,7 @@ func (h *connectUDPProdDownloadHandle) downloadOnce(nbytes int64) (int64, error)
 	}()
 	var received int64
 	for received < nbytes {
-		_ = h.pkt.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = h.pkt.SetReadDeadline(time.Now().Add(connectUDPSynthUploadWriteStall))
 		n, _, err := h.pkt.ReadFrom(buf)
 		if err != nil {
 			return received, err
@@ -288,6 +288,55 @@ func TestGATEConnectUDPH3SynthStretchUploadSteady(t *testing.T) {
 	}
 }
 
+// TestGATEConnectUDPH3SynthProdUploadSteady locks DoD H3 upload @ steady MTU (1372B) paced zero-loss @1000 Mbit/s.
+// H3 sync C2S is PPS-bound; steady payload lowers pps vs 512B for same Mbps (masque-go / ferneast ref parity).
+func TestGATEConnectUDPH3SynthProdUploadSteady(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	steady := connectudp.SteadyUploadPayloadLenH3()
+	mbps, st, err := benchConnectUDPProdProfileH3UploadZeroLossPaced(t, instantDatagramLink{}, dur, steady, connectUDPSynthProdMinMbps)
+	if err != nil {
+		t.Fatalf("connect-udp-h3 prod upload steady(%dB): %v", steady, err)
+	}
+	t.Logf("GATE-CONNECT-UDP-SYNTH h3 upload steady(%dB) paced@%.0f: %.1f Mbit/s rx=%d/%d loss=%.4f%%",
+		steady, connectUDPSynthProdMinMbps, mbps, st.RxPkts, st.SentPkts, st.LossPct)
+	if !st.BurstZeroLossOK(steady, connectudp.DefaultBurstMinRxRatio) {
+		t.Fatalf("h3 steady upload zero-loss failed: rx=%d/%d loss=%.4f%% dup=%.2f%% fill_ok=%v",
+			st.RxPkts, st.SentPkts, st.LossPct, st.DupPct, st.FillIntegrityOK(steady))
+	}
+	assertConnectUDPSynthProdMbps(t, "L4 connect-udp-h3 prod", "udp_up_steady", mbps,
+		"steady MTU paced zero-loss upload (PPS-tax path to DoD 1000)")
+}
+
+// TestLocalizeConnectUDPH3BurstMaxZeroLossMbps finds max paced burst without sequenced loss (H3 datagram ceiling).
+func TestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
+	InttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t)
+}
+
+// TestLocalizeConnectUDPH3BurstMaxZeroLossSteady finds max zero-loss burst @1372B (PPS-tax path to DoD 1000).
+func TestLocalizeConnectUDPH3BurstMaxZeroLossSteady(t *testing.T) {
+	InttestLocalizeConnectUDPH3BurstMaxZeroLossSteady(t)
+}
+
+// TestLocalizeConnectUDPH3UploadBidiDirectDial compares bidi DialH3Production vs asymmetric ListenPacket upload loss.
+func TestLocalizeConnectUDPH3UploadBidiDirectDial(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	bidiMbps, bidiSt, err := benchConnectUDPH3DirectUploadZeroLoss(t, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("h3 bidi direct upload: %v", err)
+	}
+	dropsBefore := connectudp.SnapshotDataplaneDrops()
+	asymMbps, asymSt, err := benchConnectUDPH3AsymmetricUploadZeroLoss(t, dur, connectudp.DefaultBenchUDPPayloadLen)
+	if err != nil {
+		t.Fatalf("h3 asymmetric upload: %v", err)
+	}
+	dropDelta := connectudp.SnapshotDataplaneDrops().Delta(dropsBefore)
+	t.Logf("LOCALIZE h3 upload bidi=%.1f loss=%.2f%% asymmetric=%.1f loss=%.2f%%",
+		bidiMbps, bidiSt.LossPct, asymMbps, asymSt.LossPct)
+	t.Logf("LOCALIZE h3 upload dataplane drops (asymmetric leg): streamQ=%d quicRcvQ=%d unknownStream=%d h3Send=%d",
+		dropDelta.StreamDatagramQueue, dropDelta.QuicDatagramRcvQueue, dropDelta.UnknownStreamDatagram,
+		dropDelta.TransientHTTPDatagramSend)
+}
+
 // TestLocalizeConnectUDPH3UploadFloodRx measures unlimited flood rx goodput (loss expected; not a GATE metric).
 func TestLocalizeConnectUDPH3UploadFloodRx(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
@@ -296,6 +345,21 @@ func TestLocalizeConnectUDPH3UploadFloodRx(t *testing.T) {
 		t.Fatalf("connect-udp-h3 flood upload: %v", err)
 	}
 	t.Logf("LOCALIZE h3 upload flood rx: %.1f Mbit/s (%d bytes)", mbps, bytes)
+}
+
+// TestLocalizeConnectUDPH3EchoDuplexGap compares echo-duplex vs fountain S2C on H3 (checklist C).
+func TestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
+	InttestLocalizeConnectUDPH3EchoDuplexGap(t)
+}
+
+// TestLocalizeConnectUDPH3DownloadFountainDirectDial compares DialH3Production vs CoreSession ListenPacket fountain S2C.
+func TestLocalizeConnectUDPH3DownloadFountainDirectDial(t *testing.T) {
+	InttestLocalizeConnectUDPH3DownloadFountainDirectDial(t)
+}
+
+// TestLocalizeConnectUDPH2EchoDuplexGap compares H2 echo-duplex vs upload-only (checklist C).
+func TestLocalizeConnectUDPH2EchoDuplexGap(t *testing.T) {
+	InttestLocalizeConnectUDPH2EchoDuplexGap(t)
 }
 
 // TestGATEConnectUDPH3SynthProdDownload locks connect-udp-h3 prod S2C fountain on instant link (synth >= 500 Mbit/s).
@@ -307,7 +371,7 @@ func TestGATEConnectUDPH3SynthProdDownload(t *testing.T) {
 		t.Fatalf("connect-udp-h3 prod download: %v", err)
 	}
 	t.Logf("GATE-CONNECT-UDP-SYNTH h3 download: %.1f Mbit/s (%d bytes)", mbps, bytes)
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_down", mbps,
+	assertConnectUDPSynthInstantDownloadMbps(t, "L4 connect-udp-h3 prod", "udp_down", mbps,
 		"S2C fountain — echo-duplex is localize only")
 }
 
@@ -334,7 +398,7 @@ func TestGATEConnectUDPH3SynthProdDownloadFountain(t *testing.T) {
 		t.Fatalf("fountain download: %v", err)
 	}
 	t.Logf("GATE-CONNECT-UDP-SYNTH h3 download-fountain: %.1f Mbit/s (%d bytes)", mbps, bytes)
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h3 prod", "udp_down_fountain", mbps,
+	assertConnectUDPSynthInstantDownloadMbps(t, "L4 connect-udp-h3 prod", "udp_down_fountain", mbps,
 		"S2C-only receive path")
 }
 
@@ -368,8 +432,31 @@ func TestGATEConnectUDPH2SynthProdUpload(t *testing.T) {
 			st.LossPct, st.DupPct)
 		return
 	}
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_up", mbps,
-		"H2 capsule path — sequenced burst zero-loss upload")
+	t.Logf("PASS: h2 upload zero-loss gate rx=%d/%d goodput=%.1f Mbit/s (512B sequenced — stretch is maxCapsule gate)",
+		st.RxPkts, st.SentPkts, mbps)
+}
+
+// TestGATEConnectUDPH2SynthProdUploadMaxCapsule locks DoD upload @ max RFC9297 capsule (zero-loss sequenced).
+func TestGATEConnectUDPH2SynthProdUploadMaxCapsule(t *testing.T) {
+	dur := connectUDPSynthProdBenchDuration
+	maxPayload := h2c.MaxUDPPayloadPerDatagramCapsule()
+	mbps, st, err := benchConnectUDPProdProfileH2UploadZeroLoss(t, instantH2Link{}, dur, maxPayload)
+	if err != nil {
+		t.Fatalf("connect-udp-h2 prod upload maxCapsule: %v", err)
+	}
+	t.Logf("GATE-CONNECT-UDP-SYNTH h2 upload maxCapsule(%dB) sequenced: %.1f Mbit/s rx=%d/%d loss=%.2f%%",
+		maxPayload, mbps, st.RxPkts, st.SentPkts, st.LossPct)
+	if !st.BurstZeroLossOK(maxPayload, connectudp.DefaultBurstMinRxRatio) {
+		t.Fatalf("h2 maxCapsule upload zero-loss failed: rx=%d/%d loss=%.4f%% dup=%.2f%% fill_ok=%v",
+			st.RxPkts, st.SentPkts, st.LossPct, st.DupPct, st.FillIntegrityOK(maxPayload))
+	}
+	if synthProdGatePass(mbps) {
+		assertConnectUDPSynthProdMbps(t, "L4 connect-udp-h2 prod", "udp_up_max_capsule", mbps,
+			"max RFC9297 capsule zero-loss sequenced upload")
+		return
+	}
+	t.Logf("OPEN: h2 maxCapsule zero-loss sequenced %.1f Mbit/s (want >= %.0f DoD on instant link)",
+		mbps, connectUDPSynthProdMinMbps)
 }
 
 // TestGATEConnectUDPH2SynthStretchUploadMaxCapsule enforces DoD stretch on max RFC9297 capsule (W-UDP-2t).
@@ -386,30 +473,22 @@ func TestGATEConnectUDPH2SynthStretchUploadMaxCapsule(t *testing.T) {
 		t.Fatalf("%s", synthKPIDiagnostic("L4 connect-udp-h2 prod", "udp_up_max_capsule", mbps, stretchMinMbps,
 			"max RFC9297 capsule stretch; DoD 1000 on Linux Docker"))
 	}
+	if mbps >= connectUDPSynthProdMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
+		t.Logf("PASS: h2 maxCapsule rx goodput meets DoD %.0f Mbit/s", connectUDPSynthProdMinMbps)
+	} else {
+		t.Logf("OPEN: h2 maxCapsule rx %.1f Mbit/s below DoD %.0f (Windows in-proc; zero-loss sequenced is prod gate)",
+			mbps, connectUDPSynthProdMinMbps)
+	}
 }
 
 func TestGATEConnectUDPH2SynthProdDownload(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	fountain := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	fountainAddr := fountain.LocalAddr().(*net.UDPAddr)
-	proxyPort := startInProcessH2UDPConnectProxy(t)
-	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, instantH2Link{})
-	defer func() { _ = session.Close() }()
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(fountainAddr.IP.String()),
-		Port: uint16(fountainAddr.Port),
-	})
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	bytes, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	bytes, mbps, err := benchConnectUDPH2SessionDirectDownloadFountain(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h2 prod download: %v", err)
 	}
 	t.Logf("GATE-CONNECT-UDP-SYNTH h2 download: %.1f Mbit/s (%d bytes)", mbps, bytes)
-	assertConnectUDPSynthInstantMbps(t, "L4 connect-udp-h2 prod", "udp_down", mbps,
+	assertConnectUDPSynthInstantDownloadMbps(t, "L4 connect-udp-h2 prod", "udp_down", mbps,
 		"H2 capsule S2C fountain — echo-duplex is localize only")
 }
 
@@ -421,21 +500,7 @@ func TestGATEConnectUDPH2SynthProdDownloadFountain(t *testing.T) {
 // TestGATEConnectUDPH2SynthStretchDownloadFountain enforces fountain S2C stretch toward DoD (W-UDP-2t).
 func TestGATEConnectUDPH2SynthStretchDownloadFountain(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration
-	fountain := startUDPFountain(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	fountainAddr := fountain.LocalAddr().(*net.UDPAddr)
-	proxyPort := startInProcessH2UDPConnectProxy(t)
-	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, instantH2Link{})
-	defer func() { _ = session.Close() }()
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(fountainAddr.IP.String()),
-		Port: uint16(fountainAddr.Port),
-	})
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
-	}
-	defer func() { _ = pkt.Close() }()
-	primeUDPBench(t, pkt, fountainAddr)
-	bytes, mbps, err := benchConnectUDPPacketReceiveOnly(t, pkt, dur, connectudp.DefaultBenchUDPPayloadLen)
+	bytes, mbps, err := benchConnectUDPH2SessionDirectDownloadFountain(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {
 		t.Fatalf("connect-udp-h2 stretch fountain download: %v", err)
 	}

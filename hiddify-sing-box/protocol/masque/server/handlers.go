@@ -41,6 +41,9 @@ type MuxHost struct {
 
 // BuildMuxHandler constructs the MASQUE server ServeMux (UDP/IP/TCP template paths).
 func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
+	if err := cudprelay.ConfigureRelayPayloadPolicyFromConfig(host.Options.ConnectUDPRelayPayloadPolicy); err != nil {
+		return nil, E.Cause(err, "masque server connect-udp relay payload policy")
+	}
 	udpTemplateRaw, ipTemplateRaw, tcpTemplateRaw := host.ResolveTemplates(host.Options)
 	udpTemplate, err := uritemplate.New(udpTemplateRaw)
 	if err != nil {

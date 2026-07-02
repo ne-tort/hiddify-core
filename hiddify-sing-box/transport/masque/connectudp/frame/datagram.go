@@ -11,6 +11,9 @@ const (
 	MaxProxiedUDPPayloadBytes = 65527
 )
 
+// ContextIDZeroWire is the RFC 9297 HTTP Datagram Context ID 0 prefix (QUIC varint 0x00).
+var ContextIDZeroWire = []byte{0}
+
 // ErrProxiedUDPPayloadTooLarge is returned when a proxied UDP payload exceeds RFC 9298 §4.
 var ErrProxiedUDPPayloadTooLarge = errors.New("connect-udp: proxied UDP payload exceeds RFC 9298 maximum (65527 bytes)")
 
@@ -20,6 +23,17 @@ func ValidateProxiedUDPPayloadLen(n int) error {
 		return fmt.Errorf("%w: got %d", ErrProxiedUDPPayloadTooLarge, n)
 	}
 	return nil
+}
+
+// ParseHTTPDatagramUDPFast extracts Context ID 0 payload on the hot path, falling back to ParseHTTPDatagramUDP.
+func ParseHTTPDatagramUDPFast(data []byte) (payload []byte, ok bool, err error) {
+	if len(data) == 0 {
+		return nil, false, io.EOF
+	}
+	if data[0] == 0 {
+		return data[1:], true, nil
+	}
+	return ParseHTTPDatagramUDP(data)
 }
 
 // ParseHTTPDatagramUDP interprets CONNECT-UDP HTTP Datagram payload (RFC 9297 / MASQUE).

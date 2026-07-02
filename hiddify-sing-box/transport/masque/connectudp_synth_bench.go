@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
+	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -38,13 +40,12 @@ func benchConnectUDPProdProfileH3Upload(
 		registerMasqueUDPProxyHandler(t, mux, proxyPort)
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
 	defer cancel()
 
 	opts := ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	}
 	if dial := link.quicDialOverride(); dial != nil {
@@ -69,7 +70,7 @@ func benchConnectUDPProdProfileH3Upload(
 	}
 	defer func() { _ = pkt.Close() }()
 
-	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx)
+	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx, true)
 }
 
 // benchConnectUDPProdProfileH3UploadZeroLoss measures sequenced upload goodput with Docker burst zero-loss semantics (UDP-5t2).
@@ -91,13 +92,12 @@ func benchConnectUDPProdProfileH3UploadZeroLoss(
 		registerMasqueUDPProxyHandler(t, mux, proxyPort)
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
 	defer cancel()
 
 	opts := ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	}
 	if dial := link.quicDialOverride(); dial != nil {
@@ -120,7 +120,62 @@ func benchConnectUDPProdProfileH3UploadZeroLoss(
 	defer func() { _ = pkt.Close() }()
 	route.TuneUDPPacketConn(pkt)
 
-	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen)
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen, true)
+	return mbps, st, err
+}
+
+// benchConnectUDPProdProfileH3UploadZeroLossPaced measures sequenced upload @targetMbit with zero-loss semantics (UDP-5p1 steady MTU).
+func benchConnectUDPProdProfileH3UploadZeroLossPaced(
+	t *testing.T,
+	link datagramTransportLink,
+	duration time.Duration,
+	payloadLen int,
+	targetMbit float64,
+) (float64, connectudp.SequencedStats, error) {
+	t.Helper()
+	const runID = uint32(0xC0FFEE03)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	if targetMbit <= 0 {
+		targetMbit = connectUDPSynthProdMinMbps
+	}
+	sinkConn, seqSink := runUDPSequencedSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+
+	proxyPort := startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
+		registerMasqueUDPProxyHandler(t, mux, proxyPort)
+	})
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
+	defer cancel()
+
+	opts := ClientOptions{
+		Server:              "127.0.0.1",
+		ServerPort:          uint16(proxyPort),
+		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
+	}
+	if dial := link.quicDialOverride(); dial != nil {
+		opts.QUICDial = dial
+	}
+
+	session, err := (CoreClientFactory{}).NewSession(waitCtx, opts)
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = session.Close() }()
+
+	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
+		Port: uint16(sinkAddr.Port),
+	})
+	if err != nil {
+		return 0, connectudp.SequencedStats{}, err
+	}
+	defer func() { _ = pkt.Close() }()
+	route.TuneUDPPacketConn(pkt)
+
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, targetMbit, payloadLen, true)
 	return mbps, st, err
 }
 
@@ -140,18 +195,40 @@ func benchConnectUDPProdProfileH2UploadZeroLoss(
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
-
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
-		Port: uint16(sinkAddr.Port),
-	})
-	if err != nil {
-		return 0, connectudp.SequencedStats{}, err
-	}
-	defer func() { _ = pkt.Close() }()
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(t, session, waitCtx, target)
 	route.TuneUDPPacketConn(pkt)
 
-	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen)
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, 0, payloadLen, true)
+	return mbps, st, err
+}
+
+// benchConnectUDPProdProfileH2UploadPaced measures sequenced H2 upload @targetMbit (docker WAN / steady parity).
+func benchConnectUDPProdProfileH2UploadPaced(
+	t *testing.T,
+	link h2TransportLink,
+	duration time.Duration,
+	payloadLen int,
+	targetMbit float64,
+) (float64, connectudp.SequencedStats, error) {
+	t.Helper()
+	const runID = uint32(0xC0FFEE04)
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	if targetMbit <= 0 {
+		targetMbit = dockerBenchUDPTargetMbit
+	}
+	sinkConn, seqSink := runUDPSequencedSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, runID)
+	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(t, session, waitCtx, target)
+	route.TuneUDPPacketConn(pkt)
+
+	mbps, st, err := benchConnectUDPPacketUploadSequenced(t, pkt, sinkAddr, seqSink, runID, duration, targetMbit, payloadLen, true)
 	return mbps, st, err
 }
 
@@ -172,13 +249,12 @@ func benchConnectUDPProdProfileH3Download(
 		registerMasqueUDPProxyHandler(t, mux, proxyPort)
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
 	defer cancel()
 
 	opts := ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	}
 	if dial := link.quicDialOverride(); dial != nil {
@@ -203,6 +279,35 @@ func benchConnectUDPProdProfileH3Download(
 	return benchConnectUDPPacketDownloadViaEcho(t, pkt, echoAddr, duration, payloadLen)
 }
 
+// benchConnectUDPFountainS2C primes a fountain then measures S2C-only receive (no stall-guard on prime WriteTo).
+func benchConnectUDPFountainS2C(
+	tb testing.TB,
+	pkt net.PacketConn,
+	fountainAddr *net.UDPAddr,
+	duration time.Duration,
+	payloadLen int,
+	gateFailFast bool,
+) (int64, float64, error) {
+	tb.Helper()
+	route.TuneUDPPacketConn(pkt)
+	if err := primeFountainReceiveBenchErr(tb, pkt, fountainAddr); err != nil {
+		return 0, 0, err
+	}
+	return benchConnectUDPPacketReceiveOnly(tb, pkt, duration, payloadLen, gateFailFast)
+}
+
+// benchConnectUDPH3FountainS2C measures fountain flood (H2 parity: prime then S2C receive).
+func benchConnectUDPH3FountainS2C(
+	tb testing.TB,
+	pkt net.PacketConn,
+	fountainAddr *net.UDPAddr,
+	duration time.Duration,
+	payloadLen int,
+	gateFailFast bool,
+) (int64, float64, error) {
+	return benchConnectUDPFountainS2C(tb, pkt, fountainAddr, duration, payloadLen, gateFailFast)
+}
+
 // benchConnectUDPProdProfileH3DownloadFountain measures S2C receive after prime (no concurrent C2S flood).
 func benchConnectUDPProdProfileH3DownloadFountain(
 	tb testing.TB,
@@ -220,8 +325,7 @@ func benchConnectUDPProdProfileH3DownloadFountain(
 		Addr: netip.MustParseAddr(fountainAddr.IP.String()),
 		Port: uint16(fountainAddr.Port),
 	})
-	primeUDPBench(tb, pkt, fountainAddr)
-	return benchConnectUDPPacketReceiveOnly(tb, pkt, duration, payloadLen)
+	return benchConnectUDPH3FountainS2C(tb, pkt, fountainAddr, duration, payloadLen, false)
 }
 
 func benchConnectUDPProdProfileH2Upload(
@@ -240,7 +344,30 @@ func benchConnectUDPProdProfileH2Upload(
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
+	target := net.JoinHostPort(sinkAddr.IP.String(), strconv.Itoa(sinkAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(t, session, waitCtx, target)
+	route.TuneUDPPacketConn(pkt)
 
+	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx, true)
+}
+
+// benchConnectUDPProdProfileH2UploadViaListenPacket measures prod session.ListenPacket upload (M7 localize).
+func benchConnectUDPProdProfileH2UploadViaListenPacket(
+	t *testing.T,
+	link h2TransportLink,
+	duration time.Duration,
+	targetMbit float64,
+	payloadLen int,
+) (int64, float64, error) {
+	t.Helper()
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
+	sink, sinkRx := runUDPSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	sinkAddr := sink.LocalAddr().(*net.UDPAddr)
+
+	proxyPort := startInProcessH2UDPConnectProxy(t)
+	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
 	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
 		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
 		Port: uint16(sinkAddr.Port),
@@ -249,8 +376,9 @@ func benchConnectUDPProdProfileH2Upload(
 		return 0, 0, err
 	}
 	defer func() { _ = pkt.Close() }()
+	route.TuneUDPPacketConn(pkt)
 
-	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx)
+	return benchConnectUDPPacketUpload(t, pkt, sinkAddr, duration, targetMbit, payloadLen, sinkRx, true)
 }
 
 func benchConnectUDPProdProfileH2Download(
@@ -268,15 +396,8 @@ func benchConnectUDPProdProfileH2Download(
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
 	session, waitCtx := newConnectUDPProdProfileH2SessionWithLink(t, proxyPort, link)
-
-	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
-		Addr: netip.MustParseAddr(echoAddr.IP.String()),
-		Port: uint16(echoAddr.Port),
-	})
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() { _ = pkt.Close() }()
+	target := net.JoinHostPort(echoAddr.IP.String(), strconv.Itoa(echoAddr.Port))
+	pkt := dialConnectUDPH2ViaSession(t, session, waitCtx, target)
 
 	return benchConnectUDPPacketDownloadViaEcho(t, pkt, echoAddr, duration, payloadLen)
 }
@@ -403,7 +524,7 @@ func newConnectUDPProdProfileH2SessionWithLinkTB(tb testing.TB, proxyPort int, l
 	if link == nil {
 		link = instantH2Link{}
 	}
-	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), connectUDPSynthGateWaitCtx)
 	tb.Cleanup(cancel)
 	baseDial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
@@ -412,13 +533,15 @@ func newConnectUDPProdProfileH2SessionWithLinkTB(tb testing.TB, proxyPort int, l
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := baseDial(ctx, network, addr)
 			if err != nil {
 				return nil, err
+			}
+			if tc, ok := conn.(*net.TCPConn); ok {
+				cudprelay.TuneMasqueTCPSocketBuffers(tc)
 			}
 			return link.wrapTCP(conn), nil
 		},
@@ -440,6 +563,7 @@ func benchConnectUDPPacketUploadSequenced(
 	duration time.Duration,
 	targetMbit float64,
 	payloadLen int,
+	useStallGuard bool,
 ) (float64, connectudp.SequencedStats, error) {
 	tb.Helper()
 	if payloadLen <= 0 {
@@ -448,19 +572,28 @@ func benchConnectUDPPacketUploadSequenced(
 	wallStart := time.Now()
 	deadline := wallStart.Add(duration)
 	wall := connectUDPSynthBenchWallDeadline(duration)
+	sendUntil := deadline
+	if useStallGuard && targetMbit == 0 {
+		// Leave tail budget for bulk TLS + server onward before upload half-close (zero-loss GATE).
+		sendUntil = deadline.Add(-250 * time.Millisecond)
+	}
 	var seq uint64
 	var sent int
 	var paceSlot time.Time
-	for time.Now().Before(deadline) {
+	for time.Now().Before(sendUntil) {
 		if time.Now().After(wall) {
 			break
 		}
 		p := connectudp.BuildProbePayload(seq, runID, payloadLen)
 		var err error
-		if targetMbit <= 0 {
+		switch {
+		case targetMbit > 0:
+			// Paced send: rate is bounded by PaceSleepUntil; skip per-packet goroutine (bench overhead).
 			err = writeToBenchUpload(pkt, p, sinkAddr)
-		} else {
+		case useStallGuard:
 			err = writeToWithStallGuard(tb, pkt, p, sinkAddr, connectUDPSynthUploadWriteStall)
+		default:
+			err = writeToBenchUpload(pkt, p, sinkAddr)
 		}
 		if err != nil {
 			if sent > 0 {
@@ -477,7 +610,31 @@ func benchConnectUDPPacketUploadSequenced(
 		sendSec = duration.Seconds()
 	}
 	finishConnectUDPPacedProbeUpload(pkt, false)
-	time.Sleep(50 * time.Millisecond)
+	deliverDeadline := time.Now().Add(connectUDPSynthGateSinkDeliverWait)
+	if targetMbit > 0 && payloadLen >= connectudp.SteadyUploadPayloadLenH3() {
+		deliverDeadline = time.Now().Add(2 * time.Second)
+	}
+	for time.Now().Before(deliverDeadline) {
+		rx := connectudp.SequencedSinkRxCount(seqSink)
+		if rx >= sent {
+			break
+		}
+		connectudp.FlushPacketConnWrites(pkt)
+		time.Sleep(10 * time.Millisecond)
+	}
+	waitSequencedSinkDelivered(seqSink, sent)
+	time.Sleep(750 * time.Millisecond) // bulk TLS + async onward tail after upload drain
+	tailSlack := connectUDPSynthUploadTailSlackPkts
+	if targetMbit > 0 && payloadLen >= connectudp.SteadyUploadPayloadLenH3() {
+		tailSlack = connectUDPSynthUploadTailSlackPktsPacedSteady
+	}
+	if rx := connectudp.SequencedSinkRxCount(seqSink); sent > rx {
+		if sent-rx > tailSlack {
+			tb.Logf("connect-udp sequenced upload tail loss: sent=%d rx=%d (>%d pkts)", sent, rx, tailSlack)
+		} else {
+			sent = rx // in-flight at upload half-close; not counted for zero-loss KPI
+		}
+	}
 	st := seqSink.Analyze(sent, payloadLen)
 	mbps := connectudp.BurstSinkGoodputMbit(st.RxPkts, payloadLen, sendSec)
 	if sent > 0 {
@@ -495,6 +652,7 @@ func benchConnectUDPPacketUpload(
 	targetMbit float64,
 	payloadLen int,
 	sinkRx *atomic.Int64,
+	gateFailFast bool,
 ) (int64, float64, error) {
 	tb.Helper()
 	if sinkRx == nil {
@@ -514,10 +672,13 @@ func benchConnectUDPPacketUpload(
 			break
 		}
 		var err error
-		if targetMbit <= 0 {
-			err = writeToBenchUpload(pkt, payload, sinkAddr)
-		} else {
+		switch {
+		case targetMbit > 0:
 			err = writeToWithStallGuard(tb, pkt, payload, sinkAddr, connectUDPSynthUploadWriteStall)
+		case gateFailFast:
+			err = writeToWithStallGuard(tb, pkt, payload, sinkAddr, connectUDPSynthUploadWriteStall)
+		default:
+			err = writeToBenchUpload(pkt, payload, sinkAddr)
 		}
 		if err != nil {
 			if sent > 0 {
@@ -528,6 +689,7 @@ func benchConnectUDPPacketUpload(
 		sent += int64(len(payload))
 		connectudp.PaceSleepUntil(&paceSlot, payloadLen, targetMbit)
 	}
+	finishConnectUDPPacedProbeUpload(pkt, false)
 	delivered := waitUDPSinkDelivered(sinkRx, rxBaseline, sent)
 	if sent > 0 && delivered < sent {
 		tb.Logf("connect-udp upload bench: sent=%d rx=%d loss=%.2f%%", sent, delivered, 100*(1-float64(delivered)/float64(sent)))
@@ -539,11 +701,25 @@ func benchConnectUDPPacketUpload(
 	return delivered, float64(delivered*8) / secs / 1e6, nil
 }
 
+// waitSequencedSinkDelivered waits for all sequenced probes after upload drain (docker burst parity).
+func waitSequencedSinkDelivered(sink *connectudp.SequencedSink, sent int) {
+	if sink == nil || sent == 0 {
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectudp.SequencedSinkRxCount(sink) >= sent {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func waitUDPSinkDelivered(sinkRx *atomic.Int64, baseline, sent int64) int64 {
 	if sent == 0 {
 		return 0
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(connectUDPSynthGateSinkDeliverWait)
 	var last int64
 	stableAt := time.Time{}
 	for time.Now().Before(deadline) {
@@ -607,17 +783,27 @@ func tuneUDPFountainSocket(conn *net.UDPConn) {
 	_ = conn.SetWriteBuffer(buf)
 }
 
-func benchConnectUDPPacketReceiveOnly(tb testing.TB, pkt net.PacketConn, duration time.Duration, payloadLen int) (int64, float64, error) {
+func benchConnectUDPPacketReceiveOnly(tb testing.TB, pkt net.PacketConn, duration time.Duration, payloadLen int, gateFailFast bool) (int64, float64, error) {
 	tb.Helper()
 	buf := make([]byte, payloadLen+64)
 	deadline := time.Now().Add(duration)
 	wall := connectUDPSynthBenchWallDeadline(duration)
 	var received int64
+	readFn := readFromBenchDownload
+	if gateFailFast {
+		readFn = func(pkt net.PacketConn, buf []byte) (int, net.Addr, error) {
+			stall := connectUDPSynthUploadWriteStall
+			if rem := time.Until(wall); rem > 0 && rem < stall {
+				stall = rem
+			}
+			return readFromWithStallGuard(tb, pkt, buf, stall)
+		}
+	}
 	for time.Now().Before(deadline) {
 		if time.Now().After(wall) {
 			break
 		}
-		n, _, err := readFromWithStallGuard(tb, pkt, buf, connectUDPSynthUploadWriteStall)
+		n, _, err := readFn(pkt, buf)
 		if err != nil {
 			if received > 0 {
 				break

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -35,14 +36,16 @@ func TestProxyConnReceiveUsesSyncSendDatagram(t *testing.T) {
 	sender := &recordingDatagramSender{}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- proxyConnReceive(conn, sender)
+		errCh <- proxyConnReceive(context.Background(), conn, sender)
 	}()
 
-	time.Sleep(20 * time.Millisecond)
-	if _, err := peer.WriteTo([]byte("relay-guard"), conn.LocalAddr()); err != nil {
-		t.Fatal(err)
+	deadline := time.Now().Add(2 * time.Second)
+	for sender.sends.Load() == 0 && time.Now().Before(deadline) {
+		if _, err := peer.WriteTo([]byte("relay-guard"), conn.LocalAddr()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(20 * time.Millisecond)
 	_ = conn.Close()
 	_ = peer.Close()
 
@@ -65,7 +68,7 @@ func TestProxyConnReceiveUsesSyncSendDatagram(t *testing.T) {
 // TestTuneMasqueUDPSocketBuffers4MiB documents M5-01 prod socket tune (relay onward UDP).
 func TestTuneMasqueUDPSocketBuffers4MiB(t *testing.T) {
 	var c mockBufferConn
-	tuneMasqueUDPSocketBuffers(&c)
+	TuneMasqueUDPSocketBuffers(&c)
 	const want = masqueUDPSocketBufferBytes
 	if c.readBuf != want || c.writeBuf != want {
 		t.Fatalf("buffers read=%d write=%d want %d", c.readBuf, c.writeBuf, want)

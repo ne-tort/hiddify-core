@@ -11,7 +11,7 @@ func TestBuildChainSingleHop(t *testing.T) {
 	chain, err := BuildChain(option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
-		TransportMode: option.MasqueTransportModeAuto,
+		
 	})
 	if err != nil {
 		t.Fatalf("build chain: %v", err)

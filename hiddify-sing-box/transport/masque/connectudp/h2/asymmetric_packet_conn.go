@@ -64,24 +64,26 @@ func NewAsymmetricPacketConn(download net.PacketConn, uploads []net.PacketConn, 
 			remoteAddr = localAddr
 		}
 	}
-	uploadChCap := len(uploads) * 4
-	if uploadChCap < 4 {
-		uploadChCap = 4
-	}
 	c := &AsymmetricPacketConn{
 		download:    download,
 		uploads:     uploads,
 		localAddr:   localAddr,
 		remoteAddr:  remoteAddr,
 		onClose:     onClose,
-		uploadCh:    make(chan uploadJob, uploadChCap),
-		uploadSlots: make(chan struct{}, len(uploads)),
 		uploadClose: make(chan struct{}),
 	}
-	for i := range uploads {
-		conn := uploads[i]
-		c.uploadWG.Add(1)
-		go c.uploadWorker(conn)
+	if len(uploads) > 1 {
+		uploadChCap := len(uploads) * 4
+		if uploadChCap < 4 {
+			uploadChCap = 4
+		}
+		c.uploadCh = make(chan uploadJob, uploadChCap)
+		c.uploadSlots = make(chan struct{}, len(uploads))
+		for i := range uploads {
+			conn := uploads[i]
+			c.uploadWG.Add(1)
+			go c.uploadWorker(conn)
+		}
 	}
 	return c
 }
@@ -139,9 +141,11 @@ func (c *AsymmetricPacketConn) Close() error {
 		for _, conn := range c.uploads {
 			_ = conn.Close()
 		}
-		close(c.uploadCh)
-		c.uploadWG.Wait()
-		c.inFlight.Wait()
+		if c.uploadCh != nil {
+			close(c.uploadCh)
+			c.uploadWG.Wait()
+			c.inFlight.Wait()
+		}
 		c.FlushC2SWrites()
 		if c.onClose != nil {
 			c.onClose()
@@ -161,6 +165,9 @@ func (c *AsymmetricPacketConn) abortUploadJob(job uploadJob) {
 }
 
 func (c *AsymmetricPacketConn) sendUploadJob(job uploadJob) error {
+	if c.uploadCh == nil {
+		return net.ErrClosed
+	}
 	select {
 	case c.uploadCh <- job:
 		return nil
@@ -231,12 +238,6 @@ func (c *AsymmetricPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if c.deadlines.WriteTimeoutExceeded() {
 		return 0, os.ErrDeadlineExceeded
 	}
-	for _, conn := range c.uploads {
-		if pc, ok := conn.(*PacketConn); ok {
-			pc.markDuplexPeerActive()
-		}
-	}
-	c.wakeDownloadPumpForUpload()
 	if len(p) == 0 {
 		for _, conn := range c.uploads {
 			if _, err := conn.WriteTo(nil, addr); err != nil {
@@ -249,7 +250,7 @@ func (c *AsymmetricPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if len(c.uploads) == 1 {
 		return c.uploads[0].WriteTo(p, addr)
 	}
-	if c.closed.Load() {
+	if c.uploadCh == nil || c.closed.Load() {
 		return 0, net.ErrClosed
 	}
 	payload := borrowUploadPayload(len(p))
@@ -294,13 +295,6 @@ func (c *AsymmetricPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	c.flushUploadPendingBeforeRead()
 	n, addr, err := c.download.ReadFrom(p)
-	if n > 0 {
-		for _, conn := range c.uploads {
-			if pc, ok := conn.(*PacketConn); ok {
-				pc.markDuplexPeerActive()
-			}
-		}
-	}
 	return n, addr, err
 }
 
@@ -311,10 +305,4 @@ func (c *AsymmetricPacketConn) Read(p []byte) (int, error) {
 
 func (c *AsymmetricPacketConn) Write(p []byte) (int, error) {
 	return c.WriteTo(p, c.remoteAddr)
-}
-
-func (c *AsymmetricPacketConn) wakeDownloadPumpForUpload() {
-	if pc, ok := c.download.(*PacketConn); ok && pc != nil && !pc.closed.Load() && pc.asyncDownlink {
-		pc.ensureDownlinkPump()
-	}
 }

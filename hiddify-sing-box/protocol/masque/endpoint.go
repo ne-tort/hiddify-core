@@ -11,26 +11,30 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
-func normalizeMode(mode string) string {
+func normalizeRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "", option.MasqueRoleClient:
+		return option.MasqueRoleClient
+	case option.MasqueRoleServer:
+		return option.MasqueRoleServer
+	default:
+		return strings.TrimSpace(role)
+	}
+}
+
+func normalizeDataplaneMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", option.MasqueModeClient:
-		return option.MasqueModeClient
-	case option.MasqueModeServer:
-		return option.MasqueModeServer
+	case "", option.MasqueDataplaneDefault:
+		return option.MasqueDataplaneDefault
+	case option.MasqueDataplaneConnectIP:
+		return option.MasqueDataplaneConnectIP
 	default:
 		return strings.TrimSpace(mode)
 	}
 }
 
-func normalizeTransportMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "":
-		return option.MasqueTransportModeAuto
-	case option.MasqueTransportModeAuto, option.MasqueTransportModeConnectUDP, option.MasqueTransportModeConnectIP:
-		return strings.ToLower(strings.TrimSpace(mode))
-	default:
-		return strings.TrimSpace(mode)
-	}
+func masqueUsesConnectIPDataplane(mode string) bool {
+	return normalizeDataplaneMode(mode) == option.MasqueDataplaneConnectIP
 }
 
 func normalizeHopPolicy(policy string) string {
@@ -62,21 +66,17 @@ func normalizeTCPMode(mode string) string {
 	}
 }
 
-func normalizeTCPTransport(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case option.MasqueTCPTransportConnectStream:
-		return option.MasqueTCPTransportConnectStream
-	case option.MasqueTCPTransportConnectIP:
-		return option.MasqueTCPTransportConnectIP
-	case option.MasqueTCPTransportAuto:
-		return option.MasqueTCPTransportAuto
-	default:
-		t := strings.TrimSpace(mode)
-		if t == "" {
-			return ""
-		}
-		return strings.ToLower(t)
+func rejectRemovedMasqueClientFields(o option.MasqueEndpointOptions) error {
+	if strings.TrimSpace(o.TransportMode) != "" {
+		return E.New("masque: removed field transport_mode; use mode (default|connect_ip)")
 	}
+	if strings.TrimSpace(o.TCPTransport) != "" {
+		return E.New("masque: removed field tcp_transport; use mode default or connect_ip")
+	}
+	if o.HTTPLayerFallback {
+		return E.New("masque: removed field http_layer_fallback; use http_layer auto")
+	}
+	return nil
 }
 
 func normalizeTCPRelay(mode string) string {
@@ -103,21 +103,13 @@ func normalizeHTTPLayer(layer string) string {
 	}
 }
 
-// applyMasqueClientMasqueDefaults runs before validateMasqueOptions for client mode only.
-// It clears incompatible leftovers and fills a safe TCP default so minimal JSON is accepted.
+// applyMasqueClientMasqueDefaults runs before validateMasqueOptions for client role only.
 func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.MasqueEndpointOptions {
-	if normalizeMode(o.Mode) == option.MasqueModeServer {
+	if normalizeRole(o.Role) == option.MasqueRoleServer {
 		return o
 	}
-	tm := normalizeTransportMode(o.TransportMode)
-	if tm == option.MasqueTransportModeConnectUDP && strings.TrimSpace(o.TemplateIP) != "" {
+	if !masqueUsesConnectIPDataplane(o.Mode) && strings.TrimSpace(o.TemplateIP) != "" {
 		o.TemplateIP = ""
-	}
-	tcp := normalizeTCPTransport(o.TCPTransport)
-	if tcp == "" || tcp == option.MasqueTCPTransportAuto {
-		if tm != option.MasqueTransportModeConnectIP {
-			o.TCPTransport = option.MasqueTCPTransportConnectStream
-		}
 	}
 	if o.OutboundTLS == nil {
 		o.OutboundTLS = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
@@ -146,18 +138,20 @@ func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUI
 }
 
 func validateMasqueOptions(o option.MasqueEndpointOptions) error {
-	mode := normalizeMode(o.Mode)
-	if mode != option.MasqueModeClient && mode != option.MasqueModeServer {
-		return E.New("invalid masque mode")
+	role := normalizeRole(o.Role)
+	if role != option.MasqueRoleClient && role != option.MasqueRoleServer {
+		return E.New("invalid masque role")
 	}
-	if mode == option.MasqueModeServer {
+	if role == option.MasqueRoleServer {
 		return validateMasqueServerOptions(o)
 	}
+	if err := rejectRemovedMasqueClientFields(o); err != nil {
+		return err
+	}
 
-	tm := normalizeTransportMode(o.TransportMode)
+	dm := normalizeDataplaneMode(o.Mode)
 	fp := normalizeFallbackPolicy(o.FallbackPolicy)
 	tcpMode := normalizeTCPMode(o.TCPMode)
-	tcpTransport := normalizeTCPTransport(o.TCPTransport)
 	hopPolicy := normalizeHopPolicy(o.HopPolicy)
 	httpLayerNorm := normalizeHTTPLayer(o.HTTPLayer)
 	rawHTTPLayer := strings.TrimSpace(o.HTTPLayer)
@@ -169,7 +163,7 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque: http_layer h2 is incompatible with quic_experimental.enabled")
 	}
 	if o.HTTPLayerCacheTTL.Build() > 0 && httpLayerNorm != option.MasqueHTTPLayerAuto {
-		return E.New("masque: http_layer_cache_ttl is only used when http_layer is auto (remove it or switch to auto)")
+		return E.New("masque: http_layer_cache_ttl is only used when http_layer is auto")
 	}
 
 	if o.UDPTimeout.Build() != 0 {
@@ -211,20 +205,12 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque: allow_private_targets / allowed_target_ports / blocked_target_ports are server-only")
 	}
 
-	if tcpTransport == "" || tcpTransport == option.MasqueTCPTransportAuto {
-		return E.New("masque: tcp_transport must be set explicitly (connect_stream, or connect_ip when transport_mode is connect_ip)")
-	}
-	switch tcpTransport {
-	case option.MasqueTCPTransportConnectStream:
-	case option.MasqueTCPTransportConnectIP:
-		if tm != option.MasqueTransportModeConnectIP {
-			return E.New("masque: tcp_transport connect_ip requires transport_mode connect_ip (userspace TCP over CONNECT-IP tunnel)")
-		}
+	switch dm {
+	case option.MasqueDataplaneDefault, option.MasqueDataplaneConnectIP:
 	default:
-		return E.New("masque: invalid tcp_transport: ", tcpTransport)
-	}
-	if err := TM.RejectConnectIPHybridTransport(tm, tcpTransport); err != nil {
-		return err
+		if strings.TrimSpace(o.Mode) != "" {
+			return E.New("masque: invalid mode: ", o.Mode)
+		}
 	}
 
 	if strings.TrimSpace(o.TCPMode) != "" {
@@ -272,8 +258,8 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 
 	hasScope := strings.TrimSpace(o.ConnectIPScopeTarget) != "" || o.ConnectIPScopeIPProto != 0
 	if hasScope {
-		if tm != option.MasqueTransportModeConnectIP {
-			return E.New("masque: connect_ip_scope_* requires transport_mode connect_ip")
+		if !masqueUsesConnectIPDataplane(o.Mode) {
+			return E.New("masque: connect_ip_scope_* requires mode connect_ip")
 		}
 		tip := strings.TrimSpace(o.TemplateIP)
 		if tip == "" {
@@ -284,14 +270,14 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		}
 	}
 
-	switch tm {
-	case option.MasqueTransportModeConnectUDP:
+	switch dm {
+	case option.MasqueDataplaneDefault:
 		if strings.TrimSpace(o.TemplateIP) != "" {
-			return E.New("masque: transport_mode connect_udp cannot set template_ip")
+			return E.New("masque: mode default cannot set template_ip")
 		}
-	case option.MasqueTransportModeConnectIP:
+	case option.MasqueDataplaneConnectIP:
 		if strings.TrimSpace(o.TemplateUDP) != "" {
-			return E.New("masque: transport_mode connect_ip cannot set template_udp")
+			return E.New("masque: mode connect_ip cannot set template_udp")
 		}
 	}
 
@@ -312,26 +298,22 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 			return E.New("masque: template_tcp must include {target_host} and {target_port}")
 		}
 	}
-	switch tm {
-	case option.MasqueTransportModeAuto, option.MasqueTransportModeConnectUDP, option.MasqueTransportModeConnectIP:
-	default:
-		if strings.TrimSpace(o.TransportMode) != "" {
-			return E.New("masque: invalid transport_mode: ", o.TransportMode)
-		}
-	}
 
 	return nil
 }
 
 func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
+	if err := rejectRemovedMasqueClientFields(o); err != nil {
+		return err
+	}
 	if strings.TrimSpace(o.HTTPLayer) != "" {
 		return E.New("masque server: http_layer is client-only")
 	}
-	if o.HTTPLayerFallback {
-		return E.New("masque server: http_layer_fallback is client-only")
-	}
 	if o.HTTPLayerCacheTTL.Build() != 0 {
 		return E.New("masque server: http_layer_cache_ttl is client-only")
+	}
+	if strings.TrimSpace(o.Mode) != "" {
+		return E.New("masque server: mode is client-only")
 	}
 	if o.UDPTimeout.Build() != 0 {
 		return E.New("masque: udp_timeout is not supported on server path")
@@ -354,7 +336,10 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque server: tls is required")
 	}
 	if strings.TrimSpace(o.TransportMode) != "" {
-		return E.New("masque server: transport_mode is client-only")
+		return E.New("masque server: removed field transport_mode")
+	}
+	if strings.TrimSpace(o.TCPTransport) != "" {
+		return E.New("masque server: removed field tcp_transport")
 	}
 	if strings.TrimSpace(o.FallbackPolicy) != "" {
 		return E.New("masque server: fallback_policy is client-only")
@@ -362,8 +347,8 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if strings.TrimSpace(o.TCPMode) != "" {
 		return E.New("masque server: tcp_mode is client-only")
 	}
-	if strings.TrimSpace(o.TCPTransport) != "" {
-		return E.New("masque server: tcp_transport is client-only")
+	if o.HTTPLayerFallback {
+		return E.New("masque server: removed field http_layer_fallback")
 	}
 	tcpRelay := normalizeTCPRelay(o.TCPRelay)
 	if strings.TrimSpace(o.TCPRelay) != "" && tcpRelay != option.MasqueTCPRelayTemplate {

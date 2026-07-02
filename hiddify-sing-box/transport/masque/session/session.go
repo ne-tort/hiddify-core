@@ -24,7 +24,7 @@ type CoreSession struct {
 	H2ConnectStreamTransport *http2.Transport
 	H2UDPMu                  sync.Mutex
 	H2ConnectStreamMu        sync.Mutex
-	HTTPLayerFallback        bool
+	HTTPLayerAuto            bool
 	HTTPFallbackConsumed     atomic.Bool
 	UDPHTTPLayer             atomic.Value // "h3" | "h2"
 	IPConn                   *connectip.Conn

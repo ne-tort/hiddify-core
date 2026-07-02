@@ -47,9 +47,21 @@ func InttestGATEConnectUDPH3SynthStabilityUploadPaced(t *testing.T) {
 	assertConnectUDPProbeLoss(t, "paced upload", st, connectUDPSynthMaxLossPct)
 }
 
+// InttestLocalizeConnectUDPH3BurstMaxZeroLossMbps finds max paced burst @512B without sequenced loss.
 func InttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
+	inttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t, connectudp.DefaultBenchUDPPayloadLen)
+}
+
+// InttestLocalizeConnectUDPH3BurstMaxZeroLossSteady finds max paced burst @steady MTU (1372B) toward DoD 1000.
+func InttestLocalizeConnectUDPH3BurstMaxZeroLossSteady(t *testing.T) {
+	inttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t, connectudp.SteadyUploadPayloadLenH3())
+}
+
+func inttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T, payloadLen int) {
 	const baseRunID = uint32(0xC0FF0000)
-	payloadLen := connectudp.DefaultBenchUDPPayloadLen
+	if payloadLen <= 0 {
+		payloadLen = connectudp.DefaultBenchUDPPayloadLen
+	}
 	sinkConn, seqSink := runUDPSequencedSink(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}, baseRunID|1)
 	sinkAddr := sinkConn.LocalAddr().(*net.UDPAddr)
 
@@ -73,7 +85,13 @@ func InttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
 		var paceSlot time.Time
 		for time.Now().Before(deadline) {
 			p := connectudp.BuildProbePayload(seq, runID, payloadLen)
-			if err := writeToWithStallGuard(t, pkt, p, sinkAddr, connectUDPSynthUploadWriteStall); err != nil {
+			var err error
+			if targetMbit > 0 {
+				err = writeToBenchUpload(pkt, p, sinkAddr)
+			} else {
+				err = writeToWithStallGuard(t, pkt, p, sinkAddr, connectUDPSynthUploadWriteStall)
+			}
+			if err != nil {
 				t.Fatalf("burst probe %.1f Mbit/s stalled seq=%d sent=%d: %v", targetMbit, seq, sent, err)
 			}
 			sent++
@@ -101,6 +119,9 @@ func InttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T) {
 	}
 
 	lo, hi := 8.0, 400.0
+	if payloadLen >= connectudp.SteadyUploadPayloadLenH3() {
+		lo, hi = 200.0, 1200.0
+	}
 	var best connectudp.SequencedStats
 	var bestMbps float64
 	for step := 0; step < 9; step++ {
@@ -145,7 +166,7 @@ func InttestGATEConnectUDPH3SynthStabilityUploadSustained(t *testing.T) {
 
 	wallStart := time.Now()
 	benchDur := connectUDPSynthProdBenchDuration
-	bytes, mbps, err := benchConnectUDPPacketUpload(t, pkt, sinkAddr, benchDur, 0, payloadLen, rxBytes)
+	bytes, mbps, err := benchConnectUDPPacketUpload(t, pkt, sinkAddr, benchDur, 0, payloadLen, rxBytes, true)
 	if err != nil {
 		t.Fatalf("sustained upload failed after %v: %v", time.Since(wallStart), err)
 	}

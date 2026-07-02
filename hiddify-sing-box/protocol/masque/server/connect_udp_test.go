@@ -216,9 +216,78 @@ func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
 	req.Host = "127.0.0.1:443"
 	req.URL.Scheme = "https"
 	req.Header.Set(":protocol", "connect-udp")
+	req.Header.Set(http3.CapsuleProtocolHeader, cudpframe.CapsuleProtocolHeaderValue)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status: got %d want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestBuildMuxHandlerConnectUDPRejectsMissingCapsuleProtocol(t *testing.T) {
+	t.Parallel()
+	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
+	handler, err := BuildMuxHandler(MuxHost{
+		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
+		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
+			return udpTemplate, "https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}", "https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+		},
+		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
+		RequestForParse: func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request {
+			return r
+		},
+		AuthorityMatches: func(_, _ string, _ bool) bool { return true },
+	}, option.MasqueTCPRelayTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
+	req.Host = "127.0.0.1:443"
+	req.URL.Scheme = "https"
+	req.Header.Set(":protocol", "connect-udp")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBuildMuxHandlerRejectsInvalidConnectUDPRelayPayloadPolicy(t *testing.T) {
+	t.Parallel()
+	_, err := BuildMuxHandler(MuxHost{
+		Options: option.MasqueEndpointOptions{
+			AllowPrivateTargets:          true,
+			ConnectUDPRelayPayloadPolicy: "jumbo",
+		},
+		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
+			return "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}",
+				"https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}",
+				"https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+		},
+		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
+	}, option.MasqueTCPRelayTemplate)
+	if err == nil {
+		t.Fatal("expected error for invalid connect_udp_relay_payload_policy")
+	}
+}
+
+func TestBuildMuxHandlerAppliesConnectUDPRelayPayloadPolicy(t *testing.T) {
+	t.Cleanup(func() { cudprelay.SetRelayPayloadPolicy(cudprelay.RelayPayloadProd) })
+	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
+	_, err := BuildMuxHandler(MuxHost{
+		Options: option.MasqueEndpointOptions{
+			AllowPrivateTargets:          true,
+			ConnectUDPRelayPayloadPolicy: cudprelay.RelayPayloadConfigRFCInterop,
+		},
+		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
+			return udpTemplate, "https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}", "https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+		},
+		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
+	}, option.MasqueTCPRelayTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cudprelay.RelayPayloadPolicyCurrent() != cudprelay.RelayPayloadRFCInterop {
+		t.Fatalf("policy: got %v want RFCInterop", cudprelay.RelayPayloadPolicyCurrent())
 	}
 }

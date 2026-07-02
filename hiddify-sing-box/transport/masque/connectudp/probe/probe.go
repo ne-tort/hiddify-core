@@ -102,6 +102,32 @@ type SequencedStats struct {
 	OOOPkts    int
 	ExcessPkts int // unique rx > sent (stale sink / probe contamination)
 	FillSHA256 string
+	SeqSetOK   bool // all seq in [0, sent) present (strict zero-loss contract)
+}
+
+// RxCount returns unique sequenced packets recorded for the current run_id.
+func (s *SequencedSink) RxCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.seen)
+}
+
+// SeqSetComplete reports whether every seq in [0, sentPkts) was recorded exactly once.
+func (s *SequencedSink) SeqSetComplete(sentPkts int) bool {
+	if sentPkts <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.seen) != sentPkts {
+		return false
+	}
+	for i := 0; i < sentPkts; i++ {
+		if _, ok := s.seen[uint64(i)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Analyze compares sink records to sentPkts for one run_id.
@@ -140,6 +166,7 @@ func (s *SequencedSink) Analyze(sentPkts, payloadLen int) SequencedStats {
 		OOOPkts:    ooo,
 		ExcessPkts: excess,
 		FillSHA256: fill,
+		SeqSetOK:   s.SeqSetComplete(sentPkts),
 	}
 }
 
@@ -156,6 +183,9 @@ func (st SequencedStats) BurstZeroLossOK(payloadLen int, minRxRatio float64) boo
 		return false
 	}
 	if st.RxPkts < minRx || st.RxPkts > st.SentPkts {
+		return false
+	}
+	if !st.SeqSetOK {
 		return false
 	}
 	return st.FillIntegrityOK(payloadLen)

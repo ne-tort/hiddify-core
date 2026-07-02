@@ -15,9 +15,11 @@ func TestProdRelayRFC9298TwoLoopShape(t *testing.T) {
 	}
 	section := h3RelayProdSource[idxFn:]
 	for _, needle := range []string{
-		"wg.Add(2)",
-		"s.proxyConnSend(context.Background(), conn, str)",
-		"proxyConnReceive(conn, str)",
+		"wg.Add(3)",
+		"relayCtx, cancelRelay := context.WithCancel(context.Background())",
+		"s.proxyConnSend(relayCtx, conn, str)",
+		"proxyConnReceive(relayCtx, conn, str)",
+		"frame.SkipRequestStreamCapsules",
 	} {
 		if !strings.Contains(section, needle) {
 			t.Fatalf("ProxyConnectedSocket must implement RFC 9298 two-loop relay (missing %q)", needle)
@@ -36,19 +38,21 @@ func TestProdRelayUsesSkipRequestStreamCapsules(t *testing.T) {
 // TestProdRelayRFC9298WireParseAndValidate locks C2S/S2C wire helpers for proxied UDP framing and oversize abort.
 func TestProdRelayRFC9298WireParseAndValidate(t *testing.T) {
 	t.Parallel()
-	for _, needle := range []string{
-		"frame.ParseHTTPDatagramUDP",
-		"frame.ValidateProxiedUDPPayloadLen",
-	} {
-		if !strings.Contains(h3RelayC2SSource, needle) {
-			t.Fatalf("h3_c2s.go must use %q", needle)
-		}
+	c2sWire := h3RelayC2SSource
+	if !strings.Contains(c2sWire, "relayHTTPDatagramUDPPayload") {
+		t.Fatal("h3 C2S relay must use relayHTTPDatagramUDPPayload (masque-go context-0 fast path)")
+	}
+	if !strings.Contains(c2sWire, "ParseHTTPDatagramUDPFast") {
+		t.Fatal("h3 C2S parse must use frame.ParseHTTPDatagramUDPFast for HTTP datagram framing")
+	}
+	if !strings.Contains(h3RelayC2SSource, "frame.ValidateProxiedUDPPayloadLen") {
+		t.Fatal("h3_c2s.go must validate proxied UDP payload length")
 	}
 	if !strings.Contains(h3RelayS2CSource, "frame.ValidateProxiedUDPPayloadLen") {
 		t.Fatal("h3_s2c.go must validate proxied UDP payload length")
 	}
-	if !strings.Contains(h3RelayS2CSource, "contextIDZero") {
-		t.Fatal("h3_s2c.go must prefix S2C datagrams with context ID 0")
+	if !strings.Contains(h3RelayS2CSource, "frame.ContextIDZeroWire") {
+		t.Fatal("h3 S2C must prefix datagrams with context ID 0")
 	}
 }
 
@@ -58,7 +62,7 @@ func TestProdRelayRFC9298ICMPPortUnreachableEmptyPayload(t *testing.T) {
 	if !strings.Contains(h3RelayS2CSource, "isICMPPortUnreachableUDPRead") {
 		t.Fatal("h3_s2c.go must detect ICMP port unreachable on UDP read")
 	}
-	if !strings.Contains(h3RelayS2CSource, "SendDatagram(b[:len(contextIDZero)]") {
+	if !strings.Contains(h3RelayS2CSource, "SendDatagram(frame.ContextIDZeroWire)") {
 		t.Fatal("h3_s2c.go must relay ICMP as zero-length proxied UDP (ctx0 only)")
 	}
 }

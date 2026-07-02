@@ -26,3 +26,5 @@ type chunkRecordWriter struct {
 func (w *chunkRecordWriter) Write(p []byte) (int, error) { return w.fn(p) }
 
 func (w *chunkRecordWriter) Close() error { return nil }
+
+

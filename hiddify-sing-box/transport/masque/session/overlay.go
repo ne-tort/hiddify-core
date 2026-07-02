@@ -80,9 +80,9 @@ func TryHTTPFallbackSwitch(s *CoreSession, host LifecycleHost, err error) bool {
 	return ok
 }
 
-// TryHTTPFallbackSwitchLockedAssumeMu pivots overlay when http_layer_fallback is enabled. Caller holds s.Mu.
+// TryHTTPFallbackSwitchLockedAssumeMu pivots overlay when http_layer is auto. Caller holds s.Mu.
 func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host LifecycleHost, err error) bool {
-	if !s.HTTPLayerFallback || err == nil || !httpx.IsLayerSwitchableFailure(err) {
+	if !s.HTTPLayerAuto || err == nil || !httpx.IsLayerSwitchableFailure(err) {
 		return false
 	}
 	if !s.HTTPFallbackConsumed.CompareAndSwap(false, true) {
@@ -110,7 +110,7 @@ func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host LifecycleHost, err
 	return true
 }
 
-// ResetHTTPFallbackBudgetAfterSuccess clears the one-shot http_layer_fallback latch after a successful overlay handshake.
+// ResetHTTPFallbackBudgetAfterSuccess clears the one-shot auto overlay pivot latch after a successful handshake.
 func ResetHTTPFallbackBudgetAfterSuccess(s *CoreSession) {
 	s.HTTPFallbackConsumed.Store(false)
 }

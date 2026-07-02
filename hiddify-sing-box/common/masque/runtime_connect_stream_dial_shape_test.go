@@ -121,7 +121,6 @@ func startRuntimeConnectStreamH3Stack(t *testing.T) (Runtime, uint16) {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		TCPTransport:        "connect_stream",
 	})
 	if err := rt.Start(waitCtx); err != nil {
 		t.Fatalf("runtime start: %v", err)

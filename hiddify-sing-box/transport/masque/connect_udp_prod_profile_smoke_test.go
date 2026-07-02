@@ -56,7 +56,6 @@ func newConnectUDPProdProfileH3Session(t *testing.T, proxyPort int) (ClientSessi
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
-		TransportMode:       option.MasqueTransportModeConnectUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -77,7 +76,6 @@ func newConnectUDPProdProfileH2Session(t *testing.T, proxyPort int) (ClientSessi
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		TransportMode:            option.MasqueTransportModeConnectUDP,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {

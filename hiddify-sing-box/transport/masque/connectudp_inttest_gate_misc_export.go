@@ -38,6 +38,12 @@ func InttestConnectUDPSynthFailFastWallContract(t *testing.T) {
 	if maxLeg > 10*time.Second {
 		t.Fatalf("synth bench max wall %v must be <= 10s per leg", maxLeg)
 	}
+	if connectUDPSynthGateWaitCtx > 8*time.Second {
+		t.Fatalf("gate wait ctx %v must be <= 8s", connectUDPSynthGateWaitCtx)
+	}
+	if connectUDPSynthGateParallelWaitCtx > 15*time.Second {
+		t.Fatalf("gate parallel wait ctx %v must be <= 15s", connectUDPSynthGateParallelWaitCtx)
+	}
 }
 
 func InttestGATEConnectUDPParallelScalingH2(t *testing.T) {
@@ -46,4 +52,8 @@ func InttestGATEConnectUDPParallelScalingH2(t *testing.T) {
 
 func InttestGATEConnectUDPParallelScalingH3(t *testing.T) {
 	gateConnectUDPParallelScaling(t, "h3", 4)
+}
+
+func InttestLocalizeConnectUDPH3ParallelScalingAttribution(t *testing.T) {
+	localizeConnectUDPH3ParallelScalingAttribution(t)
 }

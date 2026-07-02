@@ -5,17 +5,22 @@ import (
 	"sync"
 )
 
-const connectUploadPipeBuf = 8 << 20
+const (
+	connectUploadPipeBuf        = 8 << 20 // CONNECT-stream only; CONNECT-UDP CUT (deadlock @ sustained max capsule)
+	connectUploadShallowPipeBuf = 128 << 10 // ~80 maxCapsule chunks; enables x/net bulk TLS @ >64KiB
+)
 
 // uploadPipe is a bounded buffer between CONNECT upload producers and http2 writeRequestBody.
-// io.Pipe blocks on every chunk; this decouples C2S coalesce from TLS flush cadence.
+// io.Pipe blocks on every chunk; shallow cap decouples C2S from TLS flush without 8 MiB deadlock.
 type uploadPipe struct {
-	mu       sync.Mutex
-	cond     sync.Cond
-	buf      []byte
-	cap      int
-	closed   bool
-	writeErr error
+	mu            sync.Mutex
+	cond          sync.Cond
+	buf           []byte
+	cap           int
+	writerClosed  bool
+	readerClosed  bool
+	writeErr      error
+	flowWake      func()
 }
 
 func newUploadPipe(cap int) *uploadPipe {
@@ -27,9 +32,21 @@ func newUploadPipe(cap int) *uploadPipe {
 	return p
 }
 
-// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (replaces io.Pipe).
-func NewConnectUploadPipe() (io.ReadCloser, io.WriteCloser) {
+// ConnectUploadPipeWriter is the client upload half of a shallow/deep CONNECT upload pipe.
+type ConnectUploadPipeWriter interface {
+	io.WriteCloser
+	MasqueUploadWriterOpen() bool
+}
+
+// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (CONNECT-stream deep buffer).
+func NewConnectUploadPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
 	p := newUploadPipe(connectUploadPipeBuf)
+	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
+}
+
+// NewConnectUploadShallowPipe returns a bounded upload buffer for CONNECT-UDP (Invisv pipe shape + depth API).
+func NewConnectUploadShallowPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
+	p := newUploadPipe(connectUploadShallowPipeBuf)
 	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
 }
 
@@ -41,6 +58,36 @@ func (r *uploadPipeReader) MasqueUploadBuffered() int {
 	up.mu.Lock()
 	defer up.mu.Unlock()
 	return len(up.buf)
+}
+
+// UploadPipeCap reports the pipe capacity for http2 flush-before-blocking-read policy.
+func (r *uploadPipeReader) UploadPipeCap() int {
+	if r == nil || r.p == nil {
+		return 0
+	}
+	return r.p.cap
+}
+
+// MasqueUploadWriterOpen reports whether the client upload pipe writer is still open.
+func (r *uploadPipeReader) MasqueUploadWriterOpen() bool {
+	if r == nil || r.p == nil {
+		return false
+	}
+	up := r.p
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	return !up.writerClosed
+}
+
+// SetMasqueUploadFlowWake wakes http2 awaitFlowControl when upload producers write (shallow pipe).
+func (r *uploadPipeReader) SetMasqueUploadFlowWake(fn func()) {
+	if r == nil || r.p == nil {
+		return
+	}
+	up := r.p
+	up.mu.Lock()
+	up.flowWake = fn
+	up.mu.Unlock()
 }
 
 func (r *uploadPipeReader) Read(p []byte) (int, error) {
@@ -57,7 +104,10 @@ func (r *uploadPipeReader) Read(p []byte) (int, error) {
 			up.cond.Signal()
 			return n, nil
 		}
-		if up.closed {
+		if up.readerClosed {
+			return 0, io.ErrClosedPipe
+		}
+		if up.writerClosed {
 			if up.writeErr != nil {
 				return 0, up.writeErr
 			}
@@ -71,7 +121,7 @@ func (r *uploadPipeReader) Close() error {
 	up := r.p
 	up.mu.Lock()
 	defer up.mu.Unlock()
-	up.closed = true
+	up.readerClosed = true
 	up.cond.Broadcast()
 	return nil
 }
@@ -84,19 +134,25 @@ func (w *uploadPipeWriter) Write(p []byte) (int, error) {
 	}
 	up := w.p
 	up.mu.Lock()
-	defer up.mu.Unlock()
-	if up.closed {
+	total := 0
+	var wake func()
+	defer func() {
+		up.mu.Unlock()
+		if wake != nil {
+			wake()
+		}
+	}()
+	if up.writerClosed {
 		return 0, io.ErrClosedPipe
 	}
-	total := 0
 	for len(p) > 0 {
-		for len(up.buf) >= up.cap && !up.closed {
+		for len(up.buf) >= up.cap && !up.writerClosed {
 			up.cond.Wait()
-			if up.closed {
+			if up.writerClosed {
 				return total, io.ErrClosedPipe
 			}
 		}
-		if up.closed {
+		if up.writerClosed {
 			return total, io.ErrClosedPipe
 		}
 		space := up.cap - len(up.buf)
@@ -111,6 +167,7 @@ func (w *uploadPipeWriter) Write(p []byte) (int, error) {
 		p = p[n:]
 		total += n
 		up.cond.Signal()
+		wake = up.flowWake
 	}
 	return total, nil
 }
@@ -119,10 +176,21 @@ func (w *uploadPipeWriter) Close() error {
 	up := w.p
 	up.mu.Lock()
 	defer up.mu.Unlock()
-	if up.closed {
+	if up.writerClosed {
 		return nil
 	}
-	up.closed = true
+	up.writerClosed = true
 	up.cond.Broadcast()
 	return nil
+}
+
+// MasqueUploadWriterOpen reports whether the upload pipe writer is still open.
+func (w *uploadPipeWriter) MasqueUploadWriterOpen() bool {
+	if w == nil || w.p == nil {
+		return false
+	}
+	up := w.p
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	return !up.writerClosed
 }

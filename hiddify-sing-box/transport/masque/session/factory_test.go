@@ -16,7 +16,7 @@ func TestCoreClientFactoryExplicitCtor(t *testing.T) {
 		TemplateUDP:   "https://edge.example/masque?h={target_host}&p={target_port}",
 		TemplateIP:    "https://edge.example/cf-connect-ip",
 		TemplateTCP:   "https://edge.example/masque/tcp?h={target_host}&p={target_port}",
-		TransportMode: option.MasqueTransportModeConnectIP,
+		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)

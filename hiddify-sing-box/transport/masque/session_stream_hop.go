@@ -16,7 +16,7 @@ func (s *coreSession) streamHopHost() strmclient.SessionHopHost {
 			return strmclient.DialAttempt(ctx, s.streamAttemptHost(), destination)
 		},
 		TryFallback:     s.tryHTTPFallbackSwitch,
-		FallbackEnabled: func() bool { return s.HTTPLayerFallback },
+		FallbackEnabled: func() bool { return s.HTTPLayerAuto },
 		AuthFailure: func(err error) bool {
 			return errors.Is(err, session.ErrAuthFailed) || session.ClassifyError(err) == session.ErrorClassAuth
 		},

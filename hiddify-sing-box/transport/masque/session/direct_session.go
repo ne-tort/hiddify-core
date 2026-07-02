@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sagernet/sing-box/option"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -16,20 +15,20 @@ import (
 // DirectSession is the plain-TCP backend (CONNECT-stream / CONNECT-UDP without MASQUE overlay).
 type DirectSession struct {
 	dialer       net.Dialer
-	tcpTransport string
+	connectIP    bool
 	capabilities CapabilitySet
 }
 
 // NewDirectSession constructs a direct backend session from client options.
 func NewDirectSession(_ context.Context, options ClientOptions) (ClientSession, error) {
-	tcpTransport := NormalizeTCPTransport(options.TCPTransport)
+	connectIP := DataplaneUsesConnectIP(options.DataplaneMode)
 	return &DirectSession{
-		dialer:       net.Dialer{},
-		tcpTransport: tcpTransport,
+		dialer:    net.Dialer{},
+		connectIP: connectIP,
 		capabilities: CapabilitySet{
-			ConnectUDP: true,
-			ConnectIP:  false,
-			ConnectTCP: tcpTransport == option.MasqueTCPTransportConnectStream,
+			ConnectUDP: !connectIP,
+			ConnectIP:  connectIP,
+			ConnectTCP: !connectIP,
 		},
 	}, nil
 }
@@ -45,12 +44,8 @@ func (s *DirectSession) DialContext(ctx context.Context, network string, destina
 		return nil, context.Cause(ctx)
 	default:
 	}
-	switch s.tcpTransport {
-	case option.MasqueTCPTransportConnectIP:
+	if s.connectIP {
 		return nil, errors.Join(DirectBackendErrs.TCPOverConnectIP, errors.New("connect_ip is TUN packet-plane only"))
-	case option.MasqueTCPTransportConnectStream:
-	default:
-		return nil, DirectBackendErrs.TCPPathNotImplemented
 	}
 	host, err := strm.ResolveDestinationHost(destination)
 	if err != nil {
