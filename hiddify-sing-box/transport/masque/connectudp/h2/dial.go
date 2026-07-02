@@ -77,14 +77,6 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 	return NewAsymmetricPacketConn(download, upload, localAddr, remoteAddr, nil), nil
 }
 
-// DialH2OverlayBidi dials single-stream full-duplex CONNECT-UDP (Invisv/R8 thin client; localize/echo).
-func DialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	if cfg.Hook != nil {
-		return cfg.Hook(ctx, template, target)
-	}
-	return dialH2OverlaySingle(ctx, cfg, template, target, streamRoleBidi, "")
-}
-
 func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {
 	select {
 	case <-ctx.Done():

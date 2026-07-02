@@ -37,15 +37,6 @@ type Handler struct {
 	Hooks Hooks
 	// H2SessionRegistry scopes asymmetric H2 CONNECT-UDP sessions (nil → package default).
 	H2SessionRegistry *cudph2.SessionRegistry
-	// H3SessionRegistry scopes asymmetric H3 CONNECT-UDP sessions (nil → relay default).
-	H3SessionRegistry *cudprelay.H3SessionRegistry
-}
-
-func (h Handler) h3Sessions() *cudprelay.H3SessionRegistry {
-	if h.H3SessionRegistry != nil {
-		return h.H3SessionRegistry
-	}
-	return cudprelay.DefaultH3SessionRegistry
 }
 
 func (h Handler) h2Sessions() *cudph2.SessionRegistry {
@@ -105,14 +96,7 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 	}
 	if _, ok := w.(http3.HTTPStreamer); ok {
 		if cudpasym.StreamRoleFromRequest(r) != "" {
-			if err := cudprelay.ServeH3Asymmetric(w, r, parsed, h.h3Sessions()); err != nil {
-				if cudpasym.IsMissingMuxKey(err) {
-					w.WriteHeader(http.StatusBadRequest)
-				} else if errors.Is(err, cudprelay.ErrDuplicateH3DownloadSession) {
-					w.WriteHeader(http.StatusConflict)
-				}
-				return
-			}
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if err := udpProxy.ProxyWithContext(r.Context(), w, parsed); err != nil {

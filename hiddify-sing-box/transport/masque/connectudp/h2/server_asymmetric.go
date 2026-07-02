@@ -30,7 +30,7 @@ func ServeH2FromRequest(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 		}
 		return serveH2UploadLeg(w, r, key, reg)
 	default:
-		return ServeH2(w, r, conn)
+		return errors.New("masque h2: unknown CONNECT-UDP stream role")
 	}
 }
 

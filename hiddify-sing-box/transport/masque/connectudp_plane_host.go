@@ -63,7 +63,7 @@ func (h connectUDPPlaneHost) DialH3(ctx context.Context, client *qmasque.Client,
 	if h.s.udpDial != nil {
 		return h.s.udpDial(ctx, client, template, target)
 	}
-	// Prod H3 client: masque-go bidi DialAddr (UDP-REF-H3-02). H3 asymmetric dial is localize-only (dialConnectUDPH3Asymmetric).
+	// Prod H3 client: masque-go bidi DialAddr (UDP-REF-H3-02).
 	return cudpclient.DialH3Production(ctx, nil, client, template, target)
 }
 

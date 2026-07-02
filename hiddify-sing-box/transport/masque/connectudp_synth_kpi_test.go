@@ -355,26 +355,6 @@ func TestLocalizeConnectUDPH3BurstMaxZeroLossSteady(t *testing.T) {
 	InttestLocalizeConnectUDPH3BurstMaxZeroLossSteady(t)
 }
 
-// TestLocalizeConnectUDPH3UploadBidiDirectDial compares bidi DialH3Production vs asymmetric ListenPacket upload loss.
-func TestLocalizeConnectUDPH3UploadBidiDirectDial(t *testing.T) {
-	dur := connectUDPSynthProdBenchDuration
-	bidiMbps, bidiSt, err := benchConnectUDPH3DirectUploadZeroLoss(t, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("h3 bidi direct upload: %v", err)
-	}
-	dropsBefore := connectudp.SnapshotDataplaneDrops()
-	asymMbps, asymSt, err := benchConnectUDPH3AsymmetricUploadZeroLoss(t, dur, connectudp.DefaultBenchUDPPayloadLen)
-	if err != nil {
-		t.Fatalf("h3 asymmetric upload: %v", err)
-	}
-	dropDelta := connectudp.SnapshotDataplaneDrops().Delta(dropsBefore)
-	t.Logf("LOCALIZE h3 upload bidi=%.1f loss=%.2f%% asymmetric=%.1f loss=%.2f%%",
-		bidiMbps, bidiSt.LossPct, asymMbps, asymSt.LossPct)
-	t.Logf("LOCALIZE h3 upload dataplane drops (asymmetric leg): streamQ=%d quicRcvQ=%d unknownStream=%d h3Send=%d",
-		dropDelta.StreamDatagramQueue, dropDelta.QuicDatagramRcvQueue, dropDelta.UnknownStreamDatagram,
-		dropDelta.TransientHTTPDatagramSend)
-}
-
 // TestLocalizeConnectUDPH3UploadFloodRx measures unlimited flood rx goodput (loss expected; not a GATE metric).
 func TestLocalizeConnectUDPH3UploadFloodRx(t *testing.T) {
 	dur := connectUDPSynthProdBenchDuration

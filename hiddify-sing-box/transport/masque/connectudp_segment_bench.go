@@ -93,7 +93,6 @@ func segmentPayloadLen(payloadLen int) int {
 
 func segmentEnableRelayStats(tb testing.TB) {
 	tb.Helper()
-	tb.Setenv("MASQUE_CONNECT_UDP_RELAY_STATS", "1")
 	cudprelay.EnableRelayStatsForBench()
 	cudprelay.ResetUDPRelayStats()
 }

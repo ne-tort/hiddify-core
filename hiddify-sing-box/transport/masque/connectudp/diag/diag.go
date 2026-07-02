@@ -1,13 +1,10 @@
 package diag
 
-import (
-	"log"
-	"os"
-)
+import "log"
 
-// Enabled reports CONNECT-UDP diagnostic logging (build tag masque_debug or MASQUE_CONNECT_UDP_DEBUG=1).
+// Enabled reports CONNECT-UDP diagnostic logging (build tag masque_debug only).
 func Enabled() bool {
-	return debugBuild || os.Getenv("MASQUE_CONNECT_UDP_DEBUG") == "1"
+	return debugBuild
 }
 
 // Logf writes to stderr when Enabled(); no-op in production builds.

@@ -51,6 +51,11 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 	proxyStatus.Params.Add("next-hop", addr.String())
 
 	role := StreamRoleFromRequest(r)
+	if role != "" && role != StreamRoleDownload && role != StreamRoleUpload {
+		_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, errors.New("masque h2: unknown CONNECT-UDP stream role"))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	if role != "" {
 		_, keyErr := RequireSessionKey(r, addr.String())
 		if keyErr != nil {

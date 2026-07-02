@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-//go:embed h3_asymmetric.go
-var h3RelayAsymmetricSource string
-
 // TestProxyConnectedSocketWaitsRelayBeforeShutdown: upstream masque-go closes stream in relay goroutines, then wg.Wait.
 func TestProxyConnectedSocketWaitsRelayBeforeShutdown(t *testing.T) {
 	t.Parallel()
@@ -47,27 +44,3 @@ func TestProxyDialDoesNotDeferCloseConnectedSocket(t *testing.T) {
 	}
 }
 
-// TestH3AsymmetricDownloadLegWaitsRelayBeforeShutdown: H2 download-leg parity — wg.Wait before teardown.
-func TestH3AsymmetricDownloadLegWaitsRelayBeforeShutdown(t *testing.T) {
-	t.Parallel()
-	idxFn := strings.Index(h3RelayAsymmetricSource, "func serveH3DownloadLeg")
-	if idxFn < 0 {
-		t.Fatal("missing serveH3DownloadLeg")
-	}
-	section := h3RelayAsymmetricSource[idxFn:]
-	idxNext := strings.Index(section[1:], "func serveH3UploadLeg")
-	if idxNext > 0 {
-		section = section[:idxNext+1]
-	}
-	idxWait := strings.Index(section, "wg.Wait()")
-	if idxWait < 0 {
-		t.Fatal("missing wg.Wait in serveH3DownloadLeg")
-	}
-	if !strings.Contains(section, "proxyConnReceive(r.Context(), conn, str)") {
-		t.Fatal("serveH3DownloadLeg must run proxyConnReceive with request context")
-	}
-	afterWait := section[idxWait:]
-	if strings.Contains(afterWait, "shutdownStream()") {
-		t.Fatal("serveH3DownloadLeg must not shutdownStream before wg.Wait (keeps S2C SendDatagram alive)")
-	}
-}

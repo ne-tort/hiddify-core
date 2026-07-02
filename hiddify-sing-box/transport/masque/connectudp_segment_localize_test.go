@@ -156,34 +156,6 @@ func TestLocalizeConnectUDPSegmentPinpointH2UploadFlood(t *testing.T) {
 	}
 }
 
-// TestLocalizeConnectUDPSegmentH3AsymmetricVsBidi isolates explicit asymmetric legs vs bidi DialH3Production.
-func TestLocalizeConnectUDPSegmentH3AsymmetricVsBidi(t *testing.T) {
-	payload := connectudpDefaultBenchPayload()
-	asymMbps, asymSt, err := benchConnectUDPH3AsymmetricUploadZeroLoss(t, segmentBenchDuration(), payload)
-	if err != nil {
-		t.Fatalf("asymmetric upload: %v", err)
-	}
-	bidi := benchSegmentH3BidiDirectUpload(t, segmentRunIDBase|0x41, 0, payload)
-	asym := SegmentUploadResult{
-		Site:     "H3-asymmetric-DialAddrLeg",
-		CodeRef:  "connectudp_dial_h3_asymmetric.go + h2/asymmetric_packet_conn.go",
-		Mode:     "flood",
-		PayloadB: payload,
-		Mbps:     asymMbps,
-		Stats:    asymSt,
-	}
-	logSegmentUpload(t, asym)
-	logSegmentUpload(t, bidi)
-
-	if asym.Mbps > 0 && bidi.Mbps > 0 {
-		t.Logf("PINPOINT H3 asymmetric/bidi ratio=%.2f loss_asym=%.2f%% loss_bidi=%.2f%%",
-			asym.Mbps/bidi.Mbps, asym.Stats.LossPct, bidi.Stats.LossPct)
-	}
-	if asym.Drops.StreamDatagramQueue > bidi.Drops.StreamDatagramQueue {
-		t.Logf("PINPOINT: extra streamQ drops on asymmetric leg (relay/h3_asymmetric.go upload-only)")
-	}
-}
-
 func connectudpDefaultBenchPayload() int {
 	return connectudp.DefaultBenchUDPPayloadLen
 }
