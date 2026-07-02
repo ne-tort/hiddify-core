@@ -13,6 +13,13 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 )
 
+func h3C2SUDPFlushMinBatch() int {
+	if runtime.GOOS == "linux" {
+		return h3C2SUDPFlushMinBatchLinux
+	}
+	return 1
+}
+
 // h3C2SStream is the HTTP/3 client→UDP relay ingress (ReceiveDatagram).
 type h3C2SStream interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
@@ -33,7 +40,6 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 	statsOn := relayStatsEnabled()
 
 	var payloadBatch [h3C2SUDPSendBatchMax][]byte
-	var releaseBatch [h3C2SUDPSendBatchMax][]byte
 	batchCount := 0
 	flushC2SBatch := func() error {
 		if batchCount == 0 {
@@ -41,16 +47,19 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		}
 		n := batchCount
 		if err := writer.writePayloadBatch(payloadBatch[:n]); err != nil {
-			for i := 0; i < n; i++ {
-				quic.ReleaseMasqueDatagramReceiveBuffer(releaseBatch[i])
-			}
 			return err
-		}
-		for i := 0; i < n; i++ {
-			quic.ReleaseMasqueDatagramReceiveBuffer(releaseBatch[i])
 		}
 		batchCount = 0
 		return nil
+	}
+	flushC2SBatchIfReady := func(force bool) error {
+		if batchCount == 0 {
+			return nil
+		}
+		if !force && batchCount < h3C2SUDPFlushMinBatch() {
+			return nil
+		}
+		return flushC2SBatch()
 	}
 
 	relayEnqueue := func(raw []byte) error {
@@ -90,8 +99,9 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 			globalUDPRelayStats.c2sDatagramIn.Add(1)
 			globalUDPRelayStats.c2sUDPPayloadOut.Add(1)
 		}
-		payloadBatch[batchCount] = udpPayload
-		releaseBatch[batchCount] = raw
+		// Copy before Release: QUIC receive lease must not outlive subsliced udpPayload in batch queue.
+		payloadBatch[batchCount] = append([]byte(nil), udpPayload...)
+		quic.ReleaseMasqueDatagramReceiveBuffer(raw)
 		batchCount++
 		if batchCount >= h3C2SUDPSendBatchMax {
 			return flushC2SBatch()
@@ -126,7 +136,7 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 				if err := drainAll(); err != nil {
 					return err
 				}
-				if err := flushC2SBatch(); err != nil {
+				if err := flushC2SBatchIfReady(true); err != nil {
 					return err
 				}
 				runtime.Gosched()
@@ -140,7 +150,7 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		if err := drainAll(); err != nil {
 			return err
 		}
-		if err := flushC2SBatch(); err != nil {
+		if err := flushC2SBatchIfReady(false); err != nil {
 			return err
 		}
 		wakeH3RelayAfterC2SConsume(str)
