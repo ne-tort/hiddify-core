@@ -86,8 +86,8 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 		case <-r.Context().Done():
 			return
 		}
-		// Asymmetric download: immediate 1:1 S2C (pre-batch relay parity; batch Append stalls echo-duplex).
-		downErr = cudprelay.RelayH2ConnectDownlinkImmediate(r.Context(), conn, H2ServerUDPReadBuf, downlinkW)
+		// Asymmetric download: S2C-only leg — batch append + threshold flush (fountain KPI; no echo on this stream).
+		downErr = cudprelay.RelayH2ConnectDownlinkFountain(r.Context(), conn, H2ServerUDPReadBuf, downlinkW)
 	}()
 	wg.Wait()
 	_ = http.NewResponseController(w).Flush()
@@ -127,5 +127,6 @@ func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, re
 	}()
 
 	defer shutdownRelay()
-	return cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalReady, onICMP)
+		// Asymmetric upload: masque-go OnwardUDPWriter WriteBatch (perf); h2o uses per-packet send on bidi only.
+		return cudprelay.RelayH2ConnectUplink(r, onward, H2ResponseBodyBufSize, signalReady, onICMP)
 }

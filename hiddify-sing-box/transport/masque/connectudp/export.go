@@ -51,6 +51,10 @@ func NewSequencedSink(runID uint32) *SequencedSink {
 	return cudpprobe.NewSequencedSink(runID)
 }
 
+func AllocBenchRunID() uint32 {
+	return cudpprobe.AllocBenchRunID()
+}
+
 // SequencedSinkRxCount returns unique rx for run_id (in-proc sink; docker udp_sink_analyze parity).
 func SequencedSinkRxCount(sink *SequencedSink) int {
 	if sink == nil {

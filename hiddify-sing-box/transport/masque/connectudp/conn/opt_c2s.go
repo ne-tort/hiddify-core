@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 	"github.com/sagernet/sing-box/transport/masque/netutil"
 )
 
@@ -57,16 +58,12 @@ func (w *h3C2SWriter) flushC2SDatagramWake() {
 	w.flusher.FlushProxiedIPDatagramSend()
 }
 
-func (w *h3C2SWriter) flushPendingWriteBatch() {
-	w.flushC2SDatagramWake()
-}
-
 func (w *h3C2SWriter) shutdown() {
 	w.flushC2SDatagramWake()
 }
 
-const h3C2SBacklogDrainMaxSpins = 8192
-const h3C2STransientSendMaxSpins = 8192
+const h3C2SBacklogDrainMaxSpins = h3quic.TransientPressureMaxSpins
+const h3C2STransientSendMaxSpins = h3quic.TransientPressureMaxSpins
 
 func (w *h3C2SWriter) awaitDatagramSendDrain() {
 	if w == nil || w.backlog == nil {

@@ -28,6 +28,9 @@ func (s *slowUploadPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	s.writes.Add(1)
 	select {
 	case <-s.unblock:
+		if s.closed.Load() {
+			return 0, net.ErrClosed
+		}
 		return len(p), nil
 	case <-time.After(5 * time.Second):
 		return 0, net.ErrClosed
@@ -98,35 +101,37 @@ func TestPacketConnCloseDuringBlockedUploadWrite(t *testing.T) {
 	}
 }
 
-func TestAsymmetricPacketConnCloseUnblocksUploadQueue(t *testing.T) {
-	slowA := newSlowUploadPacketConn()
-	slowB := newSlowUploadPacketConn()
+func TestAsymmetricPacketConnCloseDuringBlockedUploadWrite(t *testing.T) {
+	slowUpload := newSlowUploadPacketConn()
 	download := newSlowUploadPacketConn()
-	c := NewAsymmetricPacketConn(download, []net.PacketConn{slowA, slowB}, nil, nil, nil)
+	c := NewAsymmetricPacketConn(download, slowUpload, nil, nil, nil)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	payload := bytes.Repeat([]byte{'y'}, 512)
+	writeDone := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		payload := bytes.Repeat([]byte{'y'}, 512)
-		for i := 0; i < 32; i++ {
-			if _, err := c.WriteTo(payload, nil); err != nil {
-				return
-			}
-		}
+		_, err := c.WriteTo(payload, nil)
+		writeDone <- err
 	}()
 
 	time.Sleep(50 * time.Millisecond)
-	done := make(chan struct{})
+	closeDone := make(chan struct{})
 	go func() {
 		_ = c.Close()
-		close(done)
+		close(closeDone)
 	}()
 
 	select {
-	case <-done:
+	case <-closeDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("AsymmetricPacketConn.Close hung")
+		t.Fatal("AsymmetricPacketConn.Close blocked during sync upload")
 	}
-	wg.Wait()
+
+	select {
+	case err := <-writeDone:
+		if err == nil {
+			t.Fatal("expected error after Close during blocked upload")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WriteTo blocked after Close")
+	}
 }

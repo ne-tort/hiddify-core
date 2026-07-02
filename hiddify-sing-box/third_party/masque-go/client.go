@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,12 +13,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
+	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 	cudpconn "github.com/sagernet/sing-box/transport/masque/connectudp/conn"
+	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
 // defaultInitialPacketSize is an increased packet size used for the connection to the proxy.
@@ -166,10 +166,10 @@ func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr 
 		hdr.Set("Authorization", "Bearer "+t)
 	}
 	if opts.streamRole != "" {
-		hdr.Set("Masque-Udp-Stream-Role", opts.streamRole)
+		hdr.Set(cudpasym.StreamRoleHeader, opts.streamRole)
 	}
 	if opts.muxKey != "" {
-		hdr.Set("Masque-Udp-Mux-Key", opts.muxKey)
+		hdr.Set(cudpasym.MuxKeyHeader, opts.muxKey)
 	}
 	if err := rstr.SendRequestHeader(&http.Request{
 		Method: http.MethodConnect,
@@ -197,7 +197,7 @@ func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr 
 	}
 
 	if _, udp := raddr.(*net.UDPAddr); !udp {
-		if udpAddr := nextHopAddr(rsp); udpAddr != nil {
+		if udpAddr := cudpframe.ProxyStatusNextHopUDP(rsp); udpAddr != nil {
 			raddr = udpAddr
 		}
 	}
@@ -214,46 +214,6 @@ func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Ad
 	return cudpconn.NewH3ConnWithConfig(rstr, local, remote, cudpconn.H3ConnConfig{
 		LegRole: cudpconn.H3LegRoleFromStreamRole(opts.streamRole),
 	}), rsp, nil
-}
-
-// Extract the Proxy-Status next-hop value as a UDPAddr.
-func nextHopAddr(rsp *http.Response) *net.UDPAddr {
-	proxyStatusVals := rsp.Header.Values("Proxy-Status")
-	if len(proxyStatusVals) == 0 {
-		return nil
-	}
-	proxyStatus, err := httpsfv.UnmarshalItem(proxyStatusVals)
-	if err != nil {
-		log.Printf("bad Proxy-Status: %v", err)
-		return nil
-	}
-	nextHop, ok := proxyStatus.Params.Get("next-hop")
-	if !ok {
-		return nil
-	}
-	nextHopStr, ok := nextHop.(string)
-	if !ok {
-		log.Printf("non-string nextHop value")
-		return nil
-	}
-	if nextHopStr == "" {
-		return nil
-	}
-	host, port, err := net.SplitHostPort(nextHopStr)
-	if err != nil {
-		log.Printf("bad next-hop value: %v", err)
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil
-	}
-	portNum, err := net.LookupPort("udp", port)
-	if err != nil {
-		log.Printf("bad port: %v", err)
-		return nil
-	}
-	return &net.UDPAddr{IP: ip, Port: portNum}
 }
 
 // Close closes the connection to the proxy.

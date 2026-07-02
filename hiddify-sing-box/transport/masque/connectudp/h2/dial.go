@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/yosida95/uritemplate/v3"
@@ -74,7 +74,15 @@ func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, templ
 		_ = download.Close()
 		return nil, err
 	}
-	return NewAsymmetricPacketConn(download, []net.PacketConn{upload}, localAddr, remoteAddr, nil), nil
+	return NewAsymmetricPacketConn(download, upload, localAddr, remoteAddr, nil), nil
+}
+
+// DialH2OverlayBidi dials single-stream full-duplex CONNECT-UDP (Invisv/R8 thin client; localize/echo).
+func DialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
+	if cfg.Hook != nil {
+		return cfg.Hook(ctx, template, target)
+	}
+	return dialH2OverlaySingle(ctx, cfg, template, target, streamRoleBidi, "")
 }
 
 func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {
@@ -193,7 +201,7 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 	dialAddr := cfg.ResolveDialAddr()
 
 	raddr := NewUDPAddr(target)
-	if nh := ProxyStatusNextHopUDP(resp); nh != nil {
+	if nh := frame.ProxyStatusNextHopUDP(resp); nh != nil {
 		raddr = NewUDPAddr(net.JoinHostPort(nh.IP.String(), strconv.Itoa(nh.Port)))
 	}
 
@@ -217,42 +225,6 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 		pc.startUploadOnlyDrain()
 	}
 	return pc, nil
-}
-
-// ProxyStatusNextHopUDP parses Proxy-Status next-hop from a CONNECT-UDP response.
-func ProxyStatusNextHopUDP(rsp *http.Response) *net.UDPAddr {
-	if rsp == nil {
-		return nil
-	}
-	vals := rsp.Header.Values("Proxy-Status")
-	if len(vals) == 0 {
-		return nil
-	}
-	proxyStatus, err := httpsfv.UnmarshalItem(vals)
-	if err != nil {
-		return nil
-	}
-	nextHop, ok := proxyStatus.Params.Get("next-hop")
-	if !ok {
-		return nil
-	}
-	nextHopStr, ok := nextHop.(string)
-	if !ok || nextHopStr == "" {
-		return nil
-	}
-	host, port, err := net.SplitHostPort(nextHopStr)
-	if err != nil {
-		return nil
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return nil
-	}
-	portNum, err := net.LookupPort("udp", port)
-	if err != nil {
-		return nil
-	}
-	return &net.UDPAddr{IP: ip, Port: portNum}
 }
 
 // H2DialHostCandidates returns TCP dial host order for H2 MASQUE (WARP sibling parity).

@@ -13,11 +13,10 @@ import (
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
-// H2UplinkOnward batches onward UDP sends for H2 CONNECT-UDP server uplink relay.
+// H2UplinkOnward queues onward UDP sends for H2 CONNECT-UDP server uplink relay.
 type H2UplinkOnward interface {
 	Queue(payload []byte) (icmp bool, err error)
 	Flush() (icmp bool, err error)
-	SendBurstViews(wire []byte, count, wireLen, payloadOff int) (icmp bool, err error)
 }
 
 // H2DownlinkCapsules writes RFC 9297 DATAGRAM capsules on the HTTP/2 response body.
@@ -25,52 +24,40 @@ type H2DownlinkCapsules interface {
 	WriteUDPPayloadAsCapsules(udpPayload []byte) error
 }
 
-// H2DownlinkBatchWriter appends capsules and flushes once per relay UDP drain batch.
-type H2DownlinkBatchWriter interface {
+// H2DownlinkAppender batches S2C capsules before HTTP/2 flush (asymmetric download fountain; not bidi echo).
+type H2DownlinkAppender interface {
 	H2DownlinkCapsules
 	AppendUDPPayloadAsCapsules(udpPayload []byte) error
 	FlushPending() error
 }
 
-// DirectH2OnwardWriter wraps a single-leg OnwardUDPWriter (no session mutex).
-type DirectH2OnwardWriter struct {
-	W *OnwardUDPWriter
-}
+const h2DownlinkBatchWire = 64 * 1024
 
-func (o *DirectH2OnwardWriter) Queue(payload []byte) (bool, error) {
-	if o == nil || o.W == nil {
-		return false, errors.New("masque h2: onward writer unavailable")
+func relayH2DownlinkICMP(downlink H2DownlinkCapsules) error {
+	if err := downlink.WriteUDPPayloadAsCapsules(nil); err != nil {
+		return fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram: %w", err)
 	}
-	return o.W.Queue(payload)
+	return nil
 }
 
-func (o *DirectH2OnwardWriter) Flush() (bool, error) {
-	if o == nil || o.W == nil {
-		return false, errors.New("masque h2: onward writer unavailable")
+func validateH2DownlinkPayloadLen(n int) error {
+	if n <= 0 {
+		return nil
 	}
-	return o.W.Flush()
+	return frame.ValidateProxiedUDPPayloadLen(n)
 }
 
-func (o *DirectH2OnwardWriter) SendBurstViews(wire []byte, count, wireLen, payloadOff int) (bool, error) {
-	if o == nil || o.W == nil {
-		return false, errors.New("masque h2: onward writer unavailable")
-	}
-	return o.W.SendBurstViews(wire, count, wireLen, payloadOff)
-}
-
-// DirectH2Onward is the thin single-write onward path (c2sRelayUDPWriteReliable guard anchor).
-type DirectH2Onward struct {
+// DirectH2OnwardUplink implements H2UplinkOnward with h2o udp_write_core immediate send (no Linux WriteBatch).
+type DirectH2OnwardUplink struct {
 	Conn *net.UDPConn
 }
 
-func (o *DirectH2Onward) RelayUDP(payload []byte) error {
-	if o == nil || o.Conn == nil {
-		return errors.New("masque h2: onward UDP unavailable")
-	}
-	if len(payload) == 0 {
-		return nil
-	}
-	return c2sRelayUDPWriteReliable(o.Conn, payload, nil)
+func (o *DirectH2OnwardUplink) Queue(payload []byte) (bool, error) {
+	return queueH2OnwardUDP(o.Conn, payload)
+}
+
+func (o *DirectH2OnwardUplink) Flush() (bool, error) {
+	return false, nil
 }
 
 // RelayH2ConnectUplink scans HTTP/2 request-body DATAGRAM capsules and relays payloads onward.
@@ -103,24 +90,6 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 		default:
 		}
 		for len(pending) > 0 {
-			if n512 := h2c.CountLeadingDatagramCapsule512Wire(pending); n512 > 0 {
-				wireLen := h2c.DatagramCapsule512WireLen
-				icmp, err := onward.SendBurstViews(pending, n512, wireLen, wireLen-512)
-				pending = pending[n512*wireLen:]
-				if icmp {
-					if onICMP != nil {
-						if werr := onICMP(); werr != nil {
-							return fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram after burst: %w", werr)
-						}
-					}
-				} else if err != nil {
-					return fmt.Errorf("masque h2 dataplane connect-udp server udp burst: %w", err)
-				}
-				if signalReady != nil {
-					signalReady()
-				}
-				continue
-			}
 			if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
 				pending = pending[consumed:]
 				if err := relayOnward(udpPayload); err != nil {
@@ -182,85 +151,7 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 	}
 }
 
-// RelayH2ConnectDownlink reads onward UDP, batches available datagrams, then writes capsules (h2o udp_on_read drain).
-// tailFlush controls sub-threshold flush after a drain batch (echo: true on lone reply after uplink).
-func RelayH2ConnectDownlink(ctx context.Context, conn *net.UDPConn, readBufSize int, downlink H2DownlinkCapsules, maxBatchWire int, tailFlush func(payloads [][]byte) bool) error {
-	if maxBatchWire <= 0 {
-		maxBatchWire = 32 * 1024
-	}
-	batchW, batchOK := downlink.(H2DownlinkBatchWriter)
-	buf := make([]byte, readBufSize)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		payloads, err := readOnwardUDPBatch(ctx, conn, buf, maxBatchWire, onwardUDPWireLenH2Capsule)
-		if err != nil {
-			if isICMPPortUnreachableUDPRead(0, err) {
-				if werr := downlink.WriteUDPPayloadAsCapsules(nil); werr != nil {
-					return fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram: %w", werr)
-				}
-				continue
-			}
-			if isTransientUDPReadError(err) {
-				continue
-			}
-			if isServeTerminalUDPConnErr(err) {
-				return nil
-			}
-			return fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
-		}
-		if len(payloads) == 0 {
-			continue
-		}
-		if batchOK {
-			batchWire := 0
-			for _, payload := range payloads {
-				if len(payload) > 0 {
-					if err := frame.ValidateProxiedUDPPayloadLen(len(payload)); err != nil {
-						return err
-					}
-					batchWire += onwardUDPWireLenH2Capsule(payload)
-				}
-				if err := batchW.AppendUDPPayloadAsCapsules(payload); err != nil {
-					return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", err)
-				}
-			}
-			shouldFlush := shouldFlushH2DownlinkBatch(batchWire, maxBatchWire, payloads, tailFlush)
-			if shouldFlush {
-				if err := batchW.FlushPending(); err != nil {
-					return fmt.Errorf("masque h2 dataplane connect-udp server down flush: %w", err)
-				}
-			}
-			continue
-		}
-		for _, payload := range payloads {
-			if len(payload) > 0 {
-				if err := frame.ValidateProxiedUDPPayloadLen(len(payload)); err != nil {
-					return err
-				}
-			}
-			if err := downlink.WriteUDPPayloadAsCapsules(payload); err != nil {
-				return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", err)
-			}
-		}
-	}
-}
-
-func shouldFlushH2DownlinkBatch(batchWire, maxBatchWire int, payloads [][]byte, tailFlush func([][]byte) bool) bool {
-	if batchWire >= maxBatchWire {
-		return true
-	}
-	if tailFlush != nil {
-		return tailFlush(payloads)
-	}
-	return false
-}
-
 // RelayH2ConnectDownlinkImmediate writes one RFC9297 capsule per onward UDP read (h2o 1:1 S2C).
-// Asymmetric download legs use this instead of batch Append — echo-duplex needs immediate flush.
 func RelayH2ConnectDownlinkImmediate(ctx context.Context, conn *net.UDPConn, readBufSize int, downlink H2DownlinkCapsules) error {
 	buf := make([]byte, readBufSize)
 	for {
@@ -272,8 +163,8 @@ func RelayH2ConnectDownlinkImmediate(ctx context.Context, conn *net.UDPConn, rea
 		n, err := conn.Read(buf)
 		if err != nil {
 			if isICMPPortUnreachableUDPRead(n, err) {
-				if werr := downlink.WriteUDPPayloadAsCapsules(nil); werr != nil {
-					return fmt.Errorf("masque h2 dataplane connect-udp server icmp empty dgram: %w", werr)
+				if werr := relayH2DownlinkICMP(downlink); werr != nil {
+					return werr
 				}
 				continue
 			}
@@ -285,13 +176,69 @@ func RelayH2ConnectDownlinkImmediate(ctx context.Context, conn *net.UDPConn, rea
 			}
 			return fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
 		}
-		if len(buf[:n]) > 0 {
-			if err := frame.ValidateProxiedUDPPayloadLen(n); err != nil {
-				return err
-			}
+		if err := validateH2DownlinkPayloadLen(n); err != nil {
+			return err
 		}
 		if err := downlink.WriteUDPPayloadAsCapsules(buf[:n]); err != nil {
 			return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", err)
+		}
+	}
+}
+
+// RelayH2ConnectDownlinkFountain appends RFC9297 wire with byte-threshold flush (asymmetric S2C-only leg).
+// It keeps low-latency single-packet echo, but uses append batching for multi-packet bursts.
+func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, readBufSize int, downlink H2DownlinkAppender) error {
+	if downlink == nil {
+		return errors.New("masque h2 dataplane connect-udp server downlink: nil appender")
+	}
+	defer func() { _ = downlink.FlushPending() }()
+	buf := make([]byte, readBufSize)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		payloads, err := readOnwardUDPBatch(ctx, conn, buf, h2DownlinkBatchWire, onwardUDPWireLenH2Capsule)
+		if err != nil {
+			if isRelayBatchContextDone(err) {
+				return nil
+			}
+			if isICMPPortUnreachableUDPRead(0, err) {
+				if werr := relayH2DownlinkICMP(downlink); werr != nil {
+					return werr
+				}
+				continue
+			}
+			if isTransientUDPReadError(err) {
+				continue
+			}
+			if isServeTerminalUDPConnErr(err) {
+				return nil
+			}
+			if len(payloads) == 0 {
+				return fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
+			}
+		}
+		for _, payload := range payloads {
+			if vErr := validateH2DownlinkPayloadLen(len(payload)); vErr != nil {
+				return vErr
+			}
+			if aErr := downlink.AppendUDPPayloadAsCapsules(payload); aErr != nil {
+				return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", aErr)
+			}
+		}
+		// Single-packet batch: low-latency flush for echo on asym download leg.
+		if len(payloads) == 1 {
+			if fErr := downlink.FlushPending(); fErr != nil {
+				return fmt.Errorf("masque h2 dataplane connect-udp server down flush: %w", fErr)
+			}
+		}
+		if err != nil {
+			if isRelayBatchContextDone(err) {
+				return nil
+			}
+			return err
 		}
 	}
 }

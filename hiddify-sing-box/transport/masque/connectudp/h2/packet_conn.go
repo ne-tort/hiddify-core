@@ -38,9 +38,7 @@ type PacketConn struct {
 
 	respBodyBuf *bufio.Reader
 	// downlinkPending holds unconsumed RFC9297 wire bytes (h2o scan-loop buffer).
-	downlinkPending []byte
-	// downlinkQueue holds parsed UDP payloads ready for ReadFrom (copied before pending trim).
-	downlinkQueue [][]byte
+	downlinkPending bytes.Buffer
 
 	writeMu sync.Mutex
 	readMu  sync.Mutex
@@ -60,9 +58,6 @@ type PacketConn struct {
 	duplexActive atomic.Bool
 	payloadWritePending atomic.Bool
 
-	lastUploadAt    time.Time
-	rapidUploadHits int
-	bulkUpload      bool
 	writesSinceRead int
 
 	primeOnce sync.Once
@@ -200,8 +195,6 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if hadPayloadWrite {
 		c.duplexActive.Store(true)
 		c.writeMu.Lock()
-		c.bulkUpload = false
-		c.rapidUploadHits = 0
 		c.writesSinceRead = 0
 		c.writeMu.Unlock()
 		if err := c.flushUploadPendingForRead(); err != nil {
@@ -233,8 +226,6 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	if n > 0 {
 		c.duplexActive.Store(true)
 		c.writeMu.Lock()
-		c.bulkUpload = false
-		c.rapidUploadHits = 0
 		c.writesSinceRead = 0
 		c.writeMu.Unlock()
 	}
@@ -313,9 +304,6 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		}
 		_ = c.Close()
 		return 0, fmt.Errorf("masque h2 dataplane connect-udp encode body: %w", encErr)
-	}
-	if !c.duplexActive.Load() {
-		c.noteUploadArrivalLocked(time.Now())
 	}
 	c.writesSinceRead++
 	var wire []byte

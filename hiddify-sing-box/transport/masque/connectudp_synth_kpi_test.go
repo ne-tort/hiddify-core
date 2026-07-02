@@ -505,7 +505,7 @@ func TestGATEConnectUDPH2SynthStretchDownloadFountain(t *testing.T) {
 		t.Fatalf("connect-udp-h2 stretch fountain download: %v", err)
 	}
 	t.Logf("GATE-CONNECT-UDP-SYNTH h2 stretch download-fountain: %.1f Mbit/s (%d bytes)", mbps, bytes)
-	const stretchMinMbps = 550.0
+	stretchMinMbps := connectUDPSynthStretchDownloadMinMbps()
 	if mbps < stretchMinMbps*(1-connectUDPSynthInstantGateSlackPct) {
 		t.Fatalf("%s", synthKPIDiagnostic("L4 connect-udp-h2 prod", "udp_down_fountain", mbps, stretchMinMbps,
 			"S2C sustained stretch toward DoD 1000"))

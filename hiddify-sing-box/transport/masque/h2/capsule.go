@@ -390,6 +390,26 @@ func AppendDatagramCapsuleBuffer(dst *bytes.Buffer, udpPayload []byte) {
 	dst.Write(wire)
 }
 
+// AppendUDPPayloadAsDatagramCapsulesBuffer splits a UDP payload into DATAGRAM capsules in dst.
+func AppendUDPPayloadAsDatagramCapsulesBuffer(dst *bytes.Buffer, udpPayload []byte) {
+	if dst == nil {
+		return
+	}
+	if len(udpPayload) == 0 {
+		AppendDatagramCapsuleBuffer(dst, nil)
+		return
+	}
+	step := MaxUDPPayloadPerDatagramCapsule()
+	for offset := 0; offset < len(udpPayload); {
+		end := offset + step
+		if end > len(udpPayload) {
+			end = len(udpPayload)
+		}
+		AppendDatagramCapsuleBuffer(dst, udpPayload[offset:end])
+		offset = end
+	}
+}
+
 // AppendUDPPayloadAsDatagramCapsules splits a UDP payload into DATAGRAM capsules without flushing.
 func AppendUDPPayloadAsDatagramCapsules(w io.Writer, udpPayload []byte) error {
 	if len(udpPayload) == 0 {

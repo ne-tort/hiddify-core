@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// FlushPacketConnWrites drains async CONNECT-UDP C2S write queues (SOCKS unwrap chain).
+// FlushPacketConnWrites drains CONNECT-UDP C2S coalesce buffers through wrapper chains (SOCKS unwrap).
 func FlushPacketConnWrites(conn net.PacketConn) {
 	for conn != nil {
 		if f, ok := conn.(interface{ FlushC2SWrites() }); ok {

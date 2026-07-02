@@ -1,7 +1,6 @@
 package h2
 
 import (
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -33,19 +32,6 @@ func TestIsH2ExtendedConnectUnsupportedByPeer(t *testing.T) {
 	require.False(t, IsH2ExtendedConnectUnsupportedByPeer(errString("connection reset")))
 	require.True(t, IsH2ExtendedConnectUnsupportedByPeer(errString("extended connect not supported by peer")))
 	require.True(t, IsH2ExtendedConnectUnsupportedByPeer(errString("missing SETTINGS enable_connect_protocol")))
-}
-
-func TestProxyStatusNextHopUDP(t *testing.T) {
-	require.Nil(t, ProxyStatusNextHopUDP(nil))
-	rsp := &http.Response{
-		Header: http.Header{
-			"Proxy-Status": {`masque; next-hop="192.0.2.1:5353"`},
-		},
-	}
-	nh := ProxyStatusNextHopUDP(rsp)
-	require.NotNil(t, nh)
-	require.Equal(t, "192.0.2.1", nh.IP.String())
-	require.Equal(t, 5353, nh.Port)
 }
 
 type errString string

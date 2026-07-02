@@ -35,7 +35,7 @@ func TestPacketConnReadDeadlineDoesNotCloseConn(t *testing.T) {
 	if !errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadFrom: %v want deadline exceeded", err)
 	}
-	if c.closed.Load() {
+	if c.IsClosed() {
 		t.Fatal("PacketConn closed on read deadline")
 	}
 	if _, werr := c.WriteTo(bytes.Repeat([]byte{'u'}, 64), c.RemoteAddr()); errors.Is(werr, net.ErrClosed) {
@@ -58,7 +58,7 @@ func TestAsymmetricPacketConnReadDeadlineSurvivesUploadWrite(t *testing.T) {
 		RemoteAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
 	})
 	upload := &stubUploadPacketConn{local: download.LocalAddr()}
-	c := NewAsymmetricPacketConn(download, []net.PacketConn{upload}, download.LocalAddr(), download.RemoteAddr(), nil)
+	c := NewAsymmetricPacketConn(download, upload, download.LocalAddr(), download.RemoteAddr(), nil)
 	t.Cleanup(func() { _ = c.Close() })
 
 	if err := c.SetReadDeadline(time.Now().Add(40 * time.Millisecond)); err != nil {
@@ -68,10 +68,10 @@ func TestAsymmetricPacketConnReadDeadlineSurvivesUploadWrite(t *testing.T) {
 	if !errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadFrom: %v want deadline exceeded", err)
 	}
-	if c.closed.Load() {
+	if c.IsClosed() {
 		t.Fatal("AsymmetricPacketConn closed on read deadline")
 	}
-	if download.closed.Load() {
+	if download.IsClosed() {
 		t.Fatal("download leg closed on read deadline")
 	}
 	if upload.closed.Load() {

@@ -19,10 +19,6 @@ func (h2OversizeOnward) Queue([]byte) (bool, error) {
 
 func (h2OversizeOnward) Flush() (bool, error) { return false, nil }
 
-func (h2OversizeOnward) SendBurstViews([]byte, int, int, int) (bool, error) {
-	return false, errors.New("relay should not run")
-}
-
 // TestRelayH2ConnectUplinkAbortsOnOversizeCapsule locks H2 uplink abort when a single DATAGRAM capsule exceeds wire max.
 func TestRelayH2ConnectUplinkAbortsOnOversizeCapsule(t *testing.T) {
 	t.Parallel()

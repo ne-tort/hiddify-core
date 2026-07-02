@@ -17,6 +17,7 @@ import (
 	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 )
 
 type masqueAddr struct{ string }
@@ -31,11 +32,6 @@ type http3Stream interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
 	SendDatagram([]byte) error
 	CancelRead(quic.StreamErrorCode)
-}
-
-// tryDrainHTTPDatagrams is quic-go HTTP/3 non-blocking datagram dequeue (masque-go conn shape).
-type tryDrainHTTPDatagrams interface {
-	TryReceiveDatagram() ([]byte, bool)
 }
 
 var (
@@ -121,7 +117,7 @@ start:
 	if c.closed.Load() {
 		return 0, nil, net.ErrClosed
 	}
-	if drainer, ok := c.str.(tryDrainHTTPDatagrams); ok {
+	if drainer, ok := c.str.(h3quic.TryDrainHTTPDatagrams); ok {
 		for {
 			data, ok := drainer.TryReceiveDatagram()
 			if !ok {
@@ -190,10 +186,6 @@ func (c *H3Conn) WriteTo(p []byte, _ net.Addr) (int, error) {
 }
 
 func (c *H3Conn) FlushC2SWrites() {
-	c.flushDatagramSend()
-}
-
-func (c *H3Conn) FlushPendingC2SBatch() {
 	c.flushDatagramSend()
 }
 

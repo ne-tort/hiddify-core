@@ -8,11 +8,10 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
-	"github.com/sagernet/sing-box/transport/masque/connectudp"
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
@@ -35,18 +34,6 @@ type Proxy struct {
 	closers  map[io.Closer]struct{}
 }
 
-func dnsErrorToProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
-	if dnsError.Timeout() {
-		proxyStatus.Params.Add("error", "dns_timeout")
-	} else {
-		proxyStatus.Params.Add("error", "dns_error")
-		if dnsError.IsNotFound {
-			proxyStatus.Params.Add("rcode", "Negative response")
-		} else {
-			proxyStatus.Params.Add("rcode", "SERVFAIL")
-		}
-	}
-}
 
 // Proxy dials a connected UDP socket and proxies the CONNECT-UDP request.
 func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
@@ -58,26 +45,15 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 	}
 	s.mx.Unlock()
 
-	proxyStatus := httpsfv.NewItem(r.Host)
-	writeProxyStatus := func(err error) error {
-		if err != nil {
-			proxyStatus.Params.Add("details", err.Error())
-		}
-		proxyStatusVal, marshalErr := httpsfv.Marshal(proxyStatus)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		w.Header().Add("Proxy-Status", proxyStatusVal)
-		return err
-	}
+	proxyStatus := frame.NewProxyStatusItem(r.Host)
 
 	addr, err := net.ResolveUDPAddr("udp", r.Target)
 	if err != nil {
 		var dnsError *net.DNSError
 		if errors.As(err, &dnsError) {
-			dnsErrorToProxyStatus(&proxyStatus, dnsError)
+			frame.DNSErrorToProxyStatus(&proxyStatus, dnsError)
 		}
-		err = writeProxyStatus(err)
+		_ = frame.WriteProxyStatusHeader(w, &proxyStatus, err)
 		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
@@ -87,14 +63,14 @@ func (s *Proxy) Proxy(w http.ResponseWriter, r *frame.Request) error {
 	conn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
 		proxyStatus.Params.Add("error", "destination_ip_unroutable")
-		err = writeProxyStatus(err)
+		_ = frame.WriteProxyStatusHeader(w, &proxyStatus, err)
 		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err
 	}
 
 	TuneMasqueUDPSocketBuffers(conn)
 
-	if err = writeProxyStatus(nil); err != nil {
+	if err = frame.WriteProxyStatusHeader(w, &proxyStatus, nil); err != nil {
 		conn.Close()
 		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return err

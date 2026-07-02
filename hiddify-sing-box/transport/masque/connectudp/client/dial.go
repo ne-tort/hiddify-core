@@ -14,6 +14,9 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
+// ErrConnectUDPNotSupported is returned when the backend capability set lacks CONNECT-UDP.
+var ErrConnectUDPNotSupported = E.New("masque backend does not support CONNECT-UDP")
+
 // QUICClientConfig builds a masque-go CONNECT-UDP QUIC client.
 type QUICClientConfig struct {
 	TLSClientConfig *tls.Config

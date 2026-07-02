@@ -5,8 +5,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 )
@@ -34,62 +34,18 @@ func closeH2OnwardConn(conn *net.UDPConn) {
 	}
 }
 
-func dnsErrorToMasqueProxyStatus(proxyStatus *httpsfv.Item, dnsError *net.DNSError) {
-	if dnsError.Timeout() {
-		proxyStatus.Params.Add("error", "dns_timeout")
-		return
-	}
-	proxyStatus.Params.Add("error", "dns_error")
-	if dnsError.IsNotFound {
-		proxyStatus.Params.Add("rcode", "Negative response")
-	} else {
-		proxyStatus.Params.Add("rcode", "SERVFAIL")
-	}
-}
-
-func resolveDialToHTTPStatus(err error) int {
-	if err == nil {
-		return http.StatusOK
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return http.StatusGatewayTimeout
-	}
-	var dnsError *net.DNSError
-	if errors.As(err, &dnsError) {
-		return http.StatusBadGateway
-	}
-	var addrErr *net.AddrError
-	var parseError *net.ParseError
-	if errors.As(err, &addrErr) || errors.As(err, &parseError) {
-		return http.StatusBadRequest
-	}
-	return http.StatusInternalServerError
-}
-
 // ServeConnectUDP handles the HTTP/2 CONNECT-UDP server leg (capsule relay) after ACL checks.
 func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHost string, cfg ServeConnectUDPConfig) {
-	proxyStatus := httpsfv.NewItem(authorityHost)
-	writeProxyStatus := func(err error) error {
-		if err != nil {
-			proxyStatus.Params.Add("details", err.Error())
-		}
-		val, marshalErr := httpsfv.Marshal(proxyStatus)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		w.Header().Add("Proxy-Status", val)
-		return err
-	}
+	proxyStatus := cudpframe.NewProxyStatusItem(authorityHost)
 
 	addr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		var dnsError *net.DNSError
 		if errors.As(err, &dnsError) {
-			dnsErrorToMasqueProxyStatus(&proxyStatus, dnsError)
+			cudpframe.DNSErrorToProxyStatus(&proxyStatus, dnsError)
 		}
-		_ = writeProxyStatus(err)
-		w.WriteHeader(resolveDialToHTTPStatus(err))
+		_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, err)
+		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(err))
 		return
 	}
 	proxyStatus.Params.Add("next-hop", addr.String())
@@ -99,11 +55,11 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 		_, keyErr := RequireSessionKey(r, addr.String())
 		if keyErr != nil {
 			if IsMissingMuxKey(keyErr) {
-				_ = writeProxyStatus(keyErr)
+				_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, keyErr)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			_ = writeProxyStatus(keyErr)
+			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, keyErr)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -115,8 +71,8 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 		conn, dialErr = net.DialUDP("udp", nil, addr)
 		if dialErr != nil {
 			proxyStatus.Params.Add("error", "destination_ip_unroutable")
-			_ = writeProxyStatus(dialErr)
-			w.WriteHeader(resolveDialToHTTPStatus(dialErr))
+			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, dialErr)
+			w.WriteHeader(connectudp.ResolveDialToHTTPStatus(dialErr))
 			return
 		}
 		tuneH2OnwardUDP(conn)
@@ -126,7 +82,7 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 	if role == StreamRoleDownload {
 		if regErr := RegisterDownloadBeforeOK(w, r, conn, addr.String(), sessions); regErr != nil {
 			closeH2OnwardConn(conn)
-			_ = writeProxyStatus(regErr)
+			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, regErr)
 			if IsDuplicateDownloadSession(regErr) {
 				w.WriteHeader(http.StatusConflict)
 			} else if IsMissingMuxKey(regErr) {
@@ -139,13 +95,13 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 	}
 	if role == StreamRoleUpload {
 		if waitErr := WaitDownloadSessionBeforeOK(r, addr.String(), sessions); waitErr != nil {
-			_ = writeProxyStatus(waitErr)
+			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, waitErr)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 	}
 
-	if err := writeProxyStatus(nil); err != nil {
+	if err := cudpframe.WriteProxyStatusHeader(w, &proxyStatus, nil); err != nil {
 		closeH2OnwardConn(conn)
 		w.WriteHeader(http.StatusInternalServerError)
 		return

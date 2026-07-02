@@ -223,7 +223,8 @@ func (h connectUDPPlaneHost) NewQUICClient() *qmasque.Client {
 
 func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, template *uritemplate.Template, target string) (net.PacketConn, error) {
 	host := connectUDPPlaneHost{s: s}
-	return cudpclient.DialAddr(ctx, host, host.ObservabilityInput(template, target), client, template, target)
+	conn, _, err := cudpclient.DialUDPResilient(ctx, host, client, template, target)
+	return conn, err
 }
 
 func (s *coreSession) listenPacketConnectUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

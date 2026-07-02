@@ -13,23 +13,9 @@ import (
 
 const (
 	h2UploadWriteInterruptDeadline = 100 * time.Millisecond
-	// h2UploadCoalesceDuplexBytes batches less on C2S when S2C ReadFrom is active (H2 bidi interleave).
-	h2UploadCoalesceDuplexBytes = 32 * 1024
-	// h2UploadCoalesceBulkBytesDefault is prod upload-leg / bulk coalesce ceiling (Docker KPI parity).
-	h2UploadCoalesceBulkBytesDefault = 64 * 1024
-	// h2UploadCoalesceThreshold is the upload-only coalesce ceiling (128 KiB — balance pipe block vs flush rate).
-	h2UploadCoalesceThreshold = 128 * 1024
-	// h2UploadBulkEnterGap: WriteTo closer than this counts toward bulk coalesce (echo flood / upload-only).
-	h2UploadBulkEnterGap = 50 * time.Microsecond
-	// h2UploadBulkExitGap: spaced WriteTo in duplex leaves bulk (pipeline-1 / TUN RTT).
-	h2UploadBulkExitGap = 500 * time.Microsecond
-	// h2UploadBulkEnterHits: consecutive rapid WriteTo before bulk coalesce arms.
-	h2UploadBulkEnterHits = 4
+	// h2UploadCoalesceBytes: upload-only threshold flush (Invisv blocking body; no timer/debounce).
+	h2UploadCoalesceBytes = 64 * 1024
 )
-
-func h2UploadCoalesceBulkBytesConfigured() int {
-	return h2UploadCoalesceBulkBytesDefault
-}
 
 // Prime sends an empty DATAGRAM capsule at dial before first WriteTo.
 func (c *PacketConn) Prime() error {
@@ -151,19 +137,7 @@ func (c *PacketConn) writeDeadlineContext() (context.Context, context.CancelFunc
 }
 
 func (c *PacketConn) uploadCoalesceThreshold() int {
-	if c != nil && c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() && c.bulkUpload {
-		return h2UploadCoalesceBulkBytesConfigured()
-	}
-	if c != nil && c.duplexActive.Load() {
-		if c.bulkUpload {
-			return h2UploadCoalesceBulkBytesConfigured()
-		}
-		return h2UploadCoalesceDuplexBytes
-	}
-	if c != nil && c.bulkUpload {
-		return h2UploadCoalesceBulkBytesConfigured()
-	}
-	return h2UploadCoalesceBulkBytesConfigured()
+	return h2UploadCoalesceBytes
 }
 
 func (c *PacketConn) writeUploadWireUnlocked(wire []byte) error {
@@ -210,31 +184,9 @@ func (c *PacketConn) awaitWriteReqBody(ctx context.Context, writeFn func() error
 	}
 }
 
-func (c *PacketConn) noteUploadArrivalLocked(now time.Time) {
-	enterHits := h2UploadBulkEnterHits
-	if c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() {
-		enterHits = 2
-	}
-	if !c.lastUploadAt.IsZero() {
-		gap := now.Sub(c.lastUploadAt)
-		switch {
-		case gap <= h2UploadBulkEnterGap:
-			c.rapidUploadHits++
-			if c.rapidUploadHits >= enterHits {
-				c.bulkUpload = true
-			}
-		case gap >= h2UploadBulkExitGap:
-			c.bulkUpload = false
-			c.rapidUploadHits = 0
-		default:
-			c.rapidUploadHits = 0
-		}
-	}
-	c.lastUploadAt = now
-}
-
 func (c *PacketConn) uploadFlushInteractiveLocked() bool {
-	return c.duplexActive.Load() && !c.bulkUpload
+	// Echo-duplex on upload leg: peer download ReadFrom active → flush each batch (no coalesce hold).
+	return c.duplexActive.Load()
 }
 
 func (c *PacketConn) flushUploadPendingForRead() error {
@@ -252,20 +204,4 @@ func (c *PacketConn) flushUploadPendingForRead() error {
 		return fmt.Errorf("masque h2 dataplane connect-udp read wake flush: %w", err)
 	}
 	return nil
-}
-
-// FlushPendingC2SBatch drains coalesced upload wire (asymmetric echo read path).
-func (c *PacketConn) FlushPendingC2SBatch() {
-	c.FlushC2SWrites()
-}
-
-// markDuplexPeerActive arms upload coalesce when the peer leg is active (asymmetric echo).
-func (c *PacketConn) markDuplexPeerActive() {
-	if c == nil || c.closed.Load() {
-		return
-	}
-	if c.uploadOnly && c.legProfile.uploadNoCoalesceTimer() {
-		return
-	}
-	c.duplexActive.Store(true)
 }

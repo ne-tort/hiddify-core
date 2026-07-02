@@ -40,6 +40,19 @@ func (h *wrapSplitListenHost) PrepareUDP() (*qmasque.Client, *uritemplate.Templa
 func (h *wrapSplitListenHost) DialUDP(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
 	return stubPacketConn{}, nil
 }
+func (h *wrapSplitListenHost) DialOverHTTP2(context.Context, *uritemplate.Template, string) (net.PacketConn, error) {
+	return stubPacketConn{}, nil
+}
+func (h *wrapSplitListenHost) DialH3(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
+	return stubPacketConn{}, nil
+}
+func (h *wrapSplitListenHost) RecordHTTPLayerSuccess(string)        {}
+func (h *wrapSplitListenHost) ResetHTTPFallbackBudgetAfterSuccess() {}
+func (h *wrapSplitListenHost) ErrTemplateNotConfigured() error      { return ErrConnectUDPNotSupported }
+func (h *wrapSplitListenHost) ObservabilityInput(*uritemplate.Template, string) ObservabilityInput {
+	return ObservabilityInput{}
+}
+func (h *wrapSplitListenHost) NewQUICClient() *qmasque.Client { return &qmasque.Client{} }
 func (h *wrapSplitListenHost) WrapDatagramSplit(pc net.PacketConn, writeMax int, httpLayer string) net.PacketConn {
 	h.wrapped = true
 	if writeMax != h.writeMax {

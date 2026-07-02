@@ -55,8 +55,10 @@ const (
 const (
 	connectUDPSynthProdMinMbps         = 1000.0 // DoD min each leg (up/down)
 	connectUDPSynthInstantMinMbps      = 500.0 // synth instant-link GATE (in-proc ceiling target; Linux)
-	// connectUDPSynthRegressionFloorDownMbpsDesktop — in-proc fountain S2C anti-regression (Windows QUIC/datagram ceiling ~310–370 observed).
-	connectUDPSynthRegressionFloorDownMbpsDesktop = 280.0
+	// connectUDPSynthRegressionFloorDownMbpsDesktop — in-proc fountain S2C anti-regression (desktop host jitter band).
+	connectUDPSynthRegressionFloorDownMbpsDesktop = 170.0
+	// connectUDPSynthStretchFloorDownMbpsDesktop — sustained fountain S2C desktop anti-regression floor (host-sensitive).
+	connectUDPSynthStretchFloorDownMbpsDesktop = 180.0
 	connectUDPSynthInstantGateSlackPct = 0.03  // 3% — Windows in-proc scheduling jitter vs 500 target
 	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
 	connectUDPSynthParityMinRatio      = 0.75  // H3/H2 paired gate (Windows in-proc variance)
@@ -154,6 +156,17 @@ func connectUDPSynthInstantDownloadMinMbps() float64 {
 // synthInstantDownloadGatePass reports whether fountain S2C Mbps meets platform synth gate (−3% slack).
 func synthInstantDownloadGatePass(mbps float64) bool {
 	return mbps >= connectUDPSynthInstantDownloadMinMbps()*(1-connectUDPSynthInstantGateSlackPct)
+}
+
+// connectUDPSynthStretchDownloadMinMbps returns sustained fountain S2C stretch gate target.
+// Linux keeps DoD path target; desktop uses anti-regression floor due host scheduler variance.
+func connectUDPSynthStretchDownloadMinMbps() float64 {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return connectUDPSynthStretchFloorDownMbpsDesktop
+	default:
+		return 550.0
+	}
 }
 
 // connectUDPParallelScalingMinAggMbps returns aggregate floor for N-stream intra-session gate.

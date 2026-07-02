@@ -3,6 +3,7 @@ package probe
 import (
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -49,6 +50,13 @@ type SequencedSink struct {
 
 // DefaultBurstMinRxRatio is the minimum unique rx/sent for zero-loss burst KPI.
 const DefaultBurstMinRxRatio = 0.95
+
+var benchRunIDSeq uint32 = 0xC0FFEE00
+
+// AllocBenchRunID returns a unique probe run_id for in-proc benches (avoids cross-test sink pollution).
+func AllocBenchRunID() uint32 {
+	return atomic.AddUint32(&benchRunIDSeq, 1)
+}
 
 // NewSequencedSink filters packets by runID.
 func NewSequencedSink(runID uint32) *SequencedSink {
@@ -114,20 +122,17 @@ func (s *SequencedSink) RxCount() int {
 
 // SeqSetComplete reports whether every seq in [0, sentPkts) was recorded exactly once.
 func (s *SequencedSink) SeqSetComplete(sentPkts int) bool {
-	if sentPkts <= 0 {
-		return false
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.seen) != sentPkts {
+	return s.seqSetCompleteLocked(sentPkts)
+}
+
+func (s *SequencedSink) seqSetCompleteLocked(sentPkts int) bool {
+	if sentPkts <= 0 || len(s.seen) != sentPkts {
 		return false
 	}
-	for i := 0; i < sentPkts; i++ {
-		if _, ok := s.seen[uint64(i)]; !ok {
-			return false
-		}
-	}
-	return true
+	// Distinct seq with max==sent-1 and count==sent implies exactly {0..sent-1}.
+	return s.maxSeq == int64(sentPkts-1)
 }
 
 // Analyze compares sink records to sentPkts for one run_id.
@@ -136,6 +141,11 @@ func (s *SequencedSink) Analyze(sentPkts, payloadLen int) SequencedStats {
 	rx := len(s.seen)
 	dup := s.dup
 	ooo := s.ooo
+	seqOK := s.seqSetCompleteLocked(sentPkts)
+	fill := ""
+	if rx > 0 && payloadLen > UDPProbeHeaderLen {
+		fill = UDPProbeFillSHA256(rx, payloadLen)
+	}
 	s.mu.Unlock()
 
 	excess := 0
@@ -152,10 +162,6 @@ func (s *SequencedSink) Analyze(sentPkts, payloadLen int) SequencedStats {
 	if sentPkts > 0 {
 		dupPct = 100.0 * float64(dup) / float64(sentPkts)
 	}
-	fill := ""
-	if rx > 0 && payloadLen > UDPProbeHeaderLen {
-		fill = UDPProbeFillSHA256(rx, payloadLen)
-	}
 	return SequencedStats{
 		RxPkts:     rx,
 		SentPkts:   sentPkts,
@@ -166,7 +172,7 @@ func (s *SequencedSink) Analyze(sentPkts, payloadLen int) SequencedStats {
 		OOOPkts:    ooo,
 		ExcessPkts: excess,
 		FillSHA256: fill,
-		SeqSetOK:   s.SeqSetComplete(sentPkts),
+		SeqSetOK:   seqOK,
 	}
 }
 

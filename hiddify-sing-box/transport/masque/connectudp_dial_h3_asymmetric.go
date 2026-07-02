@@ -7,7 +7,7 @@ import (
 
 	qmasque "github.com/quic-go/masque-go"
 	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
-	cudph2leg "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
+	cudpasymconn "github.com/sagernet/sing-box/transport/masque/connectudp/asymconn"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -37,5 +37,5 @@ func dialConnectUDPH3Asymmetric(ctx context.Context, client *qmasque.Client, tem
 		_ = download.Close()
 		return nil, err
 	}
-	return cudph2leg.NewAsymmetricPacketConn(download, []net.PacketConn{upload}, local, remote, nil), nil
+	return cudpasymconn.NewPacketConn(download, upload, local, remote, nil), nil
 }

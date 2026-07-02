@@ -2,6 +2,7 @@ package h2
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -52,35 +53,26 @@ func (c *PacketConn) downlinkReadScratch() []byte {
 	return c.downlinkReadBuf
 }
 
-// enqueueDownlinkUDP copies parsed UDP payloads before pending trim (h2o relay forwards immediately; client queues for ReadFrom).
-func (c *PacketConn) enqueueDownlinkUDP(payload []byte) {
-	if c == nil || len(payload) == 0 {
-		return
-	}
-	c.downlinkQueue = append(c.downlinkQueue, append([]byte(nil), payload...))
-}
-
-// scanDownlinkPendingIntoQueue mirrors RelayH2ConnectUplink scan loop (h2o udp_do_write_stream).
-func (c *PacketConn) scanDownlinkPendingIntoQueue() (icmp bool, err error) {
-	for len(c.downlinkPending) > 0 {
-		pending := c.downlinkPending
+// parseOneDownlinkFromPending extracts the next proxied UDP payload from pending wire (Invisv blocking ReadFrom shape).
+func (c *PacketConn) parseOneDownlinkFromPending() (payload []byte, icmp bool, err error) {
+	for c.downlinkPending.Len() > 0 {
+		pending := c.downlinkPending.Bytes()
 		if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
-			c.downlinkPending = pending[consumed:]
+			c.downlinkPending.Next(consumed)
 			if len(udpPayload) == 0 {
-				return true, nil
+				return nil, true, nil
 			}
-			c.enqueueDownlinkUDP(udpPayload)
-			continue
+			return udpPayload, false, nil
 		}
 		inner, consumed, perr := h2c.ParseNextDatagramCapsuleWire(pending)
 		if perr != nil {
 			_ = c.Close()
-			return false, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", perr)
+			return nil, false, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", perr)
 		}
 		if consumed == 0 {
 			break
 		}
-		c.downlinkPending = pending[consumed:]
+		c.downlinkPending.Next(consumed)
 		if inner == nil {
 			continue
 		}
@@ -89,49 +81,29 @@ func (c *PacketConn) scanDownlinkPendingIntoQueue() (icmp bool, err error) {
 			continue
 		}
 		if len(udpPayload) == 0 {
-			return true, nil
+			return nil, true, nil
 		}
-		c.enqueueDownlinkUDP(udpPayload)
+		return udpPayload, false, nil
 	}
-	if len(c.downlinkPending) == 0 && cap(c.downlinkPending) > ResponseBodyBufSize*2 {
-		c.downlinkPending = nil
+	c.compactDownlinkPending()
+	return nil, false, nil
+}
+
+func (c *PacketConn) compactDownlinkPending() {
+	if c.downlinkPending.Len() == 0 && c.downlinkPending.Cap() > ResponseBodyBufSize*2 {
+		c.downlinkPending = bytes.Buffer{}
 	}
-	return false, nil
 }
 
 func (c *PacketConn) tryParseOneDatagramInto(p []byte) (n int, icmp bool, err error) {
-	if len(c.downlinkQueue) > 0 {
-		payload := c.downlinkQueue[0]
-		c.downlinkQueue = c.downlinkQueue[1:]
-		if len(c.downlinkQueue) == 0 {
-			c.downlinkQueue = nil
-		}
-		return copy(p, payload), false, nil
+	payload, icmp, err := c.parseOneDownlinkFromPending()
+	if err != nil || icmp {
+		return 0, icmp, err
 	}
-	for len(c.downlinkPending) > 0 {
-		pending := c.downlinkPending
-		if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
-			c.downlinkPending = pending[consumed:]
-			if len(udpPayload) == 0 {
-				return 0, true, nil
-			}
-			return copy(p, udpPayload), false, nil
-		}
-		icmp, err = c.scanDownlinkPendingIntoQueue()
-		if icmp || err != nil {
-			return 0, icmp, err
-		}
-		if len(c.downlinkQueue) > 0 {
-			payload := c.downlinkQueue[0]
-			c.downlinkQueue = c.downlinkQueue[1:]
-			if len(c.downlinkQueue) == 0 {
-				c.downlinkQueue = nil
-			}
-			return copy(p, payload), false, nil
-		}
-		break
+	if len(payload) == 0 {
+		return 0, false, nil
 	}
-	return 0, false, nil
+	return copy(p, payload), false, nil
 }
 
 func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (int, error) {
@@ -173,12 +145,12 @@ func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (in
 		}
 		nr, err := c.readResponseBodyChunk(ctx, readBuf)
 		if nr > 0 {
-			c.downlinkPending = append(c.downlinkPending, readBuf[:nr]...)
+			_, _ = c.downlinkPending.Write(readBuf[:nr])
 			continue
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(c.downlinkPending) > 0 {
+				if c.downlinkPending.Len() > 0 {
 					_ = c.Close()
 					return 0, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", io.ErrUnexpectedEOF)
 				}

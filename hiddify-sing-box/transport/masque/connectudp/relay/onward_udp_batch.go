@@ -9,7 +9,10 @@ import (
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
-const defaultOnwardUDPBatchPoll = 100 * time.Millisecond
+const (
+	defaultOnwardUDPBatchPoll = 100 * time.Millisecond
+	onwardUDPBatchCoalesceSpins = 8
+)
 
 type onwardUDPWireLen func(payload []byte) int
 
@@ -35,6 +38,7 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 	var payloads [][]byte
 	wire := 0
 	first := true
+	coalesceSpins := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -57,6 +61,10 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 		if err != nil {
 			_ = conn.SetReadDeadline(time.Time{})
 			if len(payloads) > 0 && isUDPReadTimeout(err) {
+				if len(payloads) == 1 && wire < maxWire && coalesceSpins < onwardUDPBatchCoalesceSpins {
+					coalesceSpins++
+					continue
+				}
 				return payloads, nil
 			}
 			if n > 0 {
@@ -69,6 +77,7 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 		}
 		payloads = append(payloads, append([]byte(nil), buf[:n]...))
 		wire += wireLen(buf[:n])
+		coalesceSpins = 0
 		if wire >= maxWire {
 			_ = conn.SetReadDeadline(time.Time{})
 			return payloads, nil

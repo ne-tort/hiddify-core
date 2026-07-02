@@ -42,5 +42,6 @@ type ListenHost interface {
 type SessionUDP interface {
 	DialHost
 	ListenHost
+	ObservabilityInput(template *uritemplate.Template, target string) ObservabilityInput
 	NewQUICClient() *qmasque.Client
 }

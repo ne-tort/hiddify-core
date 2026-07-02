@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -8,10 +9,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 	"github.com/sagernet/sing-box/transport/masque/netutil"
 )
-
-const h3TransientRetryMaxSpins = 8192
 
 const masqueUDPSocketBufferBytes = netutil.MasqueSocketBufferBytes
 
@@ -72,9 +72,9 @@ func c2sRelayUDPWrite(conn interface{ Write([]byte) (int, error) }, payload []by
 	return nil
 }
 
-// c2sRelayUDPWriteReliable retries transient onward UDP pressure (H3 C2S / H2 DirectH2Onward parity).
+// c2sRelayUDPWriteReliable retries transient onward UDP pressure (H3 C2S / H2 queueH2OnwardUDP parity).
 func c2sRelayUDPWriteReliable(conn interface{ Write([]byte) (int, error) }, payload []byte, icmpRelay func() error) error {
-	for spin := 0; spin < h3TransientRetryMaxSpins; spin++ {
+	for spin := 0; spin < h3quic.TransientPressureMaxSpins; spin++ {
 		err := c2sRelayUDPWrite(conn, payload, icmpRelay)
 		if err == nil {
 			return nil
@@ -110,4 +110,8 @@ func isServeTerminalUDPConnErr(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "use of closed network connection") ||
 		strings.Contains(s, "pipe is being closed")
+}
+
+func isRelayBatchContextDone(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

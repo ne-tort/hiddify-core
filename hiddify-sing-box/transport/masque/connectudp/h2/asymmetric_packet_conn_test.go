@@ -2,6 +2,7 @@ package h2
 
 import (
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,9 +33,9 @@ func TestAsymmetricPacketConnSingleUploadSyncWrite(t *testing.T) {
 	local := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
 	download := &stubPacketConn{local: local, remote: local}
 	upload := &stubPacketConn{local: local, remote: local}
-	c := NewAsymmetricPacketConn(download, []net.PacketConn{upload}, local, local, nil)
-	if c.uploadCh != nil {
-		t.Fatal("single upload leg must not allocate upload worker channel")
+	c := NewAsymmetricPacketConn(download, upload, local, local, nil)
+	if strings.Contains(h2AsymmetricPacketConnSource, "uploadCh") {
+		t.Fatal("asymmetric_packet_conn.go must not use async upload worker channel")
 	}
 	payload := []byte("sync-upload")
 	if _, err := c.WriteTo(payload, local); err != nil {

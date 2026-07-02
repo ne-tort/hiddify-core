@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"bytes"
 
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
@@ -15,16 +16,17 @@ const (
 	H2ServerUDPReadBuf    = 65535
 	H2ResponseBodyBufSize = 256 * 1024
 	// H2DownlinkBulkFlushBytes batches S2C RFC9297 wire before one HTTP/2 flush (capsule.go batch + G42).
-	H2DownlinkBulkFlushBytes = 32 * 1024
+	// Matches upload coalesce (h2UploadCoalesceBytes) and readOnwardUDPBatch wire budget.
+	H2DownlinkBulkFlushBytes = 64 * 1024
 )
 
 // H2ResponseWriter writes DATAGRAM capsules on the CONNECT-UDP response body.
 // Fountain: relay UDP drain + Append* with byte threshold flush. ICMP/bidi Write: h2o 1:1 immediate.
 type H2ResponseWriter struct {
 	http.ResponseWriter
-	profile           LegProfile
 	mu                sync.Mutex
 	pendingSinceFlush int
+	pendingWire       bytes.Buffer
 }
 
 func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
@@ -50,12 +52,13 @@ func (w *H2ResponseWriter) AppendUDPPayloadAsCapsules(udpPayload []byte) error {
 }
 
 func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
+	if w.pendingWire.Cap() == 0 {
+		w.pendingWire.Grow(H2DownlinkBulkFlushBytes)
+	}
 	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		if err := h2c.AppendDatagramCapsuleWire(w.ResponseWriter, udpPayload); err != nil {
-			return err
-		}
-	} else if err := h2c.AppendUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload); err != nil {
-		return err
+		h2c.AppendDatagramCapsuleBuffer(&w.pendingWire, udpPayload)
+	} else {
+		h2c.AppendUDPPayloadAsDatagramCapsulesBuffer(&w.pendingWire, udpPayload)
 	}
 	w.pendingSinceFlush += h2c.UDPPayloadWireLen(udpPayload)
 	return nil
@@ -63,6 +66,7 @@ func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
 
 func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error {
 	w.pendingSinceFlush = 0
+	w.pendingWire.Reset()
 	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
 		return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
 	}
@@ -70,6 +74,12 @@ func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error
 }
 
 func (w *H2ResponseWriter) flushLocked() error {
+	if w.pendingWire.Len() > 0 {
+		if _, err := h2c.WriteAll(w.ResponseWriter, w.pendingWire.Bytes()); err != nil {
+			return err
+		}
+		w.pendingWire.Reset()
+	}
 	h2c.FlushResponse(w.ResponseWriter)
 	w.pendingSinceFlush = 0
 	return nil
@@ -84,8 +94,8 @@ func (w *H2ResponseWriter) FlushPending() error {
 	return w.flushLocked()
 }
 
-func newH2DownlinkWriter(w http.ResponseWriter, profile LegProfile) *H2ResponseWriter {
-	return &H2ResponseWriter{ResponseWriter: w, profile: profile}
+func newH2DownlinkWriter(w http.ResponseWriter, _ LegProfile) *H2ResponseWriter {
+	return &H2ResponseWriter{ResponseWriter: w}
 }
 
 func NewDownlinkResponseWriter(w http.ResponseWriter) *H2ResponseWriter {
@@ -117,7 +127,7 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		downlinkReadyOnce.Do(func() { close(downlinkReady) })
 	}
 	signalDownlinkReady()
-	onward := &cudprelay.DirectH2OnwardWriter{W: cudprelay.NewOnwardUDPWriter(conn)}
+	onward := &cudprelay.DirectH2OnwardUplink{Conn: conn}
 	onICMP := func() error { return downlinkW.WriteUDPPayloadAsCapsules(nil) }
 
 	relayCtx, cancelRelay := context.WithCancel(r.Context())
@@ -135,16 +145,13 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		defer wg.Done()
 		defer shutdownRelay()
 		defer closeUDPConn()
-		defer func() { _ = downlinkW.FlushPending() }()
 		select {
 		case <-downlinkReady:
 		case <-relayCtx.Done():
 			return
 		}
-		// h2o connect.c: flush S2C after each onward UDP drain batch (bidi echo path).
-		downErr = cudprelay.RelayH2ConnectDownlink(relayCtx, conn, H2ServerUDPReadBuf, downlinkW, H2DownlinkBulkFlushBytes, func(payloads [][]byte) bool {
-			return true
-		})
+		// h2o udp_on_read: 1 UDP datagram → 1 RFC9297 capsule → flush (no S2C batch).
+		downErr = cudprelay.RelayH2ConnectDownlinkImmediate(relayCtx, conn, H2ServerUDPReadBuf, downlinkW)
 	}()
 	wg.Wait()
 	joined := errors.Join(upErr, downErr)

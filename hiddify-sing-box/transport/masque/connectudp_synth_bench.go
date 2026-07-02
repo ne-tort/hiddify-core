@@ -81,7 +81,7 @@ func benchConnectUDPProdProfileH3UploadZeroLoss(
 	payloadLen int,
 ) (float64, connectudp.SequencedStats, error) {
 	t.Helper()
-	const runID = uint32(0xC0FFEE01)
+	runID := connectudp.AllocBenchRunID()
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
@@ -133,7 +133,7 @@ func benchConnectUDPProdProfileH3UploadZeroLossPaced(
 	targetMbit float64,
 ) (float64, connectudp.SequencedStats, error) {
 	t.Helper()
-	const runID = uint32(0xC0FFEE03)
+	runID := connectudp.AllocBenchRunID()
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
@@ -186,7 +186,7 @@ func benchConnectUDPProdProfileH2UploadZeroLoss(
 	payloadLen int,
 ) (float64, connectudp.SequencedStats, error) {
 	t.Helper()
-	const runID = uint32(0xC0FFEE02)
+	runID := connectudp.AllocBenchRunID()
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}
@@ -212,7 +212,7 @@ func benchConnectUDPProdProfileH2UploadPaced(
 	targetMbit float64,
 ) (float64, connectudp.SequencedStats, error) {
 	t.Helper()
-	const runID = uint32(0xC0FFEE04)
+	runID := connectudp.AllocBenchRunID()
 	if payloadLen <= 0 {
 		payloadLen = connectudp.DefaultBenchUDPPayloadLen
 	}

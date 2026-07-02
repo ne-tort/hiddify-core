@@ -53,6 +53,21 @@ func (h *listenFallbackFakeHost) WrapDatagramSplit(pc net.PacketConn, _ int, _ s
 	return pc
 }
 
+func (h *listenFallbackFakeHost) Tag() string { return "test" }
+func (h *listenFallbackFakeHost) DialOverHTTP2(context.Context, *uritemplate.Template, string) (net.PacketConn, error) {
+	return nil, errors.New("unexpected h2 dial")
+}
+func (h *listenFallbackFakeHost) DialH3(context.Context, *qmasque.Client, *uritemplate.Template, string) (net.PacketConn, error) {
+	return nil, errors.New("unexpected h3 dial")
+}
+func (h *listenFallbackFakeHost) RecordHTTPLayerSuccess(string)              {}
+func (h *listenFallbackFakeHost) ResetHTTPFallbackBudgetAfterSuccess()       {}
+func (h *listenFallbackFakeHost) ErrTemplateNotConfigured() error            { return ErrConnectUDPNotSupported }
+func (h *listenFallbackFakeHost) ObservabilityInput(*uritemplate.Template, string) ObservabilityInput {
+	return ObservabilityInput{}
+}
+func (h *listenFallbackFakeHost) NewQUICClient() *qmasque.Client { return nil }
+
 func TestListenPacketPrepareFailureClearsHTTPFallbackLatch(t *testing.T) {
 	host := &listenFallbackFakeHost{prepareErr: ErrConnectUDPNotSupported}
 	_, err := ListenPacket(host, context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 53))

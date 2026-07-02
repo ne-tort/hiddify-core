@@ -13,9 +13,6 @@ import (
 // ErrDuplicateDownloadSession is returned when a second download leg registers the same mux key.
 var ErrDuplicateDownloadSession = errors.New("masque h2: duplicate asymmetric download session")
 
-// ErrMissingMuxKey is returned when asymmetric legs omit Masque-Udp-Mux-Key.
-var ErrMissingMuxKey = errors.New("masque h2: missing Masque-Udp-Mux-Key")
-
 var DefaultSessionRegistry = NewSessionRegistry()
 
 // SessionRegistry tracks asymmetric CONNECT-UDP sessions.
@@ -125,16 +122,6 @@ func (o *sessionOnwardWriter) Flush() (bool, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return w.Flush()
-}
-
-func (o *sessionOnwardWriter) SendBurstViews(wire []byte, count, wireLen, payloadOff int) (bool, error) {
-	w := o.writer()
-	if w == nil {
-		return false, errors.New("masque h2: session onward writer unavailable")
-	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return w.SendBurstViews(wire, count, wireLen, payloadOff)
 }
 
 func (reg *SessionRegistry) lookupDownloadSession(key sessionKey) (*h2Session, *H2ResponseWriter, bool) {

@@ -17,7 +17,8 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
 
-// ServeH3Asymmetric routes CONNECT-UDP over HTTP/3 with Masque-Udp-Stream-Role legs (UDP-5p2b).
+// ServeH3Asymmetric routes CONNECT-UDP over HTTP/3 with Masque-Udp-Stream-Role legs.
+// Localize/bench parity with H2 asymmetric server — prod H3 server path is bidi relay.Proxy.
 func ServeH3Asymmetric(w http.ResponseWriter, r *http.Request, parsed *frame.Request, reg *H3SessionRegistry) error {
 	if reg == nil {
 		reg = DefaultH3SessionRegistry
@@ -73,7 +74,7 @@ func serveH3DownloadLeg(w http.ResponseWriter, r *http.Request, str *http3.Strea
 	defer beginRelaySessionStats("h3-download-leg")()
 
 	w.Header().Set(http3.CapsuleProtocolHeader, frame.CapsuleProtocolHeaderValue)
-	if err := addProxyStatusNextHop(w, parsed.Host, parsed.Target); err != nil {
+	if err := frame.AddProxyStatusNextHopHeader(w, parsed.Host, parsed.Target); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return err
 	}
@@ -132,7 +133,7 @@ func serveH3UploadLeg(w http.ResponseWriter, r *http.Request, str *http3.Stream,
 	}
 
 	w.Header().Set(http3.CapsuleProtocolHeader, frame.CapsuleProtocolHeaderValue)
-	if err := addProxyStatusNextHop(w, r.Host, key.target); err != nil {
+	if err := frame.AddProxyStatusNextHopHeader(w, r.Host, key.target); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 )
 
 type h3DatagramSender interface {
@@ -31,6 +32,9 @@ func proxyConnReceive(ctx context.Context, conn *net.UDPConn, str h3DatagramSend
 	for {
 		payloads, err := readOnwardUDPBatch(ctx, conn, buf, h3DownlinkUDPBatchWire, onwardUDPWireLenRaw)
 		if err != nil {
+			if isRelayBatchContextDone(err) {
+				return nil
+			}
 			if isICMPPortUnreachableUDPRead(0, err) {
 				if sendErr := str.SendDatagram(frame.ContextIDZeroWire); sendErr != nil {
 					return sendErr
@@ -53,6 +57,9 @@ func proxyConnReceive(ctx context.Context, conn *net.UDPConn, str h3DatagramSend
 			}
 		}
 		if err != nil {
+			if isRelayBatchContextDone(err) {
+				return nil
+			}
 			return err
 		}
 	}
@@ -81,7 +88,7 @@ func relayH3S2CPayload(str h3DatagramSender, wire []byte, ctx0Len int, payload [
 }
 
 func sendH3S2CDatagram(str h3DatagramSender, data []byte, statsOn bool) error {
-	for spin := 0; spin < h3TransientRetryMaxSpins; spin++ {
+	for spin := 0; spin < h3quic.TransientPressureMaxSpins; spin++ {
 		err := str.SendDatagram(data)
 		if err == nil {
 			if statsOn {
