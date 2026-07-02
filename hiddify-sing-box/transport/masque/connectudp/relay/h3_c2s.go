@@ -138,6 +138,13 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 		return flushC2SBatch()
 	}
 
+	// Tail batch must flush on relay cancel / exit (client disconnect teardown).
+	defer func() {
+		if err := flushC2SBatch(); err != nil {
+			diag.Logf("proxyConnSend tail flush on exit: %v", err)
+		}
+	}()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

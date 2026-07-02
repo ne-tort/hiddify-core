@@ -153,9 +153,9 @@ func (s *Proxy) ProxyConnectedSocket(ctx context.Context, w http.ResponseWriter,
 		}
 		cancelRelay()
 		_ = str.Close()
-		_ = conn.Close()
 	}()
 	wg.Wait()
+	_ = conn.Close()
 
 	s.mx.Lock()
 	if s.closers != nil {

@@ -42,12 +42,11 @@ type connectUDPBurstProbeResult struct {
 // finishConnectUDPPacedProbeUpload drains masque upload after paced send (direct or SOCKS relay).
 func finishConnectUDPPacedProbeUpload(pkt net.PacketConn, viaSocks bool) {
 	connectudp.FlushPacketConnWrites(pkt)
-	if viaSocks {
-		// Keep SOCKS associate open while sharded H2 async upload drains (closing early drops in-flight).
-		time.Sleep(2 * time.Second)
-		return
-	}
 	_ = connectudp.DrainPacketConnUpload(pkt, connectUDPSynthUploadDrainTimeout)
+	if viaSocks {
+		// Keep SOCKS associate open while H2/H3 upload + server onward drain (closing early drops in-flight).
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func benchConnectUDPPacedSinkGoodput(

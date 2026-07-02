@@ -3,6 +3,7 @@ package client
 import (
 	"net"
 	"sync"
+	"time"
 
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/option"
@@ -30,6 +31,8 @@ func wrapOwnedQUICPacketConn(pc net.PacketConn, client *qmasque.Client) net.Pack
 func (c *ownedQUICPacketConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
+		FlushPacketConnWrites(c.PacketConn)
+		_ = DrainPacketConnUpload(c.PacketConn, 2*time.Second)
 		err = c.PacketConn.Close()
 		if c.client != nil {
 			_ = c.client.Close()

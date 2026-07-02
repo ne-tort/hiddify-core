@@ -5,8 +5,8 @@ import "net"
 // masque-go proxyConnUDPSendBatchMax — batch onward UDP writes after HTTP/3 DATAGRAM drain.
 const h3C2SUDPSendBatchMax = 128
 
-// h3C2SUDPFlushMinBatchLinux defers kernel WriteBatch flush until N payloads queue (copy-on-enqueue).
-const h3C2SUDPFlushMinBatchLinux = 8
+// h3C2SUDPFlushMinBatchLinux: masque-go proxyConnSend flushes each datagram (no defer batch).
+const h3C2SUDPFlushMinBatchLinux = 1
 
 // h3C2SOnwardFlushChunk interleaves HTTP/3 DATAGRAM drain during onward bursts (masque-go sync loop parity).
 const h3C2SOnwardFlushChunk = 1

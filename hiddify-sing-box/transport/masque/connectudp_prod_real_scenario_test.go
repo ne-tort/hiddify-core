@@ -108,9 +108,9 @@ func assertConnectUDPProdRealScenarioWAN(
 	t.Helper()
 	t.Logf("%s WAN paced(%dB) @%.0f: %.1f Mbit/s rx=%d/%d loss=%.4f%% dup=%.2f%%",
 		layer, payloadLen, targetMbit, mbps, st.RxPkts, st.SentPkts, st.LossPct, st.DupPct)
-	if st.LossPct > connectUDPSynthMaxLossPct {
-		t.Fatalf("%s WAN paced loss=%.4f%% > max %.1f%%: rx=%d/%d",
-			layer, st.LossPct, connectUDPSynthMaxLossPct, st.RxPkts, st.SentPkts)
+	if st.LossPct > 0 {
+		t.Fatalf("%s WAN paced loss=%.4f%% (want zero): rx=%d/%d",
+			layer, st.LossPct, st.RxPkts, st.SentPkts)
 	}
 	const wanSlackMbps = 1.0
 	if mbps < targetMbit-wanSlackMbps {
