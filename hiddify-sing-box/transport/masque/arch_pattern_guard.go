@@ -101,10 +101,10 @@ const (
 	connectUDPLegacyPacedMaxMbps = 8.5
 )
 
-// CPU budget gates (ns/byte on fixed 4 MiB bench via testing.Benchmark). Update AGENTS.md after each run.
+// CPU budget gates (ns/byte on 256 KiB gate @64 KiB/iter; setup once, max 12s/site). Update after CI run.
 // Implied CPU-only ceiling ≈ 8000/nsPerB Mbit/s when no FC/scheduling stall.
 const (
-	masqueCPUBenchBytes = 4 * 1024 * 1024
+	masqueCPUBenchBytes = 4 * 1024 * 1024 // long BenchmarkConnectStream* anchors only
 
 	connectStreamL0DownloadMaxNsPerB  = 80.0   // loopback TCP WriteTo; measured ~33 ns/B order varies
 	connectStreamL1DownloadMaxNsPerB  = 80.0   // prod CONNECT-stream H3 instant WriteTo

@@ -88,7 +88,8 @@ func (c *baseFlowController) effectiveWindowUpdateThreshold() float64 {
 	if c.masquePeerDuplexLazyFC {
 		return 0.005
 	}
-	return windowUpdateThreshold()
+	// MASQUE prod: per-read MAX_*_DATA (B7 instant_credit wire model).
+	return 0
 }
 
 func (c *baseFlowController) setMasqueDuplexEagerFC(eager bool) {

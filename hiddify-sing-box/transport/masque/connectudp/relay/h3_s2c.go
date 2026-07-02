@@ -94,6 +94,7 @@ func sendH3S2CDatagram(str h3DatagramSender, data []byte, statsOn bool) error {
 			if statsOn {
 				globalUDPRelayStats.s2cDatagramOut.Add(1)
 			}
+			recordRelayS2CSendSpins(spin)
 			return nil
 		}
 		if isHTTPDatagramTooLargeError(err) {

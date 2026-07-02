@@ -85,10 +85,9 @@ func TestMasqueConnectStreamH3LocalizeDownloadWriteTo(t *testing.T) {
 }
 
 // TestH3ConnectStreamH2ParityStrictL256Download (H3-T6-07) — H3 download on strict L256 bidi wrap
-// must stay within 50% of H2 on the same window model (both eager WINDOW off).
+// must stay within 50% of H2 on the same window model (strict link, H2 eager WINDOW off).
 func TestH3ConnectStreamH2ParityStrictL256Download(t *testing.T) {
 	t.Setenv("MASQUE_H2_DOWNLOAD_EAGER_WINDOW", "0")
-	t.Setenv("MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW", "0")
 	const duration = localizeBenchDuration
 
 	h2 := benchConnectStreamH2DownloadLayerWriteTo(t, "H2_L256", benchWindowedBidiLinkL256(), duration)

@@ -100,12 +100,13 @@ func segmentEnableRelayStats(tb testing.TB) {
 func logSegmentUpload(tb testing.TB, r SegmentUploadResult) {
 	tb.Helper()
 	tb.Logf(
-		"RESULT_SEGMENT kind=upload site=%s code=%q mode=%s payload=%d mbps=%.1f loss=%.2f%% dup=%.2f%% rx=%d/%d streamQ=%d quicRcvQ=%d c2s_in=%d c2s_out=%d s2c_in=%d s2c_out=%d",
+		"RESULT_SEGMENT kind=upload site=%s code=%q mode=%s payload=%d mbps=%.1f loss=%.2f%% dup=%.2f%% rx=%d/%d streamQ=%d quicRcvQ=%d c2s_in=%d c2s_out=%d s2c_in=%d s2c_out=%d c2s_flush=%d s2c_batch=%d s2c_batch_pkts=%d s2c_spins=%d",
 		r.Site, r.CodeRef, r.Mode, r.PayloadB, r.Mbps, r.Stats.LossPct, r.Stats.DupPct,
 		r.Stats.RxPkts, r.Stats.SentPkts,
 		r.Drops.StreamDatagramQueue, r.Drops.QuicDatagramRcvQueue,
 		r.Relay.C2SDatagramIn, r.Relay.C2SUDPPayloadOut,
 		r.Relay.S2CUDPIn, r.Relay.S2CDatagramOut,
+		r.Relay.C2SBatchFlushes, r.Relay.S2CBatchReads, r.Relay.S2CBatchPkts, r.Relay.S2CSendSpins,
 	)
 }
 
@@ -134,7 +135,7 @@ func runSegmentUploadSequenced(
 	tb.Helper()
 	payloadLen = segmentPayloadLen(payloadLen)
 	mbps, st, err := benchConnectUDPPacketUploadSequenced(
-		tb, pkt, sinkAddr, seqSink, runID, segmentBenchDuration(), targetMbit, payloadLen, targetMbit > 0,
+		tb, pkt, sinkAddr, seqSink, runID, segmentBenchDuration(), targetMbit, payloadLen, true,
 	)
 	if err != nil {
 		tb.Fatalf("segment %s upload: %v", site, err)

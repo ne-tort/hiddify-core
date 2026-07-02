@@ -117,6 +117,7 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 			if err := writer.writePayloadBatch(payloadBatch[:n]); err != nil {
 				return err
 			}
+			recordRelayC2SBatchFlush()
 			if tail := batchCount - n; tail > 0 {
 				copy(payloadBatch[:tail], payloadBatch[n:batchCount])
 			}

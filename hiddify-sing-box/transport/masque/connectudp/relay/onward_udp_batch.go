@@ -44,13 +44,15 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 		case <-ctx.Done():
 			_ = conn.SetReadDeadline(time.Time{})
 			if len(payloads) > 0 {
+				recordRelayS2CBatch(payloads)
 				return payloads, nil
 			}
 			return nil, ctx.Err()
 		default:
 		}
 		if !first {
-			_ = conn.SetReadDeadline(time.Now())
+			// Short future deadline drains already-queued datagrams without blocking for in-flight arrivals.
+			_ = conn.SetReadDeadline(time.Now().Add(time.Microsecond))
 		} else if dl, ok := ctx.Deadline(); ok {
 			_ = conn.SetReadDeadline(dl)
 		} else {
@@ -65,11 +67,13 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 					coalesceSpins++
 					continue
 				}
+				recordRelayS2CBatch(payloads)
 				return payloads, nil
 			}
 			if n > 0 {
 				payloads = append(payloads, append([]byte(nil), buf[:n]...))
 			}
+			recordRelayS2CBatch(payloads)
 			return payloads, err
 		}
 		if n <= 0 {
@@ -80,6 +84,7 @@ func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxW
 		coalesceSpins = 0
 		if wire >= maxWire {
 			_ = conn.SetReadDeadline(time.Time{})
+			recordRelayS2CBatch(payloads)
 			return payloads, nil
 		}
 	}

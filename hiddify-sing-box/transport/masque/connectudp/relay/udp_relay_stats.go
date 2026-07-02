@@ -15,6 +15,11 @@ type UDPRelayStatsSnapshot struct {
 	S2CDatagramOut   uint64
 	S2CDropOversize  uint64
 	S2CDropSendFail  uint64
+	// Hotpath attribution (bench only; zero overhead when relayStatsActive=false).
+	C2SBatchFlushes uint64
+	S2CBatchReads   uint64
+	S2CBatchPkts    uint64
+	S2CSendSpins    uint64
 }
 
 type udpRelayStats struct {
@@ -26,6 +31,10 @@ type udpRelayStats struct {
 	s2cDatagramOut   atomic.Uint64
 	s2cDropOversize  atomic.Uint64
 	s2cDropSendFail  atomic.Uint64
+	c2sBatchFlushes  atomic.Uint64
+	s2cBatchReads    atomic.Uint64
+	s2cBatchPkts     atomic.Uint64
+	s2cSendSpins     atomic.Uint64
 }
 
 var globalUDPRelayStats udpRelayStats
@@ -67,6 +76,30 @@ func SnapshotUDPRelayStats() UDPRelayStatsSnapshot {
 		S2CDatagramOut:   globalUDPRelayStats.s2cDatagramOut.Load(),
 		S2CDropOversize:  globalUDPRelayStats.s2cDropOversize.Load(),
 		S2CDropSendFail:  globalUDPRelayStats.s2cDropSendFail.Load(),
+		C2SBatchFlushes:  globalUDPRelayStats.c2sBatchFlushes.Load(),
+		S2CBatchReads:    globalUDPRelayStats.s2cBatchReads.Load(),
+		S2CBatchPkts:     globalUDPRelayStats.s2cBatchPkts.Load(),
+		S2CSendSpins:     globalUDPRelayStats.s2cSendSpins.Load(),
+	}
+}
+
+func recordRelayC2SBatchFlush() {
+	if relayStatsEnabled() {
+		globalUDPRelayStats.c2sBatchFlushes.Add(1)
+	}
+}
+
+func recordRelayS2CBatch(payloads [][]byte) {
+	if !relayStatsEnabled() || len(payloads) == 0 {
+		return
+	}
+	globalUDPRelayStats.s2cBatchReads.Add(1)
+	globalUDPRelayStats.s2cBatchPkts.Add(uint64(len(payloads)))
+}
+
+func recordRelayS2CSendSpins(spins int) {
+	if relayStatsEnabled() && spins > 0 {
+		globalUDPRelayStats.s2cSendSpins.Add(uint64(spins))
 	}
 }
 
@@ -80,6 +113,10 @@ func (d UDPRelayStatsSnapshot) Delta(before UDPRelayStatsSnapshot) UDPRelayStats
 		S2CDatagramOut:   d.S2CDatagramOut - before.S2CDatagramOut,
 		S2CDropOversize:  d.S2CDropOversize - before.S2CDropOversize,
 		S2CDropSendFail:  d.S2CDropSendFail - before.S2CDropSendFail,
+		C2SBatchFlushes:  d.C2SBatchFlushes - before.C2SBatchFlushes,
+		S2CBatchReads:    d.S2CBatchReads - before.S2CBatchReads,
+		S2CBatchPkts:     d.S2CBatchPkts - before.S2CBatchPkts,
+		S2CSendSpins:     d.S2CSendSpins - before.S2CSendSpins,
 	}
 }
 
@@ -90,7 +127,7 @@ func LogUDPRelayStats(tag string) {
 	}
 	s := SnapshotUDPRelayStats()
 	log.Printf(
-		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d",
+		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d c2s_batch_flush=%d s2c_batch_reads=%d s2c_batch_pkts=%d s2c_send_spins=%d",
 		tag,
 		s.C2SDatagramIn,
 		s.C2SUDPPayloadOut,
@@ -100,6 +137,10 @@ func LogUDPRelayStats(tag string) {
 		s.S2CDatagramOut,
 		s.S2CDropOversize,
 		s.S2CDropSendFail,
+		s.C2SBatchFlushes,
+		s.S2CBatchReads,
+		s.S2CBatchPkts,
+		s.S2CSendSpins,
 	)
 }
 

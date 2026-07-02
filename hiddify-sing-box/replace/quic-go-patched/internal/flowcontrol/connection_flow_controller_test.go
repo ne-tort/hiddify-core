@@ -13,7 +13,6 @@ import (
 )
 
 func TestConnectionFlowControlWindowUpdate(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
 	fc := NewConnectionFlowController(
 		100, // initial receive window
 		100, // max receive window
@@ -21,10 +20,8 @@ func TestConnectionFlowControlWindowUpdate(t *testing.T) {
 		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
-	require.False(t, fc.AddBytesRead(1))
-	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	require.True(t, fc.AddBytesRead(99))
-	require.Equal(t, protocol.ByteCount(200), fc.GetWindowUpdate(monotime.Now()))
+	require.True(t, fc.AddBytesRead(1))
+	require.Equal(t, protocol.ByteCount(101), fc.GetWindowUpdate(monotime.Now()))
 }
 
 func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {

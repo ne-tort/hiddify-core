@@ -125,7 +125,7 @@ func TestStreamAbandoning(t *testing.T) {
 
 	require.NoError(t, fc.UpdateHighestReceived(50, true, monotime.Now()))
 	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	require.Zero(t, connFC.GetWindowUpdate(monotime.Now()))
+	require.Equal(t, protocol.ByteCount(100), connFC.GetWindowUpdate(monotime.Now()))
 
 	// Abandon the stream.
 	// This marks all bytes as having been consumed.
@@ -176,9 +176,7 @@ func TestStreamSendWindow(t *testing.T) {
 	require.False(t, fc.IsNewlyBlocked()) // we're blocked, but not on stream flow control
 }
 
-func TestStreamWindowUpdate(t *testing.T) {
-	t.Setenv("MASQUE_QUIC_FAST_WINDOW_UPDATES", "0")
-	t.Setenv("MASQUE_QUIC_WINDOW_UPDATE_THRESHOLD", "0.25")
+func TestMasqueProdWindowUpdateDefault(t *testing.T) {
 	fc := NewStreamFlowController(
 		42,
 		NewConnectionFlowController(
@@ -194,22 +192,30 @@ func TestStreamWindowUpdate(t *testing.T) {
 		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
-	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	hasStreamWindowUpdate, _ := fc.AddBytesRead(24)
-	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	// the window is updated when it's 25% filled
-	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
-	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(125), fc.GetWindowUpdate(monotime.Now()))
+	hasUpdate, _ := fc.AddBytesRead(1)
+	require.True(t, hasUpdate, "MASQUE prod FC should update after 1 byte on 100-byte window")
+}
 
-	hasStreamWindowUpdate, _ = fc.AddBytesRead(24)
-	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
-	// the window is updated when it's 25% filled
-	hasStreamWindowUpdate, _ = fc.AddBytesRead(1)
+func TestStreamWindowUpdate(t *testing.T) {
+	fc := NewStreamFlowController(
+		42,
+		NewConnectionFlowController(
+			protocol.MaxByteCount,
+			protocol.MaxByteCount,
+			nil,
+			utils.NewRTTStats(),
+			utils.DefaultLogger,
+		),
+		100,
+		100,
+		protocol.MaxByteCount,
+		utils.NewRTTStats(),
+		utils.DefaultLogger,
+	)
+	require.Equal(t, protocol.ByteCount(100), fc.GetWindowUpdate(monotime.Now()))
+	hasStreamWindowUpdate, _ := fc.AddBytesRead(1)
 	require.True(t, hasStreamWindowUpdate)
-	require.Equal(t, protocol.ByteCount(150), fc.GetWindowUpdate(monotime.Now()))
+	require.Equal(t, protocol.ByteCount(101), fc.GetWindowUpdate(monotime.Now()))
 
 	// Receive the final offset.
 	// We don't need to send any more flow control updates.
@@ -237,8 +243,8 @@ func TestStreamConnectionWindowUpdate(t *testing.T) {
 	)
 
 	hasStreamWindowUpdate, hasConnWindowUpdate := fc.AddBytesRead(50)
-	require.False(t, hasStreamWindowUpdate)
-	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
+	require.True(t, hasStreamWindowUpdate)
+	require.Equal(t, protocol.ByteCount(1050), fc.GetWindowUpdate(monotime.Now()))
 	require.True(t, hasConnWindowUpdate)
 	require.NotZero(t, connFC.GetWindowUpdate(monotime.Now()))
 }

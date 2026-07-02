@@ -180,7 +180,7 @@ func TestMasqueConnectStreamReadPathSkipsDownloadActive(t *testing.T) {
 }
 
 // TestMasqueBenchCeilingDownload (K-S1): prod WriteTo + windowed bidi exceeds VPS KPI when
-// MASQUE_QUIC_DOWNLOAD_EAGER_WINDOW is on (default); legacy sb-peer RTT model when off.
+// prod per-read QUIC FC is on (default); strict bidi link models legacy wire-FC ceiling.
 func TestMasqueBenchCeilingDownload(t *testing.T) {
 	const duration = localizeBenchDuration
 	link := benchWindowedBidiLink()
