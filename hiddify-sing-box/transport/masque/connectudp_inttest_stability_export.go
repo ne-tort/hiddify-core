@@ -104,9 +104,14 @@ func inttestLocalizeConnectUDPH3BurstMaxZeroLossMbps(t *testing.T, payloadLen in
 		if sendSec <= 0 {
 			sendSec = connectUDPSynthProdBenchDuration.Seconds()
 		}
-		connectudp.FlushPacketConnWrites(pkt)
-		if err := connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout); err != nil {
-			t.Fatalf("burst probe %.1f Mbit/s upload drain: %v", targetMbit, err)
+		finishConnectUDPPacedProbeUpload(pkt, false)
+		deliverDeadline := time.Now().Add(connectUDPSynthGateSinkDeliverWait)
+		for time.Now().Before(deliverDeadline) {
+			if connectudp.SequencedSinkRxCount(seqSink) >= sent {
+				break
+			}
+			connectudp.FlushPacketConnWrites(pkt)
+			time.Sleep(10 * time.Millisecond)
 		}
 		time.Sleep(500 * time.Millisecond)
 		st := seqSink.Analyze(sent, payloadLen)
