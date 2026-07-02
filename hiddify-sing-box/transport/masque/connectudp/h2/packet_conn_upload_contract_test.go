@@ -12,21 +12,25 @@ var connectUDPH2PacketConnSource string
 //go:embed packet_conn_upload.go
 var connectUDPH2PacketConnUploadSource string
 
-// TestConnectUDPH2UploadInvisvImmediateWriteContract locks direct WriteDatagramCapsule per WriteTo.
-func TestConnectUDPH2UploadInvisvImmediateWriteContract(t *testing.T) {
+// TestConnectUDPH2UploadCoalesceContract locks asymmetric upload-leg bulk coalesce + bidi immediate write.
+func TestConnectUDPH2UploadCoalesceContract(t *testing.T) {
 	t.Parallel()
 	for _, sub := range []string{
-		`h2c.WriteDatagramCapsule(c.reqBody, p)`,
-		`writeUploadUDPPayloadUnlocked`,
+		`AppendDatagramCapsuleBuffer`,
+		`uploadPending`,
+		`writeUploadWireUnlocked`,
 	} {
-		if !strings.Contains(connectUDPH2PacketConnUploadSource, sub) {
-			t.Fatalf("packet_conn_upload.go: missing Invisv immediate write %q", sub)
+		if !strings.Contains(connectUDPH2PacketConnUploadSource, sub) && !strings.Contains(connectUDPH2PacketConnSource, sub) {
+			t.Fatalf("H2 upload coalesce: missing %q", sub)
 		}
 	}
-	if strings.Contains(connectUDPH2PacketConnSource, "uploadPending") {
-		t.Fatal("packet_conn.go: must not coalesce into uploadPending — Invisv/h2o immediate capsule write")
+	if !strings.Contains(connectUDPH2PacketConnSource, `!c.uploadOnly`) {
+		t.Fatal("packet_conn.go: bidi path must branch on !uploadOnly for immediate WriteDatagramCapsule")
 	}
-	if strings.Contains(connectUDPH2PacketConnSource, "AppendDatagramCapsuleBuffer") {
-		t.Fatal("packet_conn.go: must not buffer capsules before write")
+	if !strings.Contains(connectUDPH2PacketConnSource, `writeUploadUDPPayloadUnlocked`) {
+		t.Fatal("packet_conn.go: bidi path must use immediate writeUploadUDPPayloadUnlocked")
+	}
+	if strings.Contains(connectUDPH2PacketConnSource, "uploadFlushTimer") {
+		t.Fatal("packet_conn.go: must not use debounced uploadFlushTimer (UDP-6MIG-10)")
 	}
 }

@@ -1,7 +1,7 @@
 package h2
 
 // LegProfile tags asymmetric stream role.
-// Upload: thin immediate C2S. DownloadFountain: S2C bulk threshold flush. Bidi: h2o 1:1 immediate S2C.
+// Upload: bulk threshold coalesce (64–128 KiB). DownloadFountain: S2C bulk threshold flush. Bidi: immediate C2S.
 type LegProfile uint8
 
 const (
@@ -19,4 +19,13 @@ func legProfileForStreamRole(role streamRole) LegProfile {
 	default:
 		return LegProfileBidi
 	}
+}
+
+func (p LegProfile) uploadImmediateFlush() bool {
+	return p == LegProfileUpload
+}
+
+// uploadNoCoalesceTimer: upload leg uses sync threshold flush only (no debounce timer).
+func (p LegProfile) uploadNoCoalesceTimer() bool {
+	return p == LegProfileUpload
 }

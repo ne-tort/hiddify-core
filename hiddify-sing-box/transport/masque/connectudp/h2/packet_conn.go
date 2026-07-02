@@ -2,6 +2,7 @@ package h2
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -50,11 +51,19 @@ type PacketConn struct {
 	legProfile      LegProfile
 	downlinkReadBuf []byte
 
+	// uploadPending holds encoded RFC9297 wire bytes before batched WriteAll (asymmetric upload leg).
+	uploadPending bytes.Buffer
+
 	deadlines    split.ConnDeadlines
 	closed       atomic.Bool
 	closeOnce    sync.Once
 	duplexActive atomic.Bool
 	payloadWritePending atomic.Bool
+
+	lastUploadAt    time.Time
+	rapidUploadHits int
+	bulkUpload      bool
+	writesSinceRead int
 
 	primeOnce sync.Once
 	primeErr  error
@@ -113,7 +122,11 @@ func (c *PacketConn) Close() error {
 		}
 		c.closed.Store(true)
 		c.writeMu.Lock()
+		wire := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
+		if len(wire) > 0 {
+			_ = c.flushUploadWire(wire)
+		}
 		c.FlushC2SWrites()
 		if c.uploadWireAck != nil {
 			if done, ok := c.uploadWireAck.(interface{ MarkUploadWriterDone() }); ok {
@@ -138,18 +151,17 @@ func (c *PacketConn) Close() error {
 	return nil
 }
 
-// FlushC2SWrites unblocks the io.Pipe upload pump at upload end (Invisv CreateTCPStream drain shape).
-// Steady WriteTo stays one flushed capsule per call.
+// FlushC2SWrites drains coalesced upload wire (docker probe / asymmetric echo parity).
 func (c *PacketConn) FlushC2SWrites() {
-	if c == nil || c.closed.Load() || c.reqBody == nil || c.uploadWireCommitted.Load() <= 0 {
+	if c == nil || c.closed.Load() {
 		return
 	}
 	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if c.closed.Load() || c.reqBody == nil {
-		return
+	wire := c.takeUploadPendingLocked()
+	c.writeMu.Unlock()
+	if len(wire) > 0 {
+		_ = c.flushUploadWire(wire)
 	}
-	_ = h2c.WriteDatagramCapsule(c.reqBody, nil)
 }
 
 func (c *PacketConn) AwaitUploadDrain(timeout time.Duration) error {
@@ -187,6 +199,11 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	// SOCKS UDP ASSOCIATE may block in ReadFrom before any downlink; do not arm duplex coalesce yet.
 	if hadPayloadWrite {
 		c.duplexActive.Store(true)
+		c.writeMu.Lock()
+		c.bulkUpload = false
+		c.rapidUploadHits = 0
+		c.writesSinceRead = 0
+		c.writeMu.Unlock()
 		if err := c.flushUploadPendingForRead(); err != nil {
 			return 0, nil, err
 		}
@@ -215,6 +232,11 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	if n > 0 {
 		c.duplexActive.Store(true)
+		c.writeMu.Lock()
+		c.bulkUpload = false
+		c.rapidUploadHits = 0
+		c.writesSinceRead = 0
+		c.writeMu.Unlock()
 	}
 	return n, c.remoteAddr, nil
 }
@@ -237,7 +259,15 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		return 0, os.ErrDeadlineExceeded
 	}
 	if len(p) == 0 {
+		pending := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
+		if err := c.flushUploadWire(pending); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return 0, err
+			}
+			_ = c.Close()
+			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
+		}
 		if err := c.writeEmptyDatagramCapsule(); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
@@ -247,16 +277,65 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		}
 		return 0, nil
 	}
-	c.writeMu.Unlock()
-	if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-			return 0, err
+
+	// Bidi prod entry: immediate capsule write (Invisv thin shape).
+	if !c.uploadOnly {
+		c.writeMu.Unlock()
+		if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return 0, err
+			}
+			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return 0, err
+			}
+			_ = c.Close()
+			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 		}
-		if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return 0, err
+		if len(p) > 0 {
+			c.payloadWritePending.Store(true)
+		}
+		return len(p), nil
+	}
+
+	var encErr error
+	if len(p) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
+		h2c.AppendDatagramCapsuleBuffer(&c.uploadPending, p)
+	} else {
+		encErr = h2c.AppendUDPPayloadAsDatagramCapsules(&c.uploadPending, p)
+	}
+	if encErr != nil {
+		c.writeMu.Unlock()
+		if errors.Is(encErr, io.EOF) || errors.Is(encErr, io.ErrClosedPipe) {
+			return 0, encErr
+		}
+		if errors.Is(encErr, os.ErrDeadlineExceeded) || errors.Is(encErr, context.Canceled) {
+			return 0, encErr
 		}
 		_ = c.Close()
-		return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
+		return 0, fmt.Errorf("masque h2 dataplane connect-udp encode body: %w", encErr)
+	}
+	if !c.duplexActive.Load() {
+		c.noteUploadArrivalLocked(time.Now())
+	}
+	c.writesSinceRead++
+	var wire []byte
+	switch {
+	case c.uploadOnly && c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load():
+		wire = c.takeUploadPendingLocked()
+	case c.uploadFlushInteractiveLocked():
+		wire = c.takeUploadPendingLocked()
+	case c.uploadPending.Len() >= c.uploadCoalesceThreshold():
+		wire = c.takeUploadPendingLocked()
+	}
+	c.writeMu.Unlock()
+	if len(wire) > 0 {
+		if err := c.flushUploadWire(wire); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+				return 0, err
+			}
+			_ = c.Close()
+			return 0, fmt.Errorf("masque h2 dataplane connect-udp flush body: %w", err)
+		}
 	}
 	if len(p) > 0 {
 		c.payloadWritePending.Store(true)

@@ -31,8 +31,8 @@ func TestConnectUDPH2ProdUsesRFC9297DatagramCapsule(t *testing.T) {
 		{"packet_conn.go", h2PacketConnProdSource},
 		{"server.go", h2ServerProdSource},
 	} {
-		if !strings.Contains(src.body, "WriteDatagramCapsule") {
-			t.Fatalf("%s must encode UDP via h2.WriteDatagramCapsule (RFC 9297 DATAGRAM, Invisv immediate write)", src.name)
+		if !strings.Contains(src.body, "WriteDatagramCapsule") && !strings.Contains(src.body, "AppendDatagramCapsuleBuffer") {
+			t.Fatalf("%s must encode UDP via RFC 9297 DATAGRAM (WriteDatagramCapsule or AppendDatagramCapsuleBuffer batch)", src.name)
 		}
 		for _, sym := range invisvDraft03Forbidden {
 			if strings.Contains(src.body, sym) {
