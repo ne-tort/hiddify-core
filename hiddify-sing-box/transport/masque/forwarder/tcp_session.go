@@ -44,6 +44,7 @@ type tcpForwardSession struct {
 	remoteFinSent    bool
 	remotePumpDone   atomic.Bool
 	clientPayloadSeen atomic.Bool
+	s2cAllowWithoutClientPayload atomic.Bool // pure download / post-recycle probe before any C2S DATA
 	closed           atomic.Bool
 	handshakeIdleOnce sync.Once
 
@@ -209,6 +210,13 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc he
 			go s.close()
 			return
 		}
+		s.ensureRemotePump(ctx)
+	}
+
+	// Pure ACK after handshake (no C2S payload): start S2C pump for download-only / iperf -R probes.
+	// pumpRemoteToClient blocks on remote Read until backend sends; iperf params ordering preserved.
+	if len(payload) == 0 && s.established && flags&header.TCPFlagAck != 0 {
+		s.s2cAllowWithoutClientPayload.Store(true)
 		s.ensureRemotePump(ctx)
 	}
 
@@ -488,7 +496,7 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 		if len(data) == 0 {
 			continue
 		}
-		if !s.clientPayloadSeen.Load() {
+		if !s.clientPayloadSeen.Load() && !s.s2cAllowWithoutClientPayload.Load() {
 			s.preClientS2C = append(s.preClientS2C, data...)
 			select {
 			case <-ctx.Done():
