@@ -86,6 +86,25 @@ func (n OverlayNAT) DNATIngress(pkt []byte) []byte {
 	return out
 }
 
+// DNATIngressInPlace applies DNATIngress on pkt without allocating (host-kernel LoopOut hot path).
+func (n OverlayNAT) DNATIngressInPlace(pkt []byte) {
+	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
+		return
+	}
+	if n.hairpinEnabled() {
+		if src, ok := ipv4Source(pkt); ok && src == n.WireTarget {
+			rewriteIPv4SourceInPlace(pkt, n.VirtTarget)
+			fixIPv4TransportChecksum(pkt)
+		}
+	}
+	if n.enabled() {
+		if dst, ok := ipv4Destination(pkt); ok && dst == n.WireLocal {
+			rewriteIPv4DestinationInPlace(pkt, n.TunHost)
+			fixIPv4TransportChecksum(pkt)
+		}
+	}
+}
+
 func fixIPv4TransportChecksum(pkt []byte) {
 	if len(pkt) < header.IPv4MinimumSize {
 		return

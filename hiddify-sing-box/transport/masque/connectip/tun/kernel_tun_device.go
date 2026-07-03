@@ -182,13 +182,13 @@ func (d *KernelTunDevice) WritePacket(pkt []byte) error {
 	if d == nil || len(pkt) == 0 {
 		return nil
 	}
-	out := d.nat.DNATIngress(pkt)
-	n, err := d.write(out)
+	d.nat.DNATIngressInPlace(pkt)
+	n, err := d.write(pkt)
 	if err != nil {
 		return err
 	}
-	if n != len(out) {
-		return fmt.Errorf("connect-ip kernel tun: write short %d/%d", n, len(out))
+	if n != len(pkt) {
+		return fmt.Errorf("connect-ip kernel tun: write short %d/%d", n, len(pkt))
 	}
 	return nil
 }

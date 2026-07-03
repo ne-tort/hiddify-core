@@ -841,6 +841,72 @@ func TestForwarderSyncAckBeforeShortPayload(t *testing.T) {
 	}
 }
 
+// TestGATEConnectIPForwarderDownloadOnlyPureAck (IP-P1-DOWNLOAD) pure client ACK after handshake
+// must start S2C pump so iperf -R / post-recycle download probes receive remote bulk.
+func TestGATEConnectIPForwarderDownloadOnlyPureAck(t *testing.T) {
+	t.Parallel()
+	rec := &recordingPacketPlaneConn{}
+	f := newTestPacketForwarder(rec)
+	t.Cleanup(func() { stopTestPacketForwarder(f) })
+
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	go func() {
+		payload := make([]byte, 64*1024)
+		for i := 0; i < 4; i++ {
+			if _, err := server.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{172, 19, 100, 2}),
+		dstAddr: tcpip.AddrFrom4([4]byte{198, 18, 0, 99}),
+		srcPort: 40000,
+		dstPort: 5201,
+	}
+	sess := &tcpForwardSession{
+		f:           f,
+		flow:        flow,
+		remote:      client,
+		outbound:    bufio.NewWriter(client),
+		irs:         1000,
+		iss:         5000,
+		rcvNxt:      1001,
+		sndNxt:      5001,
+		established: true,
+		synAckSent:  true,
+		peerAck:     5001,
+		peerRwnd:    65535,
+		peerRwndValid: true,
+	}
+	sess.add()
+
+	ack := buildClientAckSegment(flow, 5001)
+	sess.handleSegment(context.Background(), ack, header.TCP(ack[header.IPv4MinimumSize:]), header.IPv4MinimumSize, header.TCPMinimumSize)
+
+	deadline := time.Now().Add(2 * time.Second)
+	var dataBytes int
+	for time.Now().Before(deadline) {
+		rec.mu.Lock()
+		for _, w := range rec.writes {
+			ipLen := int(w[2])<<8 | int(w[3])
+			if ipLen > header.IPv4MinimumSize+header.TCPMinimumSize {
+				dataBytes += ipLen - header.IPv4MinimumSize - header.TCPMinimumSize
+			}
+		}
+		rec.mu.Unlock()
+		if dataBytes >= 32*1024 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if dataBytes < 32*1024 {
+		t.Fatalf("pure-ACK download S2C=%d bytes want >= 32KiB", dataBytes)
+	}
+}
+
 // TestForwarderRemoteWriteBeforePumpStart verifies usque order: ACK → backend params → then S2C pump.
 func TestForwarderRemoteWriteBeforePumpStart(t *testing.T) {
 	t.Parallel()

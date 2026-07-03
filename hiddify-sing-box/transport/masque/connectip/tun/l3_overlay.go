@@ -393,7 +393,7 @@ func (b *L3OverlayBridge) WritePacket(pkt []byte) error {
 		kernel := b.kernel
 		b.mu.Unlock()
 		if kernel != nil {
-			b.noteIngressWake(b.nat.DNATIngress(pkt))
+			b.noteIngressWake(pkt)
 			return kernel.WritePacket(pkt)
 		}
 	}

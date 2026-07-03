@@ -50,6 +50,22 @@ func TestOverlayNATEgressInPlaceSNAT(t *testing.T) {
 	}
 }
 
+func TestOverlayNATIngressInPlaceDNAT(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wire := netip.MustParseAddr("198.18.0.1")
+	pkt := []byte{
+		0x45, 0x00, 0x00, 0x28, 0x00, 0x00, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00,
+		198, 18, 0, 2,
+		198, 18, 0, 1,
+	}
+	nat := OverlayNAT{TunHost: tunHost, WireLocal: wire}
+	nat.DNATIngressInPlace(pkt)
+	gotDst, ok := ipv4Destination(pkt)
+	if !ok || gotDst != tunHost {
+		t.Fatalf("in-place DNAT dst want %s got %v ok=%v", tunHost, gotDst, ok)
+	}
+}
+
 func TestOverlayNATHairpin(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wire := netip.MustParseAddr("198.18.0.1")

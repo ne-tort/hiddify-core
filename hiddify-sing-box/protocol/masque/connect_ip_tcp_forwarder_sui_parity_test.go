@@ -45,7 +45,15 @@ func TestConnectIPTCPForwarderSuiParityPipeBulk(t *testing.T) {
 // phase-1 route stops after egress flush; phase-2 fresh pipe route must download.
 // Not parallel: lifecycle timing is load-sensitive under L5 gate.
 func TestConnectIPTCPForwarderRestartAcceptance(t *testing.T) {
+	runConnectIPTCPForwarderRestartAcceptance(t)
+}
 
+// TestGATEConnectIPForwarderPostRecycleDownload (IP-P1-RECYCLE in-proc) locks download after server restart.
+func TestGATEConnectIPForwarderPostRecycleDownload(t *testing.T) {
+	runConnectIPTCPForwarderRestartAcceptance(t)
+}
+
+func runConnectIPTCPForwarderRestartAcceptance(t *testing.T) {
 	_, remotePort := startConnectIPPipeRemoteBulkServer(t)
 	peer := netip.MustParsePrefix("198.18.0.2/32")
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -116,6 +124,15 @@ func TestConnectIPTCPForwarderRestartAcceptance(t *testing.T) {
 // TestConnectIPTCPForwarderSuiParityRecycle verifies bulk upload teardown (incl. benign 0x100)
 // on the same RouteConnectIPBlocked handler allows a fresh download without docker restart.
 func TestConnectIPTCPForwarderSuiParityRecycle(t *testing.T) {
+	runConnectIPTCPForwarderSuiParityRecycle(t)
+}
+
+// TestGATEConnectIPForwarderSameSessionRecycleDownload (IP-P1-RECYCLE in-proc) locks download on same route after upload teardown.
+func TestGATEConnectIPForwarderSameSessionRecycleDownload(t *testing.T) {
+	runConnectIPTCPForwarderSuiParityRecycle(t)
+}
+
+func runConnectIPTCPForwarderSuiParityRecycle(t *testing.T) {
 	// Not parallel: 0x100 teardown + recycle timing is load-sensitive under L5 gate.
 
 	clientSess, rawServerSess := newMasquePacketPipePair()
