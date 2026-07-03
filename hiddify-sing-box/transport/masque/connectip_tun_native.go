@@ -6,12 +6,12 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"strings"
 	"time"
 
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 	ciptun "github.com/sagernet/sing-box/transport/masque/connectip/tun"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/sagernet/sing-tun"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -117,15 +117,12 @@ func ConnectIPTunNativeL3(
 			}
 			reader.FlushEgressBatch()
 		}
-		if hostKernel {
-			bridge.SetPumpWakeHooks(cippump.WakeHooks{}, flushEgress)
-		} else {
-			bridge.SetIngressWakeNote(cs.noteConnectIPNativeL3IngressWake)
-			bridge.SetPumpWakeHooks(cippump.WakeHooks{
-				TakeIngressWakePending: cs.ConnectIPIngressAckWake.TakePending,
-				PokeEgressTransport:    flushEgress,
-			}, flushEgress)
+		wakeHooks := cippump.WakeHooks{
+			TakeIngressWakePending: cs.ConnectIPIngressAckWake.TakePending,
+			PokeEgressTransport:    flushEgress,
 		}
+		bridge.SetIngressWakeNote(cs.noteConnectIPNativeL3IngressWake)
+		bridge.SetPumpWakeHooks(wakeHooks, flushEgress)
 	}
 	if hook, ok := sess.(interface {
 		AfterNativeL3ShortTCP(context.Context, netip.AddrPort, uint64)
@@ -194,16 +191,9 @@ func DialNativeL3TCP(ctx context.Context, sess ClientSession, dest M.Socksaddr) 
 	return ns.DialContext(ctx, dest)
 }
 
-// ConnectIPTunNativeL3Eligible reports whether transport options use native connect_ip (not hybrid).
-func ConnectIPTunNativeL3Eligible(transportMode, tcpTransport string) bool {
-	if !strings.EqualFold(strings.TrimSpace(transportMode), "connect_ip") {
-		return false
-	}
-	tt := strings.TrimSpace(tcpTransport)
-	if tt != "" && !strings.EqualFold(tt, "connect_ip") {
-		return false
-	}
-	return true
+// ConnectIPTunNativeL3Eligible reports whether endpoint dataplane uses native connect_ip (not hybrid).
+func ConnectIPTunNativeL3Eligible(dataplaneMode string) bool {
+	return session.DataplaneUsesConnectIP(dataplaneMode)
 }
 
 type nativeL3PacketReader interface {

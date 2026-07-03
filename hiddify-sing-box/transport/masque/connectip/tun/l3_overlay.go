@@ -264,6 +264,18 @@ func (b *L3OverlayBridge) ingressReader() PacketReader {
 	return b.reader
 }
 
+func (b *L3OverlayBridge) noteIngressWake(out []byte) {
+	if len(out) == 0 {
+		return
+	}
+	b.mu.Lock()
+	note := b.ingressWakeNote
+	b.mu.Unlock()
+	if note != nil {
+		note(out)
+	}
+}
+
 func (b *L3OverlayBridge) injectIngress(pkt []byte) (hasTCPPayload bool, err error) {
 	if len(pkt) == 0 {
 		return false, nil
@@ -273,12 +285,7 @@ func (b *L3OverlayBridge) injectIngress(pkt []byte) (hasTCPPayload bool, err err
 		hasTCPPayload = true
 	}
 	if !b.hostKernelRelay() {
-		b.mu.Lock()
-		note := b.ingressWakeNote
-		b.mu.Unlock()
-		if note != nil {
-			note(out)
-		}
+		b.noteIngressWake(out)
 	}
 	if err := b.deliverIngress(out); err != nil {
 		return hasTCPPayload, err
@@ -386,6 +393,7 @@ func (b *L3OverlayBridge) WritePacket(pkt []byte) error {
 		kernel := b.kernel
 		b.mu.Unlock()
 		if kernel != nil {
+			b.noteIngressWake(b.nat.DNATIngress(pkt))
 			return kernel.WritePacket(pkt)
 		}
 	}
@@ -436,6 +444,10 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 			return errors.New("connect-ip: host-kernel pump requires BatchTunnelDevice")
 		}
 		batchOpts := b.hostKernelBatchPumpOptions(onLoopInEnd)
+		batchOpts.Wake = wake
+		batchOpts.OnLoopOutEnd = func(_ cippump.TunnelDevice) {
+			b.flushIngressAckWake()
+		}
 		return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
 	}
 	return cippump.RunTunnel(ctx, device, conn, opts)

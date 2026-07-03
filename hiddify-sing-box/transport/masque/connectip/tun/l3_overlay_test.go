@@ -698,6 +698,46 @@ func TestL3OverlayIngressPayloadWake(t *testing.T) {
 	}
 }
 
+// TestL3HostKernelIngressPayloadWake (IP-DP-1) host-kernel LoopOut schedules ingress ACK wake.
+func TestL3HostKernelIngressPayloadWake(t *testing.T) {
+	pkt := make([]byte, 44)
+	pkt[0] = 0x45
+	pkt[2] = 0
+	pkt[3] = 44
+	pkt[9] = 6
+	copy(pkt[12:16], []byte{127, 0, 0, 2})
+	copy(pkt[16:20], []byte{127, 0, 0, 1})
+	pkt[32] = 0x50
+	pkt[33] = 0x18
+	copy(pkt[40:44], []byte{1, 2, 3, 4})
+	reader := &mockL3Reader{packets: [][]byte{pkt}}
+	var wakes atomic.Int32
+	b := NewL3OverlayBridge(func(p []byte) (int, error) {
+		return len(p), nil
+	}, nil, reader, OverlayNAT{})
+	b.SetHostEgressRead(func(context.Context, []byte) (int, error) { return 0, nil }, nil)
+	b.SetIngressAckWakeHook(func() {
+		wakes.Add(1)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- b.RunPump(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for wakes.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if wakes.Load() < 1 {
+		t.Fatalf("wakes=%d want >= 1 (host-kernel LoopOut batch-end wake)", wakes.Load())
+	}
+}
+
 func TestL3OverlayHostTunWriteExcludesStackInject(t *testing.T) {
 	pkt := make([]byte, 44)
 	pkt[0] = 0x45

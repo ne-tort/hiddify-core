@@ -107,10 +107,14 @@ func (d *KernelTunDevice) ReadPacket(ctx context.Context, buf []byte) (int, erro
 func (d *KernelTunDevice) acceptEgressBuf(buf []byte) (int, bool) {
 	n, ok := prepareRelayHostEgress(buf, d.nat, d.overlayPrefixes, d.onEgress)
 	if !ok {
-		d.readObs.recordSkipped()
+		if d.readObs != nil {
+			d.readObs.recordSkipped()
+		}
 		return 0, false
 	}
-	d.readObs.recordAccepted(n)
+	if d.readObs != nil {
+		d.readObs.recordAccepted(n)
+	}
 	return n, true
 }
 
