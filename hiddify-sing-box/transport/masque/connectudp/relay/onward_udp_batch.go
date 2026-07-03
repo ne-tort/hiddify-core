@@ -24,7 +24,7 @@ func onwardUDPWireLenH2Capsule(payload []byte) int {
 	return h2c.UDPPayloadWireLen(payload)
 }
 
-// readOnwardUDPBatch drains available onward UDP datagrams (h2o/h3 parity: poll first read, zero-deadline coalesce).
+// readOnwardUDPBatch drains available onward UDP datagrams (h2o/h3 parity: poll first read, microsecond RX coalesce).
 func readOnwardUDPBatch(ctx context.Context, conn *net.UDPConn, buf []byte, maxWire int, wireLen onwardUDPWireLen) ([][]byte, error) {
 	if conn == nil {
 		return nil, errors.New("masque: udp batch read: nil conn")

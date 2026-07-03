@@ -15,7 +15,19 @@ const (
 	connectUDPCPUBenchGateBytes   = 256 * 1024 // total sample for ns/byte gate
 	connectUDPCPUBenchGateWall    = 12 * time.Second
 	connectUDPCPUBudgetMatrixWall = 50 * time.Second
+
+	cpuSiteL0Upload   = "L0-loopback-udp-upload"
+	cpuSiteH3Upload   = "L1-connect-udp-h3-upload"
+	cpuSiteH2Upload   = "L1-connect-udp-h2-upload"
+	cpuSiteH3Download = "L1-connect-udp-h3-download-fountain"
 )
+
+var cpuSiteCodeRef = map[string]string{
+	cpuSiteL0Upload:   "kernel:UDPConn.WriteTo",
+	cpuSiteH3Upload:   "connectudp/client+dial.go:DialH3Production → conn/h3.go:WriteTo",
+	cpuSiteH2Upload:   "connectudp/h2/packet_conn_upload.go:writeUploadUDPPayloadUnlocked",
+	cpuSiteH3Download: "conn/h3.go:ReadFrom ← relay/h3_s2c.go:proxyConnReceive",
+}
 
 // cpuBudgetNsPerByte converts bytes+nanos to ns/byte.
 func cpuBudgetNsPerByte(totalBytes int64, totalNs int64) float64 {

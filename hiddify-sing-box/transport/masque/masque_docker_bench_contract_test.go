@@ -29,6 +29,8 @@ const (
 	dockerBenchConnectUDPSoftMaxRatio = 8.0  // up/down informational asymmetry band
 )
 
+var hybridConnectIPProfileRe = regexp.MustCompile(`id\s*=\s*"connect-ip-h[23]"`)
+
 func readDockerBenchSource(t *testing.T, name string) string {
 	t.Helper()
 	root := findDockerPerfLabRoot(t)
