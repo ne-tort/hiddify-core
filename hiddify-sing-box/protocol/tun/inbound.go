@@ -61,6 +61,7 @@ type Inbound struct {
 	l3OverlayOutboundTag string
 	l3OverlayPrefixes    []netip.Prefix
 	l3OverlaySocksDest   M.Socksaddr
+	l3OverlayTunHost     netip.Addr
 	l3OverlayCancel      context.CancelFunc
 	l3OverlayNativeStop         func()
 	l3OverlayNativeStart        func(context.Context) error
@@ -328,6 +329,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		for _, p := range options.L3OverlayRouteAddress {
 			inbound.l3OverlayPrefixes = append(inbound.l3OverlayPrefixes, p)
 		}
+		inbound.l3OverlayTunHost = firstTunInet4(inet4Address, inbound.l3OverlayPrefixes)
 	}
 	return inbound, nil
 }
