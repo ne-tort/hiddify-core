@@ -693,6 +693,13 @@ func TestMasqueDockerBenchCISmokeContract(t *testing.T) {
 		"sing-box-linux-amd64",
 		"docker compose build",
 	)
+	verifySh := readRepoSource(t, filepath.Join("scripts", "verify-connect-ip-tun.sh"))
+	requireSubstrings(t, verifySh, "linux tun verify",
+		"verify-connect-ip-tun.sh",
+		"connect-ip-h3-tun",
+		"BENCH_CONNECT_IP_TUN_DOD",
+		"build-masque-perf-lab.sh",
+	)
 	requireSubstrings(t, matrixDoc, "ci smoke doc",
 		"masque-docker-smoke.yml",
 		"TestMasqueDockerBenchCISmokeContract",

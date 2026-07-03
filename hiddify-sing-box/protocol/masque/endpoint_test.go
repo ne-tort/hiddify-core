@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -650,19 +649,16 @@ func TestEndpointScopeFieldsRequireTemplateIPFlowVariables(t *testing.T) {
 	}
 }
 
-func TestEndpointRejectsQUICExperimentalWithoutEnv(t *testing.T) {
-	prev := os.Getenv("MASQUE_EXPERIMENTAL_QUIC")
-	defer os.Setenv("MASQUE_EXPERIMENTAL_QUIC", prev)
-	_ = os.Setenv("MASQUE_EXPERIMENTAL_QUIC", "")
-	_, err := NewEndpoint(context.TODO(), nil, nil, "quic-exp-no-env", option.MasqueEndpointOptions{
+func TestEndpointAcceptsQUICExperimentalFromJSON(t *testing.T) {
+	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		QUICExperimental: &option.MasqueQUICExperimentalOptions{
 			Enabled: true,
 		},
-	})
-	if err == nil {
-		t.Fatal("expected quic_experimental.enabled to require MASQUE_EXPERIMENTAL_QUIC=1")
+	}
+	if err := validateMasqueOptions(opts); err != nil {
+		t.Fatalf("quic_experimental.enabled must be opt-in via JSON only (no env gate): %v", err)
 	}
 }
 

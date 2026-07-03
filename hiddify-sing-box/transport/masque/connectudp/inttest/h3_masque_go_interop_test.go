@@ -54,9 +54,7 @@ func TestInteropMasqueGoClientEchoInProcess(t *testing.T) {
 }
 
 func TestInteropMasqueGoClientSplitPayloadEchoInProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("H3 multi-datagram echo reassembly order unreliable on Windows loopback")
-	}
+	skipH3MultiDatagramWindows(t)
 	echoAddr := masque.InttestRunUDPEcho(t)
 	proxyPort := masque.InttestStartMasqueUDPProxyWithRelay(t)
 	client, ctx := masque.InttestNewMasqueGoUDPClient(t)

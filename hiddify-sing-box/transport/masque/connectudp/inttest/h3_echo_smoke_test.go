@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net"
 	"net/netip"
-	"runtime"
 	"testing"
 	"time"
 
@@ -61,9 +60,7 @@ func inttestUDPTargetAddrEqual(addr net.Addr, want *net.UDPAddr) bool {
 }
 
 func TestCoreSessionConnectUDPSplitPayloadEchoInProcess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("H3 multi-datagram echo reassembly order unreliable on Windows loopback")
-	}
+	skipH3MultiDatagramWindows(t)
 	echoAddr := masque.InttestRunUDPEcho(t)
 	proxyPort := masque.InttestStartMasqueUDPProxyWithRelay(t)
 	session, waitCtx := masque.InttestNewConnectUDPH3Session(t, proxyPort)

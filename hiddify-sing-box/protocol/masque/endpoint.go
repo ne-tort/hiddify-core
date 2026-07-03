@@ -1,7 +1,6 @@
 package masque
 
 import (
-	"os"
 	"strings"
 
 	CM "github.com/sagernet/sing-box/common/masque"
@@ -172,11 +171,6 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	if o.Workers != 0 {
 		return E.New("masque: workers is not supported on this client path")
 	}
-	if o.QUICExperimental != nil && o.QUICExperimental.Enabled {
-		if strings.TrimSpace(os.Getenv("MASQUE_EXPERIMENTAL_QUIC")) != "1" {
-			return E.New("masque: quic_experimental.enabled requires MASQUE_EXPERIMENTAL_QUIC=1")
-		}
-	}
 	if o.ServerAuth != nil {
 		return E.New("masque: server_auth is server-only")
 	}
@@ -320,11 +314,6 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	}
 	if o.Workers != 0 {
 		return E.New("masque: workers is not supported on server path")
-	}
-	if o.QUICExperimental != nil && o.QUICExperimental.Enabled {
-		if strings.TrimSpace(os.Getenv("MASQUE_EXPERIMENTAL_QUIC")) != "1" {
-			return E.New("masque: quic_experimental.enabled requires MASQUE_EXPERIMENTAL_QUIC=1")
-		}
 	}
 	if strings.TrimSpace(o.Listen) == "" {
 		return E.New("masque server: listen is required")
