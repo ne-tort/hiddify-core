@@ -1055,3 +1055,55 @@ func TestMasqueDockerBenchLocalComposeZeroEnvContract(t *testing.T) {
 		"MASQUE_BENCH_SKIP_URL_TEST",
 	)
 }
+
+// TestMasqueDockerBenchConnectUDPProdComposeZeroEnvContract locks connect-udp prod overlay:
+// no perf MASQUE/HIDDIFY knobs; bench skip + trace off only.
+func TestMasqueDockerBenchConnectUDPProdComposeZeroEnvContract(t *testing.T) {
+	t.Parallel()
+	overlay := readDockerBenchSource(t, "docker-compose.connect-udp-prod.yml")
+	forbidden := []string{
+		"HIDDIFY_MASQUE_",
+		"HIDDIFY_CONNECT_IP",
+		"MASQUE_CONNECT_IP_",
+		"MASQUE_CONNECT_UDP_RELAY_STATS",
+		"MASQUE_QUIC_KEEPALIVE_MS",
+		"MASQUE_QUIC_HANDSHAKE_IDLE_MS",
+		"MASQUE_H3_",
+		"MASQUE_H2_",
+		"MASQUE_RELAY_",
+	}
+	for _, key := range forbidden {
+		if strings.Contains(overlay, key) {
+			t.Fatalf("docker-compose.connect-udp-prod.yml: forbidden perf env passthrough %q", key)
+		}
+	}
+	requireSubstrings(t, overlay, "connect-udp prod compose zero-env",
+		"MASQUE_BENCH_SKIP_URL_TEST",
+		`MASQUE_TRACE_TCP: "0"`,
+	)
+}
+
+// TestMasquePerfLabDockerfileArtifactsContract locks Dockerfile COPY paths to build script outputs.
+func TestMasquePerfLabDockerfileArtifactsContract(t *testing.T) {
+	t.Parallel()
+	dockerfile := readDockerBenchSource(t, "Dockerfile")
+	required := []string{
+		"artifacts/sing-box-linux-amd64",
+		"artifacts/udp-probe-linux-amd64",
+		"artifacts/connect-udp-burst-direct-linux-amd64",
+		"artifacts/masque-go-docker-proxy-linux-amd64",
+		"artifacts/masque-go-docker-probe-linux-amd64",
+	}
+	for _, artifact := range required {
+		if !strings.Contains(dockerfile, artifact) {
+			t.Fatalf("Dockerfile missing COPY %q", artifact)
+		}
+	}
+	sh := readDockerBenchSource(t, filepath.Join("..", "..", "scripts", "build-masque-perf-lab.sh"))
+	for _, artifact := range required {
+		base := filepath.Base(artifact)
+		if !strings.Contains(sh, base) {
+			t.Fatalf("build-masque-perf-lab.sh must build %q (Dockerfile COPY parity)", base)
+		}
+	}
+}

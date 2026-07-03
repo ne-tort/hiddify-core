@@ -8,7 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,10 +16,17 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
+var localizeEchoGateStrict atomic.Bool
+
+// SetLocalizeEchoGateStrict enables hard FAIL on echo-duplex ratio localize gates (Verify -EchoGate).
+func SetLocalizeEchoGateStrict(strict bool) {
+	localizeEchoGateStrict.Store(strict)
+}
+
 func inttestLocalizeEchoDuplexGateFail(t *testing.T, format string, args ...any) {
 	t.Helper()
-	if os.Getenv("HIDDIFY_LOCALIZE_ECHO_GATE") != "1" {
-		t.Logf("OPEN (HIDDIFY_LOCALIZE_ECHO_GATE off): "+format, args...)
+	if !localizeEchoGateStrict.Load() {
+		t.Logf("OPEN (echo gate soft): "+format, args...)
 		return
 	}
 	t.Fatalf(format, args...)

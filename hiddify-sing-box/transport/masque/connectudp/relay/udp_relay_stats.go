@@ -39,7 +39,7 @@ type udpRelayStats struct {
 
 var globalUDPRelayStats udpRelayStats
 
-// relayStatsActive is bench/env only; prod hot path checks this once per batch (single atomic load).
+// relayStatsActive is bench-only (EnableRelayStatsForBench); prod hot path checks once per batch.
 var relayStatsActive atomic.Bool
 
 func relayStatsEnabled() bool {
@@ -120,7 +120,7 @@ func (d UDPRelayStatsSnapshot) Delta(before UDPRelayStatsSnapshot) UDPRelayStats
 	}
 }
 
-// LogUDPRelayStats emits a machine-parseable bench line when stats env is enabled.
+// LogUDPRelayStats emits a machine-parseable bench line when relay stats are enabled in-process.
 func LogUDPRelayStats(tag string) {
 	if !relayStatsEnabled() {
 		return

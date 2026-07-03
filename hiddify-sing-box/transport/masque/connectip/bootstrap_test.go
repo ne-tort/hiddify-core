@@ -37,7 +37,6 @@ func TestWarpConsumerBootstrapSkipsNonWarpProtocol(t *testing.T) {
 }
 
 func TestWarpConsumerBootstrapSkipsLegacyH2WithoutCapsules(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{controlCapsules: false}
 	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
@@ -54,7 +53,6 @@ func TestWarpConsumerBootstrapSkipsLegacyH2WithoutCapsules(t *testing.T) {
 }
 
 func TestWarpConsumerBootstrapLegacyH2ProfileLocalAdvertisesRoutes(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{controlCapsules: false}
 	if err := WarpConsumerBootstrap(context.Background(), conn, SessionBootstrapParams{
 		Tag:                   "t1",
@@ -89,7 +87,6 @@ func TestWarpConsumerBootstrapUsesExistingPrefixes(t *testing.T) {
 }
 
 func TestWarpConsumerBootstrapRequestAddressesOnEmptyPrefixes(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{
 		controlCapsules: true,
 		notify:          make(chan []netip.Prefix),
@@ -106,7 +103,6 @@ func TestWarpConsumerBootstrapRequestAddressesOnEmptyPrefixes(t *testing.T) {
 }
 
 func TestWarpConsumerBootstrapRequestAddressesErrorClosesConn(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "0")
 	conn := &fakeBootstrapConn{
 		controlCapsules: true,
 		requestErr:      errors.New("request failed"),

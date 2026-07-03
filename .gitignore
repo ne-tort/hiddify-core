@@ -16,3 +16,8 @@ data
 node_modules
 *.db
 *.json
+
+# Local dev scratch (not prod)
+hiddify-sing-box/_acktest/
+hiddify-sing-box/_stack.txt
+hiddify-sing-box/sing-box
