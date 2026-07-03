@@ -84,7 +84,6 @@ func assertRuntimeConnectStreamProdDialShape(t *testing.T, conn net.Conn) {
 
 func startRuntimeConnectStreamH3Stack(t *testing.T) (Runtime, uint16) {
 	t.Helper()
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

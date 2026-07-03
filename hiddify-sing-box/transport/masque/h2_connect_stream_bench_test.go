@@ -66,14 +66,6 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 	}
 	defer conn.Close()
 
-	payload := make([]byte, 256*1024)
-	done := make(chan error, 1)
-	go func() {
-		_, err := conn.Read(payload[:64])
-		done <- err
-	}()
-	time.Sleep(20 * time.Millisecond)
-
 	uploadDone := make(chan error, 1)
 	go func() {
 		rf, ok := conn.(io.ReaderFrom)
@@ -95,10 +87,6 @@ func TestH2ConnectStreamTCPUploadInProcess(t *testing.T) {
 	}
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
-	}
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
 	}
 }
 

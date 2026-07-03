@@ -53,3 +53,34 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestH2InProcessSocksFakeIperfNoPulse mirrors prod-stack fake iperf (read banner, write params, io.Copy).
+func TestH2InProcessSocksFakeIperfNoPulse(t *testing.T) {
+	const minBytes = 32 * 1024
+	targetPort := masque.InttestStartH2FakeIperfDownloadTarget(t)
+	proxyPort := masque.InttestStartInProcessH2TCPConnectStreamProxy(t)
+	socksPort := masque.InttestStartH2ConnectStreamSocksRouter(t, proxyPort)
+
+	conn := masque.InttestSocksTCPDial(t, socksPort, targetPort)
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	banner := make([]byte, 8)
+	if _, err := io.ReadFull(conn, banner); err != nil {
+		t.Fatalf("read banner: %v", err)
+	}
+	if string(banner) != "iperf3\r\n" {
+		t.Fatalf("banner: got %q", string(banner))
+	}
+	if _, err := conn.Write([]byte("FAKEIPERF")); err != nil {
+		t.Fatalf("write params: %v", err)
+	}
+	var dst bytes.Buffer
+	n, err := io.Copy(&dst, conn)
+	if err != nil && n == 0 {
+		t.Fatalf("download: %v", err)
+	}
+	if n < minBytes {
+		t.Fatalf("download short: %d want >= %d", n, minBytes)
+	}
+}

@@ -44,7 +44,6 @@ func startConnectStreamDialShapeTarget(t *testing.T) net.Listener {
 
 func dialConnectStreamOverH3Proxy(t *testing.T, targetPort uint16) net.Conn {
 	t.Helper()
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "1")
 	proxyPort := startInProcessTCPConnectProxy(t, connectStreamRelayHandler)
 	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	t.Cleanup(cancel)

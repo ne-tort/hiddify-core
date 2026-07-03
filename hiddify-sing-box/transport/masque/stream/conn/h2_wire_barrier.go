@@ -1,6 +1,7 @@
 package conn
 
 import (
+	"context"
 	"net"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,13 @@ func PrimeH2UploadBootstrapOnConn(c net.Conn, barrier UploadWireBarrier) error {
 		return nil
 	}
 	return bc.primeH2UploadBootstrapWire(barrier)
+}
+
+// SetStreamCancel wires http2 Extended CONNECT request-context teardown on tunnel close.
+func SetStreamCancel(c net.Conn, cancel context.CancelCauseFunc) {
+	if bc := unwrapBidiTunnelConn(c); bc != nil {
+		bc.streamCancel = cancel
+	}
 }
 
 func unwrapBidiTunnelConn(c net.Conn) *bidiTunnelConn {

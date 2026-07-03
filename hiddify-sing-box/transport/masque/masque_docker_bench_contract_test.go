@@ -693,8 +693,14 @@ func TestMasqueDockerBenchCISmokeContract(t *testing.T) {
 		"sing-box-linux-amd64",
 		"docker compose build",
 	)
-	verifySh := readRepoSource(t, filepath.Join("scripts", "verify-connect-ip-tun.sh"))
-	requireSubstrings(t, verifySh, "linux tun verify",
+	verifySh := readRepoSource(t, filepath.Join("scripts", "verify-connect-stream.sh"))
+	requireSubstrings(t, verifySh, "linux stream verify",
+		"verify-connect-stream.sh",
+		"TestGATEConnectStreamProdZeroEnv",
+		"connect-stream-h3,connect-stream-h2",
+	)
+	verifyTunSh := readRepoSource(t, filepath.Join("scripts", "verify-connect-ip-tun.sh"))
+	requireSubstrings(t, verifyTunSh, "linux tun verify",
 		"verify-connect-ip-tun.sh",
 		"connect-ip-h3-tun",
 		"BENCH_CONNECT_IP_TUN_DOD",
@@ -966,7 +972,7 @@ func TestMasqueDockerBenchConnectStreamH2BaselineContract(t *testing.T) {
 	local := readDockerBenchSource(t, "local_profiles.py")
 	history := readRepoSource(t, filepath.Join("docs", "masque", "bench-history", "2026-06-13-connect-stream-h2-baseline.md"))
 	matrixDoc := readRepoSource(t, filepath.Join("docs", "masque", "benchmark-matrix.md"))
-	streamTest := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "stream", "tunnel_conn_test.go"))
+	streamTest := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "stream", "conn", "paths_test.go"))
 	benchTest := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h2_connect_stream_bench_test.go"))
 
 	requireSubstrings(t, local, "connect-stream-h2 profile",
@@ -982,8 +988,7 @@ func TestMasqueDockerBenchConnectStreamH2BaselineContract(t *testing.T) {
 	)
 	requireSubstrings(t, history, "connect-stream-h2 baseline",
 		"connect-stream-h2",
-		"MASQUE_H2_BIDI_DOWNLOAD_DRAIN",
-		"TestTunnelConnReadFromUploadDrainsPendingDownload",
+		"connect-stream-h3 (control)",
 	)
 	h2DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "stream", "conn", "paths.go"))
 	requireSubstrings(t, h2DrainGo, "h2 bidi drain prod",
@@ -995,14 +1000,12 @@ func TestMasqueDockerBenchConnectStreamH2BaselineContract(t *testing.T) {
 		"TestMasqueDockerBenchConnectStreamH2BaselineContract",
 	)
 	requireSubstrings(t, streamTest, "tunnel conn drain",
-		"TestTunnelConnReadFromUploadDrainsPendingDownload",
-		"TestH2BidiTunnelConnWriteUploadDrainsPendingDownload",
-		"connect-stream-h2",
+		"TestBidiTunnelConnUploadDrainsPendingDownload",
+		"TestBidiTunnelConnReadFromUploadPath",
 	)
 	requireSubstrings(t, benchTest, "h2 banner upload",
 		"TestH2ConnectStreamTCPUploadServerBannerNoConcurrentRead",
 		"TestH2ConnectStreamTCPUploadWriteBannerNoConcurrentRead",
-		"MASQUE_H2_BIDI_DOWNLOAD_DRAIN",
 	)
 }
 

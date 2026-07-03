@@ -184,6 +184,20 @@ func (w *uploadPipeWriter) Close() error {
 	return nil
 }
 
+// PokeH2BidiDownload wakes http2 awaitFlowControl after download-side progress (RFC 8441 bidi).
+func (w *uploadPipeWriter) PokeH2BidiDownload() {
+	if w == nil || w.p == nil {
+		return
+	}
+	up := w.p
+	up.mu.Lock()
+	wake := up.flowWake
+	up.mu.Unlock()
+	if wake != nil {
+		wake()
+	}
+}
+
 // MasqueUploadWriterOpen reports whether the upload pipe writer is still open.
 func (w *uploadPipeWriter) MasqueUploadWriterOpen() bool {
 	if w == nil || w.p == nil {

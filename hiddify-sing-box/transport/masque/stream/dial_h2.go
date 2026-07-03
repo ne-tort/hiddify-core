@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // H2ConnectStreamProto is the :protocol header value for Extended CONNECT over HTTP/2 (RFC 8441).
@@ -152,7 +154,12 @@ func DialHTTP2ConnectStream(
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
 		stopReqCtxRelay(true)
-		return hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
+		conn, err := hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
+		if err != nil {
+			return nil, err
+		}
+		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
+		return conn, nil
 	}
 	if lastRoundTripErr != nil {
 		if IsRetryableTCPStreamError(lastRoundTripErr) {

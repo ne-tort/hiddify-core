@@ -145,21 +145,11 @@ func measureE2EDownloadWriteToMbps(conn net.Conn, duration time.Duration) (int64
 
 // TestArchE2EConnectStreamL3WriteTo (REF4-2): sb client → HandleTCPConnectRequest → target, instant wire >21.
 func TestArchE2EConnectStreamL3WriteTo(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
-	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
-	t.Setenv("MASQUE_RELAY_TCP_STREAM_HIJACK", "0")
-	t.Setenv("MASQUE_RELAY_TCP_LEGACY", "")
-
 	runArchE2EConnectStreamL3WriteToBench(t, "REF4-2 E2E sb client → sb server handler → target")
 }
 
-// TestArchE2EConnectStreamL3WriteToProdHijack (REF4-2b): prod default STREAM_HIJACK=1 on real QUIC stack.
+// TestArchE2EConnectStreamL3WriteToProdHijack (REF4-2b): prod default STREAM_HIJACK on real QUIC stack.
 func TestArchE2EConnectStreamL3WriteToProdHijack(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
-	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
-	t.Setenv("MASQUE_RELAY_TCP_STREAM_HIJACK", "1")
-	t.Setenv("MASQUE_RELAY_TCP_LEGACY", "")
-
 	runArchE2EConnectStreamL3WriteToBench(t, "REF4-2b E2E prod hijack sb client → sb server → target")
 }
 

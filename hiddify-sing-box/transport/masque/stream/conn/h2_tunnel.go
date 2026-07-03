@@ -113,13 +113,21 @@ func (w *h2ConnectStreamResponseBody) responseBodyReader() io.Reader {
 }
 
 func (w *h2ConnectStreamResponseBody) Close() error {
-	if w.r == nil {
+	if w == nil {
 		return nil
 	}
 	w.mu.Lock()
-	w.waitInflightDrainLocked()
+	defer w.mu.Unlock()
+	w.inflightDrain = nil
+	if w.r == nil {
+		return nil
+	}
 	r := w.r
-	w.mu.Unlock()
+	w.r = nil
+	w.br = nil
+	if r == nil {
+		return nil
+	}
 	return r.Close()
 }
 
