@@ -972,7 +972,8 @@ func TestCoreClientFactoryConnectIPDatagramCeilingClamp(t *testing.T) {
 		{name: "zero requested uses default ceiling max", requested: 0, expectedCeiling: mcip.DefaultDatagramCeilingMax},
 		{name: "below lower bound clamps to 1280", requested: 1200, expectedCeiling: 1280},
 		{name: "within bounds preserved", requested: 1400, expectedCeiling: 1400},
-		{name: "above default max clamps to 1500", requested: 5000, expectedCeiling: mcip.DefaultDatagramCeilingMax},
+		{name: "jumbo mtu from JSON preserved", requested: 5000, expectedCeiling: 5000},
+		{name: "above configured max clamps", requested: 10000, expectedCeiling: mcip.MaxConfiguredDatagramCeiling},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

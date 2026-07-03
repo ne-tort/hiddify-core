@@ -1,9 +1,10 @@
 package connectip
 
 const (
-	// DefaultDatagramCeilingMax is the inclusive upper bound for CONNECT-IP IPv4 datagram bytes.
-	// Per-endpoint mtu in masque config overrides session ceiling at runtime.
+	// DefaultDatagramCeilingMax is the default CONNECT-IP IPv4 datagram ceiling when endpoint mtu unset.
 	DefaultDatagramCeilingMax = 1500
+	// MaxConfiguredDatagramCeiling is the inclusive upper bound from endpoint mtu in JSON (no env).
+	MaxConfiguredDatagramCeiling = 9000
 	// H3FramingSlack is QUIC/H3 HTTP DATAGRAM framing overhead reserved from the ceiling for gVisor link MTU.
 	H3FramingSlack = 80
 	// MaxIPv4WireBytes caps CONNECT-IP IPv4 datagram size on the H3 return path (~1372 B practical wire limit).

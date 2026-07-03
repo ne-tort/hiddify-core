@@ -6,6 +6,9 @@ func TestDefaultDatagramCeilingMax(t *testing.T) {
 	if DefaultDatagramCeilingMax != 1500 {
 		t.Fatalf("got %d want %d", DefaultDatagramCeilingMax, 1500)
 	}
+	if MaxConfiguredDatagramCeiling != 9000 {
+		t.Fatalf("MaxConfiguredDatagramCeiling=%d want 9000", MaxConfiguredDatagramCeiling)
+	}
 }
 
 func TestH3H2NetstackMTUParity(t *testing.T) {

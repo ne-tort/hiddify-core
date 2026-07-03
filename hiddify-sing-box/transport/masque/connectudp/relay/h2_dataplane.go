@@ -228,8 +228,8 @@ func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, read
 				return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", aErr)
 			}
 		}
-		// Single-packet batch: low-latency flush for echo on asym download leg.
-		if len(payloads) == 1 {
+		// Flush each RX batch so multi-datagram echo (split upload) is not held below 64KiB threshold.
+		if len(payloads) > 0 {
 			if fErr := downlink.FlushPending(); fErr != nil {
 				return fmt.Errorf("masque h2 dataplane connect-udp server down flush: %w", fErr)
 			}
