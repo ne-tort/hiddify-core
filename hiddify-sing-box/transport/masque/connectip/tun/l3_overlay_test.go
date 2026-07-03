@@ -355,6 +355,91 @@ func TestL3HostKernelBulkSyncBulkThenAckDownloadAlive(t *testing.T) {
 	cancel()
 }
 
+// TestGATEConnectIPPerf1bFullNoWakeDownloadRegression (GATE-P0-5) negative control: coalesced bulk
+// NoWake without OnLoopInEnd flush leaves wire egress pending (pre-PERF-1b stall signature).
+func TestGATEConnectIPPerf1bFullNoWakeDownloadRegression(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wireLocal := netip.MustParseAddr("198.18.0.1")
+	server := netip.MustParseAddr("172.30.99.2")
+	prefixes := []netip.Prefix{netip.MustParsePrefix(server.String() + "/32")}
+	bulk := makeIPv4TCPPayload(tunHost, server, 40000, 5201, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	downBulk := makeIPv4TCPPayload(server, wireLocal, 5201, 40000, 0x18, make([]byte, 1000))
+
+	var hostReads atomic.Int32
+	hostRead := HostEgressReader(func(ctx context.Context, buf []byte) (int, error) {
+		if hostReads.Add(1) > 2 {
+			<-ctx.Done()
+			return 0, ctx.Err()
+		}
+		return copy(buf, bulk), nil
+	})
+
+	w := &flushPendingWriter{inner: &mockL3Writer{}}
+	var tunInjected atomic.Int32
+	b := NewL3OverlayBridge(func(p []byte) (int, error) {
+		tunInjected.Add(1)
+		return len(p), nil
+	}, w, &mockL3Reader{}, OverlayNAT{TunHost: tunHost, WireLocal: wireLocal})
+	b.SetHostEgressRead(hostRead, prefixes)
+	b.SetPumpWakeHooks(cippump.WakeHooks{}, nil) // regression: no OnLoopInEnd flush
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = b.RunPump(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for w.inner.wireWrites() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := w.inner.wireWrites(); got < 2 {
+		t.Fatalf("bulk NoWake ops=%d want >=2", got)
+	}
+	if w.inner.flushes.Load() != 0 {
+		t.Fatalf("negative control: flushes=%d want 0 without OnLoopInEnd", w.inner.flushes.Load())
+	}
+	if w.delivered.Load() != 0 {
+		t.Fatalf("negative control: delivered=%d want 0 (NoWake pending until flush)", w.delivered.Load())
+	}
+
+	if err := b.WritePacket(downBulk); err != nil {
+		t.Fatalf("LoopOut WritePacket after bulk: %v", err)
+	}
+	if tunInjected.Load() < 1 {
+		t.Fatalf("tunInjected=%d want >=1 (LoopOut independent of egress flush)", tunInjected.Load())
+	}
+	if w.delivered.Load() != 0 {
+		t.Fatalf("regression signature: delivered=%d want 0 without flush (contrast GATE-P0-3)", w.delivered.Load())
+	}
+	cancel()
+}
+
+// flushPendingWriter counts wire datagrams only after FlushEgressBatch (R2 batch parity).
+type flushPendingWriter struct {
+	inner     *mockL3Writer
+	pending   atomic.Int32
+	delivered atomic.Int32
+}
+
+func (w *flushPendingWriter) WritePacket(p []byte) ([]byte, error) {
+	w.pending.Add(1)
+	return w.inner.WritePacket(p)
+}
+
+func (w *flushPendingWriter) WritePacketNoWake(p []byte) ([]byte, error) {
+	w.pending.Add(1)
+	return w.inner.WritePacketNoWake(p)
+}
+
+func (w *flushPendingWriter) WritePacketInPlaceNoWake(p []byte) (bool, []byte, error) {
+	w.pending.Add(1)
+	return w.inner.WritePacketInPlaceNoWake(p)
+}
+
+func (w *flushPendingWriter) FlushEgressBatch() {
+	w.inner.FlushEgressBatch()
+	w.delivered.Store(w.pending.Load())
+}
+
 // TestL3HostKernelPumpInPlaceRetained (GATE-PERF-1c) host-kernel LoopIn retains pump pool buf on in-place wire write.
 func TestL3HostKernelPumpInPlaceRetained(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
