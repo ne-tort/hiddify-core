@@ -3,7 +3,7 @@ package connectip
 // CounterObsHooks returns Obs hooks that update CONNECT-IP observability counters.
 func CounterObsHooks() Obs {
 	return Obs{
-		EventsEnabled: obsEventsEnabledFromEnv,
+		EventsEnabled: nil,
 		OnPacketRx: func(n int) {
 			rxSeq := obsCounters.packetRxTotal.Add(1)
 			obsCounters.bytesRxTotal.Add(uint64(n))

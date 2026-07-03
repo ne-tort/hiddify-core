@@ -32,7 +32,6 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 	if os.Getenv("RUN_MASQUE_CONNECT_IP_TCP_E2E") == "" {
 		t.Skip("set RUN_MASQUE_CONNECT_IP_TCP_E2E=1 to run this optional local CONNECT-IP+TCP smoke test")
 	}
-	_ = os.Setenv("HIDDIFY_MASQUE_CONNECT_IP_DEBUG", "1")
 	certPath, keyPath := writeMasqueTestServerCertPair(t)
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

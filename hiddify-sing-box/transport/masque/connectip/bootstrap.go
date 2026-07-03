@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"time"
 
@@ -50,18 +49,10 @@ func RunPostDialBootstrap(dpCtx context.Context, conn BootstrapConn, p SessionBo
 	return GenericServerBootstrap(dpCtx, conn, p)
 }
 
-// BootstrapRequireAssignedPrefix reports MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX (default relaxed).
+// BootstrapRequireAssignedPrefix is prod policy: relaxed — continue without ADDRESS_ASSIGN
+// (netstack still waits LocalPrefixes; opt-in fail-closed was lab-only).
 func BootstrapRequireAssignedPrefix() bool {
-	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX"))
-	if raw == "" {
-		// Default relaxed: some live CF colos deliver ADDRESS_ASSIGN only after dataplane
-		// starts or with long latency; closing the QUIC stream here breaks the tunnel entirely.
-		// TCP netstack creation still waits on LocalPrefixes (see netstack.go).
-		// Opt in to fail-closed: MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX=1
-		return false
-	}
-	raw = strings.ToLower(raw)
-	return raw != "0" && raw != "false" && raw != "no" && raw != "off"
+	return false
 }
 
 // AdvertiseWarpProfileLocalRoutes sends ROUTE_ADVERTISEMENT entries for WARP device profile

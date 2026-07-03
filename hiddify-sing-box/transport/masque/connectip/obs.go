@@ -1,11 +1,5 @@
 package connectip
 
-import (
-	"os"
-	"strings"
-	"sync"
-)
-
 // Obs hooks optional CONNECT-IP netstack counters (wired from transport/masque).
 type Obs struct {
 	EventsEnabled              func() bool
@@ -39,32 +33,16 @@ type Obs struct {
 
 var obs Obs
 
-var obsEnvEventsEnabled struct {
-	once    sync.Once
-	enabled bool
-}
-
-func cachedObsEnvEventsEnabled() bool {
-	obsEnvEventsEnabled.once.Do(func() {
-		obsEnvEventsEnabled.enabled = obsEventsEnabledFromEnv()
-	})
-	return obsEnvEventsEnabled.enabled
-}
-
 // SetObs installs observability hooks (called from transport/masque init).
 func SetObs(o Obs) {
 	obs = o
-}
-
-func obsEventsEnabledFromEnv() bool {
-	return strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_OBS")) == "1"
 }
 
 func obsEventsEnabled() bool {
 	if obs.EventsEnabled != nil {
 		return obs.EventsEnabled()
 	}
-	return cachedObsEnvEventsEnabled()
+	return false
 }
 
 func obsReadInject() {

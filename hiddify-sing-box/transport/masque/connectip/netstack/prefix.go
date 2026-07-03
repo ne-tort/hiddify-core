@@ -4,52 +4,16 @@ import (
 	"context"
 	"errors"
 	"net/netip"
-	"os"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 const defaultLocalPrefixWait = 6 * time.Second
 
-var (
-	localPrefixWaitEnvCache struct {
-		mu    sync.Mutex
-		done  bool
-		value time.Duration
-	}
-)
-
-func parseLocalPrefixWaitFromEnv() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC"))
-	if raw == "" {
-		return defaultLocalPrefixWait
-	}
-	sec, err := strconv.Atoi(raw)
-	if err != nil || sec < 0 || sec > 60 {
-		return defaultLocalPrefixWait
-	}
-	return time.Duration(sec) * time.Second
-}
-
 // LocalPrefixWait bounds LocalPrefixes on the CONNECT-IP conn before falling back
-// to synthetic 198.18.0.1. Env is read once per process (MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC).
+// to synthetic 198.18.0.1 (prod hardcode).
 func LocalPrefixWait() time.Duration {
-	localPrefixWaitEnvCache.mu.Lock()
-	defer localPrefixWaitEnvCache.mu.Unlock()
-	if !localPrefixWaitEnvCache.done {
-		localPrefixWaitEnvCache.value = parseLocalPrefixWaitFromEnv()
-		localPrefixWaitEnvCache.done = true
-	}
-	return localPrefixWaitEnvCache.value
-}
-
-// ResetLocalPrefixWaitEnvCache clears the prefix-wait env cache (tests only).
-func ResetLocalPrefixWaitEnvCache() {
-	localPrefixWaitEnvCache.mu.Lock()
-	defer localPrefixWaitEnvCache.mu.Unlock()
-	localPrefixWaitEnvCache.done = false
+	return defaultLocalPrefixWait
 }
 
 // LocalPrefixWaitForSession bounds LocalPrefixes blocking when the CONNECT-IP
@@ -140,9 +104,8 @@ type PrefixSource interface {
 	LocalPrefixes(ctx context.Context) ([]netip.Prefix, error)
 }
 
-// SessionPrefixWait returns the env/profile-local wait used by CONNECT-IP TCP netstack
-// LocalPrefixes blocking. Warp bootstrap passive waits derive from the same helper so
-// MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC stays consistent.
+// SessionPrefixWait returns the profile-local wait used by CONNECT-IP TCP netstack
+// LocalPrefixes blocking. Warp bootstrap passive waits derive from the same helper.
 func SessionPrefixWait(profileLocalIPv4, profileLocalIPv6 string) time.Duration {
 	return LocalPrefixWaitForSession(
 		ParseProfileInterfaceAddress(profileLocalIPv4),

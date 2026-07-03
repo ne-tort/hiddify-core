@@ -111,8 +111,6 @@ func TestBootstrapWaitPolicy(t *testing.T) {
 }
 
 func TestSessionPrefixWaitMatchesNetstack(t *testing.T) {
-	ResetLocalPrefixWaitEnvCache()
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
 	profileV4 := ParseProfileInterfaceAddress("172.16.0.2")
 	sessionWait := SessionPrefixWait("172.16.0.2", "")
 	netstackWait := LocalPrefixWaitForSession(profileV4, netip.Addr{})
@@ -123,14 +121,12 @@ func TestSessionPrefixWaitMatchesNetstack(t *testing.T) {
 		t.Fatalf("expected 2s profile cap, got %v", sessionWait)
 	}
 
-	ResetLocalPrefixWaitEnvCache()
-	t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "1")
-	sessionWait = SessionPrefixWait("172.16.0.2", "")
-	if sessionWait != time.Second {
-		t.Fatalf("expected env override 1s, got %v", sessionWait)
+	sessionWaitNoProfile := SessionPrefixWait("", "")
+	if sessionWaitNoProfile != 6*time.Second {
+		t.Fatalf("expected 6s default wait without profile, got %v", sessionWaitNoProfile)
 	}
 	policy := NewBootstrapWaitPolicy(false, "172.16.0.2", "", 20*time.Second)
-	if policy.FirstWait != time.Second || policy.SecondWait != time.Second {
+	if policy.FirstWait != 2*time.Second || policy.SecondWait != 2*time.Second {
 		t.Fatalf("bootstrap profile-local waits should match session wait, got first=%v second=%v", policy.FirstWait, policy.SecondWait)
 	}
 }

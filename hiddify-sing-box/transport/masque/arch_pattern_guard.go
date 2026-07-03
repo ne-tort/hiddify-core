@@ -115,6 +115,9 @@ const (
 	connectUDPL1H2UploadMaxNsPerB     = 150.0  // CONNECT-UDP H2 capsule WriteTo; measured ~61
 	connectUDPL1H2DownloadMaxNsPerB   = 250.0  // CONNECT-UDP H2 ReadFrom+echo feed; calibrate on CI
 
+	connectIPL1PipeUploadMaxNsPerB   = 15.0  // CONNECT-IP L1 pipe TCP upload; measured ~1.9
+	connectIPL1PipeDownloadMaxNsPerB = 45.0  // CONNECT-IP L1 pipe TCP download; measured ~5.7–7.3
+
 	serverRelayTwoGoroutineMaxNsPerB = 150.0 // stream/relay instant bidi; see relay_cpu_bench_test.go
 )
 

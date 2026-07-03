@@ -103,9 +103,11 @@ func TestMasqueDockerBenchRecycleContract(t *testing.T) {
 		`wait_connect_ip_tun_native_ready`,
 		`warm_connect_ip_tun_before_iperf`,
 		`time.sleep(2)`,
-		`iperf_direct_in_client(True`,
+		`connect_ip_tun_download_steady_kpi`,
 		`[bench] upload OK`,
 		`[bench] download OK`,
+		`post-recycle download OK`,
+		`steady`,
 	)
 	if strings.Contains(src, "HIDDIFY_CONNECT_IP_TUN_POST_RECYCLE") {
 		t.Fatal("recycle: HIDDIFY_CONNECT_IP_TUN_POST_RECYCLE crutch must be CUT")
@@ -1022,5 +1024,34 @@ func TestMasqueDockerBenchRemoteComposeZeroEnvContract(t *testing.T) {
 	requireSubstrings(t, remote, "remote compose zero-env",
 		"MASQUE_BENCH_SKIP_URL_TEST",
 		"QUIC_GO_DISABLE_GSO",
+	)
+}
+
+// TestMasqueDockerBenchLocalComposeZeroEnvContract locks local docker-compose.yml:
+// no perf MASQUE/HIDDIFY knobs; bench skip + optional trace only.
+func TestMasqueDockerBenchLocalComposeZeroEnvContract(t *testing.T) {
+	t.Parallel()
+	local := readDockerBenchSource(t, "docker-compose.yml")
+	forbidden := []string{
+		"HIDDIFY_MASQUE_",
+		"HIDDIFY_CONNECT_IP",
+		"MASQUE_CONNECT_IP_",
+		"MASQUE_QUIC_KEEPALIVE_MS",
+		"MASQUE_QUIC_HANDSHAKE_IDLE_MS",
+		"MASQUE_CONNECT_STREAM_DIAL_MAX_ATTEMPTS",
+		"MASQUE_CONNECT_STREAM_DIAL_BACKOFF_MS",
+		"MASQUE_QUIC_PACKET_CONN_POLICY",
+		"MASQUE_TRACE_RELAY_FLUSH",
+		"MASQUE_H3_",
+		"MASQUE_H2_",
+		"MASQUE_RELAY_",
+	}
+	for _, key := range forbidden {
+		if strings.Contains(local, key) {
+			t.Fatalf("docker-compose.yml: forbidden perf env passthrough %q", key)
+		}
+	}
+	requireSubstrings(t, local, "local compose zero-env",
+		"MASQUE_BENCH_SKIP_URL_TEST",
 	)
 }

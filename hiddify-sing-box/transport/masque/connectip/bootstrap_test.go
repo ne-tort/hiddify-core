@@ -19,24 +19,9 @@ func TestNewSessionBootstrapParams(t *testing.T) {
 }
 
 func TestBootstrapRequireAssignedPrefix(t *testing.T) {
-	t.Run("default_relaxed", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX", "")
-		if BootstrapRequireAssignedPrefix() {
-			t.Fatal("expected default relaxed")
-		}
-	})
-	t.Run("opt_in_strict", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX", "1")
-		if !BootstrapRequireAssignedPrefix() {
-			t.Fatal("expected strict when env=1")
-		}
-	})
-	t.Run("explicit_off", func(t *testing.T) {
-		t.Setenv("MASQUE_CONNECT_IP_BOOTSTRAP_REQUIRE_PREFIX", "off")
-		if BootstrapRequireAssignedPrefix() {
-			t.Fatal("expected relaxed when env=off")
-		}
-	})
+	if BootstrapRequireAssignedPrefix() {
+		t.Fatal("prod policy: relaxed (continue without ADDRESS_ASSIGN)")
+	}
 }
 
 func TestWarpConsumerBootstrapSkipsNonWarpProtocol(t *testing.T) {

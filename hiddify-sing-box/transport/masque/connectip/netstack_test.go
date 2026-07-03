@@ -733,35 +733,26 @@ func TestConnectIPTCPNetstackDialFailsAfterWriteNotifyFatalError(t *testing.T) {
 }
 
 func TestConnectIPNetstackLocalPrefixWaitForSession(t *testing.T) {
-	t.Run("caps_long_env_when_profile_v4", func(t *testing.T) {
-		ResetLocalPrefixWaitEnvCache()
-		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
+	t.Run("caps_default_when_profile_v4", func(t *testing.T) {
 		v4 := netip.MustParseAddr("172.16.0.2")
 		if d := LocalPrefixWaitForSession(v4, netip.Addr{}); d != 2*time.Second {
 			t.Fatalf("expected 2s cap, got %v", d)
 		}
 	})
-	t.Run("caps_long_env_when_profile_v6", func(t *testing.T) {
-		ResetLocalPrefixWaitEnvCache()
-		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "20")
+	t.Run("caps_default_when_profile_v6", func(t *testing.T) {
 		v6 := netip.MustParseAddr("fd12::1")
 		if d := LocalPrefixWaitForSession(netip.Addr{}, v6); d != 2*time.Second {
 			t.Fatalf("expected 2s cap, got %v", d)
 		}
 	})
 	t.Run("full_wait_without_profile", func(t *testing.T) {
-		ResetLocalPrefixWaitEnvCache()
-		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "9")
-		if d := LocalPrefixWaitForSession(netip.Addr{}, netip.Addr{}); d != 9*time.Second {
-			t.Fatalf("expected 9s from env, got %v", d)
+		if d := LocalPrefixWaitForSession(netip.Addr{}, netip.Addr{}); d != 6*time.Second {
+			t.Fatalf("expected 6s default, got %v", d)
 		}
 	})
-	t.Run("respects_shorter_env_with_profile", func(t *testing.T) {
-		ResetLocalPrefixWaitEnvCache()
-		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", "1")
-		v4 := netip.MustParseAddr("172.16.0.2")
-		if d := LocalPrefixWaitForSession(v4, netip.Addr{}); d != 1*time.Second {
-			t.Fatalf("expected 1s (below cap), got %v", d)
+	t.Run("prod_hardcoded_local_prefix_wait", func(t *testing.T) {
+		if d := LocalPrefixWait(); d != 6*time.Second {
+			t.Fatalf("expected prod hardcode 6s, got %v", d)
 		}
 	})
 }

@@ -5,16 +5,11 @@ import (
 	"time"
 )
 
-func TestLocalPrefixWaitEnvContract(t *testing.T) {
-	run := func(env string, want time.Duration) {
-		t.Helper()
-		ResetLocalPrefixWaitEnvCache()
-		t.Setenv("MASQUE_CONNECT_IP_TCP_NETSTACK_PREFIX_WAIT_SEC", env)
-		if got := LocalPrefixWait(); got != want {
-			t.Fatalf("env=%q: got %v want %v", env, got, want)
-		}
+func TestLocalPrefixWaitProdHardcode(t *testing.T) {
+	if got := LocalPrefixWait(); got != defaultLocalPrefixWait {
+		t.Fatalf("got %v want prod hardcode %v", got, defaultLocalPrefixWait)
 	}
-	run("", defaultLocalPrefixWait)
-	run("3", 3*time.Second)
-	run("not-a-number", defaultLocalPrefixWait)
+	if defaultLocalPrefixWait != 6*time.Second {
+		t.Fatalf("defaultLocalPrefixWait contract: got %v want 6s", defaultLocalPrefixWait)
+	}
 }

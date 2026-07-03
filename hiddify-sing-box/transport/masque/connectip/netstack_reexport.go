@@ -67,7 +67,6 @@ var (
 
 	LocalPrefixWait            = cipnet.LocalPrefixWait
 	LocalPrefixWaitForSession  = cipnet.LocalPrefixWaitForSession
-	ResetLocalPrefixWaitEnvCache = cipnet.ResetLocalPrefixWaitEnvCache
 	BogusProfileMasqueIfaceAddr = cipnet.BogusProfileMasqueIfaceAddr
 	ParseProfileInterfaceAddress = cipnet.ParseProfileInterfaceAddress
 	PrefixPreferredAddress     = cipnet.PrefixPreferredAddress
