@@ -91,7 +91,7 @@ func ConnectIPTunNativeL3(
 		nativeNS, errNS = cip.NewNetstackForSession(ctx, egressSess, cip.NetstackOptions{
 			LocalIPv4: tunHost,
 			LocalIPv6: netip.MustParseAddr("fd00::1"),
-			MTU:       cip.H3NetstackMTU(cip.DefaultDatagramCeilingMax),
+			MTU:       connectIPNativeL3NetstackMTU(sess),
 		})
 		if errNS != nil {
 			if leaveL3 != nil {
@@ -202,6 +202,14 @@ type nativeL3PacketReader interface {
 
 type nativeL3PacketWriter interface {
 	WritePacket([]byte) ([]byte, error)
+}
+
+func connectIPNativeL3NetstackMTU(sess ClientSession) int {
+	ceiling := cip.DefaultDatagramCeilingMax
+	if cs, ok := sess.(*coreSession); ok && cs.ConnectIPDatagramCeiling > 0 {
+		ceiling = cs.ConnectIPDatagramCeiling
+	}
+	return cip.H3NetstackMTU(ceiling)
 }
 
 func connectIPNativeL3PlaneEndpoints(ipSess IPPacketSession) (nativeL3PacketWriter, nativeL3PacketReader, error) {
