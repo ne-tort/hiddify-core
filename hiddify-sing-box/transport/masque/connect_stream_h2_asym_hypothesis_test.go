@@ -79,6 +79,45 @@ func TestGATEH2AsymHypothesisRelayPlainIncompatible(t *testing.T) {
 	t.Log("download wake is load-bearing for H2 ResponseWriter; upload wake alone already FALSIFIED (H3)")
 }
 
+// TestGATEH2AsymHypothesisStockFlushDockerFalsified locks wave-3 H7: Invisv/stock per-DATA flush did not fix upload asym.
+// Value: bulk TLS batching is not the upload ceiling; do not chase flush policy alone.
+func TestGATEH2AsymHypothesisStockFlushDockerFalsified(t *testing.T) {
+	assertHypothesisFalsified(t, "H7-STOCK-FLUSH",
+		masque.ExportConnectStreamH2AsymDockerBaselineUpMbps,
+		masque.ExportConnectStreamH2AsymStockFlushUpMbps)
+}
+
+// TestGATEH2AsymBottleneckIsClientUpload locks localization: upload path is client-primary, not server relay.
+// Value: prevents server-relay rewrites as the default fix path (see STR-P2-H2-UPLOAD-ASYM-H2O-COMPARE.md).
+func TestGATEH2AsymBottleneckIsClientUpload(t *testing.T) {
+	up := masque.ExportConnectStreamH2AsymDockerBaselineUpMbps
+	down := masque.ExportConnectStreamH2AsymDockerBaselineDownMbps
+	upOnly := masque.ExportConnectStreamH2AsymUploadOnlyMbps
+	h3Up := masque.ExportConnectStreamH2AsymH3ControlUpMbps
+	h3Down := masque.ExportConnectStreamH2AsymH3ControlDownMbps
+	if down <= 0 || up <= 0 {
+		t.Fatal("baseline legs zero")
+	}
+	if up/down >= 0.85 {
+		t.Fatalf("baseline already symmetric (%.2f) — update ledger", up/down)
+	}
+	// Upload-only must not be materially faster than sequential upload (server/session pollution ruled out).
+	if hypothesisUplift(up, upOnly) > masque.ExportConnectStreamH2AsymHypothesisMinUplift {
+		t.Fatalf("upload-only uplift %.1f%% suggests ordering/server pollution — re-open H4",
+			hypothesisUplift(up, upOnly)*100)
+	}
+	// H3 control must stay near-symmetric (harness + server onward OK).
+	h3Ratio := h3Up / h3Down
+	if h3Ratio > h3Down/h3Up {
+		h3Ratio = h3Down / h3Up
+	}
+	if h3Ratio < masque.ExportConnectStreamH2AsymH3ControlMinRatio {
+		t.Fatalf("H3 control not symmetric (%.2f) — cannot blame H2 client alone", h3Ratio)
+	}
+	t.Logf("bottleneck=CLIENT H2 upload: baseline up/down=%.2f upload_only=%.0f H3 ratio=%.2f",
+		up/down, upOnly, h3Ratio)
+}
+
 func assertHypothesisFalsified(t *testing.T, id string, baseUp, bisectUp float64) {
 	t.Helper()
 	uplift := hypothesisUplift(baseUp, bisectUp)

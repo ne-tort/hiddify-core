@@ -5,7 +5,17 @@ import (
 	"time"
 )
 
-func masqueUploadBulkFlushEnabled() bool { return true }
+// masqueUploadBulkFlushOn is prod default (batch TLS flush for CONNECT-stream).
+// Invisv/stock x/net flushes per WriteData; toggle via SetMasqueUploadBulkFlushEnabled (bisect only).
+var masqueUploadBulkFlushOn = true
+
+func masqueUploadBulkFlushEnabled() bool { return masqueUploadBulkFlushOn }
+
+// SetMasqueUploadBulkFlushEnabled toggles bulk TLS batching (bisect / unit tests only).
+// false = stock x/net / Invisv shape: Flush after every DATA frame.
+func SetMasqueUploadBulkFlushEnabled(on bool) {
+	masqueUploadBulkFlushOn = on
+}
 
 var masqueBulkFlushThresholdBytes = 256 << 10
 

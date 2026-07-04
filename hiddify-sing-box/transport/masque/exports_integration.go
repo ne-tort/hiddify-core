@@ -15,6 +15,7 @@ const (
 	ExportConnectStreamH2AsymH3ControlDownMbps       = connectStreamH2AsymH3ControlDownMbps
 	ExportConnectStreamH2AsymH3ControlUpMbps         = connectStreamH2AsymH3ControlUpMbps
 	ExportConnectStreamH2AsymH3ControlMinRatio       = connectStreamH2AsymH3ControlMinRatio
+	ExportConnectStreamH2AsymStockFlushUpMbps        = connectStreamH2AsymStockFlushUpMbps
 	ExportConnectStreamH2AsymHypothesisMinUplift     = connectStreamH2AsymHypothesisMinUplift
 )
 

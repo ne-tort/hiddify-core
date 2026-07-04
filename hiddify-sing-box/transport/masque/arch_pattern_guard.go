@@ -45,6 +45,8 @@ const (
 	connectStreamH2AsymH3ControlDownMbps        = 6030.0
 	connectStreamH2AsymH3ControlUpMbps          = 6500.0
 	connectStreamH2AsymH3ControlMinRatio        = 0.85 // H3 must stay near-symmetric (harness control)
+	// Wave 3: Invisv/stock x/net flush-per-DATA (MASQUE_BISECT_H2_BULK_FLUSH=0).
+	connectStreamH2AsymStockFlushUpMbps         = 3150.0
 	connectStreamH2AsymHypothesisMinUplift      = 0.15 // 15% upload uplift confirms hypothesis
 )
 

@@ -40,4 +40,11 @@ func init() {
 			http2.SetMasqueUploadReadBufferDefaultBytes(bytes)
 		}
 	}
+	// Invisv/stock x/net: flush every DATA frame (no bulk batching).
+	switch os.Getenv("MASQUE_BISECT_H2_BULK_FLUSH") {
+	case "0", "false", "off":
+		http2.SetMasqueUploadBulkFlushEnabled(false)
+	case "1", "true", "on":
+		http2.SetMasqueUploadBulkFlushEnabled(true)
+	}
 }
