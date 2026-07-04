@@ -7,11 +7,15 @@ import (
 // H3UploadFlushChunkBytes splits bulk CONNECT-stream upload before hitting the wire (64 KiB).
 const H3UploadFlushChunkBytes = 64 * 1024
 
-// H3UploadChunkBytes returns CONNECT upload chunk size (single prod profile: 256 KiB).
+// H3UploadChunkBytes returns CONNECT upload chunk size.
+// Saturated duplex (WriteTo + concurrent upload) must flush at H3UploadFlushChunkBytes so
+// response-side tunnel framing does not mis-parse coalesced 256 KiB request DATA as frame types.
 func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploadStarted bool) int {
-	_ = downloadActive
 	_ = downloadDelivered
 	_ = duplexUploadStarted
+	if downloadActive {
+		return H3UploadFlushChunkBytes
+	}
 	return TunnelWriteToBufLen
 }
 

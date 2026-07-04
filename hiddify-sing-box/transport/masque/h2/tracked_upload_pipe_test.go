@@ -9,6 +9,7 @@ func TestTrackedUploadPipeWriterOpenUntilClose(t *testing.T) {
 	t.Parallel()
 	r, w := NewTrackedUploadPipe()
 	body := &ExtendedConnectUploadBody{Pipe: r, Writer: w}
+	body.BeginUploadWriterLive()
 	if !body.MasqueUploadWriterOpen() {
 		t.Fatal("writer should be open after create")
 	}

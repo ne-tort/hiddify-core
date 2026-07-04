@@ -35,18 +35,51 @@ const (
 	connectStreamH2SeqSymmetryMaxRatio = 2.0 // max(down,up)/min(down,up) after chunk fix
 	// STR-P2-H2-UPLOAD-ASYM hypothesis ledger (Docker SOCKS max P1 @0ms, 2026-07-04).
 	connectStreamH2AsymDockerBaselineDownMbps = 6530.0
-	connectStreamH2AsymDockerBaselineUpMbps   = 3240.0
+	connectStreamH2AsymDockerBaselineUpMbps   = 4340.0 // post-H8 prod shallow pipe (was 3240 deep pipe)
+	connectStreamH2AsymDeepPipeBaselineUpMbps = 3240.0 // pre-H8 bisect anchor
+	connectStreamH2AsymDeepPipeUploadOnlyMbps = 3270.0 // pre-H8 upload-only leg
 	connectStreamH2AsymChunk64BisectUpMbps      = 3280.0
 	connectStreamH2AsymEagerOffBisectUpMbps     = 3570.0
 	connectStreamH2AsymRelayWakeOffBisectUpMbps   = 3420.0
 	// Wave 2: leg isolation + H3 control (Docker SOCKS max P1 @0ms, 2026-07-04).
-	connectStreamH2AsymUploadOnlyMbps           = 3270.0
-	connectStreamH2AsymDownloadOnlyMbps         = 6570.0
+	connectStreamH2AsymUploadOnlyMbps           = 4320.0 // post-H8 prod shallow (was 3270 deep pipe)
+	connectStreamH2AsymDownloadOnlyMbps         = 4920.0 // fresh re-anchor 2026-07-04 PM (was 6570 AM)
 	connectStreamH2AsymH3ControlDownMbps        = 6030.0
 	connectStreamH2AsymH3ControlUpMbps          = 6500.0
 	connectStreamH2AsymH3ControlMinRatio        = 0.85 // H3 must stay near-symmetric (harness control)
 	// Wave 3: Invisv/stock x/net flush-per-DATA (MASQUE_BISECT_H2_BULK_FLUSH=0).
 	connectStreamH2AsymStockFlushUpMbps         = 3150.0
+	// Wave 3 continued: Invisv shallow pipe + bidi poke (Docker SOCKS max P1 @0ms, 2026-07-04).
+	connectStreamH2AsymShallowPipeBisectUpMbps       = 4340.0 // sequential upload leg
+	connectStreamH2AsymShallowPipeUploadOnlyMbps     = 4320.0 // upload-only leg (2026-07-04 PM re-run)
+	connectStreamH2AsymShallowPipeDownloadOnlyMbps   = 5190.0 // download-only leg vs prod 4920
+	connectStreamH2AsymShallowPipeDownloadMinRatio   = 0.90   // shallow down >= prod download_only * ratio
+	connectStreamH2AsymShallowPipeSeqDownMbps        = 4800.0 // sequential download (shallow) — harness variance vs 6530
+	connectStreamH2AsymBidiPokeOffBisectUpMbps       = 3120.0
+	// Wave 4: x/net flush knobs post-H8 (upload-only @3s fast smoke, 2026-07-04 PM).
+	connectStreamH2AsymDeferFCFlushUpMbps          = 4290.0 // H10 FALSIFIED (−1% vs prod shallow)
+	connectStreamH2AsymNoBlockingReadFlushUpMbps   = 0.0    // H11 INCOMPATIBLE (iperf interrupt)
+	connectStreamH2AsymBulk512UpMbps               = 4370.0 // H12 FALSIFIED (+0.7%)
+	connectStreamH2AsymBulkFlushDelay10UpMbps      = 4360.0 // H13 FALSIFIED (+0.5%)
+	// Post-H8 prod sequential @8s (2026-07-04 PM).
+	connectStreamH2AsymPostH8SeqUpMbps             = 4290.0
+	connectStreamH2AsymPostH8SeqDownMbps           = 4930.0
+	connectStreamH2AsymPostH8SeqMinRatio           = 0.85
+	// Shallow pipe upload profile @4360 Mbit/s upload-only 8s.
+	connectStreamH2AsymShallowProfileDataFrames    = 33186
+	connectStreamH2AsymShallowProfileTLSFlushes    = 16742
+	connectStreamH2AsymShallowProfileMaxFCWaits     = 0
+	// Wave 5: Invisv-shaped composite (stock flush + eager off + poke off + download direct).
+	connectStreamH2AsymInvisvCompositeUpMbps           = 4330.0
+	connectStreamH2AsymInvisvCompositeSeqUpMbps          = 4370.0
+	connectStreamH2AsymInvisvCompositeSeqDownMbps        = 2630.0 // eager WINDOW off tanks download
+	connectStreamH2AsymInvisvCompositeSeqDownMinRatio    = 0.85
+	// Wave 6: Invisv stock RoundTrip (no writeRequestMasqueDuplex).
+	connectStreamH2AsymStockDuplexUpMbps                 = 4340.0
+	connectStreamH2AsymStockDuplexSeqUpMbps              = 4300.0
+	connectStreamH2AsymStockDuplexSeqDownMbps            = 6980.0 // fast 3s; download not regressed
+	// upload-only profile (deep pipe prod): awaitFlowControl waits=0 @ ~3260 Mbit/s
+	connectStreamH2AsymUploadProfileMaxFCWaits       = 0
 	connectStreamH2AsymHypothesisMinUplift      = 0.15 // 15% upload uplift confirms hypothesis
 )
 

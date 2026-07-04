@@ -126,10 +126,7 @@ func (c *TunnelConn) beginDuplexDownload() {
 		}
 	}
 	if TestDuplexDownloadArmedHook != nil {
-		select {
-		case TestDuplexDownloadArmedHook <- struct{}{}:
-		default:
-		}
+		TestDuplexDownloadArmedHook <- struct{}{}
 		// Synth barrier: upload goroutine starts here — re-arm full duplex before WriteTo drains.
 		c.waitConcurrentUploadAnnounce()
 		if atomic.LoadInt32(&c.uploadTrafficStarted) != 0 {

@@ -1,29 +1,6 @@
-// Package http2xconnect ensures golang.org/x/net/http2 enables RFC 8441 (SETTINGS_ENABLE_CONNECT_PROTOCOL)
-// before the http2 package's init reads GODEBUG. MASQUE uses Extended CONNECT for H2 CONNECT-UDP / CONNECT-stream;
-// upstream x/net defaults to opt-in via GODEBUG=http2xconnect=1 (see golang.org/issue/71128).
-//
-// Import this package blank-only from protocol/masque or transport/masque so it initializes before golang.org/x/net/http2.
+//go:build with_masque
+
+// Package http2xconnect is blank-imported from protocol/masque and transport/masque so it
+// initializes before golang.org/x/net/http2. Extended CONNECT (RFC 8441) is enabled at
+// compile time in the patched x/net fork (masque_extended_connect.go).
 package http2xconnect
-
-import (
-	"os"
-	"strings"
-)
-
-func init() {
-	ensureHTTP2ExtendedConnectEnabled()
-}
-
-func ensureHTTP2ExtendedConnectEnabled() {
-	// x/net/http2 masque_extended_connect.go enables Extended CONNECT at compile time.
-	// Keep GODEBUG setter for net/http paths that read env before x/net init (legacy compat).
-	e := os.Getenv("GODEBUG")
-	if strings.Contains(e, "http2xconnect=1") || strings.Contains(e, "http2xconnect=0") {
-		return
-	}
-	if e == "" {
-		os.Setenv("GODEBUG", "http2xconnect=1")
-		return
-	}
-	os.Setenv("GODEBUG", e+",http2xconnect=1")
-}

@@ -150,13 +150,6 @@ type masqueUploadPipeCap interface {
 // nears capacity (bulk pipe cap is 512KiB; flush at 256KiB = TLS bulk threshold).
 var masqueUploadPipeFlushWaterMark = 256 << 10
 
-// SetMasqueUploadPipeFlushWaterMarkBytes overrides pipe watermark (bisect / unit tests only).
-func SetMasqueUploadPipeFlushWaterMarkBytes(n int) {
-	if n > 0 {
-		masqueUploadPipeFlushWaterMark = n
-	}
-}
-
 func masqueUploadPipeFlushMark(body io.ReadCloser) int {
 	mark := masqueUploadPipeFlushWaterMark
 	if cap, ok := body.(masqueUploadPipeCap); ok {

@@ -7,13 +7,14 @@ import (
 )
 
 func TestH3UploadChunkBytesProd(t *testing.T) {
-	for _, active := range []bool{false, true} {
-		for _, delivered := range []bool{false, true} {
-			for _, duplex := range []bool{false, true} {
-				if got := H3UploadChunkBytes(active, delivered, duplex); got != TunnelWriteToBufLen {
-					t.Fatalf("chunk=%d want %d (active=%v delivered=%v duplex=%v)",
-						got, TunnelWriteToBufLen, active, delivered, duplex)
-				}
+	if got := H3UploadChunkBytes(false, false, false); got != TunnelWriteToBufLen {
+		t.Fatalf("sequential upload chunk=%d want %d", got, TunnelWriteToBufLen)
+	}
+	for _, delivered := range []bool{false, true} {
+		for _, duplex := range []bool{false, true} {
+			if got := H3UploadChunkBytes(true, delivered, duplex); got != H3UploadFlushChunkBytes {
+				t.Fatalf("duplex upload chunk=%d want %d (delivered=%v duplex=%v)",
+					got, H3UploadFlushChunkBytes, delivered, duplex)
 			}
 		}
 	}

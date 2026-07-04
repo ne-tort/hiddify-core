@@ -50,9 +50,7 @@ func NewHooks(w Wire) strm.DialH2Hooks {
 			return r, w
 		},
 		NewConnectUploadBody: func(uploadR io.Reader) io.Reader {
-			body := &h2c.ExtendedConnectUploadBody{Pipe: uploadR}
-			body.BeginUploadWriterLive()
-			return body
+			return &h2c.ExtendedConnectUploadBody{Pipe: uploadR}
 		},
 		SetAuthHeader:      w.SetAuth,
 		RequestURL:         w.RequestURL,

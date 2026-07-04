@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/h3"
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 var errBenchDuration = errors.New("masque: bench duration elapsed")
@@ -126,6 +127,47 @@ func measureTCPUploadMbps(conn net.Conn, duration time.Duration) (int64, float64
 	return total, mbps, nil
 }
 
+// measureTCPUploadMbpsUntil uploads until endAt with per-write deadlines (honest goodput under duplex backpressure).
+func measureTCPUploadMbpsUntil(conn net.Conn, endAt time.Time, writeSize int) (int64, float64, error) {
+	if writeSize <= 0 {
+		writeSize = 64 * 1024
+	}
+	start := time.Now()
+	buf := make([]byte, writeSize)
+	var total int64
+	for time.Now().Before(endAt) {
+		wd := 2 * time.Second
+		if rem := time.Until(endAt); rem < wd {
+			wd = rem
+		}
+		if wd <= 0 {
+			break
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(wd))
+		n, err := conn.Write(buf)
+		if n > 0 {
+			total += int64(n)
+		}
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() && total > 0 {
+				break
+			}
+			if err == io.EOF {
+				break
+			}
+			if total > 0 {
+				break
+			}
+			return 0, 0, err
+		}
+	}
+	secs := time.Since(start).Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return total, float64(total*8) / secs / 1e6, nil
+}
+
 func measureTCPUploadMbpsWriteSize(conn net.Conn, duration time.Duration, writeSize int) (int64, float64, error) {
 	if writeSize <= 0 {
 		writeSize = 1
@@ -171,13 +213,24 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 	downDone := make(chan downRes, 1)
 	upDone := make(chan upRes, 1)
 	start := make(chan struct{})
-	downloadArmed := make(chan struct{}, 1)
-	prevArmedHook := h3.TestDuplexDownloadArmedHook
+	downloadArmed := make(chan struct{})
+	prevArmedHookH3 := h3.TestDuplexDownloadArmedHook
+	prevArmedHookH2 := strmconn.TestDuplexDownloadArmedHook
 	h3.TestDuplexDownloadArmedHook = downloadArmed
-	defer func() { h3.TestDuplexDownloadArmedHook = prevArmedHook }()
+	strmconn.TestDuplexDownloadArmedHook = downloadArmed
+	defer func() {
+		h3.TestDuplexDownloadArmedHook = prevArmedHookH3
+		strmconn.TestDuplexDownloadArmedHook = prevArmedHookH2
+	}()
 	go func() {
 		<-start
-		n, mbps, e := measureTCPDownloadWriteToMbps(conn, duration)
+		benchEnd := time.Now().Add(duration)
+		rem := time.Until(benchEnd)
+		if rem <= 0 {
+			downDone <- downRes{err: errBenchDuration}
+			return
+		}
+		n, mbps, e := measureTCPDownloadWriteToMbps(conn, rem)
 		if e != nil && n == 0 {
 			downDone <- downRes{err: e}
 			return
@@ -186,11 +239,14 @@ func measureSegmentDuplexMbps(conn net.Conn, duration time.Duration) (down, up, 
 	}()
 	go func() {
 		<-start
-		<-downloadArmed
-		chunk := make([]byte, 256*1024)
+		benchEnd := time.Now().Add(duration)
+		select {
+		case <-downloadArmed:
+		case <-time.After(time.Until(benchEnd)):
+		}
+		chunk := make([]byte, 64*1024)
 		var upTotal int64
-		stop := time.Now().Add(duration)
-		for time.Now().Before(stop) {
+		for time.Now().Before(benchEnd) {
 			n, e := conn.Write(chunk)
 			if n > 0 {
 				upTotal += int64(n)

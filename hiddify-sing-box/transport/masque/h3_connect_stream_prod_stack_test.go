@@ -27,6 +27,7 @@ const (
 	h3ProdStackFakeIperfMinBytes = 32 * 1024
 	h3DockerSynthStallWatchdog   = 10 * time.Second
 	h3DockerSynthDownloadBench   = 2 * time.Second
+	prodStackTestShutdownTimeout   = 400 * time.Millisecond // synth tests: avoid 8s HTTP/2 graceful drain
 )
 
 func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
@@ -75,7 +76,10 @@ func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
 		t.Fatal("expected HTTP/3 listener on LaunchMasqueStack")
 	}
 	t.Cleanup(func() {
-		if shutErr := server.ShutdownMasqueEndpoint(server.ShutdownMasqueEndpointConfig{Stack: stack}); shutErr != nil {
+		if shutErr := server.ShutdownMasqueEndpoint(server.ShutdownMasqueEndpointConfig{
+			Stack:           stack,
+			ShutdownTimeout: prodStackTestShutdownTimeout,
+		}); shutErr != nil {
 			t.Errorf("shutdown LaunchMasqueStack: %v", shutErr)
 		}
 	})
@@ -141,7 +145,10 @@ func startLaunchMasqueStackH2ConnectStreamServer(t *testing.T) int {
 		t.Fatal("expected HTTP/2 collateral listener on LaunchMasqueStack")
 	}
 	t.Cleanup(func() {
-		if shutErr := server.ShutdownMasqueEndpoint(server.ShutdownMasqueEndpointConfig{Stack: stack}); shutErr != nil {
+		if shutErr := server.ShutdownMasqueEndpoint(server.ShutdownMasqueEndpointConfig{
+			Stack:           stack,
+			ShutdownTimeout: prodStackTestShutdownTimeout,
+		}); shutErr != nil {
 			t.Errorf("shutdown LaunchMasqueStack: %v", shutErr)
 		}
 	})

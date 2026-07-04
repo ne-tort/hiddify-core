@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	masque "github.com/sagernet/sing-box/transport/masque"
+	"golang.org/x/net/http2"
 )
 
 func TestMasqueConnectStreamH2LocalizeUpload(t *testing.T) {
@@ -98,7 +99,8 @@ func TestH2B0WindowedDuplexWriteToNoUploadPulse(t *testing.T) {
 }
 
 func TestH2StrictWindowCeilingBand(t *testing.T) {
-	t.Setenv("MASQUE_H2_DOWNLOAD_EAGER_WINDOW", "0")
+	http2.SetMasqueDownloadEagerWindowEnabled(false)
+	t.Cleanup(func() { http2.SetMasqueDownloadEagerWindowEnabled(true) })
 	masque.InttestRunConnectStreamH2DuplexWriteToNoPulseBenchMbpsStrict(t, 10, 20)
 }
 

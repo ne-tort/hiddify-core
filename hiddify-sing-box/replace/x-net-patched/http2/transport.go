@@ -440,6 +440,7 @@ type clientStream struct {
 	reqBodyContentLength int64         // -1 means unknown
 	reqBodyClosed        chan struct{} // guarded by cc.mu; non-nil on Close, closed when done
 	masqueExtendedConnect bool         // RFC 8441 Extended CONNECT (captured at RoundTrip)
+	masqueDownloadPokeOnce sync.Once  // one-shot eager WINDOW_UPDATE before bulk download read
 
 	// owned by writeRequest:
 	sentEndStream bool // sent an END_STREAM flag to the peer
@@ -493,7 +494,7 @@ func (cs *clientStream) abortRequestBodyWrite() {
 	cc := cs.cc
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masquePreserveConnectUploadPump(cs.reqBody) {
+	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masqueDeferConnectUploadBodyClose(cs.reqBody) {
 		cs.closeReqBodyLocked()
 		cc.cond.Broadcast()
 	}
@@ -1592,13 +1593,13 @@ func (cs *clientStream) writeRequestMasqueDuplex(req *http.Request, ctx context.
 	cc := cs.cc
 	cs.bindMasqueUploadFlowWake()
 
-	for masqueUploadWriterOpen(cs.reqBody) || masqueUploadPumpActive(cs.reqBody) {
+	for masqueSustainedUploadPumpContinue(cs.reqBody) {
 		err := cs.writeRequestBody(req)
 		if err != nil {
 			if err != errStopReqBodyWrite {
 				return err
 			}
-			if !masqueUploadWriterOpen(cs.reqBody) && !masqueUploadPumpActive(cs.reqBody) {
+			if !masqueSustainedUploadPumpContinue(cs.reqBody) {
 				break
 			}
 			// Invisv io.Pipe: wait for upload pipe data or flow-control wake (avoid busy spin).
@@ -1745,7 +1746,7 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 	// while still writing request body
 	cc.mu.Lock()
 	mustCloseBody := false
-	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masquePreserveConnectUploadPump(cs.reqBody) {
+	if cs.reqBody != nil && cs.reqBodyClosed == nil && !masqueDeferConnectUploadBodyClose(cs.reqBody) {
 		mustCloseBody = true
 		cs.reqBodyClosed = make(chan struct{})
 	}
@@ -1962,6 +1963,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 	// Scratch buffer for reading into & writing from.
 	bulkFlush := masqueUploadBodyUsesBulkFlush(body)
 	preserve := masquePreserveConnectUploadPump(body)
+	sustained := masqueDeferConnectUploadBodyClose(body)
 	scratchLen := cs.frameScratchBufferLen(maxFrameSize)
 	if bulkFlush {
 		scratchLen = masqueUploadReadBufferLen(scratchLen, maxFrameSize)
@@ -2020,13 +2022,13 @@ uploadBodyLoop:
 			}
 			if err != nil {
 				cc.mu.Lock()
-				bodyClosed := cs.reqBodyClosed != nil && !masquePreserveConnectUploadPump(body)
+				bodyClosed := cs.reqBodyClosed != nil && !sustained
 				cc.mu.Unlock()
 				switch {
 				case bodyClosed:
 					return errStopReqBodyWrite
 				case err == io.EOF:
-					if preserve && masqueUploadWriterOpen(body) {
+					if masqueSustainedUploadPumpContinue(body) {
 						err = nil
 						continue
 					}
@@ -2067,7 +2069,7 @@ uploadBodyLoop:
 				data := remain[:allowed]
 				remain = remain[allowed:]
 				sentEnd = sawEOF && len(remain) == 0 && !hasTrailers && pendingAck == 0 &&
-					!cs.sentEndStream && (!preserve || !masqueUploadWriterOpen(body))
+					!cs.sentEndStream && !masqueSustainedUploadPumpContinue(body)
 				err = cc.fr.WriteData(cs.ID, sentEnd, data)
 				if err == nil {
 					if sentEnd {
@@ -2125,17 +2127,20 @@ uploadBodyLoop:
 		if preserve && (masqueUploadWriterOpen(body) || masqueUploadPumpActive(body)) {
 			continue uploadBodyLoop
 		}
+		if masqueConnectStreamBidiUpload(body) && masqueSustainedUploadPumpContinue(body) {
+			continue uploadBodyLoop
+		}
 		break uploadBodyLoop
 	}
 
 	if sentEnd {
-		if preserve && masqueUploadWriterOpen(body) {
+		if masqueSustainedUploadPumpContinue(body) {
 			goto uploadBodyLoop
 		}
 		return nil
 	}
 
-	if preserve && masqueUploadWriterOpen(body) {
+	if masqueSustainedUploadPumpContinue(body) {
 		goto uploadBodyLoop
 	}
 
@@ -2162,6 +2167,9 @@ uploadBodyLoop:
 
 	// Two ways to send END_STREAM: either with trailers, or
 	// with an empty DATA frame.
+	if masqueSustainedUploadPumpAfterHeaders(body) {
+		return errStopReqBodyWrite
+	}
 	if len(trls) > 0 {
 		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls)
 	} else {
@@ -2189,7 +2197,7 @@ func (cs *clientStream) awaitFlowControl(maxBytes int) (taken int32, err error) 
 		if cc.closed {
 			return 0, errClientConnClosed
 		}
-		if cs.reqBodyClosed != nil && !masquePreserveConnectUploadPump(cs.reqBody) {
+		if cs.reqBodyClosed != nil && !masqueDeferConnectUploadBodyClose(cs.reqBody) {
 			return 0, errStopReqBodyWrite
 		}
 		select {
@@ -2745,6 +2753,9 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 	if cs.readErr != nil {
 		return 0, cs.readErr
 	}
+	if cs.masqueExtendedConnect {
+		cs.masquePokeDownloadReceiveWindowOnce()
+	}
 	n, err = b.cs.bufPipe.Read(p)
 	if cs.bytesRemain != -1 {
 		if int64(n) > cs.bytesRemain {
@@ -2787,8 +2798,11 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 		}
 		cc.bw.Flush()
 	}
-	// MASQUE H2 Extended CONNECT bidi: client download read must schedule upload
+	// MASQUE H2 Extended CONNECT bidi: download read must schedule upload
 	// writeRequestBody blocked in awaitFlowControl on the same stream (iperf -R).
+	if cs.masqueExtendedConnect {
+		masqueWakeRequestBodyWrite(cs.reqBody)
+	}
 	cc.mu.Lock()
 	cc.cond.Broadcast()
 	cc.mu.Unlock()

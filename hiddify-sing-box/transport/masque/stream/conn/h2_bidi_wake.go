@@ -1,21 +1,24 @@
 package conn
 
 import (
-	"context"
 	"sync/atomic"
-	"time"
 )
+
+// TestDuplexDownloadArmedHook fires when H2 WriteTo arms the download leg (synth duplex barrier).
+var TestDuplexDownloadArmedHook chan struct{}
+
+func fireH2DuplexDownloadArmedHook() {
+	if TestDuplexDownloadArmedHook == nil {
+		return
+	}
+	// Blocking send: synth upload goroutine must not miss armed before bench endAt (upload=0 flake).
+	TestDuplexDownloadArmedHook <- struct{}{}
+}
 
 // H2BidiBootstrapUploadBytes is one-shot upload DATA size before first download read (4 KiB).
 const H2BidiBootstrapUploadBytes = 4 * 1024
 
-// h2DownloadKeepaliveBytes is periodic upload DATA during Read-based download (RFC 8441 bidi FC).
-const h2DownloadKeepaliveBytes = 64
-
-var (
-	h2BootstrapUploadBuf    [H2BidiBootstrapUploadBytes]byte
-	h2DownloadKeepaliveBuf  [h2DownloadKeepaliveBytes]byte
-)
+var h2BootstrapUploadBuf [H2BidiBootstrapUploadBytes]byte
 
 func flushUploadPath(up UploadPath) {
 	if up == nil {
@@ -32,6 +35,9 @@ func flushUploadPath(up UploadPath) {
 
 // pokeUploadPathForH2BidiDownload flushes the CONNECT upload half after app upload chunks.
 func pokeUploadPathForH2BidiDownload(up UploadPath) {
+	if !h2BidiPokeEnabled {
+		return
+	}
 	flushUploadPath(up)
 	if up == nil {
 		return
@@ -57,60 +63,30 @@ func uploadPathHasH2BidiWake(up UploadPath) bool {
 	return ok
 }
 
-func (c *bidiTunnelConn) bootstrapH2UploadForDownloadOnce() {
-	if c == nil || c.paths.Upload == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
+func (c *bidiTunnelConn) wakeH2BidiUploadDuringDownload() {
+	if c == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
+		return
+	}
+	if atomic.LoadInt32(&c.downloadActive) == 0 {
+		return
+	}
+	c.wakeH2BidiUploadOnDownloadRead()
+}
+
+// wakeH2BidiUploadOnDownloadRead pokes the CONNECT upload leg during response-body reads (Read or WriteTo).
+func (c *bidiTunnelConn) wakeH2BidiUploadOnDownloadRead() {
+	if c == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
+		return
+	}
+	if !h2BidiPokeEnabled {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {
+		pokeUploadPathForH2BidiDownload(c.paths.Upload)
 		return
 	}
 	c.uploadMu.Lock()
 	_, _ = c.paths.Upload.Write(h2BootstrapUploadBuf[:])
 	c.uploadMu.Unlock()
 	pokeUploadPathForH2BidiDownload(c.paths.Upload)
-}
-
-func (c *bidiTunnelConn) wakeH2BidiUploadDuringDownload() {
-	if c == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
-		return
-	}
-	c.bootstrapH2UploadForDownloadOnce()
-	pokeUploadPathForH2BidiDownload(c.paths.Upload)
-}
-
-// sustainH2UploadDuringDownloadRead sends one upload keepalive chunk (download-phase pulse helper).
-func (c *bidiTunnelConn) sustainH2UploadDuringDownloadRead() {
-	if c == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
-		return
-	}
-	c.uploadMu.Lock()
-	_, _ = c.paths.Upload.Write(h2DownloadKeepaliveBuf[:])
-	c.uploadMu.Unlock()
-	pokeUploadPathForH2BidiDownload(c.paths.Upload)
-}
-
-func (c *bidiTunnelConn) ensureH2DownloadPhaseUploadPulse() {
-	if c == nil || atomic.LoadInt32(&c.appDownloadBytes) == 0 {
-		return
-	}
-	if !uploadPathHasH2BidiWake(c.paths.Upload) {
-		return
-	}
-	c.downloadPulseOnce.Do(func() {
-		go c.runH2DownloadPhaseUploadPulse()
-	})
-}
-
-func (c *bidiTunnelConn) runH2DownloadPhaseUploadPulse() {
-	ticker := time.NewTicker(15 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if c.ctx != nil {
-			if err := context.Cause(c.ctx); err != nil {
-				return
-			}
-		}
-		<-ticker.C
-		c.sustainH2UploadDuringDownloadRead()
-	}
 }

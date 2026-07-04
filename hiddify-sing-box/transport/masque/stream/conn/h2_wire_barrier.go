@@ -44,7 +44,7 @@ func unwrapBidiTunnelConn(c net.Conn) *bidiTunnelConn {
 }
 
 func (c *bidiTunnelConn) primeH2UploadBootstrapWire(barrier UploadWireBarrier) error {
-	if c.paths.Upload == nil {
+	if c.paths.Upload == nil || !h2BidiPokeEnabled {
 		return nil
 	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {

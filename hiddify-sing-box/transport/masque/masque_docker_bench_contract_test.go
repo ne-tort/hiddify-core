@@ -1055,6 +1055,7 @@ func TestMasqueDockerBenchLocalComposeZeroEnvContract(t *testing.T) {
 		"MASQUE_H3_",
 		"MASQUE_H2_",
 		"MASQUE_RELAY_",
+		"MASQUE_BISECT_",
 	}
 	for _, key := range forbidden {
 		if strings.Contains(local, key) {

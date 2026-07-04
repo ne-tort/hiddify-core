@@ -1,8 +1,9 @@
+//go:build with_masque
+
 package include
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/sagernet/sing-box/option"
@@ -32,25 +33,14 @@ func TestEndpointRegistryCreate_MasqueTypes(t *testing.T) {
 		if endpointType == "masque" {
 			if o, ok := options.(*option.MasqueEndpointOptions); ok {
 				o.ServerOptions.Server = "example.com"
-				o.TCPTransport = option.MasqueTCPTransportConnectStream
-			}
-		}
-		if endpointType == "warp_masque" {
-			if o, ok := options.(*option.WarpMasqueEndpointOptions); ok {
-				o.TCPTransport = option.MasqueTCPTransportConnectStream
 			}
 		}
 		endpoint, err := registry.Create(ctx, nil, nil, "test-"+endpointType, endpointType, options)
 		if err != nil {
-			// !with_masque builds should hit this explicit stub path.
-			if !strings.Contains(err.Error(), "with_masque") {
-				t.Fatalf("unexpected create error for %q: %v", endpointType, err)
-			}
-			continue
+			t.Fatalf("unexpected create error for %q: %v", endpointType, err)
 		}
 		if endpoint == nil {
 			t.Fatalf("expected endpoint instance for type %q", endpointType)
 		}
 	}
 }
-

@@ -58,16 +58,23 @@ func (w *h2ConnectStreamResponseBody) Read(p []byte) (int, error) {
 	}
 	rctx, rcancel := context.WithDeadline(context.Background(), time.Unix(0, rNanos))
 	defer rcancel()
-	return w.awaitReadInterruptible(rctx, p)
+	r := w.r
+	if r == nil {
+		return 0, io.EOF
+	}
+	return w.awaitReadInterruptible(rctx, r, p)
 }
 
-func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context, p []byte) (int, error) {
+func (w *h2ConnectStreamResponseBody) awaitReadInterruptible(ctx context.Context, r io.Reader, p []byte) (int, error) {
+	if r == nil {
+		return 0, io.EOF
+	}
 	ch := make(chan struct {
 		n   int
 		err error
 	}, 1)
 	go func() {
-		n, err := w.r.Read(p)
+		n, err := r.Read(p)
 		ch <- struct {
 			n   int
 			err error
@@ -117,17 +124,16 @@ func (w *h2ConnectStreamResponseBody) Close() error {
 		return nil
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.inflightDrain = nil
+	w.waitInflightDrainLocked()
 	if w.r == nil {
+		w.mu.Unlock()
 		return nil
 	}
 	r := w.r
 	w.r = nil
 	w.br = nil
-	if r == nil {
-		return nil
-	}
+	w.inflightDrain = nil
+	w.mu.Unlock()
 	return r.Close()
 }
 

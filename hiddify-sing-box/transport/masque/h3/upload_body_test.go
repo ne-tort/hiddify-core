@@ -11,6 +11,15 @@ func TestH3UploadFlushChunkBytesProdDefault(t *testing.T) {
 	}
 }
 
+func TestH3UploadChunkBytesDuplexUsesFlushChunk(t *testing.T) {
+	if got := H3UploadChunkBytes(true, false, true); got != H3UploadFlushChunkBytes {
+		t.Fatalf("duplex chunk: got %d want %d", got, H3UploadFlushChunkBytes)
+	}
+	if got := H3UploadChunkBytes(false, false, false); got != TunnelWriteToBufLen {
+		t.Fatalf("sequential upload chunk: got %d want %d", got, TunnelWriteToBufLen)
+	}
+}
+
 func TestH3WriteChunkedSplitsWrites(t *testing.T) {
 	var got []int
 	w := &chunkRecordWriter{fn: func(p []byte) (int, error) {

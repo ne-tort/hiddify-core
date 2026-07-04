@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/h3"
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 var (
@@ -27,6 +28,9 @@ var (
 	ExportStartH3ConnectStreamSocksRouterWithSession = startH3ConnectStreamSocksRouterWithSession
 	ExportNewConnectStreamH3DockerLiveSession       = newConnectStreamH3DockerLiveSession
 	ExportNewConnectStreamH3ProdSession             = newConnectStreamH3ProdSession
+	ExportNewConnectStreamH3ProdSessionWithTimeout = newConnectStreamH3ProdSessionWithTimeout
+	ExportDialConnectStreamH3ProdTCP                = dialConnectStreamH3ProdTCP
+	ExportDialConnectStreamH3ProdTCPWithSession     = dialConnectStreamH3ProdTCPWithSession
 	ExportSocksTCPDial                              = socksTCPDial
 	ExportSocksTCPDialHost                          = socksTCPDialHost
 	ExportBenchWindowedBidiLinkStrict               = benchWindowedBidiLinkStrict
@@ -43,8 +47,12 @@ var (
 	ExportConnectStreamSynthParityMinRatio          = connectStreamSynthParityMinRatio
 	ExportConnectStreamSynthDuplexMaxRatio          = connectStreamSynthDuplexMaxRatio
 	ExportConnectStreamSynthProdBenchDuration       = connectStreamSynthProdBenchDuration
+	ExportConnectStreamSynthSequentialBenchDuration = connectStreamSynthSequentialBenchDuration
 	ExportConnectStreamSynthDuplexGateSamples       = connectStreamSynthDuplexGateSamples
 	ExportConnectStreamSynthDuplexGateMinPass       = connectStreamSynthDuplexGateMinPass
+	ExportConnectStreamSynthDuplexGateSamplesForHost = connectStreamSynthDuplexGateSamplesForHost
+	ExportConnectStreamSynthDuplexGateMinPassForHost = connectStreamSynthDuplexGateMinPassForHost
+	ExportConnectStreamSynthDuplexGateWarmupForHost  = connectStreamSynthDuplexGateWarmupForHost
 	ExportConnectIPSynthProdMinMbps                 = connectIPSynthProdMinMbps
 	ExportConnectIPSynthRegressionFloorUpMbps       = connectIPSynthRegressionFloorUpMbps
 	ExportConnectIPSynthRegressionFloorDownMbpsLinux   = connectIPSynthRegressionFloorDownMbpsLinux
@@ -104,6 +112,10 @@ func ExportMeasureTCPUploadMbps(conn net.Conn, duration time.Duration) (int64, f
 	return measureTCPUploadMbps(conn, duration)
 }
 
+func ExportMeasureTCPUploadMbpsUntil(conn net.Conn, endAt time.Time, writeSize int) (int64, float64, error) {
+	return measureTCPUploadMbpsUntil(conn, endAt, writeSize)
+}
+
 func ExportSynthKPIDiagnostic(layer, leg string, gotMbps, wantMbps float64, hint string) string {
 	return synthKPIDiagnostic(layer, leg, gotMbps, wantMbps, hint)
 }
@@ -152,9 +164,14 @@ func ExportBenchMasqueradeDuplexMinMbps(duration time.Duration) float64 {
 
 // ExportInstallDuplexDownloadArmedHook wires beginDuplexDownload barrier for prod-stack duplex synth.
 func ExportInstallDuplexDownloadArmedHook(hook chan struct{}) func() {
-	prev := h3.TestDuplexDownloadArmedHook
+	prevH3 := h3.TestDuplexDownloadArmedHook
+	prevH2 := strmconn.TestDuplexDownloadArmedHook
 	h3.TestDuplexDownloadArmedHook = hook
-	return func() { h3.TestDuplexDownloadArmedHook = prev }
+	strmconn.TestDuplexDownloadArmedHook = hook
+	return func() {
+		h3.TestDuplexDownloadArmedHook = prevH3
+		strmconn.TestDuplexDownloadArmedHook = prevH2
+	}
 }
 
 func ExportAssertLocalizeStrictL256Ceiling35ms(t *testing.T, label string, mbps float64) {

@@ -16,6 +16,22 @@ func auditSourceContains(t *testing.T, name, source string, needles []string) {
 	}
 }
 
+// TestArchREFSRCH2InvisvAuditFrozen locks REF-H2-INVISV differential table for wave-5 ref compare.
+func TestArchREFSRCH2InvisvAuditFrozen(t *testing.T) {
+	if len(ArchREFSRCH2InvisvAudit) < 7 {
+		t.Fatalf("REF-H2-INVISV audit rows=%d want >=7", len(ArchREFSRCH2InvisvAudit))
+	}
+	if ArchREFSRCH2InvisvVerdict == "" {
+		t.Fatal("REF-H2-INVISV verdict empty")
+	}
+	for _, row := range ArchREFSRCH2InvisvAudit {
+		if row.ID == "REF-H2-INV-1" && row.Status != "ADAPT" {
+			t.Fatalf("%s status=%s want ADAPT (H8 shallow prod)", row.ID, row.Status)
+		}
+	}
+	t.Log(ArchREFSRCH2InvisvVerdict)
+}
+
 // TestArchREFSRCEmbedInvisvSource verifies frozen Invisv needles in h3 prod sources.
 func TestArchREFSRCEmbedInvisvSource(t *testing.T) {
 	src := archH3InvisvAuditSource()

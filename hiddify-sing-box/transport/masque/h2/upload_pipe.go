@@ -5,46 +5,45 @@ import (
 	"sync"
 )
 
-const (
-	connectUploadPipeBuf        = 8 << 20 // CONNECT-stream only; CONNECT-UDP CUT (deadlock @ sustained max capsule)
-	connectUploadShallowPipeBuf = 128 << 10 // ~80 maxCapsule chunks; enables x/net bulk TLS @ >64KiB
-)
+const connectUploadShallowPipeBuf = 128 << 10 // CONNECT-stream + CONNECT-UDP upload pipe
 
 // uploadPipe is a bounded buffer between CONNECT upload producers and http2 writeRequestBody.
-// io.Pipe blocks on every chunk; shallow cap decouples C2S from TLS flush without 8 MiB deadlock.
 type uploadPipe struct {
-	mu            sync.Mutex
-	cond          sync.Cond
-	buf           []byte
-	cap           int
-	writerClosed  bool
-	readerClosed  bool
-	writeErr      error
-	flowWake      func()
+	mu           sync.Mutex
+	cond         sync.Cond
+	buf          []byte
+	cap          int
+	writerClosed bool
+	readerClosed bool
+	writeErr     error
+	flowWake     func()
 }
 
 func newUploadPipe(cap int) *uploadPipe {
 	if cap <= 0 {
-		cap = connectUploadPipeBuf
+		cap = connectUploadShallowPipeBuf
 	}
 	p := &uploadPipe{cap: cap}
 	p.cond.L = &p.mu
 	return p
 }
 
-// ConnectUploadPipeWriter is the client upload half of a shallow/deep CONNECT upload pipe.
+// ConnectUploadPipeWriter is the client upload half of a CONNECT upload pipe.
 type ConnectUploadPipeWriter interface {
 	io.WriteCloser
 	MasqueUploadWriterOpen() bool
 }
 
-// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (CONNECT-stream deep buffer).
+// ExportConnectUploadShallowPipeBuf exposes CONNECT-stream upload pipe size for gates.
+func ExportConnectUploadShallowPipeBuf() int { return connectUploadShallowPipeBuf }
+
+// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (128 KiB).
 func NewConnectUploadPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
-	p := newUploadPipe(connectUploadPipeBuf)
+	p := newUploadPipe(connectUploadShallowPipeBuf)
 	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
 }
 
-// NewConnectUploadShallowPipe returns a bounded upload buffer for CONNECT-UDP (Invisv pipe shape + depth API).
+// NewConnectUploadShallowPipe returns a bounded upload buffer for CONNECT-UDP.
 func NewConnectUploadShallowPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
 	p := newUploadPipe(connectUploadShallowPipeBuf)
 	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
@@ -52,7 +51,6 @@ func NewConnectUploadShallowPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
 
 type uploadPipeReader struct{ p *uploadPipe }
 
-// MasqueUploadBuffered reports bytes waiting in the upload pipe (0 = next Read may block).
 func (r *uploadPipeReader) MasqueUploadBuffered() int {
 	up := r.p
 	up.mu.Lock()
@@ -60,7 +58,6 @@ func (r *uploadPipeReader) MasqueUploadBuffered() int {
 	return len(up.buf)
 }
 
-// UploadPipeCap reports the pipe capacity for http2 flush-before-blocking-read policy.
 func (r *uploadPipeReader) UploadPipeCap() int {
 	if r == nil || r.p == nil {
 		return 0
@@ -68,7 +65,6 @@ func (r *uploadPipeReader) UploadPipeCap() int {
 	return r.p.cap
 }
 
-// MasqueUploadWriterOpen reports whether the client upload pipe writer is still open.
 func (r *uploadPipeReader) MasqueUploadWriterOpen() bool {
 	if r == nil || r.p == nil {
 		return false
@@ -79,7 +75,6 @@ func (r *uploadPipeReader) MasqueUploadWriterOpen() bool {
 	return !up.writerClosed
 }
 
-// SetMasqueUploadFlowWake wakes http2 awaitFlowControl when upload producers write (shallow pipe).
 func (r *uploadPipeReader) SetMasqueUploadFlowWake(fn func()) {
 	if r == nil || r.p == nil {
 		return
@@ -88,6 +83,19 @@ func (r *uploadPipeReader) SetMasqueUploadFlowWake(fn func()) {
 	up.mu.Lock()
 	up.flowWake = fn
 	up.mu.Unlock()
+}
+
+func (r *uploadPipeReader) MasqueWakeUploadFlow() {
+	if r == nil || r.p == nil {
+		return
+	}
+	up := r.p
+	up.mu.Lock()
+	wake := up.flowWake
+	up.mu.Unlock()
+	if wake != nil {
+		wake()
+	}
 }
 
 func (r *uploadPipeReader) Read(p []byte) (int, error) {
@@ -184,7 +192,6 @@ func (w *uploadPipeWriter) Close() error {
 	return nil
 }
 
-// PokeH2BidiDownload wakes http2 awaitFlowControl after download-side progress (RFC 8441 bidi).
 func (w *uploadPipeWriter) PokeH2BidiDownload() {
 	if w == nil || w.p == nil {
 		return
@@ -198,7 +205,6 @@ func (w *uploadPipeWriter) PokeH2BidiDownload() {
 	}
 }
 
-// MasqueUploadWriterOpen reports whether the upload pipe writer is still open.
 func (w *uploadPipeWriter) MasqueUploadWriterOpen() bool {
 	if w == nil || w.p == nil {
 		return false

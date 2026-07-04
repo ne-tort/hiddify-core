@@ -29,6 +29,28 @@ func (b *ExtendedConnectUploadBody) BeginUploadWriterLive() {
 	}
 }
 
+// MasqueConnectStreamBidiUpload reports CONNECT-stream sustained upload pump (not UDP/IP asymmetric).
+func (b *ExtendedConnectUploadBody) MasqueConnectStreamBidiUpload() bool {
+	return b != nil && !b.writerLive.Load()
+}
+
+// MasqueUploadPipeWriterOpen reports whether the client upload pipe writer is still open.
+func (b *ExtendedConnectUploadBody) MasqueUploadPipeWriterOpen() bool {
+	if b == nil {
+		return false
+	}
+	if b.Writer != nil {
+		return b.Writer.MasqueUploadWriterOpen()
+	}
+	if b.Pipe == nil {
+		return false
+	}
+	if w, ok := b.Pipe.(interface{ MasqueUploadWriterOpen() bool }); ok {
+		return w.MasqueUploadWriterOpen()
+	}
+	return false
+}
+
 // MarkUploadWriterDone signals http2 to half-close the CONNECT upload stream (PacketConn.Close).
 func (b *ExtendedConnectUploadBody) MarkUploadWriterDone() {
 	if b != nil {
@@ -51,12 +73,11 @@ func (b *ExtendedConnectUploadBody) Read(p []byte) (int, error) {
 }
 
 // MasqueUploadWriterOpen reports whether the client upload pipe writer is still open.
+// Only true after BeginUploadWriterLive (CONNECT-UDP / CONNECT-IP asymmetric leg).
+// CONNECT-stream must return false so x/net stays on the standard bidi writeRequest path.
 func (b *ExtendedConnectUploadBody) MasqueUploadWriterOpen() bool {
-	if b == nil {
+	if b == nil || !b.writerLive.Load() {
 		return false
-	}
-	if b.writerLive.Load() {
-		return true
 	}
 	if b.Writer != nil {
 		return b.Writer.MasqueUploadWriterOpen()
@@ -99,6 +120,24 @@ func (b *ExtendedConnectUploadBody) SetMasqueUploadFlowWake(fn func()) {
 	}
 	if t, ok := b.Pipe.(interface{ SetMasqueUploadFlowWake(func()) }); ok {
 		t.SetMasqueUploadFlowWake(fn)
+	}
+}
+
+// MasqueWakeRequestBodyWrite nudges http2 writeRequestBody out of awaitFlowControl (bidi download read).
+func (b *ExtendedConnectUploadBody) MasqueWakeRequestBodyWrite() {
+	if b == nil {
+		return
+	}
+	if b.Writer != nil {
+		if p, ok := b.Writer.(interface{ PokeH2BidiDownload() }); ok {
+			p.PokeH2BidiDownload()
+			return
+		}
+	}
+	if b.Pipe != nil {
+		if w, ok := b.Pipe.(interface{ MasqueWakeUploadFlow() }); ok {
+			w.MasqueWakeUploadFlow()
+		}
 	}
 }
 

@@ -15,6 +15,13 @@ import (
 
 var bidiTunnelWriteToBufPool = sync.Pool{
 	New: func() any {
+		b := make([]byte, H2ConnectStreamWriteToBufLen)
+		return &b
+	},
+}
+
+var bidiTunnelReadFromBufPool = sync.Pool{
+	New: func() any {
 		b := make([]byte, H2ConnectUploadChunkBytes)
 		return &b
 	},
@@ -164,7 +171,6 @@ type bidiTunnelConn struct {
 	duplexCopy          int32 // ConnectionManager runs ReadFrom+WriteTo concurrently
 	downloadActive      int32 // WriteTo in progress — H2 bidi upload scheduling (parity h3.TunnelConn)
 	appDownloadBytes    int32 // bytes delivered to app — skip upload-only drain after download read
-	downloadPulseOnce   sync.Once
 	bootstrapUploadDone int32 // one-shot upload DATA before first download read (iperf -R)
 }
 
@@ -296,19 +302,13 @@ func (c *bidiTunnelConn) Read(p []byte) (int, error) {
 		}
 	}
 	c.stopDownloadDrain()
-	if atomic.LoadInt32(&c.appDownloadBytes) > 0 {
-		c.ensureH2DownloadPhaseUploadPulse()
-		c.wakeH2BidiUploadDuringDownload()
-	} else {
-		c.wakeH2BidiUploadDuringDownload()
-	}
 	c.downloadMu.Lock()
 	defer c.downloadMu.Unlock()
 	_ = c.setDownloadReadDeadline(time.Time{})
 	n, err := readDownloadPath(c.paths.Download, p)
 	if n > 0 {
 		c.noteAppDownloadBytes(n)
-		c.wakeH2BidiUploadDuringDownload()
+		c.wakeH2BidiUploadOnDownloadRead()
 	}
 	return n, err
 }
@@ -332,9 +332,6 @@ func (c *bidiTunnelConn) Write(p []byte) (int, error) {
 		return n, errors.Join(tcpConnectStreamFailed, err)
 	}
 	pokeUploadPathForH2BidiDownload(c.paths.Upload)
-	if atomic.LoadInt32(&c.appDownloadBytes) > 0 {
-		c.ensureH2DownloadPhaseUploadPulse()
-	}
 	return n, nil
 }
 
@@ -344,7 +341,9 @@ func (c *bidiTunnelConn) ReadFrom(r io.Reader) (int64, error) {
 	if c.paths.Upload == nil {
 		return 0, io.ErrClosedPipe
 	}
-	buf := make([]byte, H2ConnectUploadChunkBytes)
+	bp := bidiTunnelReadFromBufPool.Get().(*[]byte)
+	defer bidiTunnelReadFromBufPool.Put(bp)
+	buf := *bp
 	var total int64
 	for {
 		n, err := r.Read(buf)
@@ -377,11 +376,9 @@ func (c *bidiTunnelConn) WriteTo(w io.Writer) (int64, error) {
 	atomic.AddInt32(&c.downloadActive, 1)
 	defer atomic.AddInt32(&c.downloadActive, -1)
 	c.stopDownloadDrain()
-	if atomic.LoadInt32(&c.appDownloadBytes) > 0 {
-		c.ensureH2DownloadPhaseUploadPulse()
-	}
 	// H2 bidi FC: poke upload before first response read (iperf -R banner / docker download leg).
 	c.wakeH2BidiUploadDuringDownload()
+	fireH2DuplexDownloadArmedHook()
 	bp := bidiTunnelWriteToBufPool.Get().(*[]byte)
 	defer bidiTunnelWriteToBufPool.Put(bp)
 	reader := &bidiTunnelDownloadReader{c: c}
@@ -405,11 +402,7 @@ func (r *bidiTunnelDownloadReader) Read(p []byte) (int, error) {
 	if r == nil || r.c == nil {
 		return 0, io.EOF
 	}
-	if atomic.LoadInt32(&r.c.appDownloadBytes) > 0 {
-		r.c.ensureH2DownloadPhaseUploadPulse()
-	} else {
-		r.c.wakeH2BidiUploadDuringDownload()
-	}
+	r.c.wakeH2BidiUploadDuringDownload()
 	r.c.downloadMu.Lock()
 	defer r.c.downloadMu.Unlock()
 	_ = r.c.setDownloadReadDeadline(time.Time{})

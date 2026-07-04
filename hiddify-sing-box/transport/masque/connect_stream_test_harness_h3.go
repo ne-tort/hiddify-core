@@ -28,8 +28,12 @@ const (
 )
 
 func newConnectStreamH3ProdSession(t *testing.T, proxyPort int) (ClientSession, context.Context) {
+	return newConnectStreamH3ProdSessionWithTimeout(t, proxyPort, 10*time.Second)
+}
+
+func newConnectStreamH3ProdSessionWithTimeout(t *testing.T, proxyPort int, timeout time.Duration) (ClientSession, context.Context) {
 	t.Helper()
-	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	t.Cleanup(cancel)
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
@@ -42,6 +46,21 @@ func newConnectStreamH3ProdSession(t *testing.T, proxyPort int) (ClientSession, 
 	}
 	t.Cleanup(func() { _ = session.Close() })
 	return session, waitCtx
+}
+
+func dialConnectStreamH3ProdTCP(t *testing.T, proxyPort int, targetPort uint16) net.Conn {
+	t.Helper()
+	session, ctx := newConnectStreamH3ProdSession(t, proxyPort)
+	return dialConnectStreamH3ProdTCPWithSession(t, session, ctx, targetPort)
+}
+
+func dialConnectStreamH3ProdTCPWithSession(t *testing.T, session ClientSession, ctx context.Context, targetPort uint16) net.Conn {
+	t.Helper()
+	conn, err := session.DialContext(ctx, "tcp", M.ParseSocksaddrHostPort("127.0.0.1", targetPort))
+	if err != nil {
+		t.Fatalf("dial connect-stream-h3 prod tcp: %v", err)
+	}
+	return conn
 }
 
 func newConnectStreamH3DockerLiveSession(t *testing.T) ClientSession {

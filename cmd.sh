@@ -1,4 +1,8 @@
+#!/usr/bin/env bash
+# Dev runner for hiddify-core CLI. Build tags = print_core_build_tags (with_masque by default).
+# Prefer: go run ./cmd/print_core_build_tags  then go run --tags "..." ./cmd/main
+set -euo pipefail
+cd "$(dirname "$0")"
 go mod tidy
-TAGS=with_v2ray_api,with_gvisor,with_quic,with_dhcp,with_wireguard,with_awg,with_masque,with_utls,with_acme,with_clash_api,with_tailscale,with_ccm,with_ocm,tfogo_checklinkname0
-# TAGS=with_dhcp,with_low_memory,with_conntrack
-go run --tags $TAGS ./cmd/main  $@
+TAGS="$(go run ./cmd/print_core_build_tags)"
+go run --tags "$TAGS" ./cmd/main "$@"
