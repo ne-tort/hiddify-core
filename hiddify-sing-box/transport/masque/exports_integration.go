@@ -3,8 +3,14 @@ package masque
 // Integration exports for protocol/masque prod-stack tests (LaunchMasqueStack + Endpoint + SOCKS).
 
 const (
-	ExportConnectStreamSynthProdMinMbps       = connectStreamSynthProdMinMbps
-	ExportConnectStreamH2SeqSymmetryMaxRatio  = connectStreamH2SeqSymmetryMaxRatio
+	ExportConnectStreamSynthProdMinMbps              = connectStreamSynthProdMinMbps
+	ExportConnectStreamH2SeqSymmetryMaxRatio         = connectStreamH2SeqSymmetryMaxRatio
+	ExportConnectStreamH2AsymDockerBaselineDownMbps  = connectStreamH2AsymDockerBaselineDownMbps
+	ExportConnectStreamH2AsymDockerBaselineUpMbps    = connectStreamH2AsymDockerBaselineUpMbps
+	ExportConnectStreamH2AsymChunk64BisectUpMbps     = connectStreamH2AsymChunk64BisectUpMbps
+	ExportConnectStreamH2AsymEagerOffBisectUpMbps     = connectStreamH2AsymEagerOffBisectUpMbps
+	ExportConnectStreamH2AsymRelayWakeOffBisectUpMbps   = connectStreamH2AsymRelayWakeOffBisectUpMbps
+	ExportConnectStreamH2AsymHypothesisMinUplift     = connectStreamH2AsymHypothesisMinUplift
 )
 
 // ExportSynthProdGatePass reports DoD 1000 Mbit/s with −3% Windows in-proc slack (parity UDP synth).

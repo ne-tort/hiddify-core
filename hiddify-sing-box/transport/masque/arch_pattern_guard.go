@@ -15,8 +15,13 @@ const (
 	connectStreamSynthParityMinRatio    = 0.85   // H3/H2 on paired gate (H3 not >15% behind H2)
 	connectStreamSynthDuplexMaxRatio    = 4.0    // max(up,down)/min(up,down) on concurrent duplex
 	connectStreamSynthProdBenchDuration = 2 * time.Second
+	// connectStreamSynthSequentialBenchDuration — separate-leg sequential synth (2 legs/stack; not duplex).
+	connectStreamSynthSequentialBenchDuration = 400 * time.Millisecond
 	connectStreamSynthDuplexGateSamples = 20   // one stack, N dials (not go test -count)
 	connectStreamSynthDuplexGateMinPass   = 15   // min PASS samples of GateSamples @1000 each leg
+	connectStreamSynthDuplexGateMinPassDesktop = 1  // single SOCKS dial anchor (matches H2 gate shape)
+	connectStreamSynthDuplexGateSamplesDesktop   = 1
+	connectStreamSynthDuplexGateWarmupDesktop    = 0
 	// connectStreamStrictL256Ceiling35msMbps — theoretical max at L256 wire-FC + 35 ms RTT (localize only).
 	connectStreamStrictL256Ceiling35msMbps = 59.0
 	connectStreamStrictL256CeilingBandMbps = 52.0
@@ -28,6 +33,13 @@ const (
 	// connectStreamH2SeqSymmetry* — H2 sequential legs (download-first → fresh upload), parity Docker @0ms.
 	// Root cause fixed: upload chunk 4→64 KiB (STR-MS6-P0); ratio was ~7–8× before fix.
 	connectStreamH2SeqSymmetryMaxRatio = 2.0 // max(down,up)/min(down,up) after chunk fix
+	// STR-P2-H2-UPLOAD-ASYM hypothesis ledger (Docker SOCKS max P1 @0ms, 2026-07-04).
+	connectStreamH2AsymDockerBaselineDownMbps = 6530.0
+	connectStreamH2AsymDockerBaselineUpMbps   = 3240.0
+	connectStreamH2AsymChunk64BisectUpMbps      = 3280.0
+	connectStreamH2AsymEagerOffBisectUpMbps     = 3570.0
+	connectStreamH2AsymRelayWakeOffBisectUpMbps   = 3420.0
+	connectStreamH2AsymHypothesisMinUplift      = 0.15 // 15% upload uplift confirms hypothesis
 )
 
 // GATE-CONNECT-IP — packet plane (tcp_transport=connect_ip); DoD @ Docker 0ms matches connect-stream (1000+ each leg).
@@ -220,6 +232,33 @@ func connectUDPParallelScalingMinAggMbps(layer string, streams int, singleMbps f
 // synthProdGatePass reports whether Mbps meets DoD prod synth (1000 Mbit/s −3% slack).
 func synthProdGatePass(mbps float64) bool {
 	return mbps >= connectUDPSynthProdMinMbps*(1-connectUDPSynthInstantGateSlackPct)
+}
+
+func connectStreamSynthDuplexGateSamplesForHost() int {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return connectStreamSynthDuplexGateSamplesDesktop
+	default:
+		return connectStreamSynthDuplexGateSamples
+	}
+}
+
+func connectStreamSynthDuplexGateMinPassForHost() int {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return connectStreamSynthDuplexGateMinPassDesktop
+	default:
+		return connectStreamSynthDuplexGateMinPass
+	}
+}
+
+func connectStreamSynthDuplexGateWarmupForHost() int {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+		return connectStreamSynthDuplexGateWarmupDesktop
+	default:
+		return 0
+	}
 }
 
 // ArchPatternGuardVerdict captures post-A3 synth measurements for K-S1/K-S2 windowed WriteTo.

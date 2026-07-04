@@ -7,8 +7,17 @@ import (
 
 func masqueUploadBulkFlushEnabled() bool { return true }
 
+var masqueBulkFlushThresholdBytes = 256 << 10
+
 // masqueBulkFlushThreshold returns bytes to batch before TLS flush in bulk mode.
-func masqueBulkFlushThreshold() int { return 256 << 10 }
+func masqueBulkFlushThreshold() int { return masqueBulkFlushThresholdBytes }
+
+// SetMasqueBulkFlushThresholdBytes overrides bulk TLS batch size (bisect / unit tests only).
+func SetMasqueBulkFlushThresholdBytes(n int) {
+	if n > 0 {
+		masqueBulkFlushThresholdBytes = n
+	}
+}
 
 func masqueBulkFlushMinPending() int { return 32 << 10 }
 

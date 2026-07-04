@@ -21,16 +21,64 @@ func masqueUploadWriterOpen(body io.ReadCloser) bool {
 	return false
 }
 
-// masqueUploadPumpActive reports whether writeRequestBody must keep draining the upload
-// leg (Invisv io.Pipe: writer open or buffered bytes remain in the shallow pipe).
-func masqueUploadPumpActive(body io.ReadCloser) bool {
+// masqueConnectStreamBidiUploadBody marks RFC 8441 CONNECT-stream upload bodies that need a
+// sustained upload pump (defer END_STREAM) without asymmetric UDP/IP writer-live semantics.
+type masqueConnectStreamBidiUploadBody interface {
+	MasqueConnectStreamBidiUpload() bool
+}
+
+func masqueConnectStreamBidiUpload(body io.ReadCloser) bool {
+	if body == nil {
+		return false
+	}
+	b, ok := body.(masqueConnectStreamBidiUploadBody)
+	return ok && b.MasqueConnectStreamBidiUpload()
+}
+
+// masqueUploadPipeWriterOpenState reports whether the app upload pipe writer is still open.
+type masqueUploadPipeWriterOpenState interface {
+	MasqueUploadPipeWriterOpen() bool
+}
+
+func masqueUploadPipeWriterOpen(body io.ReadCloser) bool {
+	if body == nil {
+		return false
+	}
 	if masqueUploadWriterOpen(body) {
 		return true
 	}
-	if b, ok := body.(masqueUploadBuffered); ok {
-		return b.MasqueUploadBuffered() > 0
+	w, ok := body.(masqueUploadPipeWriterOpenState)
+	return ok && w.MasqueUploadPipeWriterOpen()
+}
+
+// masqueSustainedUploadPumpAfterHeaders reports bodies that must not half-close upload after
+// the first writeRequestBody drain (CONNECT-stream bidi or asymmetric UDP/IP writer-live).
+func masqueSustainedUploadPumpAfterHeaders(body io.ReadCloser) bool {
+	return masqueUploadWriterOpen(body) || masqueConnectStreamBidiUpload(body)
+}
+
+// MasqueSustainedUploadPumpAfterHeaders is the exported sustained-pump probe for masque tests.
+func MasqueSustainedUploadPumpAfterHeaders(body io.ReadCloser) bool {
+	return masqueSustainedUploadPumpAfterHeaders(body)
+}
+
+// masqueSustainedUploadPumpContinue reports whether the sustained upload pump should keep looping.
+func masqueSustainedUploadPumpContinue(body io.ReadCloser) bool {
+	if masqueUploadWriterOpen(body) {
+		return true
 	}
-	return false
+	if !masqueConnectStreamBidiUpload(body) {
+		return false
+	}
+	return masqueUploadPumpActive(body)
+}
+
+// masqueUploadPumpActive reports whether writeRequestBody must keep draining the upload leg.
+func masqueUploadPumpActive(body io.ReadCloser) bool {
+	if b, ok := body.(masqueUploadBuffered); ok && b.MasqueUploadBuffered() > 0 {
+		return true
+	}
+	return masqueUploadPipeWriterOpen(body)
 }
 
 // masqueUploadWireAck is implemented by MASQUE H2 Extended CONNECT upload bodies.
@@ -41,16 +89,15 @@ type masqueUploadWireAck interface {
 
 // masquePreserveConnectUploadPump marks upload bodies that must keep writeRequestBody
 // active after response END_STREAM (CONNECT-UDP / CONNECT-IP asymmetric upload leg).
+// CONNECT-stream must not match on wire-ack type alone — only an open upload writer arms duplex.
 func masquePreserveConnectUploadPump(body io.ReadCloser) bool {
-	if body == nil {
-		return false
-	}
-	if _, ok := body.(masqueUploadWireAck); ok {
-		return true
-	}
-	// ExtendedConnectUploadBody / connect-ip-go duplex bodies (writer-open discriminator).
-	_, ok := body.(masqueUploadWriterOpenState)
-	return ok
+	return masqueUploadWriterOpen(body)
+}
+
+// masqueDeferConnectUploadBodyClose reports upload bodies that must not be torn down when the
+// CONNECT response body arrives (CONNECT-stream sustained pump + asymmetric UDP/IP writer-live).
+func masqueDeferConnectUploadBodyClose(body io.ReadCloser) bool {
+	return masqueSustainedUploadPumpAfterHeaders(body)
 }
 
 // MasquePreserveConnectUploadBody is the exported preserve probe for package masque tests.
@@ -66,14 +113,9 @@ func MasqueExtendedCONNECTUploadDuplex(isExtendedConnect bool, body io.ReadClose
 // masqueExtendedCONNECTUploadDuplex reports RFC 8441 Extended CONNECT upload streams that must
 // keep pumping after response END_STREAM (connect-ip-go / CONNECT-UDP asymmetric upload leg).
 func masqueExtendedCONNECTUploadDuplex(isExtendedConnect bool, body io.ReadCloser, contentLen int64) bool {
-	// Duplex body shape wins over :protocol capture timing (Invisv / connect-ip-go).
-	if masquePreserveConnectUploadPump(body) {
-		return true
-	}
-	if !isExtendedConnect {
-		return false
-	}
-	return body != nil && contentLen != 0
+	_ = isExtendedConnect
+	_ = contentLen
+	return masqueSustainedUploadPumpAfterHeaders(body)
 }
 
 // reqIsMasqueExtendedCONNECT reports RFC 8441 Extended CONNECT (capture at RoundTrip — :protocol may leave req.Header before writeRequest).
@@ -106,7 +148,14 @@ type masqueUploadPipeCap interface {
 
 // masqueUploadPipeFlushWaterMark: flush sub-threshold TLS DATA when upload pipe depth
 // nears capacity (bulk pipe cap is 512KiB; flush at 256KiB = TLS bulk threshold).
-const masqueUploadPipeFlushWaterMark = 256 << 10
+var masqueUploadPipeFlushWaterMark = 256 << 10
+
+// SetMasqueUploadPipeFlushWaterMarkBytes overrides pipe watermark (bisect / unit tests only).
+func SetMasqueUploadPipeFlushWaterMarkBytes(n int) {
+	if n > 0 {
+		masqueUploadPipeFlushWaterMark = n
+	}
+}
 
 func masqueUploadPipeFlushMark(body io.ReadCloser) int {
 	mark := masqueUploadPipeFlushWaterMark
@@ -152,6 +201,10 @@ func masqueShouldFlushBeforeBlockingRead(body io.ReadCloser, pendingAck int) boo
 	case buf < 0:
 		return false
 	case buf == 0:
+		// CONNECT-stream (no writer-live): flush pending DATA before blocking Read (H2 bidi FC).
+		if !masqueUploadWriterOpen(body) {
+			return true
+		}
 		return masqueShouldInteractiveUploadFlush(body, pendingAck)
 	default:
 		return buf >= masqueUploadPipeFlushMark(body)

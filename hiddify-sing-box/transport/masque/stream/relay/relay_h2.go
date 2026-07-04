@@ -8,7 +8,7 @@ import (
 )
 
 func relayTunnelWakeH2AfterUploadRead(responseWriter http.ResponseWriter) {
-	if responseWriter == nil {
+	if responseWriter == nil || !h2UploadWakePerChunk {
 		return
 	}
 	relayTunnelFlushNow(responseWriter, responseWriter)
@@ -26,37 +26,22 @@ func relayTunnelCopyBufferH2BidiUpload(dst io.Writer, src io.Reader, responseWri
 	defer relayTunnelBufPool.Put(bp)
 	buf := *bp
 	var written int64
-	var pendingWake int
-	flushWake := func(force bool) {
-		if responseWriter == nil || pendingWake <= 0 {
-			return
-		}
-		if !force && pendingWake < RelayTunnelUploadWakeBytes {
-			return
-		}
-		pendingWake = 0
-		relayTunnelWakeH2AfterUploadRead(responseWriter)
-	}
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			nw, ew := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
-				pendingWake += nw
-				flushWake(false)
+				relayTunnelWakeH2AfterUploadRead(responseWriter)
 			}
 			if ew != nil {
-				flushWake(true)
 				return written, ew
 			}
 			if nr != nw {
-				flushWake(true)
 				return written, io.ErrShortWrite
 			}
 		}
 		if er != nil {
-			flushWake(true)
 			if er == io.EOF {
 				return written, nil
 			}
@@ -76,7 +61,11 @@ func relayTunnelCopyBufferH2BidiDownload(dst io.Writer, src io.Reader, responseW
 			nw, ew := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
-				relayTunnelWakeH2AfterDownloadWrite(responseWriter)
+				if fw, ok := dst.(*relayTunnelFlushWriter); ok {
+					fw.flushNow()
+				} else {
+					relayTunnelWakeH2AfterDownloadWrite(responseWriter)
+				}
 			}
 			if ew != nil {
 				return written, ew
