@@ -26,6 +26,12 @@ func init() {
 	case "1", "true", "on":
 		relay.SetH2UploadWakePerChunkEnabled(true)
 	}
+	switch os.Getenv("MASQUE_BISECT_H2_RELAY_PLAIN") {
+	case "1", "true", "on":
+		relay.SetH2RelayPlainEnabled(true)
+	case "0", "false", "off":
+		relay.SetH2RelayPlainEnabled(false)
+	}
 	if v := os.Getenv("MASQUE_BISECT_H2_BULK_FLUSH_KIB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			bytes := n << 10

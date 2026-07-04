@@ -15,7 +15,7 @@ func relayTunnelWakeH2AfterUploadRead(responseWriter http.ResponseWriter) {
 }
 
 func relayTunnelWakeH2AfterDownloadWrite(responseWriter http.ResponseWriter) {
-	if responseWriter == nil {
+	if responseWriter == nil || !h2DownloadWakePerChunk {
 		return
 	}
 	relayTunnelFlushNow(responseWriter, responseWriter)

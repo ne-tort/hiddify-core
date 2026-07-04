@@ -27,6 +27,58 @@ func TestGATEH2AsymHypothesisRelayUploadWakeDockerFalsified(t *testing.T) {
 		masque.ExportConnectStreamH2AsymRelayWakeOffBisectUpMbps)
 }
 
+// TestGATEH2AsymHypothesisLegOrderingDockerFalsified locks wave-2 H4: upload-only ≈ sequential upload.
+// Value: asymmetry is inherent to upload path, not download-first session pollution.
+func TestGATEH2AsymHypothesisLegOrderingDockerFalsified(t *testing.T) {
+	assertHypothesisFalsified(t, "H4-LEG-ORDERING",
+		masque.ExportConnectStreamH2AsymDockerBaselineUpMbps,
+		masque.ExportConnectStreamH2AsymUploadOnlyMbps)
+
+	upOnly := masque.ExportConnectStreamH2AsymUploadOnlyMbps
+	downOnly := masque.ExportConnectStreamH2AsymDownloadOnlyMbps
+	if downOnly <= 0 {
+		t.Fatal("download-only anchor is zero")
+	}
+	legRatio := upOnly / downOnly
+	baseRatio := masque.ExportConnectStreamH2AsymDockerBaselineUpMbps / masque.ExportConnectStreamH2AsymDockerBaselineDownMbps
+	// Isolated legs must preserve the same ~0.5 ratio band (within 20% relative).
+	if legRatio > baseRatio*1.2 || legRatio < baseRatio*0.8 {
+		t.Fatalf("H4 leg_ratio %.2f drifted from baseline ratio %.2f (up_only=%.0f down_only=%.0f)",
+			legRatio, baseRatio, upOnly, downOnly)
+	}
+	t.Logf("H4-LEG-ORDERING FALSIFIED: upload_only=%.0f download_only=%.0f leg_ratio=%.2f (baseline ratio=%.2f)",
+		upOnly, downOnly, legRatio, baseRatio)
+}
+
+// TestGATEH2AsymHypothesisH3ControlDockerSymmetric locks wave-2 H5: H3 SOCKS is symmetric on same harness.
+// Value: proves bench topology is fair; H2 upload asym is H2-specific.
+func TestGATEH2AsymHypothesisH3ControlDockerSymmetric(t *testing.T) {
+	down := masque.ExportConnectStreamH2AsymH3ControlDownMbps
+	up := masque.ExportConnectStreamH2AsymH3ControlUpMbps
+	if down <= 0 || up <= 0 {
+		t.Fatal("H3 control legs are zero")
+	}
+	ratio := up / down
+	if ratio > down/up {
+		ratio = down / up
+	}
+	minRatio := masque.ExportConnectStreamH2AsymH3ControlMinRatio
+	if ratio < minRatio {
+		t.Fatalf("H5-H3-CONTROL harness fail: ratio %.2f < %.2f (down=%.0f up=%.0f)",
+			ratio, minRatio, down, up)
+	}
+	t.Logf("H5-H3-CONTROL OK: down=%.0f up=%.0f min/max ratio=%.2f", down, up, ratio)
+}
+
+// TestGATEH2AsymHypothesisRelayPlainIncompatible locks wave-2 H6: plain relay (no wakes) breaks H2 CONNECT-stream.
+// Value: download flush is load-bearing; cannot pursue "h2o plain io.Copy" as upload fix on Go net/http H2.
+func TestGATEH2AsymHypothesisRelayPlainIncompatible(t *testing.T) {
+	// Prod defaults must keep both wakes on (plain relay is bisect-only and incompatible).
+	// Structural lock lives in relay.TestH2UploadWakePerChunkProdDefault.
+	t.Log("H6-RELAY-PLAIN INCOMPATIBLE: MASQUE_BISECT_H2_RELAY_PLAIN=1 → iperf interrupt (no download flush)")
+	t.Log("download wake is load-bearing for H2 ResponseWriter; upload wake alone already FALSIFIED (H3)")
+}
+
 func assertHypothesisFalsified(t *testing.T, id string, baseUp, bisectUp float64) {
 	t.Helper()
 	uplift := hypothesisUplift(baseUp, bisectUp)

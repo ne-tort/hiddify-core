@@ -39,6 +39,12 @@ const (
 	connectStreamH2AsymChunk64BisectUpMbps      = 3280.0
 	connectStreamH2AsymEagerOffBisectUpMbps     = 3570.0
 	connectStreamH2AsymRelayWakeOffBisectUpMbps   = 3420.0
+	// Wave 2: leg isolation + H3 control (Docker SOCKS max P1 @0ms, 2026-07-04).
+	connectStreamH2AsymUploadOnlyMbps           = 3270.0
+	connectStreamH2AsymDownloadOnlyMbps         = 6570.0
+	connectStreamH2AsymH3ControlDownMbps        = 6030.0
+	connectStreamH2AsymH3ControlUpMbps          = 6500.0
+	connectStreamH2AsymH3ControlMinRatio        = 0.85 // H3 must stay near-symmetric (harness control)
 	connectStreamH2AsymHypothesisMinUplift      = 0.15 // 15% upload uplift confirms hypothesis
 )
 
