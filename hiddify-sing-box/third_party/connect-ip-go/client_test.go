@@ -1,6 +1,7 @@
 package connectip
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -51,4 +52,24 @@ func TestConnectIPH3SettingsErrorNilSettings(t *testing.T) {
 	t.Parallel()
 	err := connectIPH3SettingsError(nil, DialOptions{})
 	require.EqualError(t, err, "connect-ip: nil HTTP/3 settings")
+}
+
+// TestH2ExtendedConnectRequestContextCancelAfterDetach ensures stop(false) cancels reqCtx after stop(true).
+func TestH2ExtendedConnectRequestContextCancelAfterDetach(t *testing.T) {
+	t.Parallel()
+	parent, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+	reqCtx, stop := NewH2ExtendedConnectRequestContext(parent)
+	stop(true)
+	select {
+	case <-reqCtx.Done():
+		t.Fatal("reqCtx canceled before Close teardown")
+	default:
+	}
+	stop(false)
+	select {
+	case <-reqCtx.Done():
+	default:
+		t.Fatal("reqCtx must cancel on stop(false) after detach")
+	}
 }

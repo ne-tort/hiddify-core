@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // DialH3LogInput carries CONNECT-stream H3 attempt logging fields (no secrets).
@@ -135,12 +136,14 @@ func DialHTTP3ConnectStreamLeg(
 			_ = resp.Body.Close()
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
-		stopReqCtxRelay(true)
 		conn, err := hooks.TunnelFromResponse(legCtx, resp, targetHost, targetPort)
 		if err != nil {
+			stopReqCtxRelay(false)
 			_ = resp.Body.Close()
 			return nil, err
 		}
+		stopReqCtxRelay(true)
+		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil
 	}
 	if lastRoundTripErr != nil {

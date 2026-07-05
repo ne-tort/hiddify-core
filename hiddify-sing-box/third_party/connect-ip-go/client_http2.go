@@ -38,17 +38,14 @@ func NewH2ExtendedConnectRequestContext(parent context.Context) (context.Context
 			cancel()
 		}
 	}()
-	var once sync.Once
+	var stopRelayOnce sync.Once
 	return reqCtx, func(detach bool) {
-		once.Do(func() {
-			if detach {
-				detached.Store(true)
-			}
-			close(stopRelay)
-			if !detach {
-				cancel()
-			}
-		})
+		stopRelayOnce.Do(func() { close(stopRelay) })
+		if detach {
+			detached.Store(true)
+			return
+		}
+		cancel()
 	}
 }
 

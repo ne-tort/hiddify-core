@@ -40,6 +40,14 @@ type connectionCopyGate struct {
 const connectIPShortRelayWarmThreshold = 256 * 1024
 const connectIPShortRelayUploadWarmMax = 8 * 1024
 
+// connectionCopyRelayStallTimeout aborts relay when no bytes move while legs remain open.
+const connectionCopyRelayStallTimeout = 5 * time.Second
+
+// connectionCopyRelayZeroByteTimeout aborts relay that never transferred bytes (ghost stream / stuck dial).
+const connectionCopyRelayZeroByteTimeout = 10 * time.Second
+
+const connectionCopyRelayStallPoll = 500 * time.Millisecond
+
 func newConnectionCopyGate(legs int32) *connectionCopyGate {
 	g := &connectionCopyGate{}
 	g.remaining.Store(legs)
@@ -181,6 +189,7 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	// before upload ReadFrom blocks on SOCKS clients waiting for that banner (iperf -R).
 	go m.connectionCopy(ctx, remoteConn, conn, true, copyGate, onClose)
 	go m.connectionCopy(ctx, conn, remoteConn, false, copyGate, onClose)
+	go m.connectionCopyRelayStallWatchdog(copyGate, onClose, conn, remoteConn)
 }
 
 func markConnectionCopyDuplex(conn net.Conn) {
@@ -189,6 +198,62 @@ func markConnectionCopyDuplex(conn net.Conn) {
 	}
 	if d, ok := conn.(C.RouteConnectionCopyDuplex); ok {
 		d.MarkConnectionCopyDuplex()
+	}
+}
+
+func (m *ConnectionManager) connectionCopyRelayStallWatchdog(gate *connectionCopyGate, onClose N.CloseHandlerFunc, a, b net.Conn) {
+	ticker := time.NewTicker(connectionCopyRelayStallPoll)
+	defer ticker.Stop()
+	var lastBytes int64
+	stallDeadline := time.Now().Add(connectionCopyRelayStallTimeout)
+	zeroByteDeadline := time.Now().Add(connectionCopyRelayZeroByteTimeout)
+	absoluteDeadline := time.Now().Add(60 * time.Second)
+	var sawRelay bool
+	for range ticker.C {
+		if gate.closed.Load() || gate.remaining.Load() == 0 {
+			return
+		}
+		if time.Now().After(absoluteDeadline) {
+			gate.abort(onClose, context.DeadlineExceeded)
+			pokeRelayDeadlines(a, b)
+			common.Close(a, b)
+			return
+		}
+		cur := gate.relayBytes.Load()
+		if cur > 0 {
+			sawRelay = true
+		}
+		if !sawRelay {
+			if time.Now().After(zeroByteDeadline) {
+				gate.abort(onClose, context.DeadlineExceeded)
+				pokeRelayDeadlines(a, b)
+				common.Close(a, b)
+				return
+			}
+			continue
+		}
+		if cur > lastBytes {
+			lastBytes = cur
+			stallDeadline = time.Now().Add(connectionCopyRelayStallTimeout)
+			continue
+		}
+		if time.Now().After(stallDeadline) {
+			gate.abort(onClose, context.DeadlineExceeded)
+			pokeRelayDeadlines(a, b)
+			common.Close(a, b)
+			return
+		}
+	}
+}
+
+func pokeRelayDeadlines(conns ...net.Conn) {
+	now := time.Now()
+	for _, c := range conns {
+		if c == nil {
+			continue
+		}
+		_ = c.SetReadDeadline(now)
+		_ = c.SetWriteDeadline(now)
 	}
 }
 

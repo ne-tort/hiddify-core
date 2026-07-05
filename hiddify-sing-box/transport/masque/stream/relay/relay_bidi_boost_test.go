@@ -27,6 +27,7 @@ func TestRelayTunnelBidiDownloadBoostWireLock(t *testing.T) {
 		"relayTunnelDownloadRelayH3Plain(bidi, targetConn)",
 		"relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)",
 		"relayTunnelPrimeDownload(src)",
+		"defer func() { _ = bidi.Close() }",
 	} {
 		if !strings.Contains(bundle, needle) {
 			t.Fatalf("relay.go missing relay anchor %q", needle)

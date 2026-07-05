@@ -154,10 +154,14 @@ func ConnFromTunnelPaths(ctx context.Context, paths TunnelPaths, local, remote n
 	}
 }
 
+// H2ConnectStreamDownloadCloseTimeout bounds wait for H2 response-body Close during tunnel teardown.
+const H2ConnectStreamDownloadCloseTimeout = 2 * time.Second
+
 // bidiTunnelConn implements net.Conn over explicit TunnelPaths (H2 thin tunnel today).
 type bidiTunnelConn struct {
 	ctx          context.Context
 	streamCancel context.CancelCauseFunc
+	uploadTeardown func()
 	paths        TunnelPaths
 	local        net.Addr
 	remote       net.Addr
@@ -417,8 +421,9 @@ func (r *bidiTunnelDownloadReader) Read(p []byte) (int, error) {
 func (c *bidiTunnelConn) Close() error {
 	c.stopDownloadDrain()
 	if c.streamCancel != nil {
-		c.streamCancel(tcpConnectStreamFailed)
+		c.streamCancel(context.Canceled)
 	}
+	c.runUploadTeardown()
 	var err error
 	if c.paths.Upload != nil {
 		err = errors.Join(err, c.paths.Upload.Close())
@@ -429,17 +434,27 @@ func (c *bidiTunnelConn) Close() error {
 		select {
 		case closeErr := <-closeDone:
 			err = errors.Join(err, closeErr)
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(H2ConnectStreamDownloadCloseTimeout):
+			c.stopDownloadDrain()
 		}
 	}
 	return err
 }
 
 func (c *bidiTunnelConn) CloseWrite() error {
+	c.runUploadTeardown()
 	if c.paths.Upload == nil {
 		return nil
 	}
 	return c.paths.Upload.Close()
+}
+
+func (c *bidiTunnelConn) runUploadTeardown() {
+	if c == nil || c.uploadTeardown == nil {
+		return
+	}
+	c.uploadTeardown()
+	c.uploadTeardown = nil
 }
 
 func (c *bidiTunnelConn) LocalAddr() net.Addr  { return c.local }

@@ -59,6 +59,9 @@ func relayH3ProbeConcurrentUpload(uploadSrc io.Reader) (io.Reader, bool) {
 }
 
 func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
+	if bidi != nil {
+		defer func() { _ = bidi.Close() }()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type closeWriter interface {
@@ -89,7 +92,8 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		_, err := relayTunnelDownloadRelayH3Plain(bidi, targetConn)
 		downloadErrCh <- err
 	}()
-	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+	relayErr := relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+	return relayErr
 }
 
 func relayTunnelDownloadRelayH3Plain(dst io.Writer, src net.Conn) (int64, error) {
@@ -269,9 +273,6 @@ func h3StreamFromCONNECTRelay(reqBody io.ReadCloser, responseWriter http.Respons
 		}
 		if hs, ok := reqBody.(http3.HTTPStreamer); ok {
 			if str := hs.HTTPStream(); str != nil {
-				if rel, ok := reqBody.(http3.ResponseStreamReleaser); ok {
-					rel.ReleaseHTTPStream()
-				}
 				relayBidiWakerFromHTTPStream(str).enableConnectStream()
 				return str
 			}

@@ -82,7 +82,22 @@ func (*testH3ConnectStream) SetReadDeadline(time.Time) error {
 }
 func (*testH3ConnectStream) SetWriteDeadline(time.Time) error { return nil }
 func (*testH3ConnectStream) CancelRead(quic.StreamErrorCode)  {}
+func (*testH3ConnectStream) CancelWrite(quic.StreamErrorCode) {}
 func (*testH3ConnectStream) QUICStream() *quic.Stream           { return nil }
+
+func TestGATEH3TunnelConnCloseInvokesRequestCancel(t *testing.T) {
+	var canceled bool
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: &testH3ConnectStream{}})
+	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !canceled {
+		t.Fatal("requestCancel not invoked on Close")
+	}
+	// idempotent Close must not double-cancel panic
+	_ = conn.Close()
+}
 
 type emptyReader struct{}
 

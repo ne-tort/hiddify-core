@@ -37,6 +37,7 @@ type TunnelConn struct {
 	h3     h3ConnectStream
 	ctx    context.Context
 	cancel context.CancelFunc
+	requestCancel context.CancelCauseFunc
 	local  net.Addr
 	remote net.Addr
 
@@ -55,6 +56,8 @@ type TunnelConn struct {
 	routeBidiDuplex       bool  // route pairs upload Write with concurrent download WriteTo — no auto drain
 	bootstrapUploadDone   int32 // one-shot upload DATA before download drain (H2 parity)
 	uploadTrafficStarted  int32 // client upload bytes hit the wire before WriteTo bootstrap (real iperf3 cookie)
+
+	requestCancelOnce sync.Once
 
 	bidiWakeSink BidiWakeSink
 
@@ -434,11 +437,26 @@ func (r *tunnelH3Reader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// connectStreamDownloadCloseTimeout bounds H3 response-body Close during tunnel teardown (H2 parity).
+const connectStreamDownloadCloseTimeout = 2 * time.Second
+
+// SetConnectStreamRequestCancel wires H3 CONNECT request-context teardown on tunnel close (H2 parity).
+func (c *TunnelConn) SetConnectStreamRequestCancel(cancel context.CancelCauseFunc) {
+	if c != nil {
+		c.requestCancel = cancel
+	}
+}
+
 func (c *TunnelConn) Close() error {
 	if c == nil {
 		return nil
 	}
 	c.stopDownloadDrain()
+	c.requestCancelOnce.Do(func() {
+		if c.requestCancel != nil {
+			c.requestCancel(context.Canceled)
+		}
+	})
 	c.cancel()
 	var err error
 	if c.h3 != nil {
@@ -446,9 +464,25 @@ func (c *TunnelConn) Close() error {
 			quic.MasqueSetBidiDownloadReceiveActive(qs, false)
 			quic.MasqueSetBidiDuplexUploadStarted(qs, false)
 		}
-		c.h3.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
-		if closeErr := c.h3.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
+		h3 := c.h3
+		cancelCode := quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
+		if atomic.LoadInt32(&c.uploadTrafficStarted) == 0 {
+			// Idle CONNECT (dial+immediate close): Invisv CreateTCPStream / DatagramStream
+			// use stream.Close() only (no CancelWrite before Close). Graceful FIN on the
+			// send half lets the peer complete relay and raise MAX_STREAMS.
+			err = h3.Close()
+		} else {
+			closeDone := make(chan error, 1)
+			go func() { closeDone <- h3.Close() }()
+			select {
+			case closeErr := <-closeDone:
+				if closeErr != nil {
+					err = errors.Join(err, closeErr)
+				}
+			case <-time.After(connectStreamDownloadCloseTimeout):
+				c.stopDownloadDrain()
+				h3.CancelRead(cancelCode)
+			}
 		}
 	}
 	return err
