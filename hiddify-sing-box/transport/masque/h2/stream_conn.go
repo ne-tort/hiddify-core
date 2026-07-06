@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
+	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // ConnectTunnelFromResponse builds a thin RFC 8441 tunnel after Extended CONNECT succeeds.
@@ -26,6 +27,9 @@ func ConnectTunnelFromResponse(streamCtx context.Context, resp *http.Response, u
 	if err := strm.PrimeH2UploadBootstrapOnConn(inner, barrier); err != nil {
 		_ = inner.Close()
 		return nil, err
+	}
+	if b, ok := uploadBody.(*ExtendedConnectUploadBody); ok {
+		strmconn.SetConnectStreamUploadTeardown(inner, b.MarkUploadWriterDone)
 	}
 	return strm.NewTunnelConn(inner), nil
 }

@@ -64,21 +64,69 @@ func masqueRequestAuthorityMatchesTemplate(templateHost, requestHost string, rel
 		return false
 	}
 	tHost, tPort, tErr := net.SplitHostPort(tH)
-	rHost, rPort, rErr := net.SplitHostPort(rH)
-	_ = rHost
-	if tErr != nil || rErr != nil {
+	if tErr != nil {
 		return false
 	}
+	rHost, rPort, rErr := net.SplitHostPort(rH)
+	if rErr != nil {
+		// Clients often omit :port in :authority when it matches the dial port (non-443 deployments).
+		if strings.TrimSpace(rH) != "" {
+			rH = net.JoinHostPort(strings.TrimSpace(rH), tPort)
+			if strings.EqualFold(tH, rH) {
+				return true
+			}
+			rHost, rPort, rErr = net.SplitHostPort(rH)
+		}
+	}
+	if rErr != nil {
+		return false
+	}
+	_ = rHost
 	if !masqueTemplateUsesLoopbackPlaceholderHost(tHost) {
 		return false
 	}
 	return tPort == rPort
 }
 
-// masqueHTTPRequestForTemplateParse returns r, or a clone with Host set to the template authority
+// masqueNormalizeRequestAuthorityToTemplatePort appends the template URL port when the
+// client :authority omits an explicit port (common for non-443 MASQUE deployments).
+func masqueNormalizeRequestAuthorityToTemplatePort(templateHost, requestHost string) (string, bool) {
+	tH := strings.TrimSpace(templateHost)
+	rH := strings.TrimSpace(requestHost)
+	if tH == "" || rH == "" {
+		return requestHost, false
+	}
+	if _, _, err := net.SplitHostPort(rH); err == nil {
+		return requestHost, false
+	}
+	tHost, tPort, err := net.SplitHostPort(tH)
+	if err != nil {
+		return requestHost, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(tHost), rH) {
+		return requestHost, false
+	}
+	return net.JoinHostPort(rH, tPort), true
+}
+
+func masqueCloneRequestForTemplateAuthority(r *http.Request, templateURL *url.URL, authorityHost string) *http.Request {
+	r2 := r.Clone(r.Context())
+	r2.Host = authorityHost
+	if r2.URL != nil && templateURL != nil {
+		u2 := *r2.URL
+		if scheme := strings.TrimSpace(templateURL.Scheme); scheme != "" {
+			u2.Scheme = scheme
+		}
+		u2.Host = authorityHost
+		r2.URL = &u2
+	}
+	return r2
+}
+
+// masqueHTTPRequestForTemplateParse returns r, or a clone with Host/URL authority set to the template
 // when relax applies and the client used a public :authority against a loopback placeholder.
 func masqueHTTPRequestForTemplateParse(r *http.Request, template *uritemplate.Template, relax bool) *http.Request {
-	if r == nil || template == nil || !relax {
+	if r == nil || template == nil {
 		return r
 	}
 	templateURL, err := url.Parse(template.Raw())
@@ -86,13 +134,20 @@ func masqueHTTPRequestForTemplateParse(r *http.Request, template *uritemplate.Te
 		return r
 	}
 	reqHost := strings.TrimSpace(r.Host)
+	if normalized, ok := masqueNormalizeRequestAuthorityToTemplatePort(templateURL.Host, reqHost); ok {
+		reqHost = normalized
+	}
 	if reqHost == "" || strings.EqualFold(templateURL.Host, reqHost) {
+		if reqHost != strings.TrimSpace(r.Host) {
+			return masqueCloneRequestForTemplateAuthority(r, templateURL, reqHost)
+		}
+		return r
+	}
+	if !relax {
 		return r
 	}
 	if !masqueRequestAuthorityMatchesTemplate(templateURL.Host, reqHost, true) {
 		return r
 	}
-	r2 := r.Clone(r.Context())
-	r2.Host = templateURL.Host
-	return r2
+	return masqueCloneRequestForTemplateAuthority(r, templateURL, templateURL.Host)
 }

@@ -12,9 +12,11 @@ type TCPConnectHost = cstrm.Host
 
 var defaultConnectStreamHandler = cstrm.Handler{
 	Hooks: cstrm.Hooks{
-		ResolveTCPTarget:  ResolveTCPTargetForDial,
-		AllowTCPPort:      AllowTCPPort,
-		OnwardTCPDialAddr: OnwardTCPDialAddr,
+		ResolveTCPTarget:      ResolveTCPTargetForDial,
+		ResolveTCPTargetAddrs: ResolveTCPTargetAddrsForDial,
+		AllowTCPPort:          AllowTCPPort,
+		OnwardTCPDialAddr:     OnwardTCPDialAddr,
+		DialTCPTargetSerial:   DialTCPTargetSerial,
 	},
 }
 

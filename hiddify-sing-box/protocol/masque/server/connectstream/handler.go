@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -22,9 +23,11 @@ import (
 
 // Hooks wires server-side ACL helpers from protocol/masque/server (onward_policy).
 type Hooks struct {
-	ResolveTCPTarget  func(ctx context.Context, host string, allowPrivate bool) (string, error)
-	AllowTCPPort      func(portStr string, allowed, blocked []uint16) bool
-	OnwardTCPDialAddr func(host string, port uint16) string
+	ResolveTCPTarget      func(ctx context.Context, host string, allowPrivate bool) (string, error)
+	ResolveTCPTargetAddrs func(ctx context.Context, host string, allowPrivate bool) ([]netip.Addr, error)
+	AllowTCPPort          func(portStr string, allowed, blocked []uint16) bool
+	OnwardTCPDialAddr     func(host string, port uint16) string
+	DialTCPTargetSerial   func(ctx context.Context, dialer net.Dialer, addrs []netip.Addr, port uint16) (net.Conn, netip.Addr, error)
 }
 
 // Host carries CONNECT-stream handler dependencies from the parent endpoint.
@@ -75,12 +78,12 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	resolve := h.Hooks.ResolveTCPTarget
-	if resolve == nil {
+	resolveAddrs := h.Hooks.ResolveTCPTargetAddrs
+	if resolveAddrs == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	resolvedHost, allowErr := resolve(r.Context(), targetHost, host.Options.AllowPrivateTargets)
+	resolvedAddrs, allowErr := resolveAddrs(r.Context(), targetHost, host.Options.AllowPrivateTargets)
 	if allowErr != nil {
 		debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr)
 		w.WriteHeader(http.StatusForbidden)
@@ -98,16 +101,33 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	dialAddrFn := h.Hooks.OnwardTCPDialAddr
-	if dialAddrFn == nil {
+	dialSerial := h.Hooks.DialTCPTargetSerial
+	if dialSerial == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	dialAddr := dialAddrFn(resolvedHost, uint16(portNum))
-	debugf("masque tcp connect dial start host=%s resolved_host=%s port=%s dial_addr=%s", targetHost, resolvedHost, targetPort, dialAddr)
-	targetConn, dialErr := host.Dialer.DialContext(r.Context(), "tcp", dialAddr)
+	var (
+		targetConn   net.Conn
+		dialErr      error
+		resolvedHost string
+	)
+	debugf("masque tcp connect dial start host=%s resolved_addrs=%v port=%s", targetHost, resolvedAddrs, targetPort)
+	if len(resolvedAddrs) == 0 {
+		dialAddrFn := h.Hooks.OnwardTCPDialAddr
+		if dialAddrFn == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		dialAddr := dialAddrFn(targetHost, uint16(portNum))
+		targetConn, dialErr = host.Dialer.DialContext(r.Context(), "tcp", dialAddr)
+		resolvedHost = targetHost
+	} else {
+		var dialedAddr netip.Addr
+		targetConn, dialedAddr, dialErr = dialSerial(r.Context(), host.Dialer, resolvedAddrs, uint16(portNum))
+		resolvedHost = dialedAddr.String()
+	}
 	if dialErr != nil {
-		debugf("masque tcp connect dial failed host=%s resolved_host=%s port=%s status=502 error_class=%s err=%v", targetHost, resolvedHost, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, dialErr)), dialErr)
+		debugf("masque tcp connect dial failed host=%s resolved_addrs=%v port=%s status=502 error_class=%s err=%v", targetHost, resolvedAddrs, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, dialErr)), dialErr)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}

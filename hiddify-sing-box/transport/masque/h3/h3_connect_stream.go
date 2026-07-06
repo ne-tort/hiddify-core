@@ -14,5 +14,6 @@ type h3ConnectStream interface {
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
 	CancelRead(quic.StreamErrorCode)
+	CancelWrite(quic.StreamErrorCode)
 	QUICStream() *quic.Stream
 }

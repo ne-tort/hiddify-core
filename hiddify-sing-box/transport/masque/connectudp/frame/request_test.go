@@ -43,7 +43,9 @@ func TestParseRequestRequiresCapsuleProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ParseRequest(connectUDPRequest(t, false, false), tmpl)
+	req := connectUDPRequest(t, false, false)
+	req.Proto = "" // H2-style: :protocol set, Proto empty — capsule header required
+	_, err = ParseRequest(req, tmpl)
 	var perr *RequestParseError
 	if !errors.As(err, &perr) {
 		t.Fatalf("ParseRequest: %v want *RequestParseError", err)
@@ -66,6 +68,22 @@ func TestParseRequestRejectsFalseCapsuleProtocol(t *testing.T) {
 	}
 	if perr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("status: got %d want %d", perr.HTTPStatus, http.StatusBadRequest)
+	}
+}
+
+func TestParseRequestAcceptsH3ConnectUDPWithoutCapsuleHeader(t *testing.T) {
+	t.Parallel()
+	tmpl, err := uritemplate.New(testUDPTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := connectUDPRequest(t, false, false)
+	parsed, err := ParseRequest(req, tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Target != "198.51.100.1:443" {
+		t.Fatalf("target: got %q", parsed.Target)
 	}
 }
 

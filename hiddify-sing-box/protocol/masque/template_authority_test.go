@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/option"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -50,6 +51,7 @@ func TestMasqueRequestAuthorityMatchesTemplate(t *testing.T) {
 		{"exact", "127.0.0.1:4438", "127.0.0.1:4438", false, true},
 		{"public vs loopback relaxed", "127.0.0.1:4438", "193.233.216.26:4438", true, true},
 		{"port mismatch", "127.0.0.1:4438", "193.233.216.26:8443", true, false},
+		{"public host without port", "127.0.0.1:4433", "163.5.180.181", true, true},
 		{"no relax mismatch", "127.0.0.1:4438", "193.233.216.26:4438", false, false},
 		{"non-loopback template", "203.0.113.1:4438", "193.233.216.26:4438", true, false},
 	}
@@ -76,5 +78,58 @@ func TestMasqueHTTPRequestForTemplateParseUDP(t *testing.T) {
 	parseR := masqueHTTPRequestForTemplateParse(req, template, true)
 	if parseR.Host != "127.0.0.1:4438" {
 		t.Fatalf("relaxed host: got %q want 127.0.0.1:4438", parseR.Host)
+	}
+}
+
+func TestMasqueHTTPRequestForTemplateParseExplicitHostWithoutPort(t *testing.T) {
+	t.Parallel()
+	template := uritemplate.MustNew("https://163.5.180.181:4433/masque/udp/{+target_host}/{target_port}")
+	req, err := http.NewRequest(http.MethodConnect, "https://163.5.180.181:4433/masque/udp/8.8.8.8/53", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "163.5.180.181"
+	parseR := masqueHTTPRequestForTemplateParse(req, template, false)
+	if parseR.Host != "163.5.180.181:4433" {
+		t.Fatalf("normalized host: got %q want 163.5.180.181:4433", parseR.Host)
+	}
+	if parseR.URL == nil || parseR.URL.Host != "163.5.180.181:4433" {
+		t.Fatalf("normalized URL host: got %v", parseR.URL)
+	}
+}
+
+func TestMasqueHTTPRequestForTemplateParseLoopbackRewritesURLHost(t *testing.T) {
+	t.Parallel()
+	template := uritemplate.MustNew("https://127.0.0.1:4433/masque/udp/{+target_host}/{target_port}")
+	req, err := http.NewRequest(http.MethodConnect, "https://163.5.180.181:4433/masque/udp/8.8.8.8/53", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "163.5.180.181:4433"
+	parseR := masqueHTTPRequestForTemplateParse(req, template, true)
+	if parseR.Host != "127.0.0.1:4433" {
+		t.Fatalf("relaxed host: got %q want 127.0.0.1:4433", parseR.Host)
+	}
+	if parseR.URL == nil || parseR.URL.Host != "127.0.0.1:4433" {
+		t.Fatalf("relaxed URL host: got %v", parseR.URL)
+	}
+}
+
+func TestMasqueHTTPRequestForTemplateParseLoopbackConnectUDPParse(t *testing.T) {
+	t.Parallel()
+	template := uritemplate.MustNew("https://127.0.0.1:4433/masque/udp/{+target_host}/{target_port}")
+	req, err := http.NewRequest(http.MethodConnect, "https://163.5.180.181:4433/masque/udp/8.8.8.8/53", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "163.5.180.181:4433"
+	req.Proto = cudpframe.RequestProtocol
+	parseR := masqueHTTPRequestForTemplateParse(req, template, true)
+	parsed, err := cudpframe.ParseRequest(parseR, template)
+	if err != nil {
+		t.Fatalf("ParseRequest: %v", err)
+	}
+	if parsed.Target != "8.8.8.8:53" {
+		t.Fatalf("target=%q", parsed.Target)
 	}
 }

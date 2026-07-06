@@ -23,10 +23,38 @@ func PrimeH2UploadBootstrapOnConn(c net.Conn, barrier UploadWireBarrier) error {
 	return bc.primeH2UploadBootstrapWire(barrier)
 }
 
-// SetStreamCancel wires http2 Extended CONNECT request-context teardown on tunnel close.
+// RequestCancelSettable marks CONNECT-stream tunnels that accept request-context cancel on Close.
+type RequestCancelSettable interface {
+	SetConnectStreamRequestCancel(context.CancelCauseFunc)
+}
+
+// SetStreamCancel wires Extended CONNECT request-context teardown on tunnel close (H2 bidi + H3).
 func SetStreamCancel(c net.Conn, cancel context.CancelCauseFunc) {
+	if c == nil || cancel == nil {
+		return
+	}
 	if bc := unwrapBidiTunnelConn(c); bc != nil {
 		bc.streamCancel = cancel
+	}
+	walkRequestCancelSettable(c, cancel)
+}
+
+// SetConnectStreamUploadTeardown registers H2 upload-body half-close (ExtendedConnectUploadBody).
+func SetConnectStreamUploadTeardown(c net.Conn, teardown func()) {
+	if bc := unwrapBidiTunnelConn(c); bc != nil {
+		bc.uploadTeardown = teardown
+	}
+}
+
+func walkRequestCancelSettable(c net.Conn, cancel context.CancelCauseFunc) {
+	if c == nil {
+		return
+	}
+	if s, ok := c.(RequestCancelSettable); ok {
+		s.SetConnectStreamRequestCancel(cancel)
+	}
+	if tc, ok := c.(interface{ TunnelInner() net.Conn }); ok {
+		walkRequestCancelSettable(tc.TunnelInner(), cancel)
 	}
 }
 

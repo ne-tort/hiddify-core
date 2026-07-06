@@ -131,35 +131,40 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("unexpected protocol: %q", proto),
 		}
 	}
+	capsuleHeaderValues, ok := r.Header[http3.CapsuleProtocolHeader]
+	if !ok {
+		// HTTP/3 CONNECT-UDP uses r.Proto=connect-udp; some stacks do not surface
+		// Capsule-Protocol in r.Header even though the request is capsule-ready.
+		if !strings.EqualFold(strings.TrimSpace(r.Proto), RequestProtocol) {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("missing %s header", http3.CapsuleProtocolHeader),
+			}
+		}
+	} else {
+		item, err := httpsfv.UnmarshalItem(capsuleHeaderValues)
+		if err != nil {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("invalid capsule header value: %s", capsuleHeaderValues),
+			}
+		}
+		if v, ok := item.Value.(bool); !ok {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("incorrect capsule header value type: %s", reflect.TypeOf(item.Value)),
+			}
+		} else if !v {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("incorrect capsule header value: %t", item.Value),
+			}
+		}
+	}
 	if r.Host != u.Host {
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusBadRequest,
 			Err:        fmt.Errorf("host in :authority (%s) does not match template host (%s)", r.Host, u.Host),
-		}
-	}
-	capsuleHeaderValues, ok := r.Header[http3.CapsuleProtocolHeader]
-	if !ok {
-		return nil, &RequestParseError{
-			HTTPStatus: http.StatusBadRequest,
-			Err:        fmt.Errorf("missing %s header", http3.CapsuleProtocolHeader),
-		}
-	}
-	item, err := httpsfv.UnmarshalItem(capsuleHeaderValues)
-	if err != nil {
-		return nil, &RequestParseError{
-			HTTPStatus: http.StatusBadRequest,
-			Err:        fmt.Errorf("invalid capsule header value: %s", capsuleHeaderValues),
-		}
-	}
-	if v, ok := item.Value.(bool); !ok {
-		return nil, &RequestParseError{
-			HTTPStatus: http.StatusBadRequest,
-			Err:        fmt.Errorf("incorrect capsule header value type: %s", reflect.TypeOf(item.Value)),
-		}
-	} else if !v {
-		return nil, &RequestParseError{
-			HTTPStatus: http.StatusBadRequest,
-			Err:        fmt.Errorf("incorrect capsule header value: %t", item.Value),
 		}
 	}
 

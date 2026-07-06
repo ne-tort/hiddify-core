@@ -1118,3 +1118,25 @@ func TestMasquePerfLabDockerfileArtifactsContract(t *testing.T) {
 		}
 	}
 }
+
+// TestMasqueDockerBenchStressSocks1080GateContract locks host burst gate for connect-stream churn.
+func TestMasqueDockerBenchStressSocks1080GateContract(t *testing.T) {
+	t.Parallel()
+	stress := readRepoSource(t, filepath.Join("docker", "masque-perf-lab", "bench", "stress_socks1080.py"))
+	verify := readRepoSource(t, filepath.Join("scripts", "Verify-ConnectStream.ps1"))
+	burstGate := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "connect_stream_burst_gate_test.go"))
+	requireSubstrings(t, stress, "stress_socks1080 gate",
+		"GATE_MIN_OK_RATE = 0.95",
+		"POST_BURST_URL",
+		"Post-burst probe",
+	)
+	requireSubstrings(t, verify, "verify burst gate",
+		"TestGATEConnectStreamSocksBurstReliability",
+	)
+	requireSubstrings(t, burstGate, "burst gate test",
+		"TestGATEConnectStreamSocksBurstReliability",
+		"burstGateMinOKRate",
+		"0.95",
+		"burstGateSequentialN",
+	)
+}

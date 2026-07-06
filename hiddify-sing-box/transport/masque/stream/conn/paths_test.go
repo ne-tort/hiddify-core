@@ -209,3 +209,20 @@ func TestBidiTunnelConnUploadDrainsPendingDownload(t *testing.T) {
 		t.Fatal("upload blocked >4s while download had unread banner (H2 bidi drain expected)")
 	}
 }
+
+func TestGATEH2ConnectStreamCloseInvokesStreamCancel(t *testing.T) {
+	var canceled bool
+	ulBuf := &nopCloserBuffer{}
+	paths := TunnelPaths{
+		Download: NewDownloadPathAdapter(io.NopCloser(bytes.NewReader(nil))),
+		Upload:   NewUploadPath(ulBuf),
+	}
+	conn := ConnFromTunnelPaths(context.Background(), paths, &net.TCPAddr{}, &net.TCPAddr{Port: 443})
+	SetStreamCancel(conn, func(error) { canceled = true })
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !canceled {
+		t.Fatal("streamCancel not invoked on Close")
+	}
+}

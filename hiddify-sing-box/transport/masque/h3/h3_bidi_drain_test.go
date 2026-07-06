@@ -50,6 +50,7 @@ func (s *testH3BidiStream) Close() error               { return nil }
 func (s *testH3BidiStream) SetReadDeadline(time.Time) error  { return nil }
 func (s *testH3BidiStream) SetWriteDeadline(time.Time) error { return nil }
 func (s *testH3BidiStream) CancelRead(quic.StreamErrorCode)  {}
+func (s *testH3BidiStream) CancelWrite(quic.StreamErrorCode) {}
 func (s *testH3BidiStream) QUICStream() *quic.Stream         { return nil }
 
 // TestH3TunnelConnWriteUploadDrainsPendingDownload verifies prod SOCKS upload (Write on

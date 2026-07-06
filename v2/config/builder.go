@@ -79,6 +79,7 @@ func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptio
 	if err != nil {
 		return nil, err
 	}
+	patchMasqueClientEndpoints(input)
 
 	var options option.Options
 	if hopts.EnableFullConfig {

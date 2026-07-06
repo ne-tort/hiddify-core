@@ -40,6 +40,7 @@ func (s *refBenchInfiniteStream) Close() error                      { return nil
 func (s *refBenchInfiniteStream) SetReadDeadline(time.Time) error  { return nil }
 func (s *refBenchInfiniteStream) SetWriteDeadline(time.Time) error { return nil }
 func (s *refBenchInfiniteStream) CancelRead(quic.StreamErrorCode)  {}
+func (s *refBenchInfiniteStream) CancelWrite(quic.StreamErrorCode) {}
 func (s *refBenchInfiniteStream) QUICStream() *quic.Stream         { return nil }
 
 func (s *refBenchInfiniteStream) WriteTo(w io.Writer) (int64, error) {
