@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"errors"
 	"net"
 	"strings"
@@ -12,8 +13,8 @@ import (
 )
 
 const (
-	// Field/VPS bench parity (REF1-2): 5×200ms tolerates flaky remote QUIC without env.
-	defaultConnectStreamDialMaxAttempts = 5
+	// One transport-fault retry inside the outer handshake budget (dialTCPStream ctx).
+	defaultConnectStreamDialMaxAttempts = 2
 	defaultConnectStreamDialBackoffMs   = 200
 )
 
@@ -32,9 +33,26 @@ func ConnectStreamDialBackoff(attempt int) time.Duration {
 }
 
 // TCPConnectStreamErrMayBenefitFromNextHop is true for overlay/network/handshake faults where
-// advancing hopOrder might help. False for capability errors (invalid Socksaddr, template expand).
+// advancing hopOrder might help. False for capability errors and exhausted dial budgets.
 func TCPConnectStreamErrMayBenefitFromNextHop(err error) bool {
-	return err != nil && !errors.Is(err, Errs.Capability)
+	if err == nil || errors.Is(err, Errs.Capability) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return true
+}
+
+// connectStreamRoundTripShouldRetry: only confirmed transport death, not budget expiry.
+func connectStreamRoundTripShouldRetry(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return IsRetryableTCPStreamError(err)
 }
 
 // IsRetryableTCPStreamError reports whether dialTCPStreamHTTP3/H2 may retry the round trip.

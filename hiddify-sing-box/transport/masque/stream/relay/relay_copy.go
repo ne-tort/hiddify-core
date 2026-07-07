@@ -26,28 +26,7 @@ var relayTunnelBufPool = sync.Pool{
 }
 
 // relayTunnelPrimeDownload reads the first onward-TCP segment (iperf banner, etc.). Timeout with no bytes is OK.
-func relayTunnelPrimeDownload(conn net.Conn) ([]byte, error) {
-	buf := make([]byte, 4096)
-	if d, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-		_ = d.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
-		defer func() { _ = d.SetReadDeadline(time.Time{}) }()
-	}
-	n, err := conn.Read(buf)
-	if n > 0 {
-		return buf[:n], nil
-	}
-	if err == nil {
-		return nil, nil
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return nil, nil
-	}
-	if errors.Is(err, io.EOF) {
-		return nil, err
-	}
-	return nil, err
-}
+// Implemented in relay_prime.go (opportunistic peek policy).
 
 // relayTunnelDownloadRelay copies onward TCP → CONNECT response; H2 path primes iperf banner
 // then bulk-copies with io.CopyBuffer (64 KiB, h2o proxy.tunnel parity) and batch flush at EOF.
@@ -147,6 +126,7 @@ func relayTunnelCopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
 func relayTunnelUnblockPeerRead(conn net.Conn) {
 	if d, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 		_ = d.SetReadDeadline(time.Now())
+		_ = d.SetReadDeadline(time.Time{})
 		return
 	}
 	_ = conn.Close()
@@ -174,7 +154,9 @@ func relayTunnelSelect(ctx context.Context, targetConn net.Conn, reqBody io.Read
 	case downloadErr := <-downloadErrCh:
 		if downloadErr != nil && !errors.Is(downloadErr, io.EOF) {
 			_ = targetConn.Close()
-			_ = reqBody.Close()
+			if reqBody != nil {
+				_ = reqBody.Close()
+			}
 			return downloadErr
 		}
 		select {

@@ -15,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/relay"
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -85,8 +86,16 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 	}
 	resolvedAddrs, allowErr := resolveAddrs(r.Context(), targetHost, host.Options.AllowPrivateTargets)
 	if allowErr != nil {
-		debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr)
-		w.WriteHeader(http.StatusForbidden)
+		status := http.StatusBadGateway
+		if errors.Is(allowErr, connectudp.ErrPrivateTargetDenied) {
+			status = http.StatusForbidden
+		}
+		if status == http.StatusForbidden {
+			debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr)
+		} else {
+			debugf("masque tcp connect resolve failed host=%s port=%s status=502 error_class=%s err=%v", targetHost, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, allowErr)), allowErr)
+		}
+		w.WriteHeader(status)
 		return
 	}
 	allowPort := h.Hooks.AllowTCPPort

@@ -24,13 +24,21 @@ const (
 )
 
 func relayH3ProbeUploadLeg(uploadSrc io.Reader) (io.Reader, relayH3UploadLegMode, bool) {
+	return relayH3ProbeUploadLegPolicy(uploadSrc, currentRelayProbePolicy())
+}
+
+func relayH3ProbeUploadLegPolicy(uploadSrc io.Reader, policy RelayProbePolicy) (io.Reader, relayH3UploadLegMode, bool) {
 	if uploadSrc == nil {
 		return nil, relayH3UploadLegNeutral, false
 	}
 	useTimeout := false
 	if d, ok := uploadSrc.(interface{ SetReadDeadline(time.Time) error }); ok {
 		useTimeout = true
-		_ = d.SetReadDeadline(time.Now().Add(3 * time.Millisecond))
+		deadline := time.Now()
+		if policy.UploadProbeWait > 0 {
+			deadline = deadline.Add(policy.UploadProbeWait)
+		}
+		_ = d.SetReadDeadline(deadline)
 	}
 	one := make([]byte, 1)
 	n, err := uploadSrc.Read(one)
@@ -78,22 +86,64 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		}
 		w.enableDownloadSend()
 	}
+	defer func() {
+		if cw, ok := targetConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		}
+	}()
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	go func() {
 		_, err := relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)
-		_ = reqBody.Close()
-		if cw, ok := targetConn.(closeWriter); ok {
-			_ = cw.CloseWrite()
-		}
 		uploadErrCh <- err
 	}()
 	go func() {
 		_, err := relayTunnelDownloadRelayH3Plain(bidi, targetConn)
 		downloadErrCh <- err
 	}()
-	relayErr := relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
-	return relayErr
+	// Hijacked H3: reqBody already ReleaseHTTPStream at entry — never Close (CancelRead 268).
+	return relayTunnelSelect(ctx, targetConn, nil, uploadErrCh, downloadErrCh)
+}
+
+func relayTCPTunnelH3DownloadLeg(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
+	_ = ctx
+	if bidi != nil {
+		defer func() { _ = bidi.Close() }()
+	}
+	if reqBody != nil {
+		_ = reqBody.Close()
+	}
+	if w := relayBidiWakerFromRW(bidi); w != nil {
+		w.prepareDownloadPrimary()
+		w.enableDownloadSend()
+	}
+	_, err := relayTunnelDownloadRelayH3Plain(bidi, targetConn)
+	return err
+}
+
+func relayTCPTunnelH3UploadLeg(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
+	_ = ctx
+	if bidi != nil {
+		defer func() { _ = bidi.Close() }()
+	}
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	uploadSrc := relayTunnelUploadSource(reqBody, bidi)
+	if RelayUploadFromStream() && bidi != nil {
+		uploadSrc = StripH3ClientBootstrapUpload(uploadSrc)
+	}
+	if w := relayBidiWakerFromRW(bidi); w != nil {
+		w.enableConnectStream()
+	}
+	_, err := relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)
+	if reqBody != nil {
+		_ = reqBody.Close()
+	}
+	if cw, ok := targetConn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+	return err
 }
 
 func relayTunnelDownloadRelayH3Plain(dst io.Writer, src net.Conn) (int64, error) {

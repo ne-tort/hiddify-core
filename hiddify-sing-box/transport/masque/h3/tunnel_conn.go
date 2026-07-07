@@ -61,6 +61,8 @@ type TunnelConn struct {
 
 	bidiWakeSink BidiWakeSink
 
+	scheduler *bidiScheduler
+
 	connectStreamRole ConnectStreamRole
 }
 
@@ -98,6 +100,7 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 		routeBidiDuplex:   p.RouteBidiDuplex,
 		connectStreamRole: normalizeConnectStreamRole(p.ConnectStreamLeg),
 	}
+	conn.scheduler = newBidiScheduler(conn, ProdConnectStreamSchedPolicy())
 	return conn
 }
 
@@ -215,7 +218,7 @@ func (c *TunnelConn) Read(p []byte) (int, error) {
 		err = errors.Join(ErrTunnelConnFailed, err)
 	}
 	if n > 0 {
-		c.noteDownloadDeliveryWake(n)
+		c.scheduler.noteDownloadDelivery(n)
 	}
 	return n, err
 }
@@ -282,7 +285,7 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 	if c.DownloadActive() {
 		c.noteDuplexUploadTraffic()
 	}
-	chunkBytes := H3UploadChunkBytes(c.DownloadActive(), c.DownloadDelivered(), atomic.LoadInt32(&c.duplexUploadStarted) != 0)
+	chunkBytes := c.scheduler.uploadChunkBytes()
 	var n int
 	var err error
 	if c.DownloadActive() && len(p) > chunkBytes {
@@ -291,13 +294,13 @@ func (c *TunnelConn) writeH3UploadLocked(p []byte) (int, error) {
 				if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok {
 					_ = f.FlushMasqueCoalesce()
 				}
-				c.wakeBidiSendAfterUpload()
+				c.scheduler.wakeAfterUpload()
 			}
 		})
 	} else {
 		n, err = c.h3.Write(p)
 		if err == nil && c.DownloadActive() {
-			c.wakeBidiSendAfterUpload()
+			c.scheduler.wakeAfterUpload()
 		}
 	}
 	if n > 0 {
@@ -354,7 +357,7 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 						_ = f.FlushMasqueCoalesce()
 					}
 					if c.DownloadActive() && nr < H3UploadFlushChunkBytes {
-						c.wakeBidiSendAfterUpload()
+						c.scheduler.wakeAfterUpload()
 					}
 				}
 			}
@@ -393,7 +396,7 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 		n, werr := wt.WriteTo(w)
 		if n > 0 {
 			c.noteDownloadDelivered()
-			c.noteDownloadDeliveryWake(int(n))
+			c.scheduler.noteDownloadDelivery(int(n))
 		}
 		return n, werr
 	}
@@ -417,21 +420,21 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 // tunnelH3Reader adapts h3.Read for io.CopyBuffer (Invisv stream parity).
 type tunnelH3Reader struct{ c *TunnelConn }
 
-const duplexStarvedDownloadReadCap = 16 * 1024
-
 func (r *tunnelH3Reader) Read(p []byte) (int, error) {
 	r.c.activateDownloadReceiveOnRead()
-	if qs := r.c.h3.QUICStream(); qs != nil && quic.MasqueUploadSendStarved(qs) && len(p) > duplexStarvedDownloadReadCap {
-		p = p[:duplexStarvedDownloadReadCap]
+	uploadStarved := false
+	if qs := r.c.h3.QUICStream(); qs != nil {
+		uploadStarved = quic.MasqueUploadSendStarved(qs)
 	}
+	p = r.c.scheduler.capDownloadRead(p, uploadStarved)
 	if len(p) >= H3UploadFlushChunkBytes {
-		r.c.wakeH3BidiUploadDuringDownload()
+		r.c.scheduler.wakeUploadDuringDownload()
 	}
 	n, err := r.c.h3.Read(p)
 	if n > 0 {
-		r.c.noteDownloadDeliveryWake(n)
+		r.c.scheduler.noteDownloadDelivery(n)
 		if n < H3UploadFlushChunkBytes {
-			r.c.wakeH3BidiUploadDuringDownload()
+			r.c.scheduler.wakeUploadDuringDownload()
 		}
 	}
 	return n, err

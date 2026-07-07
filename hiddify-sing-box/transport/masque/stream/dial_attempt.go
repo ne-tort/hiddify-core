@@ -2,7 +2,6 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/url"
 
@@ -40,12 +39,6 @@ func DialAttempt(ctx context.Context, host AttemptDialHost, destination M.Socksa
 		return nil, err
 	}
 	unlock()
-
-	select {
-	case <-ctx.Done():
-		return nil, errors.Join(Errs.TCPConnectStreamFailed, context.Cause(ctx))
-	default:
-	}
 
 	targetHost, err := ResolveDestinationHost(destination)
 	if err != nil {

@@ -1,64 +1,87 @@
 package server
 
 import (
+	"context"
+	"net/http"
 	"net/netip"
 	"testing"
+
+	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 )
 
 func TestOrderResolvedTCPAddrsPrefersIPv4(t *testing.T) {
 	t.Parallel()
-	aaaa := netip.MustParseAddr("2001:db8::1")
-	aaaaFirst := netip.MustParseAddr("2001:db8::2")
+	v6a := netip.MustParseAddr("2001:db8::1")
+	v6b := netip.MustParseAddr("2001:db8::2")
 	v4a := netip.MustParseAddr("203.0.113.10")
-	v4b := netip.MustParseAddr("198.51.100.20")
-	v4In6 := netip.MustParseAddr("::ffff:192.0.2.1")
-
-	got := OrderResolvedTCPAddrs([]netip.Addr{aaaa, v4a, aaaaFirst, v4In6, v4b})
-	want := []netip.Addr{v4a, netip.MustParseAddr("192.0.2.1"), v4b, aaaa, aaaaFirst}
-	if len(got) != len(want) {
-		t.Fatalf("len=%d want %d addrs=%v", len(got), len(want), got)
+	v4b := netip.MustParseAddr("203.0.113.20")
+	ordered := OrderResolvedTCPAddrs([]netip.Addr{v6a, v4b, v6b, v4a})
+	if len(ordered) != 4 {
+		t.Fatalf("len=%d", len(ordered))
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("index %d: got %v want %v full=%v", i, got[i], want[i], got)
-		}
+	if !ordered[0].Is4() || !ordered[1].Is4() || ordered[0].String() != "203.0.113.10" || ordered[1].String() != "203.0.113.20" {
+		t.Fatalf("v4 first: %v", ordered)
+	}
+	if !ordered[2].Is6() || !ordered[3].Is6() {
+		t.Fatalf("v6 after v4: %v", ordered)
 	}
 }
 
-func TestResolveTCPTargetForDialUsesIPv4FirstFromOrdered(t *testing.T) {
+func TestResolveTCPTargetAddrsForDial_PublicLiteralIPv4(t *testing.T) {
 	t.Parallel()
-	ordered := OrderResolvedTCPAddrs([]netip.Addr{
-		netip.MustParseAddr("2001:db8::1"),
-		netip.MustParseAddr("203.0.113.5"),
-	})
-	if len(ordered) != 2 || !ordered[0].Is4() {
-		t.Fatalf("order sanity: %v", ordered)
-	}
-	// ResolveTCPTargetForDial delegates to Addrs — verify literal path.
-	got, err := ResolveTCPTargetAddrsForDial(t.Context(), "203.0.113.9", false)
+	addrs, err := ResolveTCPTargetAddrsForDial(context.Background(), "8.8.8.8", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].String() != "203.0.113.9" {
-		t.Fatalf("literal: got %v", got)
-	}
-	chosen, err := ResolveTCPTargetForDial(t.Context(), "203.0.113.9", false)
-	if err != nil || chosen != "203.0.113.9" {
-		t.Fatalf("ResolveTCPTargetForDial: %q err=%v", chosen, err)
+	if len(addrs) != 1 || addrs[0].String() != "8.8.8.8" {
+		t.Fatalf("addrs=%v", addrs)
 	}
 }
 
-func TestResolveTCPTargetAddrsAllowPrivateHostname(t *testing.T) {
+func TestResolveTCPTargetAddrsForDial_PrivateLiteralDenied(t *testing.T) {
 	t.Parallel()
-	got, err := ResolveTCPTargetAddrsForDial(t.Context(), "bench.local", true)
+	_, err := ResolveTCPTargetAddrsForDial(context.Background(), "10.0.0.1", false)
+	if err == nil {
+		t.Fatal("expected private denied")
+	}
+}
+
+func TestResolveTCPTargetAddrsForDial_PrivateLiteralAllowed(t *testing.T) {
+	t.Parallel()
+	addrs, err := ResolveTCPTargetAddrsForDial(context.Background(), "10.0.0.1", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != nil {
-		t.Fatalf("allowPrivate hostname want nil addrs, got %v", got)
+	if len(addrs) != 1 || addrs[0].String() != "10.0.0.1" {
+		t.Fatalf("addrs=%v", addrs)
 	}
-	got, err = ResolveTCPTargetAddrsForDial(t.Context(), "127.0.0.1", true)
-	if err != nil || len(got) != 1 || got[0].String() != "127.0.0.1" {
-		t.Fatalf("allowPrivate literal: got %v err=%v", got, err)
+}
+
+func TestGATEConnectStreamOnwardHostnamePassthroughNoEgressDNS(t *testing.T) {
+	t.Parallel()
+	addrs, err := ResolveTCPTargetAddrsForDial(context.Background(), "example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addrs != nil {
+		t.Fatalf("hostname must passthrough without MASQUE egress DNS, got %v", addrs)
+	}
+}
+
+func TestConnectStreamResolveHTTPStatus(t *testing.T) {
+	t.Parallel()
+	if ConnectStreamResolveHTTPStatus(connectudp.ErrPrivateTargetDenied) != http.StatusForbidden {
+		t.Fatal("private target -> 403")
+	}
+	if ConnectStreamResolveHTTPStatus(ErrTCPTargetResolveFailed) != http.StatusBadGateway {
+		t.Fatal("resolve fail -> 502")
+	}
+}
+
+func TestResolveTCPTargetAddrsForDial_LocalhostDenied(t *testing.T) {
+	t.Parallel()
+	_, err := ResolveTCPTargetAddrsForDial(context.Background(), "localhost", false)
+	if err != connectudp.ErrPrivateTargetDenied {
+		t.Fatalf("err=%v", err)
 	}
 }

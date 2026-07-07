@@ -290,6 +290,40 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.RoundTripOpt(req, RoundTripOpt{})
 }
 
+// AuthorityAddr normalizes host or host:port for Transport client cache keys (same as RoundTrip).
+func AuthorityAddr(authority string) string {
+	return authorityAddr(authority)
+}
+
+// EnsureClientConn completes the QUIC handshake for hostname when no cached client exists.
+// hostname must match RoundTrip cache keys (use AuthorityAddr on the request URL host).
+func (t *Transport) EnsureClientConn(ctx context.Context, hostname string) error {
+	t.initOnce.Do(func() { t.initErr = t.init() })
+	if t.initErr != nil {
+		return t.initErr
+	}
+	cl, _, err := t.getClient(ctx, hostname, false)
+	if err != nil {
+		return err
+	}
+	defer cl.useCount.Add(-1)
+	select {
+	case <-cl.dialing:
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+	if cl.dialErr != nil {
+		t.removeClient(hostname)
+		return cl.dialErr
+	}
+	select {
+	case <-cl.conn.HandshakeComplete():
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
 func (t *Transport) getClient(ctx context.Context, hostname string, onlyCached bool) (rtc *roundTripperWithCount, isReused bool, err error) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()

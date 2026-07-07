@@ -59,14 +59,14 @@ func DispatchDialContext(s *CoreSession, host DispatchHost, ctx context.Context,
 		host.ClearHTTPFallbackAfterGiveUp()
 		return nil, host.UnsupportedNetworkError(network)
 	}
-	select {
-	case <-ctx.Done():
-		host.ClearHTTPFallbackAfterGiveUp()
-		return nil, context.Cause(ctx)
-	default:
-	}
 	switch {
 	case DataplaneUsesConnectIP(s.Options.DataplaneMode):
+		select {
+		case <-ctx.Done():
+			host.ClearHTTPFallbackAfterGiveUp()
+			return nil, context.Cause(ctx)
+		default:
+		}
 		conn, err := host.DialConnectIPTCP(ctx, destination)
 		if err == nil {
 			host.RecordTCPDialSuccess()

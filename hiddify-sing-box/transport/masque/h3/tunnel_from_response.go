@@ -33,11 +33,12 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, tar
 	}
 	http3.EnableMasqueConnectStream(str)
 	params := TunnelConnParams{
-		H3Stream:        str,
-		Ctx:             streamCtx,
-		Local:           &net.TCPAddr{},
-		Remote:          remoteAddr,
-		RouteBidiDuplex: strm.ConnectStreamRouteBidiDuplex(ctx),
+		H3Stream:         str,
+		Ctx:              streamCtx,
+		Local:            &net.TCPAddr{},
+		Remote:           remoteAddr,
+		RouteBidiDuplex:  strm.ConnectStreamRouteBidiDuplex(ctx),
+		ConnectStreamLeg: strm.ConnectStreamLegFromContext(ctx),
 	}
 	applyTunnelConnParamsHook(&params)
 	conn := NewTunnelConn(params)

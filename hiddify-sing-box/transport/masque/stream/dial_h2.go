@@ -83,10 +83,8 @@ func DialHTTP2ConnectStream(
 	maxAttempts := ConnectStreamDialMaxAttempts()
 	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		select {
-		case <-ctx.Done():
-			return nil, errors.Join(Errs.TCPConnectStreamFailed, context.Cause(ctx))
-		default:
+		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
 		tr, err := host.EnsureH2ConnectStreamTransport(ctx)
 		if err != nil {
@@ -121,18 +119,12 @@ func DialHTTP2ConnectStream(
 			lastRoundTripErr = roundTripErr
 			_ = uploadR.Close()
 			_ = uploadW.Close()
-			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
-				return nil, errors.Join(Errs.TCPConnectStreamFailed, roundTripErr)
-			}
-			if attempt+1 < maxAttempts && IsRetryableTCPStreamError(roundTripErr) && ctx.Err() == nil {
+			if attempt+1 < maxAttempts && connectStreamRoundTripShouldRetry(roundTripErr) {
 				host.ResetH2ConnectStreamTransport()
 				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, errors.Join(Errs.TCPConnectStreamFailed, backoffErr)
 				}
 				continue
-			}
-			if IsRetryableTCPStreamError(roundTripErr) {
-				host.ResetH2ConnectStreamTransport()
 			}
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, fmt.Errorf("masque h2: tcp connect-stream roundtrip: %w", roundTripErr))
 		}
@@ -142,29 +134,23 @@ func DialHTTP2ConnectStream(
 			_ = uploadW.Close()
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				return nil, errors.Join(hooks.AuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, hooks.RequestURL(tcpURL)))
+				return nil, JoinConnectStreamHTTPStatus(hooks.AuthFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 			}
 			return nil, fmt.Errorf("masque h2: %w: status=%d url=%s", Errs.TCPConnectStreamFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
-		}
-		if ctxErr := context.Cause(ctx); ctxErr != nil {
-			stopReqCtxRelay(false)
-			_ = uploadR.Close()
-			_ = uploadW.Close()
-			_ = resp.Body.Close()
-			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
 		}
 		stopReqCtxRelay(true)
 		conn, err := hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
 		if err != nil {
+			stopReqCtxRelay(false)
+			_ = uploadR.Close()
+			_ = uploadW.Close()
+			_ = resp.Body.Close()
 			return nil, err
 		}
 		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil
 	}
 	if lastRoundTripErr != nil {
-		if IsRetryableTCPStreamError(lastRoundTripErr) {
-			host.ResetH2ConnectStreamTransport()
-		}
 		return nil, errors.Join(Errs.TCPConnectStreamFailed, lastRoundTripErr)
 	}
 	return nil, Errs.TCPConnectStreamFailed

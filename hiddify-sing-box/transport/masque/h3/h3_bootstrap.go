@@ -33,29 +33,6 @@ func (c *TunnelConn) sendH3BootstrapUploadUnlocked() error {
 	return nil
 }
 
-func (c *TunnelConn) sendH3BootstrapUploadOnce() error {
-	if c == nil || c.h3 == nil {
-		return nil
-	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.sendH3BootstrapUploadUnlocked()
-}
-
-func (c *TunnelConn) bootstrapH3UploadForDownloadOnce() {
-	_ = c.sendH3BootstrapUploadOnce()
-}
-
-func (c *TunnelConn) wakeH3BidiUploadDuringDownload() {
-	if c == nil {
-		return
-	}
-	if atomic.LoadInt32(&c.downloadActive) == 0 {
-		return
-	}
-	c.wakeBidiSendAfterUpload()
-}
-
 func (c *TunnelConn) ensureH3BootstrapBeforeUploadLocked() {
 	if c == nil || c.DownloadActive() {
 		return

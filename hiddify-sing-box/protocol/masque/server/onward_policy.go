@@ -2,15 +2,29 @@ package server
 
 import (
 	"context"
-	"net"
+	"errors"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
-	"time"
 
 	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
-	E "github.com/sagernet/sing/common/exceptions"
 )
+
+var (
+	// ErrTCPTargetResolveFailed is returned when onward DNS lookup fails (maps to HTTP 502).
+	ErrTCPTargetResolveFailed = errors.New("failed to resolve tcp target")
+	// ErrTCPTargetSelectFailed is returned when no dialable address remains after policy filter.
+	ErrTCPTargetSelectFailed = errors.New("failed to select resolved tcp target")
+)
+
+// ConnectStreamResolveHTTPStatus maps onward resolve/policy errors to HTTP status for CONNECT-stream.
+func ConnectStreamResolveHTTPStatus(err error) int {
+	if errors.Is(err, connectudp.ErrPrivateTargetDenied) {
+		return http.StatusForbidden
+	}
+	return http.StatusBadGateway
+}
 
 // OrderResolvedTCPAddrs returns public addresses with IPv4 before IPv6 for onward serial dial.
 func OrderResolvedTCPAddrs(resolved []netip.Addr) []netip.Addr {
@@ -41,44 +55,43 @@ func filterPublicTCPAddrs(resolved []netip.Addr) ([]netip.Addr, error) {
 	return out, nil
 }
 
-// ResolveTCPTargetAddrsForDial resolves hostname targets and orders addresses IPv4-first.
-// IP literals return a single-element slice. With allowPrivateTargets and a non-IP host,
-// returns nil addrs (caller dials hostname via OnwardTCPDialAddr).
-func ResolveTCPTargetAddrsForDial(ctx context.Context, host string, allowPrivateTargets bool) ([]netip.Addr, error) {
-	trimmedHost := strings.Trim(strings.TrimSpace(host), "[]")
+func filterTCPAddrsForDial(resolved []netip.Addr, allowPrivateTargets bool) ([]netip.Addr, error) {
 	if allowPrivateTargets {
-		if addr, err := netip.ParseAddr(trimmedHost); err == nil {
-			return []netip.Addr{addr}, nil
+		out := make([]netip.Addr, 0, len(resolved))
+		for _, rip := range resolved {
+			if rip.IsUnspecified() {
+				continue
+			}
+			out = append(out, rip)
+		}
+		return out, nil
+	}
+	return filterPublicTCPAddrs(resolved)
+}
+
+// ResolveTCPTargetAddrsForDial classifies CONNECT-stream targets for onward dial.
+//
+// Sing-box resolves on the client; MASQUE templates should carry IP literals. IP literals
+// return a single-element slice for serial dial + hairpin. Hostnames return nil addrs so
+// the handler dials the name via the OS resolver (no MASQUE egress DNS/cache).
+func ResolveTCPTargetAddrsForDial(ctx context.Context, host string, allowPrivateTargets bool) ([]netip.Addr, error) {
+	_ = ctx
+	trimmedHost := strings.Trim(strings.TrimSpace(host), "[]")
+	lowerHost := strings.ToLower(trimmedHost)
+	if lowerHost == "" || lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".local") {
+		if !allowPrivateTargets {
+			return nil, connectudp.ErrPrivateTargetDenied
 		}
 		return nil, nil
 	}
-	lowerHost := strings.ToLower(trimmedHost)
-	if lowerHost == "" || lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".local") {
-		return nil, connectudp.ErrPrivateTargetDenied
-	}
 	addr, err := netip.ParseAddr(trimmedHost)
-	if err != nil {
-		resolver := net.DefaultResolver
-		resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		resolved, lookupErr := resolver.LookupNetIP(resolveCtx, "ip", trimmedHost)
-		if lookupErr != nil || len(resolved) == 0 {
-			return nil, E.New("failed to resolve tcp target")
+	if err == nil {
+		if !allowPrivateTargets && (addr.IsLoopback() || addr.IsPrivate() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified()) {
+			return nil, connectudp.ErrPrivateTargetDenied
 		}
-		public, filterErr := filterPublicTCPAddrs(resolved)
-		if filterErr != nil {
-			return nil, filterErr
-		}
-		ordered := OrderResolvedTCPAddrs(public)
-		if len(ordered) == 0 {
-			return nil, E.New("failed to select resolved tcp target")
-		}
-		return ordered, nil
+		return []netip.Addr{addr}, nil
 	}
-	if addr.IsLoopback() || addr.IsPrivate() || addr.IsMulticast() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsUnspecified() {
-		return nil, connectudp.ErrPrivateTargetDenied
-	}
-	return []netip.Addr{addr}, nil
+	return nil, nil
 }
 
 // ResolveTCPTargetForDial applies private-target policy before onward TCP dial.
@@ -92,7 +105,7 @@ func ResolveTCPTargetForDial(ctx context.Context, host string, allowPrivateTarge
 		if allowPrivateTargets {
 			return strings.Trim(strings.TrimSpace(host), "[]"), nil
 		}
-		return "", E.New("failed to select resolved tcp target")
+		return "", ErrTCPTargetSelectFailed
 	}
 	return addrs[0].String(), nil
 }

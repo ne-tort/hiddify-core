@@ -11,18 +11,19 @@ func TestRelayP6UploadLegWireLock(t *testing.T) {
 	t.Parallel()
 	bundle := relayGoAuditBundle()
 	for _, needle := range []string{
-		"relayH3ProbeUploadLeg",
-		"relayH3UploadLegDownloadPrimary",
-		"prepareDownloadPrimary",
-		"PrepareMasqueRelayDownloadPrimary",
-		"relayTunnelCopyBufferH3BidiUpload",
+		"relayTCPTunnelH3DownloadLeg",
+		"relayTCPTunnelH3UploadLeg",
+		"RelayH3ConnectModeFromLegRole",
 	} {
 		if !strings.Contains(bundle, needle) {
 			t.Fatalf("relay.go missing H3-L1c-6 anchor %q", needle)
 		}
 	}
-	if !strings.Contains(bundle, "legRole string") {
-		t.Fatal("relay.go missing legRole parameter on RelayTCPTunnel")
+	if !strings.Contains(bundle, "RelayH3ConnectModeFromLegRole") {
+		t.Fatal("relay.go must route H3 relay by legRole via RelayH3ConnectModeFromLegRole")
+	}
+	if strings.Contains(bundle, "_ = legRole") {
+		t.Fatal("relay.go must not discard legRole on H3 hijack path")
 	}
 	for _, needle := range []string{
 		"relayTunnelCopyBufferH2BidiUpload",

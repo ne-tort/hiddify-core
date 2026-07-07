@@ -85,7 +85,7 @@ func DialHTTP3ConnectStreamLeg(
 	}
 	select {
 	case <-ctx.Done():
-		return nil, errors.Join(Errs.TCPConnectStreamFailed, context.Cause(ctx))
+		return nil, JoinConnectStreamPhase("connect handshake", context.Cause(ctx))
 	default:
 	}
 	log.Printf("masque_http_layer_attempt layer=h3 tag=%s tcp_stream=1 target=%s dial=%s%s",
@@ -94,7 +94,7 @@ func DialHTTP3ConnectStreamLeg(
 	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctxErr := context.Cause(ctx); ctxErr != nil {
-			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
+			return nil, JoinConnectStreamPhase("connect handshake", ctxErr)
 		}
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
 		legCtx := ContextWithConnectStreamLeg(streamCtx, legLabel)
@@ -108,49 +108,40 @@ func DialHTTP3ConnectStreamLeg(
 		if roundTripErr != nil {
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
-			if errors.Is(roundTripErr, context.Canceled) || errors.Is(roundTripErr, context.DeadlineExceeded) {
-				return nil, errors.Join(Errs.TCPConnectStreamFailed, roundTripErr)
-			}
-			if attempt+1 < maxAttempts && IsRetryableTCPStreamError(roundTripErr) && ctx.Err() == nil {
+			if attempt+1 < maxAttempts && connectStreamRoundTripShouldRetry(roundTripErr) {
 				tcpHTTP = host.ResetHTTP3Transport()
 				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
-					return nil, errors.Join(Errs.TCPConnectStreamFailed, backoffErr)
+					return nil, JoinConnectStreamPhase("connect roundtrip backoff", backoffErr)
 				}
 				continue
 			}
-			if IsRetryableTCPStreamError(roundTripErr) {
+			if errors.Is(roundTripErr, context.DeadlineExceeded) {
 				host.ResetHTTP3Transport()
 			}
-			return nil, errors.Join(Errs.TCPConnectStreamFailed, roundTripErr)
+			return nil, JoinConnectStreamPhase("connect roundtrip", roundTripErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			stopReqCtxRelay(false)
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				return nil, errors.Join(hooks.AuthFailed, fmt.Errorf("status=%d url=%s", resp.StatusCode, hooks.RequestURL(tcpURL)))
+				return nil, JoinConnectStreamHTTPStatus(hooks.AuthFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 			}
 			return nil, fmt.Errorf("%w: status=%d url=%s", Errs.TCPConnectStreamFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 		}
-		if ctxErr := context.Cause(ctx); ctxErr != nil {
-			stopReqCtxRelay(false)
-			_ = resp.Body.Close()
-			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
-		}
+		// Handshake succeeded: detach request ctx before tunnel build. Parent dial cancel
+		// (DNS/CM cascade) must not discard a live CONNECT stream or leak QUIC slots.
+		stopReqCtxRelay(true)
 		conn, err := hooks.TunnelFromResponse(legCtx, resp, targetHost, targetPort)
 		if err != nil {
 			stopReqCtxRelay(false)
 			_ = resp.Body.Close()
 			return nil, err
 		}
-		stopReqCtxRelay(true)
 		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil
 	}
 	if lastRoundTripErr != nil {
-		if IsRetryableTCPStreamError(lastRoundTripErr) {
-			host.ResetHTTP3Transport()
-		}
-		return nil, errors.Join(Errs.TCPConnectStreamFailed, lastRoundTripErr)
+		return nil, JoinConnectStreamPhase("connect roundtrip", lastRoundTripErr)
 	}
 	return nil, Errs.TCPConnectStreamFailed
 }

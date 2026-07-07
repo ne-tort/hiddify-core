@@ -19,17 +19,23 @@ type TunnelPolicySnapshot struct {
 	Role            ConnectStreamRole
 	RouteBidiDuplex bool
 	UsesH3Stream    bool
+	SchedPolicy     ConnectStreamSchedPolicy
 }
 
 func (c *TunnelConn) TunnelPolicySnapshot() TunnelPolicySnapshot {
 	if c == nil {
-		return TunnelPolicySnapshot{Mode: CurrentConnectStreamMode()}
+		return TunnelPolicySnapshot{Mode: CurrentConnectStreamMode(), SchedPolicy: ProdConnectStreamSchedPolicy()}
+	}
+	policy := ProdConnectStreamSchedPolicy()
+	if c.scheduler != nil {
+		policy = c.scheduler.policy
 	}
 	return TunnelPolicySnapshot{
-		Mode:            ConnectStreamModeSingleBidi,
+		Mode:            CurrentConnectStreamMode(),
 		Role:            c.connectStreamRole,
 		RouteBidiDuplex: c.routeBidiDuplex,
 		UsesH3Stream:    c.h3 != nil,
+		SchedPolicy:     policy,
 	}
 }
 

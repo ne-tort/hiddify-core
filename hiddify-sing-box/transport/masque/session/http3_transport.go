@@ -4,13 +4,21 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log"
+	"net"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
+
+// connectStreamQUICWarmTimeout bounds one shared CONNECT-stream QUIC handshake warm.
+const connectStreamQUICWarmTimeout = 30 * time.Second
 
 // OpenH3ClientConn dials or reuses the HTTP/3 client stack for CONNECT-IP overlay.
 func OpenH3ClientConn(ctx context.Context, s *CoreSession) (*http3.ClientConn, error) {
@@ -58,30 +66,112 @@ func ResetIPH3TransportLockedAssumeMu(s *CoreSession) {
 		s.IPHTTP.Close()
 		if s.TCPHTTP == s.IPHTTP {
 			s.TCPHTTP = nil
+			s.tcpHTTPWarm = nil
 		}
 		s.IPHTTP = nil
 	}
 	s.IPHTTPConn = nil
 }
 
-// WarmTCPConnectStreamHTTP3Transport completes the QUIC handshake on an ephemeral CONNECT-stream transport (P6 warm dial).
+// TCPConnectStreamHTTP3Authority returns the http3.Transport client-cache key for CONNECT-stream RoundTrip.
+func TCPConnectStreamHTTP3Authority(options ClientOptions) string {
+	port := int(options.ServerPort)
+	if port <= 0 {
+		port = 443
+	}
+	return http3.AuthorityAddr(net.JoinHostPort(strings.TrimSpace(options.Server), strconv.Itoa(port)))
+}
+
+// EnsureTCPHTTPQuicConn completes the QUIC handshake on the shared CONNECT-stream HTTP/3
+// transport once per TCPHTTP instance. Parallel dials coalesce via singleflight; s.Mu is not
+// held during network I/O.
+func EnsureTCPHTTPQuicConn(s *CoreSession) error {
+	if CurrentUDPHTTPLayer(s) == option.MasqueHTTPLayerH2 {
+		return nil
+	}
+	s.Mu.Lock()
+	EnsureTCPHTTPTransportLockedAssumeMu(s)
+	tr := s.TCPHTTP
+	if tr == s.tcpHTTPWarm {
+		s.Mu.Unlock()
+		return nil
+	}
+	s.Mu.Unlock()
+	if tr == nil {
+		return errors.New("nil CONNECT-stream HTTP/3 transport")
+	}
+	_, err, _ := s.tcpHTTPWarmFlight.Do(warmFlightKey(tr), func() (any, error) {
+		s.Mu.Lock()
+		if s.TCPHTTP != tr {
+			s.Mu.Unlock()
+			return nil, errors.New("CONNECT-stream HTTP/3 transport replaced during warm")
+		}
+		if tr == s.tcpHTTPWarm {
+			s.Mu.Unlock()
+			return nil, nil
+		}
+		s.Mu.Unlock()
+
+		warmCtx, cancel := context.WithTimeout(context.Background(), connectStreamQUICWarmTimeout)
+		defer cancel()
+		authority := TCPConnectStreamHTTP3Authority(s.Options)
+		port := int(s.Options.ServerPort)
+		if port <= 0 {
+			port = 443
+		}
+		dialTarget := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
+		log.Printf("masque_tcp_quic_warm_start tag=%s authority=%s dial=%s",
+			strings.TrimSpace(s.Options.Tag), authority, dialTarget)
+		if err := tr.EnsureClientConn(warmCtx, authority); err != nil {
+			log.Printf("masque_tcp_quic_warm_fail tag=%s authority=%s dial=%s err=%v",
+				strings.TrimSpace(s.Options.Tag), authority, dialTarget, err)
+			return nil, fmt.Errorf("quic dial %s: %w", dialTarget, err)
+		}
+		log.Printf("masque_tcp_quic_warm_ok tag=%s authority=%s dial=%s",
+			strings.TrimSpace(s.Options.Tag), authority, dialTarget)
+		s.Mu.Lock()
+		if s.TCPHTTP == tr {
+			s.tcpHTTPWarm = tr
+		}
+		s.Mu.Unlock()
+		return nil, nil
+	})
+	return err
+}
+
+// EnsureTCPHTTPQuicConnLockedAssumeMu is a legacy alias; prefer EnsureTCPHTTPQuicConn.
+func EnsureTCPHTTPQuicConnLockedAssumeMu(ctx context.Context, s *CoreSession) error {
+	_ = ctx
+	return EnsureTCPHTTPQuicConn(s)
+}
+
+// WarmTCPConnectStreamHTTP3Transport completes the QUIC handshake on a CONNECT-stream transport (P6 warm dial).
 func WarmTCPConnectStreamHTTP3Transport(ctx context.Context, s *CoreSession, tr *http3.Transport) error {
 	if tr == nil {
 		return errors.New("nil CONNECT-stream HTTP/3 transport")
 	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return context.Cause(ctx)
+	warmCtx, cancel := context.WithTimeout(context.Background(), connectStreamQUICWarmTimeout)
+	defer cancel()
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		default:
+		}
 	}
-	port := int(s.Options.ServerPort)
-	if port <= 0 {
-		port = 443
+	if err := tr.EnsureClientConn(warmCtx, TCPConnectStreamHTTP3Authority(s.Options)); err != nil {
+		return err
 	}
-	target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
-	tlsConf := ClientTLSConfig(s.Options)
-	quicCfg := ApplyQUICExperimentalOptions(TCPConnectStreamQUICConfig(s.Options), s.Options.QUICExperimental)
-	h3t.FinalizeConnectStreamQUICConfig(quicCfg)
-	_, err := tr.Dial(ctx, target, tlsConf, quicCfg)
-	return err
+	if s.TCPHTTP == tr {
+		s.Mu.Lock()
+		s.tcpHTTPWarm = tr
+		s.Mu.Unlock()
+	}
+	return nil
+}
+
+func warmFlightKey(tr *http3.Transport) string {
+	return fmt.Sprintf("%p", tr)
 }
 
 // NewTCPConnectStreamHTTP3Transport builds the CONNECT-stream HTTP/3 overlay transport.
@@ -132,5 +222,6 @@ func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 		}
 		s.TCPHTTP.Close()
 	}
+	s.tcpHTTPWarm = nil
 	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
 }

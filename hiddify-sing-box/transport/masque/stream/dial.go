@@ -49,7 +49,7 @@ func DialWithHopChain(ctx context.Context, host DialHopChainHost, destination M.
 
 		authFail := host.IsAuthFailure(lastErr)
 		churnEligible := host.HTTPLayerAutoEnabled() && !authFail && ctx.Err() == nil &&
-			!errors.Is(lastErr, context.Canceled) && !errors.Is(lastErr, context.DeadlineExceeded)
+			IsRetryableTCPStreamError(lastErr)
 		if churnEligible {
 			host.RebuildOverlayTransport()
 			conn3, err3 := host.DialAttempt(ctx, destination)

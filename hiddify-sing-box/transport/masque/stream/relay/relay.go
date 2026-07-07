@@ -14,10 +14,16 @@ type RelayCONNECTH3Leg interface {
 
 // RelayTCPTunnel relays CONNECT tunneled TCP like h2o proxy.tunnel (plain io.CopyBuffer, full duplex).
 func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, responseWriter http.ResponseWriter, legRole string) error {
-	_ = legRole
 	if leg := h3StreamFromCONNECTRelay(reqBody, responseWriter); leg != nil {
 		releaseConnectRelayRequestBody(reqBody)
-		return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg)
+		switch RelayH3ConnectModeFromLegRole(legRole) {
+		case RelayH3ConnectModeDownloadLeg:
+			return relayTCPTunnelH3DownloadLeg(ctx, targetConn, reqBody, leg)
+		case RelayH3ConnectModeUploadLeg:
+			return relayTCPTunnelH3UploadLeg(ctx, targetConn, reqBody, leg)
+		default:
+			return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, leg)
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

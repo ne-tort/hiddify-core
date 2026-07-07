@@ -7,39 +7,15 @@ import (
 // H3UploadFlushChunkBytes splits bulk CONNECT-stream upload before hitting the wire (64 KiB).
 const H3UploadFlushChunkBytes = 64 * 1024
 
-// H3UploadChunkBytes returns CONNECT upload chunk size.
-// Saturated duplex (WriteTo + concurrent upload) must flush at H3UploadFlushChunkBytes so
-// response-side tunnel framing does not mis-parse coalesced 256 KiB request DATA as frame types.
+// H3UploadChunkBytes returns CONNECT upload chunk size (delegates to prod sched policy).
 func H3UploadChunkBytes(downloadActive bool, downloadDelivered bool, duplexUploadStarted bool) int {
 	_ = downloadDelivered
 	_ = duplexUploadStarted
-	if downloadActive {
-		return H3UploadFlushChunkBytes
-	}
-	return TunnelWriteToBufLen
+	return ProdConnectStreamSchedPolicy().UploadChunkBytes(downloadActive)
 }
 
 func writeChunked(w io.Writer, p []byte, chunk int) (int, error) {
 	return writeChunkedWake(w, p, chunk, nil)
-}
-
-// writeBatchedWake writes p in one syscall and invokes wake only after batchBytes accumulate.
-func writeBatchedWake(w io.Writer, p []byte, batchBytes int, pending *int, wake func()) (int, error) {
-	if w == nil {
-		return 0, io.ErrClosedPipe
-	}
-	if batchBytes <= 0 {
-		batchBytes = TunnelWriteToBufLen
-	}
-	n, err := w.Write(p)
-	if n > 0 && wake != nil && pending != nil {
-		*pending += n
-		if *pending >= batchBytes {
-			*pending = 0
-			wake()
-		}
-	}
-	return n, err
 }
 
 func writeChunkedWake(w io.Writer, p []byte, chunk int, afterChunk func(wrote int)) (int, error) {

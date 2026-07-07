@@ -107,3 +107,29 @@ func TestDispatchExitPathsClearHTTPFallbackLatch(t *testing.T) {
 		}
 	})
 }
+
+type dispatchStreamCanceledParentHost struct {
+	dispatchFallbackFakeHost
+	streamDialCalled bool
+}
+
+func (h *dispatchStreamCanceledParentHost) DialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
+	h.streamDialCalled = true
+	return nil, errors.New("stream dial stub")
+}
+
+func TestGATEDispatchDialContextConnectStreamIgnoresCanceledParent(t *testing.T) {
+	t.Parallel()
+	dest := M.ParseSocksaddrHostPort("8.8.8.8", 53)
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	host := &dispatchStreamCanceledParentHost{}
+	s := &session.CoreSession{Options: session.ClientOptions{}}
+	_, err := session.DispatchDialContext(s, host, parent, "tcp", dest)
+	if !host.streamDialCalled {
+		t.Fatal("connect-stream dispatch must call DialTCPStream even when parent ctx is already canceled")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("dispatch must not short-circuit with parent cancel, got %v", err)
+	}
+}

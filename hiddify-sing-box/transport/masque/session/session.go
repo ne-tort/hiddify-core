@@ -12,6 +12,7 @@ import (
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
+	"golang.org/x/sync/singleflight"
 )
 
 // CoreSession owns QUIC/H2/H3 overlay state for one MASQUE client.
@@ -33,6 +34,9 @@ type CoreSession struct {
 	IPHTTPH2Upload           io.Writer
 	IPHTTP                   *http3.Transport
 	TCPHTTP                  *http3.Transport
+	// tcpHTTPWarm marks the TCPHTTP instance with a completed QUIC handshake (CONNECT-stream warm).
+	tcpHTTPWarm              *http3.Transport
+	tcpHTTPWarmFlight        singleflight.Group
 	p6UploadWarm             p6UploadWarmPool
 	TemplateUDP              *uritemplate.Template
 	TemplateIP               *uritemplate.Template
@@ -47,6 +51,7 @@ type CoreSession struct {
 	ConnectIPPMTUState         *mcip.UDPPMTUState
 	TCPRoundTripper            http.RoundTripper
 	TCPNetstack                mcip.TCPNetstack
+	ConnectStreamInFlight      *ConnectStreamInFlight
 	ConnectIPIngressOnce       sync.Once
 	ConnectIPIngress           *mcip.Ingress
 	ConnectIPIngressAckWake    mcip.IngressAckWake
