@@ -64,6 +64,7 @@ func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templa
 		ConnectIPPMTUState:         NewConnectIPPMTUState(initialPayload, 512, initialPayload),
 		HTTPLayerAuto:              options.HTTPLayerAuto,
 		ConnectStreamInFlight:      NewConnectStreamInFlight(connectStreamMaxInFlight),
+		ConnectStreamBudget:        NewConnectStreamBudget(connectStreamPeerBidiBudget),
 	}
 	return cs, udpLayer
 }

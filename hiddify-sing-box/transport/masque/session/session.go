@@ -52,6 +52,7 @@ type CoreSession struct {
 	TCPRoundTripper            http.RoundTripper
 	TCPNetstack                mcip.TCPNetstack
 	ConnectStreamInFlight      *ConnectStreamInFlight
+	ConnectStreamBudget        *ConnectStreamBudget
 	ConnectIPIngressOnce       sync.Once
 	ConnectIPIngress           *mcip.Ingress
 	ConnectIPIngressAckWake    mcip.IngressAckWake

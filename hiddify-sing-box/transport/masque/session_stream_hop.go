@@ -45,12 +45,13 @@ func (s *coreSession) streamAdvanceHopLocked() (bool, error) {
 }
 
 func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
-	if s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
+	h3 := s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2
+	if h3 {
 		if err := session.EnsureTCPHTTPQuicConn(&s.CoreSession); err != nil {
 			return nil, strm.JoinConnectStreamPhase("quic warm", err)
 		}
 	}
-	queueCtx, queueCancel := strm.ConnectStreamHandshakeContext(ctx)
+	queueCtx, queueCancel := strm.ConnectStreamQueueContext(ctx)
 	defer queueCancel()
 	if err := s.ConnectStreamInFlight.Acquire(queueCtx); err != nil {
 		return nil, strm.JoinConnectStreamPhase("in-flight queue", err)
@@ -58,5 +59,25 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 	defer s.ConnectStreamInFlight.Release()
 	handshakeCtx, handshakeCancel := strm.ConnectStreamHandshakeContext(ctx)
 	defer handshakeCancel()
-	return strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(handshakeCtx, destination)
+	budgetHeld := false
+	if h3 {
+		if err := s.ConnectStreamBudget.Acquire(handshakeCtx); err != nil {
+			return nil, strm.JoinConnectStreamPhase("stream budget", err)
+		}
+		budgetHeld = true
+	}
+	defer func() {
+		if budgetHeld {
+			s.ConnectStreamBudget.Release()
+		}
+	}()
+	conn, err := strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(handshakeCtx, destination)
+	if err != nil {
+		return nil, err
+	}
+	if h3 {
+		budgetHeld = false
+		conn = session.AttachConnectStreamBudgetRelease(conn, s.ConnectStreamBudget)
+	}
+	return conn, nil
 }

@@ -37,6 +37,19 @@ func TestConnectStreamHandshakeUsesLongParentDeadline(t *testing.T) {
 	}
 }
 
+func TestGATEConnectStreamQueueIgnoresParentCancel(t *testing.T) {
+	t.Parallel()
+	parent, parentCancel := context.WithCancel(context.Background())
+	ctx, cancel := ConnectStreamQueueContext(parent)
+	defer cancel()
+	parentCancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("queue ctx must not follow parent cancel (WithoutCancel boundary)")
+	default:
+	}
+}
+
 func TestGATEConnectStreamHandshakeIgnoresParentCancel(t *testing.T) {
 	t.Parallel()
 	parent, parentCancel := context.WithCancel(context.Background())

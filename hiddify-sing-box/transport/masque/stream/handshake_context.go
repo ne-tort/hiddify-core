@@ -9,6 +9,17 @@ import (
 // no dial deadline (or a shorter one). One constant, one boundary — see dialTCPStream.
 const ConnectStreamHandshakeTimeout = 30 * time.Second
 
+// ConnectStreamQueueContext scopes semaphore waits (in-flight / stream budget) before RoundTrip.
+//
+// Queue wait must not share the RoundTrip timeout: a dial can spend most of the parent
+// budget waiting for a slot and still needs a full handshake window once acquired.
+func ConnectStreamQueueContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithCancel(context.WithoutCancel(parent))
+}
+
 // ConnectStreamHandshakeContext scopes one CONNECT-stream dial (single RoundTrip chain).
 //
 // Sing-box dial ctx may cancel early (DNS cascade, parallel dial). Handshake uses
