@@ -11,7 +11,7 @@ import (
 // quic-go http3 RoundTrip blocks in OpenStreamSync when peer MAX_STREAMS is exhausted; excess
 // dials then fail after the handshake ctx (~30s) as "connect roundtrip: context canceled".
 // This semaphore queues new dials before RoundTrip so slots recycle on tunnel Close.
-const connectStreamPeerBidiBudget = 80
+const connectStreamPeerBidiBudget = 48
 
 // ConnectStreamBudget bounds total CONNECT-stream QUIC bidi slots (opening + active tunnels).
 type ConnectStreamBudget struct {

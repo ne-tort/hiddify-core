@@ -69,7 +69,7 @@ func TestGATEH3ConnectStreamBudgetSaturatedQueuesNotRoundTrip(t *testing.T) {
 	t.Parallel()
 	_, targetPort, session, baseCtx := setupSynthChurnHarness(t)
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", targetPort)
-	const hold = 80
+	const hold = 48
 	held := make([]net.Conn, 0, hold)
 	defer func() {
 		for _, c := range held {
@@ -89,7 +89,7 @@ func TestGATEH3ConnectStreamBudgetSaturatedQueuesNotRoundTrip(t *testing.T) {
 	_, err := session.DialContext(shortCtx, "tcp", dest)
 	shortCancel()
 	if err == nil {
-		t.Fatal("81st dial must fail when stream budget saturated")
+		t.Fatal("49th dial must fail when stream budget saturated")
 	}
 	if !strings.Contains(err.Error(), "stream budget") {
 		t.Fatalf("want stream budget phase, got: %v", err)

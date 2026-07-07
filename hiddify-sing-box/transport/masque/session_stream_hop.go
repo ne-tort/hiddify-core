@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"

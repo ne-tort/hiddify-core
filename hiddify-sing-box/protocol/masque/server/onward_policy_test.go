@@ -19,8 +19,8 @@ func TestOrderResolvedTCPAddrsPrefersIPv4(t *testing.T) {
 	if len(ordered) != 4 {
 		t.Fatalf("len=%d", len(ordered))
 	}
-	if !ordered[0].Is4() || !ordered[1].Is4() || ordered[0].String() != "203.0.113.10" || ordered[1].String() != "203.0.113.20" {
-		t.Fatalf("v4 first: %v", ordered)
+	if !ordered[0].Is4() || !ordered[1].Is4() || ordered[0].String() != "203.0.113.20" || ordered[1].String() != "203.0.113.10" {
+		t.Fatalf("v4 first (stable partition): %v", ordered)
 	}
 	if !ordered[2].Is6() || !ordered[3].Is6() {
 		t.Fatalf("v6 after v4: %v", ordered)

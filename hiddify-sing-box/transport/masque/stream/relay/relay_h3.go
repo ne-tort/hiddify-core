@@ -86,15 +86,13 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		}
 		w.enableDownloadSend()
 	}
-	defer func() {
-		if cw, ok := targetConn.(closeWriter); ok {
-			_ = cw.CloseWrite()
-		}
-	}()
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	go func() {
 		_, err := relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)
+		if cw, ok := targetConn.(closeWriter); ok {
+			_ = cw.CloseWrite()
+		}
 		uploadErrCh <- err
 	}()
 	go func() {

@@ -86,6 +86,46 @@ func TestGATEH3DialConnectStreamParentCancelDuringHandshakeSucceeds(t *testing.T
 	}
 }
 
+func TestGATEH3DialConnectStreamCanceledRequestCtxSkipsRoundTrip(t *testing.T) {
+	u, err := url.Parse("https://example.com/masque/tcp/h/p")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var roundTrips atomic.Int32
+	hooks := DialH3Hooks{
+		NewRequestContext: func(parent context.Context) (context.Context, func(bool)) {
+			reqCtx, reqCancel := context.WithCancel(parent)
+			reqCancel()
+			return reqCtx, func(bool) {}
+		},
+		BuildRequest: func(ctx context.Context, rawURL, serverHost string) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodConnect, rawURL, nil)
+		},
+		TunnelFromResponse: func(context.Context, *http.Response, string, uint16) (net.Conn, error) {
+			return nil, context.Canceled
+		},
+		RequestURL:    func(u *url.URL) string { return u.String() },
+		ClassifyError: func(err error) string { return err.Error() },
+	}
+	host := &dialH3HandshakeGateHost{
+		rt: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			roundTrips.Add(1)
+			return nil, context.Canceled
+		}),
+	}
+	_, dialErr := DialHTTP3ConnectStream(ctx, hooks, host, u, DialH3LogInput{
+		Tag: "t", Server: "127.0.0.1", ServerPort: 443,
+	}, "127.0.0.1", 443, nil)
+	if dialErr == nil {
+		t.Fatal("expected canceled request context error")
+	}
+	if roundTrips.Load() != 0 {
+		t.Fatalf("RoundTrip should be skipped for canceled request ctx, got %d call(s)", roundTrips.Load())
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

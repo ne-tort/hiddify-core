@@ -58,6 +58,8 @@ type TunnelConn struct {
 	uploadTrafficStarted  int32 // client upload bytes hit the wire before WriteTo bootstrap (real iperf3 cookie)
 
 	requestCancelOnce sync.Once
+	closeDoneOnce     sync.Once
+	closeDone         chan struct{}
 
 	bidiWakeSink BidiWakeSink
 
@@ -99,9 +101,31 @@ func NewTunnelConn(p TunnelConnParams) *TunnelConn {
 		bidiWakeSink:      p.BidiWakeSink,
 		routeBidiDuplex:   p.RouteBidiDuplex,
 		connectStreamRole: normalizeConnectStreamRole(p.ConnectStreamLeg),
+		closeDone:         make(chan struct{}),
 	}
 	conn.scheduler = newBidiScheduler(conn, ProdConnectStreamSchedPolicy())
 	return conn
+}
+
+// ConnectStreamCloseDone reports when CONNECT stream close lifecycle is finished.
+func (c *TunnelConn) ConnectStreamCloseDone() <-chan struct{} {
+	if c == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return c.closeDone
+}
+
+func (c *TunnelConn) markCloseDone() {
+	if c == nil {
+		return
+	}
+	c.closeDoneOnce.Do(func() {
+		if c.closeDone != nil {
+			close(c.closeDone)
+		}
+	})
 }
 
 // UsesH3Stream reports whether upload/download share one *http3.Stream (always true for TunnelConn).
@@ -455,11 +479,6 @@ func (c *TunnelConn) Close() error {
 		return nil
 	}
 	c.stopDownloadDrain()
-	c.requestCancelOnce.Do(func() {
-		if c.requestCancel != nil {
-			c.requestCancel(context.Canceled)
-		}
-	})
 	c.cancel()
 	var err error
 	if c.h3 != nil {
@@ -470,13 +489,16 @@ func (c *TunnelConn) Close() error {
 		h3 := c.h3
 		cancelCode := quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
 		if atomic.LoadInt32(&c.uploadTrafficStarted) == 0 {
-			// Idle CONNECT (dial+immediate close): Invisv CreateTCPStream / DatagramStream
-			// use stream.Close() only (no CancelWrite before Close). Graceful FIN on the
-			// send half lets the peer complete relay and raise MAX_STREAMS.
+			// Idle CONNECT (dial+immediate close): graceful FIN on send half lets peer
+			// complete relay and raise MAX_STREAMS (Invisv / quic-go parity).
 			err = h3.Close()
+			c.markCloseDone()
 		} else {
 			closeDone := make(chan error, 1)
-			go func() { closeDone <- h3.Close() }()
+			go func() {
+				closeDone <- h3.Close()
+				c.markCloseDone()
+			}()
 			select {
 			case closeErr := <-closeDone:
 				if closeErr != nil {
@@ -485,9 +507,18 @@ func (c *TunnelConn) Close() error {
 			case <-time.After(connectStreamDownloadCloseTimeout):
 				c.stopDownloadDrain()
 				h3.CancelRead(cancelCode)
+				c.markCloseDone()
 			}
 		}
+	} else {
+		c.markCloseDone()
 	}
+	// Request-context cancel must follow QUIC stream teardown so peer can raise MAX_STREAMS.
+	c.requestCancelOnce.Do(func() {
+		if c.requestCancel != nil {
+			c.requestCancel(context.Canceled)
+		}
+	})
 	return err
 }
 

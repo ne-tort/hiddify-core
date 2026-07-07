@@ -43,6 +43,21 @@ func (c *TunnelConn) Write(p []byte) (int, error) {
 
 func (c *TunnelConn) Close() error { return c.Inner.Close() }
 
+// ConnectStreamCloseDone forwards H3 stream close lifecycle to budget release.
+func (c *TunnelConn) ConnectStreamCloseDone() <-chan struct{} {
+	if c == nil || c.Inner == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	if lifecycle, ok := c.Inner.(interface{ ConnectStreamCloseDone() <-chan struct{} }); ok {
+		return lifecycle.ConnectStreamCloseDone()
+	}
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
 // TunnelInner exposes the wrapped tunnel for conn/ wire-barrier unwrap (stream/conn).
 func (c *TunnelConn) TunnelInner() net.Conn { return c.Inner }
 

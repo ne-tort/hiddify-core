@@ -103,6 +103,12 @@ func DialHTTP3ConnectStreamLeg(
 			stopReqCtxRelay(false)
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, reqErr)
 		}
+		// Request context can be canceled by detach/cascade boundary before RoundTrip starts.
+		// Entering RoundTrip on an already-canceled request may still hit OpenStreamSync path.
+		if reqCtxErr := context.Cause(req.Context()); reqCtxErr != nil {
+			stopReqCtxRelay(false)
+			return nil, JoinConnectStreamPhase("connect handshake", reqCtxErr)
+		}
 		roundTripper := host.RoundTripper(tcpHTTP)
 		resp, roundTripErr := roundTripper.RoundTrip(req)
 		if roundTripErr != nil {
@@ -115,9 +121,6 @@ func DialHTTP3ConnectStreamLeg(
 				}
 				continue
 			}
-			if errors.Is(roundTripErr, context.DeadlineExceeded) {
-				host.ResetHTTP3Transport()
-			}
 			return nil, JoinConnectStreamPhase("connect roundtrip", roundTripErr)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -128,15 +131,19 @@ func DialHTTP3ConnectStreamLeg(
 			}
 			return nil, fmt.Errorf("%w: status=%d url=%s", Errs.TCPConnectStreamFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 		}
-		// Handshake succeeded: detach request ctx before tunnel build. Parent dial cancel
-		// (DNS/CM cascade) must not discard a live CONNECT stream or leak QUIC slots.
-		stopReqCtxRelay(true)
+		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			stopReqCtxRelay(false)
+			_ = resp.Body.Close()
+			return nil, JoinConnectStreamPhase("connect handshake", ctxErr)
+		}
 		conn, err := hooks.TunnelFromResponse(legCtx, resp, targetHost, targetPort)
 		if err != nil {
 			stopReqCtxRelay(false)
 			_ = resp.Body.Close()
 			return nil, err
 		}
+		// Detach after tunnel is wired; early detach can tear down the live H3 stream during bootstrap.
+		stopReqCtxRelay(true)
 		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil
 	}

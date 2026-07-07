@@ -50,6 +50,8 @@ func gateH3TrackDownloadBody(uploadR io.Reader, wantDownload int) (*gateH3CloseT
 
 // TestGATERelayH3BidiUploadEOFBeforeDownloadDoneNoEarlyBodyClose (P0 RELAY-H3-TEARDOWN):
 // upload leg EOF (iperf -R cookie shape) must not Close reqBody while download relay runs.
+// CloseWrite on onward TCP after upload EOF is required (iperf control half-close) and may
+// precede download completion.
 func TestGATERelayH3BidiUploadEOFBeforeDownloadDoneNoEarlyBodyClose(t *testing.T) {
 	t.Parallel()
 	const payloadLen = 256 * 1024
@@ -61,9 +63,6 @@ func TestGATERelayH3BidiUploadEOFBeforeDownloadDoneNoEarlyBodyClose(t *testing.T
 	tcp.relayDone.Store(true)
 	if err != nil {
 		t.Fatalf("RelayTCPTunnel: %v", err)
-	}
-	if tcp.closeWriteEarly.Load() {
-		t.Fatalf("targetConn.CloseWrite before download complete (%d/%d bytes read)", tcp.readOff, payloadLen)
 	}
 	if body.closedEarly.Load() {
 		t.Fatalf("reqBody.Close before download complete (%d/%d bytes)", body.downloadBytes.Load(), payloadLen)
@@ -123,9 +122,6 @@ func TestGATERelayH3BidiSlowDownloadSurvivesUploadEOF(t *testing.T) {
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("RelayTCPTunnel: %v", err)
-	}
-	if tcp.closeWriteEarly.Load() {
-		t.Fatalf("targetConn.CloseWrite before slow download complete (%d/%d)", tcp.off, payloadLen)
 	}
 	if body.closedEarly.Load() {
 		t.Fatalf("reqBody.Close before slow download complete (%d/%d bytes)", body.downloadBytes.Load(), payloadLen)
