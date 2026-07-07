@@ -11,13 +11,12 @@ const ConnectStreamHandshakeTimeout = 30 * time.Second
 
 // ConnectStreamQueueContext scopes semaphore waits (in-flight / stream budget) before RoundTrip.
 //
-// Queue wait must not share the RoundTrip timeout: a dial can spend most of the parent
-// budget waiting for a slot and still needs a full handshake window once acquired.
+// Queue wait must not share the sing-box dial deadline (often 30s on :443) or RoundTrip
+// timeout. context.WithoutCancel(parent) still inherits Deadline(), which caused field
+// browser bursts to fail as "connect roundtrip: context canceled" after queue pile-up.
 func ConnectStreamQueueContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		return context.WithCancel(context.Background())
-	}
-	return context.WithCancel(context.WithoutCancel(parent))
+	_ = parent
+	return context.WithCancel(context.Background())
 }
 
 // ConnectStreamHandshakeContext scopes one CONNECT-stream dial (single RoundTrip chain).

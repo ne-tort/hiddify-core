@@ -45,7 +45,21 @@ func TestGATEConnectStreamQueueIgnoresParentCancel(t *testing.T) {
 	parentCancel()
 	select {
 	case <-ctx.Done():
-		t.Fatal("queue ctx must not follow parent cancel (WithoutCancel boundary)")
+		t.Fatal("queue ctx must not follow parent cancel")
+	default:
+	}
+}
+
+func TestGATEConnectStreamQueueIgnoresParentDeadline(t *testing.T) {
+	t.Parallel()
+	parent, parentCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer parentCancel()
+	ctx, cancel := ConnectStreamQueueContext(parent)
+	defer cancel()
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		t.Fatal("queue ctx must not inherit parent deadline (browser @30s pile-up)")
 	default:
 	}
 }
