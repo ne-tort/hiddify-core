@@ -58,7 +58,6 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		return nil, strm.JoinConnectStreamPhase("in-flight queue", err)
 	}
 	defer s.ConnectStreamInFlight.Release()
-	defer s.ConnectStreamInFlight.Release()
 	budgetHeld := false
 	if h3 {
 		budgetWaitCtx, budgetWaitCancel := context.WithTimeout(context.Background(), strm.ConnectStreamHandshakeTimeout)

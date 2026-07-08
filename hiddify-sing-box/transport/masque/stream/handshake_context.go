@@ -6,8 +6,9 @@ import (
 )
 
 // ConnectStreamHandshakeTimeout is the CONNECT RoundTrip budget when sing-box passes
-// no dial deadline (or a shorter one). One constant, one boundary — see dialTCPStream.
-const ConnectStreamHandshakeTimeout = 30 * time.Second
+// no dial deadline (or a shorter one). Align with route CM absoluteDeadline (60s): field
+// WAN OpenStreamSync often exceeds 30s under parallel TUN burst.
+const ConnectStreamHandshakeTimeout = 60 * time.Second
 
 // ConnectStreamQueueContext scopes semaphore waits (in-flight / stream budget) before RoundTrip.
 //
