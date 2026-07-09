@@ -2,8 +2,11 @@ package session
 
 import (
 	"context"
+	"io"
 	"net"
 	"sync"
+
+	C "github.com/sagernet/sing-box/constant"
 )
 
 // connectStreamPeerBidiBudget caps live + opening CONNECT-stream bidi streams per QUIC session.
@@ -73,3 +76,44 @@ func (c *connectStreamBudgetConn) Close() error {
 	})
 	return err
 }
+
+func (c *connectStreamBudgetConn) ReadFrom(r io.Reader) (int64, error) {
+	if rf, ok := c.Conn.(io.ReaderFrom); ok {
+		return rf.ReadFrom(r)
+	}
+	return io.Copy(c.Conn, r)
+}
+
+func (c *connectStreamBudgetConn) WriteTo(w io.Writer) (int64, error) {
+	if wt, ok := c.Conn.(io.WriterTo); ok {
+		return wt.WriteTo(w)
+	}
+	return io.Copy(w, c.Conn)
+}
+
+func (c *connectStreamBudgetConn) RouteConnectionCopyWriterTo() {}
+
+func (c *connectStreamBudgetConn) RouteConnectionCopyReaderFrom() {}
+
+func (c *connectStreamBudgetConn) MarkConnectionCopyDuplex() {
+	if d, ok := c.Conn.(C.RouteConnectionCopyDuplex); ok {
+		d.MarkConnectionCopyDuplex()
+	}
+}
+
+func (c *connectStreamBudgetConn) ConnectStreamCloseDone() <-chan struct{} {
+	if d, ok := c.Conn.(interface{ ConnectStreamCloseDone() <-chan struct{} }); ok {
+		return d.ConnectStreamCloseDone()
+	}
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+var (
+	_ io.WriterTo                   = (*connectStreamBudgetConn)(nil)
+	_ io.ReaderFrom                 = (*connectStreamBudgetConn)(nil)
+	_ C.RouteConnectionCopyWriterTo = (*connectStreamBudgetConn)(nil)
+	_ C.RouteConnectionCopyReaderFrom = (*connectStreamBudgetConn)(nil)
+	_ C.RouteConnectionCopyDuplex   = (*connectStreamBudgetConn)(nil)
+)

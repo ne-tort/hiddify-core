@@ -63,23 +63,7 @@ func IsMasqueBidiDuplexUploadStarted(s *Stream) bool {
 
 // WakeMasqueRelayAfterDownloadWrite nudges QUIC after server relay sends download (S2C).
 func WakeMasqueRelayAfterDownloadWrite(s *Stream) {
-	if s == nil || s.datagramStream == nil {
-		return
-	}
-	qs := s.datagramStream.QUICStream()
-	if qs == nil {
-		return
-	}
-	if quic.MasqueIsBidiDuplexUploadStarted(qs) {
-		if quic.MasquePeerUploadCreditDue(qs) {
-			quic.MasqueRepromoteDuplexUploadSend(qs)
-		}
-		quic.MasqueWakeStreamSend(qs)
-		return
-	}
-	if quic.MasqueIsBidiDownloadActive(qs) || quic.MasqueIsBidiDownloadReceiveOnly(qs) {
-		quic.MasqueWakeStreamSend(qs)
-	}
+	masqueWakeSendAfterBidiProgress(s, 1)
 }
 
 // WakeMasqueRelayAfterUploadRead nudges QUIC after server relay consumes client upload (grant C2S credit).
@@ -183,9 +167,8 @@ func EnableMasqueRelayDownloadSend(s *Stream) {
 	}
 }
 
-// EnableMasqueConnectStream is the single prod CONNECT-stream profile: tunnel DATA parse + lazy receive FC.
-// Does not mark download-active until WriteTo/relay drain starts (avoids upload mis-routing in quic wake).
-// Initial MAX_STREAM_DATA is deferred: server relay arms via ArmMasqueBidiDuplexFair; client via dial prime.
+// EnableMasqueConnectStream is the single prod CONNECT-stream profile: tunnel DATA + eager receive FC.
+// Lazy FC (0.5% threshold) caps WAN download at ~1 window/RTT — disabled on all CONNECT streams (h2o parity).
 func EnableMasqueConnectStream(s *Stream) {
 	if s == nil {
 		return
@@ -193,7 +176,7 @@ func EnableMasqueConnectStream(s *Stream) {
 	EnableMasqueTunnelData(s)
 	if s.datagramStream != nil {
 		if qs := s.datagramStream.QUICStream(); qs != nil {
-			quic.MasqueSetPeerDuplexLazyFC(qs, true)
+			quic.MasqueSetPeerDuplexLazyFC(qs, false)
 		}
 	}
 }

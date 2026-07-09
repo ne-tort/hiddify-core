@@ -58,11 +58,11 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 		return nil, strm.JoinConnectStreamPhase("in-flight queue", err)
 	}
 	defer s.ConnectStreamInFlight.Release()
+	handshakeCtx, handshakeCancel := strm.ConnectStreamHandshakeContext(ctx)
+	defer handshakeCancel()
 	budgetHeld := false
 	if h3 {
-		budgetWaitCtx, budgetWaitCancel := context.WithTimeout(context.Background(), strm.ConnectStreamHandshakeTimeout)
-		err := s.ConnectStreamBudget.Acquire(budgetWaitCtx)
-		budgetWaitCancel()
+		err := s.ConnectStreamBudget.Acquire(strm.ConnectStreamBudgetWaitContext(ctx))
 		if err != nil {
 			return nil, strm.JoinConnectStreamPhase("stream budget", err)
 		}
@@ -73,8 +73,6 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 			s.ConnectStreamBudget.Release()
 		}
 	}()
-	handshakeCtx, handshakeCancel := strm.ConnectStreamHandshakeContext(ctx)
-	defer handshakeCancel()
 	conn, err := strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(handshakeCtx, destination)
 	if err != nil {
 		return nil, err

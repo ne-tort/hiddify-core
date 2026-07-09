@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -75,4 +76,51 @@ func TestConnectStreamBudgetQueuesExcess(t *testing.T) {
 		t.Fatalf("released slot must be reusable: %v", err)
 	}
 	b.Release()
+}
+
+type budgetWriterToInner struct {
+	closed chan struct{}
+}
+
+func (c *budgetWriterToInner) Read([]byte) (int, error)  { return 0, nil }
+func (c *budgetWriterToInner) Write([]byte) (int, error) { return 0, nil }
+func (c *budgetWriterToInner) Close() error {
+	close(c.closed)
+	return nil
+}
+func (c *budgetWriterToInner) LocalAddr() net.Addr                { return nil }
+func (c *budgetWriterToInner) RemoteAddr() net.Addr               { return nil }
+func (c *budgetWriterToInner) SetDeadline(time.Time) error        { return nil }
+func (c *budgetWriterToInner) SetReadDeadline(time.Time) error    { return nil }
+func (c *budgetWriterToInner) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *budgetWriterToInner) WriteTo(w io.Writer) (int64, error) {
+	return io.Copy(w, io.LimitReader(zeroBudgetReader{}, 64))
+}
+
+type zeroBudgetReader struct{}
+
+func (zeroBudgetReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
+func TestConnectStreamBudgetConnForwardsWriterTo(t *testing.T) {
+	t.Parallel()
+	b := NewConnectStreamBudget(1)
+	ctx := context.Background()
+	if err := b.Acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wrapped := AttachConnectStreamBudgetRelease(&budgetWriterToInner{closed: make(chan struct{})}, b)
+	if _, ok := wrapped.(io.WriterTo); !ok {
+		t.Fatal("budget wrapper must expose io.WriterTo for prod route writer_to path")
+	}
+	n, err := wrapped.(io.WriterTo).WriteTo(io.Discard)
+	if err != nil || n == 0 {
+		t.Fatalf("WriteTo: n=%d err=%v", n, err)
+	}
+	_ = wrapped.Close()
 }

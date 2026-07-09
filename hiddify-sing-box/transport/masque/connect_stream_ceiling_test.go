@@ -1,3 +1,5 @@
+//go:build synth_connect_stream_harness
+
 package masque
 
 import (

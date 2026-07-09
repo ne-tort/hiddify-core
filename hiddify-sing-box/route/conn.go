@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -207,16 +208,9 @@ func (m *ConnectionManager) connectionCopyRelayStallWatchdog(gate *connectionCop
 	var lastBytes int64
 	stallDeadline := time.Now().Add(connectionCopyRelayStallTimeout)
 	zeroByteDeadline := time.Now().Add(connectionCopyRelayZeroByteTimeout)
-	absoluteDeadline := time.Now().Add(60 * time.Second)
 	var sawRelay bool
 	for range ticker.C {
 		if gate.closed.Load() || gate.remaining.Load() == 0 {
-			return
-		}
-		if time.Now().After(absoluteDeadline) {
-			gate.abort(onClose, context.DeadlineExceeded)
-			pokeRelayDeadlines(a, b)
-			common.Close(a, b)
 			return
 		}
 		cur := gate.relayBytes.Load()
@@ -225,9 +219,7 @@ func (m *ConnectionManager) connectionCopyRelayStallWatchdog(gate *connectionCop
 		}
 		if !sawRelay {
 			if time.Now().After(zeroByteDeadline) {
-				gate.abort(onClose, context.DeadlineExceeded)
-				pokeRelayDeadlines(a, b)
-				common.Close(a, b)
+				m.abortRelayWatchdog(gate, onClose, a, b, "route relay watchdog zero-byte", cur)
 				return
 			}
 			continue
@@ -238,12 +230,18 @@ func (m *ConnectionManager) connectionCopyRelayStallWatchdog(gate *connectionCop
 			continue
 		}
 		if time.Now().After(stallDeadline) {
-			gate.abort(onClose, context.DeadlineExceeded)
-			pokeRelayDeadlines(a, b)
-			common.Close(a, b)
+			m.abortRelayWatchdog(gate, onClose, a, b, "route relay watchdog stall", cur)
 			return
 		}
 	}
+}
+
+func (m *ConnectionManager) abortRelayWatchdog(gate *connectionCopyGate, onClose N.CloseHandlerFunc, a, b net.Conn, phase string, relayBytes int64) {
+	log.Printf("masque_route_relay_watchdog phase=%s relay_bytes=%d upload_bytes=%d",
+		phase, relayBytes, gate.uploadBytes.Load())
+	gate.abort(onClose, fmt.Errorf("%s: %w", phase, context.DeadlineExceeded))
+	pokeRelayDeadlines(a, b)
+	common.Close(a, b)
 }
 
 func pokeRelayDeadlines(conns ...net.Conn) {

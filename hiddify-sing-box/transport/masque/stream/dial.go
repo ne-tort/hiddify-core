@@ -74,7 +74,7 @@ func DialWithHopChain(ctx context.Context, host DialHopChainHost, destination M.
 			}
 		}
 
-		if host.IsAuthFailure(lastErr) {
+		if authFail {
 			host.ClearHTTPFallbackAfterGiveUp()
 			return nil, lastErr
 		}

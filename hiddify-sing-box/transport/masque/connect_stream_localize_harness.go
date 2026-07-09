@@ -15,6 +15,13 @@ const (
 	connectStreamLocalizeCeilingMax           = connectStreamLocalizeUploadWindowedMax
 )
 
+func connectStreamCeilingBand() (min, max float64) {
+	const tolerance = 0.35
+	min = connectStreamVPSKPITargetDownMbps * (1 - tolerance)
+	max = connectStreamVPSKPITargetDownMbps * (1 + tolerance)
+	return min, max
+}
+
 type connectStreamBenchResult struct {
 	layer string
 	mbps  float64

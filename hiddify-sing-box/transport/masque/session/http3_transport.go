@@ -207,14 +207,14 @@ func EnsureTCPHTTPTransportLockedAssumeMu(s *CoreSession) {
 	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
 }
 
-// ResetTCPHTTPTransport rebuilds the CONNECT-stream HTTP overlay transport (H3 or H2 pool).
+// ResetTCPHTTPTransport rebuilds the CONNECT-stream HTTP overlay transport (H3 or H2 pool)
+// and completes one QUIC warm on the new transport. Session-level only — never from per-dial retry.
 func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 	if CurrentUDPHTTPLayer(s) == option.MasqueHTTPLayerH2 {
 		host.ResetH2ConnectStreamTransportLockedAssumeMu()
 		return
 	}
 	s.Mu.Lock()
-	defer s.Mu.Unlock()
 	if s.TCPHTTP != nil {
 		if s.TCPHTTP == s.IPHTTP {
 			s.IPHTTP = nil
@@ -224,4 +224,10 @@ func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 	}
 	s.tcpHTTPWarm = nil
 	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
+	s.ConnectStreamBudget = NewConnectStreamBudget(0)
+	s.Mu.Unlock()
+	if err := EnsureTCPHTTPQuicConn(s); err != nil {
+		log.Printf("masque_tcp_quic_warm_after_reset tag=%s err=%v",
+			strings.TrimSpace(s.Options.Tag), err)
+	}
 }

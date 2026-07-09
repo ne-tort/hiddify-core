@@ -1,0 +1,47 @@
+package masque_test
+
+// GATE-CHURN-MANIFEST: documents synth churn gates required before field HTTP soak.
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestGATEH3ConnectStreamChurnGatesPresent(t *testing.T) {
+	t.Parallel()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	required := []string{
+		"TestGATEH3ConnectStreamDirectSessionChurnNoPoison",
+		"TestGATEH3ConnectStreamDirectChurn90SubBudget",
+		"TestGATEH3ConnectStreamSocksCMSequentialChurnNoPoison",
+		"TestGATEH3ConnectStreamSocksCMParallelChurnNoPoison",
+		"TestGATEH3ConnectStreamParallelCanceledParentDialSucceeds",
+		"TestGATEH3ConnectStreamBudgetSaturatedQueuesNotRoundTrip",
+		"TestGATEH3ConnectStreamBrowserParallelParent30sDeadline",
+		"TestGATEH3ConnectStreamBrowserBurstWithHeldStreams",
+	}
+	for _, name := range required {
+		found := false
+		for _, file := range []string{
+			"connect_stream_synth_soak_localize_test.go",
+			"connect_stream_dial_budget_gate_test.go",
+		} {
+			src, err := os.ReadFile(filepath.Join(wd, file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(src), name) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing churn gate %s in synth localize/budget tests", name)
+		}
+	}
+}

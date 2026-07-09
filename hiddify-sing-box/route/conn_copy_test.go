@@ -156,9 +156,9 @@ func newStubWriteConn(w io.Writer) *stubConn {
 func runConnectionCopy(t *testing.T, source, destination net.Conn, direction bool) {
 	t.Helper()
 	m := NewConnectionManager(log.StdLogger())
-	var done atomic.Bool
+	gate := newConnectionCopyGate(1)
 	closed := make(chan struct{}, 1)
-	m.connectionCopy(context.Background(), source, destination, direction, &done, func(error) {
+	m.connectionCopy(context.Background(), source, destination, direction, gate, func(error) {
 		select {
 		case closed <- struct{}{}:
 		default:
@@ -236,15 +236,15 @@ func TestConnectionCopyDuplexWriteToAndReadFrom(t *testing.T) {
 	uploadDst := newMasqueReaderFromConn(uploadDstBuf)
 
 	m := NewConnectionManager(log.StdLogger())
-	var downloadDone atomic.Bool
-	var uploadDone atomic.Bool
+	downloadGate := newConnectionCopyGate(1)
+	uploadGate := newConnectionCopyGate(1)
 	downloadClosed := make(chan struct{}, 1)
 	uploadClosed := make(chan struct{}, 1)
 
-	go m.connectionCopy(context.Background(), downloadSrc, downloadDst, true, &downloadDone, func(error) {
+	go m.connectionCopy(context.Background(), downloadSrc, downloadDst, true, downloadGate, func(error) {
 		downloadClosed <- struct{}{}
 	})
-	go m.connectionCopy(context.Background(), uploadSrc, uploadDst, false, &uploadDone, func(error) {
+	go m.connectionCopy(context.Background(), uploadSrc, uploadDst, false, uploadGate, func(error) {
 		uploadClosed <- struct{}{}
 	})
 

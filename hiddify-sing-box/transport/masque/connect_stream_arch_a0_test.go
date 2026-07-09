@@ -1,3 +1,5 @@
+//go:build synth_arch_a0
+
 package masque
 
 import (

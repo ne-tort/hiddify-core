@@ -263,6 +263,43 @@ func masqueStreamConn(s *Stream) *Conn {
 	return masqueSenderConn(s.sendStr.sender)
 }
 
+var (
+	testMasqueConnSmoothedRTT    time.Duration
+	testMasqueConnSmoothedRTTSet bool
+)
+
+// SetTestMasqueConnSmoothedRTT overrides MasqueConnSmoothedRTT for synth gates (tests only).
+func SetTestMasqueConnSmoothedRTT(rtt time.Duration) {
+	testMasqueConnSmoothedRTT = rtt
+	testMasqueConnSmoothedRTTSet = true
+}
+
+// ClearTestMasqueConnSmoothedRTT clears the test-only RTT override.
+func ClearTestMasqueConnSmoothedRTT() {
+	testMasqueConnSmoothedRTT = 0
+	testMasqueConnSmoothedRTTSet = false
+}
+
+// MasqueConnSmoothedRTT returns the connection smoothed RTT for a QUIC stream (0 when unknown).
+func MasqueConnSmoothedRTT(s *Stream) time.Duration {
+	if testMasqueConnSmoothedRTTSet {
+		return testMasqueConnSmoothedRTT
+	}
+	conn := masqueStreamConn(s)
+	if conn == nil || conn.rttStats == nil || !conn.rttStats.HasMeasurement() {
+		return 0
+	}
+	return conn.rttStats.SmoothedRTT()
+}
+
+// MasqueStreamAvailableSendWindow reports C2S send window bytes remaining on the stream (0 when unknown).
+func MasqueStreamAvailableSendWindow(s *Stream) int {
+	if s == nil || s.sendStr == nil || s.sendStr.flowController == nil {
+		return 0
+	}
+	return int(s.sendStr.flowController.SendWindowSize())
+}
+
 func masquePokeConnPeerUploadCredit(s *Stream) bool {
 	conn := masqueStreamConn(s)
 	if conn == nil || conn.connFlowController == nil {
@@ -311,6 +348,9 @@ func masquePokeDownloadReceiveWindow(s *Stream) bool {
 	// Download-primary CONNECT (iperf -R params then bulk WriteTo): use full WINDOW poke, not
 	// NoRenotify batching — RTT-limited paths need per-delivery credit (docker @35ms gate).
 	if MasqueIsBidiDownloadReceiveOnly(s) && !MasqueIsBidiDuplexUploadStarted(s) {
+		if s.receiveStr != nil && s.receiveStr.flowController != nil {
+			flowcontrol.SetMasqueDuplexForceUpdate(s.receiveStr.flowController)
+		}
 		streamQueued := s.receiveStr.masquePokeDownloadReceiveWindow()
 		connQueued := masquePokeConnPeerUploadCredit(s)
 		return streamQueued || connQueued

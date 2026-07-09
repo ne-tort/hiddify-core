@@ -6,8 +6,9 @@ import (
 )
 
 // ConnectStreamHandshakeTimeout is the CONNECT RoundTrip budget when sing-box passes
-// no dial deadline (or a shorter one). Align with route CM absoluteDeadline (60s): field
-// WAN OpenStreamSync often exceeds 30s under parallel TUN burst.
+// no dial deadline (or a shorter one). Field WAN OpenStreamSync often exceeds 30s under
+// parallel TUN burst. This bounds handshake only — not live relay lifetime (route CM uses
+// zero-byte / stall watchdogs, not an absolute relay cap).
 const ConnectStreamHandshakeTimeout = 60 * time.Second
 
 // ConnectStreamQueueContext scopes semaphore waits (in-flight / stream budget) before RoundTrip.
@@ -18,6 +19,15 @@ const ConnectStreamHandshakeTimeout = 60 * time.Second
 func ConnectStreamQueueContext(parent context.Context) (context.Context, context.CancelFunc) {
 	_ = parent
 	return context.WithCancel(context.Background())
+}
+
+// ConnectStreamBudgetWaitContext scopes stream-budget semaphore wait before RoundTrip.
+// Inherits parent deadline (sing-box dial / synth short ctx) but not parent cancel.
+func ConnectStreamBudgetWaitContext(parent context.Context) context.Context {
+	if parent == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(parent)
 }
 
 // ConnectStreamHandshakeContext scopes one CONNECT-stream dial (single RoundTrip chain).

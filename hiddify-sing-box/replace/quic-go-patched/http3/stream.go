@@ -51,6 +51,16 @@ type Stream struct {
 	masqueCoalesceBuf []byte // batched CONNECT DATA frames (h2o/Invisv bulk coalesce)
 
 	masqueTunnelData bool // CONNECT tunnel bulk DATA phase (fast frame parse)
+
+	masqueMS3DownloadDelivery bool // MS3 TunnelConn owns delivery wake (suppress per-Read http3 wake)
+}
+
+// SetMasqueMS3DownloadDelivery marks MS3-owned download delivery (TunnelConn WriteTo).
+// While set, Stream.Read does not emit per-chunk http3 wakes — MS3 noteDownloadDelivery batches them.
+func (s *Stream) SetMasqueMS3DownloadDelivery(on bool) {
+	if s != nil {
+		s.masqueMS3DownloadDelivery = on
+	}
 }
 
 func newStream(
@@ -119,7 +129,7 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
-	if n > 0 {
+	if n > 0 && !s.masqueMS3DownloadDelivery {
 		masqueWakeSendAfterReceiveRead(s, n)
 	}
 	return n, err
@@ -143,46 +153,23 @@ func masqueStreamDownloadPrimaryReceive(s *Stream) bool {
 	return qs != nil && quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs)
 }
 
-// WriteTo drains tunneled CONNECT payload. Batched wake every 256 KiB delivered (64 KiB during duplex / download-primary).
+// WriteTo drains tunneled CONNECT payload. h2o/Invisv parity: per-delivery wake (no RTT batch).
+// Prod client download uses TunnelConn.WriteTo (MS3); WriteTo is disabled while MS3 owns delivery.
 func (s *Stream) WriteTo(w io.Writer) (int64, error) {
-	wakeBatch := masqueHTTP3WriteToBufLen
-	readCap := masqueHTTP3WriteToBufLen
-	if masqueStreamDuplexUploadWake(s) {
-		wakeBatch = 64 * 1024
-		if qs := s.datagramStream.QUICStream(); qs != nil && quic.MasqueUploadSendStarved(qs) {
-			readCap = 16 * 1024
-		}
-	} else if masqueStreamDownloadPrimaryReceive(s) {
-		wakeBatch = 4 * 1024
-		readCap = masqueHTTP3WriteToBufLen
+	if s.masqueMS3DownloadDelivery {
+		return 0, errors.New("http3: WriteTo disabled while MS3 owns CONNECT download delivery")
 	}
-	buf := make([]byte, readCap)
+	buf := make([]byte, masqueHTTP3WriteToBufLen)
 	var total int64
-	var deliveryPending int
-	flushDeliveryWake := func(delivered int) {
-		if delivered <= 0 {
-			return
-		}
-		deliveryPending += delivered
-		if deliveryPending >= wakeBatch {
-			deliveryPending = 0
-			masqueWakeSendAfterReceiveRead(s, delivered)
-		}
-	}
 	for {
 		nr, err := s.Read(buf)
 		if nr > 0 {
 			nw, werr := w.Write(buf[:nr])
 			total += int64(nw)
 			if nw > 0 {
-				flushDeliveryWake(nw)
+				masqueWakeSendAfterReceiveRead(s, nw)
 			}
 			if werr != nil {
-				if deliveryPending > 0 {
-					pending := deliveryPending
-					deliveryPending = 0
-					masqueWakeSendAfterReceiveRead(s, pending)
-				}
 				return total, werr
 			}
 			if nw < nr {
@@ -191,11 +178,6 @@ func (s *Stream) WriteTo(w io.Writer) (int64, error) {
 		}
 		if err != nil {
 			if err == io.EOF {
-				if deliveryPending > 0 {
-					pending := deliveryPending
-					deliveryPending = 0
-					masqueWakeSendAfterReceiveRead(s, pending)
-				}
 				return total, nil
 			}
 			return total, err

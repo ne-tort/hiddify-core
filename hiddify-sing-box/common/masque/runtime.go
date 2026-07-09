@@ -83,6 +83,7 @@ type RuntimeOptions struct {
 	ProfileLocalIPv4            string
 	ProfileLocalIPv6            string
 	TCPIPv6PathBracket          bool
+	ConnectStreamMode           string
 
 	TCPDial                  T.MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
@@ -192,6 +193,7 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			ProfileLocalIPv4:            strings.TrimSpace(r.options.ProfileLocalIPv4),
 			ProfileLocalIPv6:            strings.TrimSpace(r.options.ProfileLocalIPv6),
 			TCPIPv6PathBracket:          r.options.TCPIPv6PathBracket,
+			ConnectStreamMode:           r.options.ConnectStreamMode,
 		})
 		if err == nil {
 			break
