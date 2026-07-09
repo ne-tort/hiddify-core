@@ -295,6 +295,18 @@ func AuthorityAddr(authority string) string {
 	return authorityAddr(authority)
 }
 
+// CloseAuthorityQUICConnForTest closes the cached QUIC connection for authority (synth gates only).
+// The next RoundTrip evicts the stale client and redials.
+func (t *Transport) CloseAuthorityQUICConnForTest(authority string) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+	cl, ok := t.clients[authority]
+	if !ok || cl.conn == nil {
+		return
+	}
+	_ = cl.conn.CloseWithError(0, "")
+}
+
 // EnsureClientConn completes the QUIC handshake for hostname when no cached client exists.
 // hostname must match RoundTrip cache keys (use AuthorityAddr on the request URL host).
 func (t *Transport) EnsureClientConn(ctx context.Context, hostname string) error {
@@ -336,6 +348,15 @@ func (t *Transport) getClient(ctx context.Context, hostname string, onlyCached b
 	}
 
 	cl, ok := t.clients[hostname]
+	if ok && cl.conn != nil {
+		select {
+		case <-cl.conn.Context().Done():
+			_ = cl.Close()
+			delete(t.clients, hostname)
+			ok = false
+		default:
+		}
+	}
 	if !ok {
 		if onlyCached {
 			return nil, false, ErrNoCachedConn

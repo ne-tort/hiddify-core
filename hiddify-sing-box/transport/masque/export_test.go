@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/h3"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
@@ -201,4 +202,22 @@ func ExportBenchConnectIPUploadInstantL1(t *testing.T, duration time.Duration) E
 
 func ExportConnectIPUploadNativeHint(pipeL1Mbps, nativeMbps float64) string {
 	return connectIPUploadNativeLayerHint(pipeL1Mbps, nativeMbps)
+}
+
+// ExportCloseConnectStreamH3CachedQUICForTest closes the shared CONNECT-stream QUIC client
+// without tearing down the masque session (synth GATE-SESSION-DEATH).
+func ExportCloseConnectStreamH3CachedQUICForTest(tb testing.TB, sess ClientSession) {
+	tb.Helper()
+	cs, ok := sess.(*coreSession)
+	if !ok {
+		tb.Fatalf("close cached QUIC: session type %T", sess)
+	}
+	cs.Mu.Lock()
+	tr := cs.TCPHTTP
+	cs.Mu.Unlock()
+	if tr == nil {
+		return
+	}
+	authority := session.TCPConnectStreamHTTP3Authority(cs.Options)
+	tr.CloseAuthorityQUICConnForTest(authority)
 }

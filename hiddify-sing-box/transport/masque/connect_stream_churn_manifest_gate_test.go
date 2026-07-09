@@ -24,12 +24,15 @@ func TestGATEH3ConnectStreamChurnGatesPresent(t *testing.T) {
 		"TestGATEH3ConnectStreamBudgetSaturatedQueuesNotRoundTrip",
 		"TestGATEH3ConnectStreamBrowserParallelParent30sDeadline",
 		"TestGATEH3ConnectStreamBrowserBurstWithHeldStreams",
+		"TestGATEH3ConnectStreamBenchAbortStaleQUICPostProbe",
+		"TestGATEH3ConnectStreamSequentialBenchAbortBudgetProbe",
 	}
 	for _, name := range required {
 		found := false
 		for _, file := range []string{
 			"connect_stream_synth_soak_localize_test.go",
 			"connect_stream_dial_budget_gate_test.go",
+			"connect_stream_session_death_gate_test.go",
 		} {
 			src, err := os.ReadFile(filepath.Join(wd, file))
 			if err != nil {

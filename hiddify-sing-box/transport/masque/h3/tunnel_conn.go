@@ -47,6 +47,7 @@ type TunnelConn struct {
 	writeDL time.Time
 
 	downloadActive      int32 // WriteTo in progress — upload wake for iperf -R duplex
+	closePending        int32 // route Close arrived during download — finish in endDuplexDownload
 	downloadDelivered   int32 // WriteTo delivered ≥1 response byte — true duplex interleave
 	duplexUploadStarted int32 // concurrent upload Write while WriteTo active
 	drainOnce           sync.Once
@@ -58,6 +59,7 @@ type TunnelConn struct {
 	uploadTrafficStarted  int32 // client upload bytes hit the wire before WriteTo bootstrap (real iperf3 cookie)
 
 	requestCancelOnce sync.Once
+	closeFullOnce     sync.Once
 	closeDoneOnce     sync.Once
 	closeDone         chan struct{}
 
@@ -474,12 +476,41 @@ func (c *TunnelConn) SetConnectStreamRequestCancel(cancel context.CancelCauseFun
 	}
 }
 
+func (c *TunnelConn) CloseWrite() error {
+	if c == nil || c.h3 == nil {
+		return nil
+	}
+	// http3.Stream.Close shuts the CONNECT send half; response download may continue.
+	return c.h3.Close()
+}
+
 func (c *TunnelConn) Close() error {
 	if c == nil {
 		return nil
 	}
+	// Prod route CM: upload leg EOF → CloseWrite then common.Close(masque) while download
+	// WriteTo is still active. Must not RST the response half (field error 268 / TLS browse).
+	if atomic.LoadInt32(&c.downloadActive) > 0 {
+		atomic.StoreInt32(&c.closePending, 1)
+		return c.CloseWrite()
+	}
+	var err error
+	c.closeFullOnce.Do(func() {
+		err = c.closeFull()
+	})
+	return err
+}
+
+func (c *TunnelConn) closeFull() error {
 	c.stopDownloadDrain()
 	c.cancel()
+	// H2 parity (stream/conn paths.bidiTunnelConn.Close): detach request context before
+	// QUIC body teardown so relay abort does not leave ghost CONNECT streams.
+	c.requestCancelOnce.Do(func() {
+		if c.requestCancel != nil {
+			c.requestCancel(context.Canceled)
+		}
+	})
 	var err error
 	if c.h3 != nil {
 		if qs := c.h3.QUICStream(); qs != nil {
@@ -513,12 +544,6 @@ func (c *TunnelConn) Close() error {
 	} else {
 		c.markCloseDone()
 	}
-	// Request-context cancel must follow QUIC stream teardown so peer can raise MAX_STREAMS.
-	c.requestCancelOnce.Do(func() {
-		if c.requestCancel != nil {
-			c.requestCancel(context.Canceled)
-		}
-	})
 	return err
 }
 
@@ -579,4 +604,12 @@ var (
 	_ io.ReaderFrom                   = (*TunnelConn)(nil)
 	_ C.RouteConnectionCopyWriterTo   = (*TunnelConn)(nil)
 	_ C.RouteConnectionCopyReaderFrom = (*TunnelConn)(nil)
+	_ C.RouteConnectionCopyDuplex     = (*TunnelConn)(nil)
 )
+
+// MarkConnectionCopyDuplex opts route CM out of upload-only download drain (prod TUN/SOCKS).
+func (c *TunnelConn) MarkConnectionCopyDuplex() {
+	if c != nil {
+		c.routeBidiDuplex = true
+	}
+}

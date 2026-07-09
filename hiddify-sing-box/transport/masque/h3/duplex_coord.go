@@ -196,6 +196,9 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
+	if atomic.SwapInt32(&c.closePending, 0) == 1 {
+		_ = c.Close()
+	}
 }
 
 // activateDownloadReceiveOnRead pokes S2C credit on first Read (iperf -R / route Read) without downloadActive wake routing.

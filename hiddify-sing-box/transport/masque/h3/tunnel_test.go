@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,6 +98,91 @@ func TestGATEH3TunnelConnCloseInvokesRequestCancel(t *testing.T) {
 	}
 	// idempotent Close must not double-cancel panic
 	_ = conn.Close()
+}
+
+type gateH3CancelOnCloseStream struct {
+	testH3ConnectStream
+	closeN      atomic.Int32
+	cancelRead  atomic.Int32
+	cancelWrite atomic.Int32
+}
+
+func (s *gateH3CancelOnCloseStream) Close() error {
+	s.closeN.Add(1)
+	return nil
+}
+func (s *gateH3CancelOnCloseStream) CancelRead(quic.StreamErrorCode) {
+	s.cancelRead.Add(1)
+}
+func (s *gateH3CancelOnCloseStream) CancelWrite(quic.StreamErrorCode) {
+	s.cancelWrite.Add(1)
+}
+
+// TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload — prod route CM calls
+// CloseWrite then common.Close(masque) on upload EOF while download WriteTo is active.
+func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
+	stream := &gateH3CancelOnCloseStream{}
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn.beginDuplexDownload()
+	var canceled bool
+	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatalf("closeWrite: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if canceled {
+		t.Fatal("requestCancel must not run during active download half-close")
+	}
+	if stream.cancelRead.Load() != 0 || stream.cancelWrite.Load() != 0 {
+		t.Fatalf("unexpected RST during download: cancelRead=%d cancelWrite=%d",
+			stream.cancelRead.Load(), stream.cancelWrite.Load())
+	}
+	if stream.closeN.Load() != 2 {
+		t.Fatalf("expected two h3.Close half-closes (CloseWrite+Close), got closeN=%d", stream.closeN.Load())
+	}
+}
+
+// TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload — upload EOF Close during
+// active WriteTo must defer requestCancel until the download leg ends.
+func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T) {
+	stream := &gateH3CancelOnCloseStream{}
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn.beginDuplexDownload()
+	var canceled bool
+	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close during download: %v", err)
+	}
+	if canceled {
+		t.Fatal("requestCancel must not run until download leg ends")
+	}
+	conn.endDuplexDownload()
+	if !canceled {
+		t.Fatal("requestCancel not invoked after deferred close pending")
+	}
+}
+
+// TestGATEH3TunnelConnCloseAfterDownloadFullTeardown — after WriteTo ends, Close must
+// detach the CONNECT request and tear down the QUIC stream (ghost-stream parity).
+func TestGATEH3TunnelConnCloseAfterDownloadFullTeardown(t *testing.T) {
+	stream := &gateH3CancelOnCloseStream{}
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn.beginDuplexDownload()
+	conn.endDuplexDownload()
+	var canceled bool
+	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	conn.noteDuplexUploadTraffic()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if !canceled {
+		t.Fatal("requestCancel not invoked after download leg ended")
+	}
+	if stream.closeN.Load() == 0 {
+		t.Fatal("expected h3.Close during full teardown")
+	}
 }
 
 type emptyReader struct{}

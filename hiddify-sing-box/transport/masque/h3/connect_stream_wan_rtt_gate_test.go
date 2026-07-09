@@ -1,3 +1,5 @@
+//go:build masque_wan_rtt_synth
+
 package h3
 
 import (

@@ -1,27 +1,11 @@
 package h3
 
 import (
-	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
 )
-
-var errBenchDuration = errors.New("masque: bench duration elapsed")
-
-type benchWriteToSink struct {
-	deadline time.Time
-	total    int64
-}
-
-func (s *benchWriteToSink) Write(p []byte) (int, error) {
-	if time.Now().After(s.deadline) {
-		return 0, errBenchDuration
-	}
-	s.total += int64(len(p))
-	return len(p), nil
-}
 
 // TestWrapBidiWindowWriteToDownloadBand (S106): shared h3 windowed bidi WriteTo reproduces
 // bench-shaped ceiling band (~64 KiB / 35 ms RTT → 4–28 Mbit/s).
