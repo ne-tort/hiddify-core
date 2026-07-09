@@ -19,7 +19,8 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, tar
 		return nil, errors.Join(ErrTunnelConnFailed, errors.New("nil CONNECT response"))
 	}
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
-	streamCtx := context.WithoutCancel(ctx)
+	// ctx is handshake-scoped (ConnectStreamHandshakeContext / WithoutCancel).
+	streamCtx := ctx
 	hs, ok := resp.Body.(http3.HTTPStreamer)
 	if !ok {
 		return nil, ErrHTTPStreamerMissing

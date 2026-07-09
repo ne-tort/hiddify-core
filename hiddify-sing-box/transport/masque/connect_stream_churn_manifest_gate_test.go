@@ -17,7 +17,7 @@ func TestGATEH3ConnectStreamChurnGatesPresent(t *testing.T) {
 	}
 	required := []string{
 		"TestGATEH3ConnectStreamDirectSessionChurnNoPoison",
-		"TestGATEH3ConnectStreamDirectChurn90SubBudget",
+		"TestGATEH3ConnectStreamDirectChurn90SubMaxStreams",
 		"TestGATEH3ConnectStreamSocksCMSequentialChurnNoPoison",
 		"TestGATEH3ConnectStreamSocksCMParallelChurnNoPoison",
 		"TestGATEH3ConnectStreamParallelCanceledParentDialSucceeds",
@@ -31,7 +31,7 @@ func TestGATEH3ConnectStreamChurnGatesPresent(t *testing.T) {
 		found := false
 		for _, file := range []string{
 			"connect_stream_synth_soak_localize_test.go",
-			"connect_stream_dial_budget_gate_test.go",
+			"connect_stream_dial_gate_test.go",
 			"connect_stream_session_death_gate_test.go",
 		} {
 			src, err := os.ReadFile(filepath.Join(wd, file))

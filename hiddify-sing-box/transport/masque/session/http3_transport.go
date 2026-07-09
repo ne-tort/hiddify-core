@@ -139,12 +139,6 @@ func EnsureTCPHTTPQuicConn(s *CoreSession) error {
 	return err
 }
 
-// EnsureTCPHTTPQuicConnLockedAssumeMu is a legacy alias; prefer EnsureTCPHTTPQuicConn.
-func EnsureTCPHTTPQuicConnLockedAssumeMu(ctx context.Context, s *CoreSession) error {
-	_ = ctx
-	return EnsureTCPHTTPQuicConn(s)
-}
-
 // WarmTCPConnectStreamHTTP3Transport completes the QUIC handshake on a CONNECT-stream transport (P6 warm dial).
 func WarmTCPConnectStreamHTTP3Transport(ctx context.Context, s *CoreSession, tr *http3.Transport) error {
 	if tr == nil {

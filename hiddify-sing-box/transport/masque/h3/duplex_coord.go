@@ -196,8 +196,10 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 func (c *TunnelConn) endDuplexDownload() {
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
-	if atomic.SwapInt32(&c.closePending, 0) == 1 {
-		_ = c.Close()
+	if atomic.LoadInt32(&c.uploadEOFClosed) != 0 {
+		var err error
+		c.closeFullOnce.Do(func() { err = c.closeFull() })
+		_ = err
 	}
 }
 

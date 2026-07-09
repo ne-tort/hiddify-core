@@ -1,6 +1,6 @@
 package masque_test
 
-// GATE-SYNTH-CHURN: fast in-proc localization for CONNECT-stream session exhaustion (~QUIC stream budget)
+// GATE-SYNTH-CHURN: fast in-proc localization for CONNECT-stream QUIC slot recycle on Close
 // without 90s timed soak or Docker stress. Replaces long soak in Verify-ConnectStream.ps1.
 
 import (
@@ -109,9 +109,9 @@ func TestGATEH3ConnectStreamDirectSessionChurnNoPoison(t *testing.T) {
 	postChurnProbeDirect(t, session, ctx, targetPort)
 }
 
-// TestGATEH3ConnectStreamDirectChurn90SubBudget (GATE-SYNTH-BUDGET-90) — below QUIC
-// DefaultMaxIncomingStreams (100): post-probe must PASS until stream-release fix lands.
-func TestGATEH3ConnectStreamDirectChurn90SubBudget(t *testing.T) {
+// TestGATEH3ConnectStreamDirectChurn90SubMaxStreams (GATE-SYNTH-MAXSTREAMS-90) — below QUIC
+// DefaultMaxIncomingStreams (100): post-probe must PASS when Close recycles slots.
+func TestGATEH3ConnectStreamDirectChurn90SubMaxStreams(t *testing.T) {
 	_, targetPort, session, ctx := setupSynthChurnHarness(t)
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", targetPort)
 	const n = 90
@@ -120,7 +120,7 @@ func TestGATEH3ConnectStreamDirectChurn90SubBudget(t *testing.T) {
 		conn, err := dialDirectOnce(reqCtx, session, dest)
 		cancel()
 		if err != nil {
-			t.Fatalf("GATE-SYNTH-BUDGET-90 dial@%d: %v", i, err)
+			t.Fatalf("GATE-SYNTH-MAXSTREAMS-90 dial@%d: %v", i, err)
 		}
 		_ = conn.Close()
 	}
@@ -213,7 +213,7 @@ func TestGATEH3ConnectStreamSynthChurnDeathWindow(t *testing.T) {
 		t.Log("GATE-SYNTH-WINDOW post-churn probe PASS")
 	}
 	if firstFail >= 0 && firstFail < 110 {
-		t.Log("hint: failure before stream budget ~100 → QUIC stream slot leak on Close")
+		t.Log("hint: failure before peer MAX_STREAMS ~100 → QUIC stream slot leak on Close")
 	}
 	if firstFail >= 110 {
 		t.Log("hint: failure after ~100 → cumulative stall, not raw dial leak")

@@ -48,7 +48,6 @@ type TunnelConn struct {
 
 	downloadActive      int32 // WriteTo in progress — upload wake for iperf -R duplex
 	uploadEOFClosed     int32 // route upload leg called CloseWrite before Close
-	closePending        int32 // upload EOF Close during download — finish in endDuplexDownload
 	downloadDelivered   int32 // WriteTo delivered ≥1 response byte — true duplex interleave
 	duplexUploadStarted int32 // concurrent upload Write while WriteTo active
 	drainOnce           sync.Once
@@ -493,7 +492,6 @@ func (c *TunnelConn) Close() error {
 	if atomic.LoadInt32(&c.downloadActive) > 0 {
 		// Upload EOF: route CM CloseWrite then Close while download WriteTo runs — half-close only.
 		if atomic.LoadInt32(&c.uploadEOFClosed) != 0 {
-			atomic.StoreInt32(&c.closePending, 1)
 			return c.CloseWrite()
 		}
 		// Relay abort / client reset: tear down immediately (H2O slot recycle; no ghost streams).
