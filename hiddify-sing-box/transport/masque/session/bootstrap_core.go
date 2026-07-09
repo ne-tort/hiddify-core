@@ -62,9 +62,7 @@ func BootstrapCoreSession(options ClientOptions, templateUDP, templateIP, templa
 		ConnectIPTCPDatagramSlack:  mcip.TCPHTTP3DatagramSlack,
 		MasqueUDPWriteMax:          masqueUDPWriteMax,
 		ConnectIPPMTUState:         NewConnectIPPMTUState(initialPayload, 512, initialPayload),
-		HTTPLayerAuto:              options.HTTPLayerAuto,
-		ConnectStreamInFlight:      NewConnectStreamInFlight(connectStreamMaxInFlight),
-		ConnectStreamBudget:        NewConnectStreamBudget(connectStreamPeerBidiBudget),
+		HTTPLayerAuto: options.HTTPLayerAuto,
 	}
 	return cs, udpLayer
 }

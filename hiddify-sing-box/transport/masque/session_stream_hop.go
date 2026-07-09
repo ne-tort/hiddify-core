@@ -45,6 +45,11 @@ func (s *coreSession) streamAdvanceHopLocked() (bool, error) {
 	return true, nil
 }
 
+// dialTCPStream opens one CONNECT-stream tunnel (H2O parity).
+//
+// Backpressure is QUIC peer MAX_STREAMS + OpenStreamSync(ctx) inside http3 RoundTrip.
+// Slot recycle is conn Close (h3 TunnelConn closePending / closeFull). No client-side
+// semaphores — those duplicated QUIC and masked ghost-stream leaks.
 func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr) (net.Conn, error) {
 	h3 := s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2
 	if h3 {
@@ -52,34 +57,7 @@ func (s *coreSession) dialTCPStream(ctx context.Context, destination M.Socksaddr
 			return nil, strm.JoinConnectStreamPhase("quic warm", err)
 		}
 	}
-	queueCtx, queueCancel := strm.ConnectStreamQueueContext(ctx)
-	defer queueCancel()
-	if err := s.ConnectStreamInFlight.Acquire(queueCtx); err != nil {
-		return nil, strm.JoinConnectStreamPhase("in-flight queue", err)
-	}
-	defer s.ConnectStreamInFlight.Release()
 	handshakeCtx, handshakeCancel := strm.ConnectStreamHandshakeContext(ctx)
 	defer handshakeCancel()
-	budgetHeld := false
-	if h3 {
-		err := s.ConnectStreamBudget.Acquire(strm.ConnectStreamBudgetWaitContext(ctx))
-		if err != nil {
-			return nil, strm.JoinConnectStreamPhase("stream budget", err)
-		}
-		budgetHeld = true
-	}
-	defer func() {
-		if budgetHeld {
-			s.ConnectStreamBudget.Release()
-		}
-	}()
-	conn, err := strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(handshakeCtx, destination)
-	if err != nil {
-		return nil, err
-	}
-	if h3 {
-		budgetHeld = false
-		conn = session.AttachConnectStreamBudgetRelease(conn, s.ConnectStreamBudget)
-	}
-	return conn, nil
+	return strmclient.Plane{Host: s.streamHopHost()}.DialTCPStream(handshakeCtx, destination)
 }

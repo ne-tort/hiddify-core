@@ -144,14 +144,17 @@ func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
 	}
 }
 
-// TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload — upload EOF Close during
-// active WriteTo must defer requestCancel until the download leg ends.
+// TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload — upload EOF CloseWrite+Close
+// during active WriteTo defers requestCancel until the download leg ends.
 func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
 	conn.beginDuplexDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatalf("closeWrite: %v", err)
+	}
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close during download: %v", err)
 	}
@@ -161,6 +164,22 @@ func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T)
 	conn.endDuplexDownload()
 	if !canceled {
 		t.Fatal("requestCancel not invoked after deferred close pending")
+	}
+}
+
+// TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown — relay abort without upload EOF
+// must fully tear down the CONNECT stream (QUIC slot recycle / H2O parity).
+func TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown(t *testing.T) {
+	stream := &gateH3CancelOnCloseStream{}
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn.beginDuplexDownload()
+	var canceled bool
+	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close during download: %v", err)
+	}
+	if !canceled {
+		t.Fatal("requestCancel must run on abort teardown during active download")
 	}
 }
 

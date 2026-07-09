@@ -224,7 +224,6 @@ func ResetTCPHTTPTransport(s *CoreSession, host TCPHTTPTransportHost) {
 	}
 	s.tcpHTTPWarm = nil
 	s.TCPHTTP = NewTCPConnectStreamHTTP3Transport(s)
-	s.ConnectStreamBudget = NewConnectStreamBudget(0)
 	s.Mu.Unlock()
 	if err := EnsureTCPHTTPQuicConn(s); err != nil {
 		log.Printf("masque_tcp_quic_warm_after_reset tag=%s err=%v",

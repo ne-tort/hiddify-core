@@ -47,7 +47,8 @@ type TunnelConn struct {
 	writeDL time.Time
 
 	downloadActive      int32 // WriteTo in progress — upload wake for iperf -R duplex
-	closePending        int32 // route Close arrived during download — finish in endDuplexDownload
+	uploadEOFClosed     int32 // route upload leg called CloseWrite before Close
+	closePending        int32 // upload EOF Close during download — finish in endDuplexDownload
 	downloadDelivered   int32 // WriteTo delivered ≥1 response byte — true duplex interleave
 	duplexUploadStarted int32 // concurrent upload Write while WriteTo active
 	drainOnce           sync.Once
@@ -480,6 +481,7 @@ func (c *TunnelConn) CloseWrite() error {
 	if c == nil || c.h3 == nil {
 		return nil
 	}
+	atomic.StoreInt32(&c.uploadEOFClosed, 1)
 	// http3.Stream.Close shuts the CONNECT send half; response download may continue.
 	return c.h3.Close()
 }
@@ -488,11 +490,18 @@ func (c *TunnelConn) Close() error {
 	if c == nil {
 		return nil
 	}
-	// Prod route CM: upload leg EOF → CloseWrite then common.Close(masque) while download
-	// WriteTo is still active. Must not RST the response half (field error 268 / TLS browse).
 	if atomic.LoadInt32(&c.downloadActive) > 0 {
-		atomic.StoreInt32(&c.closePending, 1)
-		return c.CloseWrite()
+		// Upload EOF: route CM CloseWrite then Close while download WriteTo runs — half-close only.
+		if atomic.LoadInt32(&c.uploadEOFClosed) != 0 {
+			atomic.StoreInt32(&c.closePending, 1)
+			return c.CloseWrite()
+		}
+		// Relay abort / client reset: tear down immediately (H2O slot recycle; no ghost streams).
+		var err error
+		c.closeFullOnce.Do(func() {
+			err = c.closeFull()
+		})
+		return err
 	}
 	var err error
 	c.closeFullOnce.Do(func() {
