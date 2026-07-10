@@ -3,7 +3,6 @@ package h3
 import (
 	"context"
 	"io"
-	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,33 +28,7 @@ func TestH3ConnectRequestOmitsLegHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != "" {
-		t.Fatalf("leg header=%q want empty (single bidi prod)", got)
-	}
-}
-
-func TestCurrentConnectStreamMode(t *testing.T) {
-	if got := CurrentConnectStreamMode(); got != ConnectStreamModeSingleBidi {
-		t.Fatalf("CurrentConnectStreamMode() = %q, want %q", got, ConnectStreamModeSingleBidi)
-	}
-}
-
-func TestConnectStreamRoleNormalization(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want ConnectStreamRole
-	}{
-		{name: "single", raw: "", want: ConnectStreamRoleSingle},
-		{name: "download", raw: strm.ConnectStreamLegDownload, want: ConnectStreamRoleDownload},
-		{name: "upload", raw: strm.ConnectStreamLegUpload, want: ConnectStreamRoleUpload},
-		{name: "unknown_is_single", raw: "legacy", want: ConnectStreamRoleSingle},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := normalizeConnectStreamRole(tc.raw); got != tc.want {
-				t.Fatalf("normalizeConnectStreamRole(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
+		t.Fatalf("leg header=%q want empty (RFC single bidi)", got)
 	}
 }
 
@@ -65,11 +38,8 @@ func TestTunnelPolicySnapshot(t *testing.T) {
 		RouteBidiDuplex: true,
 	})
 	s := c.TunnelPolicySnapshot()
-	if s.Mode != ConnectStreamModeSingleBidi {
-		t.Fatalf("mode=%q want %q", s.Mode, ConnectStreamModeSingleBidi)
-	}
-	if !s.Role.IsSingleBidi() || !s.RouteBidiDuplex || !s.UsesH3Stream {
-		t.Fatalf("unexpected single snapshot: %+v", s)
+	if !s.RouteBidiDuplex || !s.UsesH3Stream {
+		t.Fatalf("unexpected snapshot: %+v", s)
 	}
 }
 
@@ -96,7 +66,6 @@ func TestGATEH3TunnelConnCloseInvokesRequestCancel(t *testing.T) {
 	if !canceled {
 		t.Fatal("requestCancel not invoked on Close")
 	}
-	// idempotent Close must not double-cancel panic
 	_ = conn.Close()
 }
 
@@ -118,12 +87,10 @@ func (s *gateH3CancelOnCloseStream) CancelWrite(quic.StreamErrorCode) {
 	s.cancelWrite.Add(1)
 }
 
-// TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload — prod route CM calls
-// CloseWrite then common.Close(masque) on upload EOF while download WriteTo is active.
 func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
-	conn.beginDuplexDownload()
+	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
 	if err := conn.CloseWrite(); err != nil {
@@ -144,12 +111,10 @@ func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
 	}
 }
 
-// TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload — upload EOF CloseWrite+Close
-// during active WriteTo defers requestCancel until the download leg ends.
 func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
-	conn.beginDuplexDownload()
+	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
 	if err := conn.CloseWrite(); err != nil {
@@ -161,18 +126,16 @@ func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T)
 	if canceled {
 		t.Fatal("requestCancel must not run until download leg ends")
 	}
-	conn.endDuplexDownload()
+	conn.endDownload()
 	if !canceled {
 		t.Fatal("requestCancel not invoked after deferred close pending")
 	}
 }
 
-// TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown — relay abort without upload EOF
-// must fully tear down the CONNECT stream (QUIC slot recycle / H2O parity).
 func TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
-	conn.beginDuplexDownload()
+	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
 	if err := conn.Close(); err != nil {
@@ -183,16 +146,13 @@ func TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown(t *testing.T) {
 	}
 }
 
-// TestGATEH3TunnelConnCloseAfterDownloadFullTeardown — after WriteTo ends, Close must
-// detach the CONNECT request and tear down the QUIC stream (ghost-stream parity).
 func TestGATEH3TunnelConnCloseAfterDownloadFullTeardown(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
-	conn.beginDuplexDownload()
-	conn.endDuplexDownload()
+	conn.beginDownload()
+	conn.endDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
-	conn.noteDuplexUploadTraffic()
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -203,18 +163,3 @@ func TestGATEH3TunnelConnCloseAfterDownloadFullTeardown(t *testing.T) {
 		t.Fatal("expected h3.Close during full teardown")
 	}
 }
-
-type emptyReader struct{}
-
-func (*emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
-
-type noopConn struct{}
-
-func (*noopConn) Read([]byte) (int, error)         { return 0, io.EOF }
-func (*noopConn) Write(p []byte) (int, error)      { return len(p), nil }
-func (*noopConn) Close() error                     { return nil }
-func (*noopConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
-func (*noopConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
-func (*noopConn) SetDeadline(time.Time) error      { return nil }
-func (*noopConn) SetReadDeadline(time.Time) error  { return nil }
-func (*noopConn) SetWriteDeadline(time.Time) error { return nil }

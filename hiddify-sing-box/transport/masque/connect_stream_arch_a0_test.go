@@ -70,8 +70,7 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 	})
 }
 
-// TestArchA0WireVsAppPipePath (A0-1a): P1 prod h3_stream vs legacy pipe — same RFC 9114 CONNECT,
-// UsesH3Stream=true (nil Body) vs UsesH3Stream=false (io.Pipe upload).
+// TestArchA0WireVsAppPipePath (A0-1a): prod uses one HTTP/3 CONNECT bidi stream (UsesH3Stream=true).
 func TestArchA0WireVsAppPipePath(t *testing.T) {
 	t.Run("prod_h3_stream_one_http3_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
@@ -81,40 +80,20 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 			t.Fatal("expected *h3.TunnelConn")
 		}
 		if !tc.UsesH3Stream() {
-			t.Fatal("prod h3_stream must share one http3.Stream (UsesH3Stream=true)")
+			t.Fatal("prod must share one http3.Stream (UsesH3Stream=true)")
 		}
 		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("prod h3_stream dial must satisfy prod route shape")
-		}
-	})
-
-	t.Run("legacy_pipe_same_connect_different_halves", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
-		defer h.close()
-		tc, ok := unwrapH3TunnelConn(h.conn)
-		if !ok {
-			t.Fatal("expected *h3.TunnelConn")
-		}
-		if tc.UsesH3Stream() {
-			t.Fatal("legacy pipe upload must decouple upload half (UsesH3Stream=false)")
-		}
-		if !strm.ProdDialShapeOf(h.conn).OK() {
-			t.Fatal("legacy pipe dial must still satisfy prod route shape on one net.Conn")
+			t.Fatal("prod dial must satisfy prod route shape")
 		}
 	})
 }
 
-// TestArchA0ContentionPointsContract (A0-2a): documents known contention anchors —
-// H3BidiBootstrapUploadBytes, H3UploadFlushChunkBytes, TunnelWriteToBufLen, 64 KiB bidi window model.
+// TestArchA0ContentionPointsContract (A0-2a): documents RFC dataplane anchors — 64 KiB buffers.
 func TestArchA0ContentionPointsContract(t *testing.T) {
-	const wantBootstrapUpload = 4 * 1024
 	const wantUploadFlushChunk = 64 * 1024
-	const wantWriteToBuf = 256 * 1024
+	const wantWriteToBuf = 64 * 1024
 	const wantBidiWindow = 64 * 1024
 
-	if got := h3.H3BidiBootstrapUploadBytes; got != wantBootstrapUpload {
-		t.Fatalf("A0-2a bidi bootstrap upload: %d want %d", got, wantBootstrapUpload)
-	}
 	if got := h3.H3UploadFlushChunkBytes; got != wantUploadFlushChunk {
 		t.Fatalf("A0-2a upload flush chunk: %d want %d", got, wantUploadFlushChunk)
 	}
@@ -125,16 +104,14 @@ func TestArchA0ContentionPointsContract(t *testing.T) {
 		t.Fatalf("A0-2a WriteTo drain buf: %d want %d", h3.TunnelWriteToBufLen, wantWriteToBuf)
 	}
 
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
-
 	h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 	defer h.close()
 	tc, ok := unwrapH3TunnelConn(h.conn)
 	if !ok || !tc.UsesH3Stream() {
-		t.Fatal("A0-2a prod h3_stream path must use *http3.Stream (UsesH3Stream=true)")
+		t.Fatal("A0-2a prod path must use *http3.Stream (UsesH3Stream=true)")
 	}
-	t.Logf("A0-2a contention anchors: bootstrapUpload=%d flushChunk=%d writeToBuf=%d bidiWindow=%d prod_h3_stream=on",
-		wantBootstrapUpload, wantUploadFlushChunk, wantWriteToBuf, wantBidiWindow)
+	t.Logf("A0-2a contention anchors: flushChunk=%d writeToBuf=%d bidiWindow=%d",
+		wantUploadFlushChunk, wantWriteToBuf, wantBidiWindow)
 }
 
 // TestArchA0ContentionMatrixC2SDuringS2C (A0-3): who writes C2S while S2C WriteTo drains.
@@ -148,23 +125,8 @@ func TestArchA0ContentionMatrixC2SDuringS2C(t *testing.T) {
 		}
 		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
 		t.Logf("A0-3 prod h3_stream C2S during S2C WriteTo (windowed): %.1f Mbit/s upload", upMbps)
-		// Same-stream C2S contends with S2C credit — upload stays in wire ceiling band.
 		if upMbps > connectStreamLocalizeCeilingMax+5 {
 			t.Fatalf("prod h3_stream upload %.1f unexpectedly high on windowed link — C2S should contend with S2C drain", upMbps)
-		}
-	})
-
-	t.Run("legacy_pipe_c2s_off_h3_stream", func(t *testing.T) {
-		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
-		defer h.close()
-		tc, ok := unwrapH3TunnelConn(h.conn)
-		if !ok || tc.UsesH3Stream() {
-			t.Fatal("legacy pipe matrix row requires UsesH3Stream=false")
-		}
-		upMbps := runConnectStreamConcurrentUploadMbps(t, h.conn, localizeBenchDuration)
-		t.Logf("A0-3 legacy pipe C2S during S2C WriteTo: %.1f Mbit/s upload", upMbps)
-		if upMbps < connectStreamLocalizeCeilingMin {
-			t.Fatalf("legacy pipe upload stalled under concurrent WriteTo: %.1f Mbit/s (want >= %.0f)", upMbps, connectStreamLocalizeCeilingMin)
 		}
 	})
 }
@@ -287,7 +249,7 @@ func TestArchA0OrchestrationBoundary(t *testing.T) {
 		}
 	}
 
-	t.Setenv("MASQUE_CONNECT_STREAM_PIPE_UPLOAD", "0")
+	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
 	h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 	defer h.close()
 

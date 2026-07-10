@@ -1,4 +1,4 @@
-package h3
+﻿package h3
 
 // Prod TunnelConn benches on infinite mock stream for REF paired delta tests (masque package).
 
@@ -133,7 +133,7 @@ func (s *exportBenchSink) Write(p []byte) (int, error) {
 }
 
 func exportBenchUploadMbps(conn net.Conn, duration time.Duration) float64 {
-	chunk := make([]byte, 256*1024)
+	chunk := make([]byte, connectStreamBufLen)
 	var total int64
 	stop := time.Now().Add(duration)
 	for time.Now().Before(stop) {
@@ -174,7 +174,7 @@ func exportBenchDuplexMbps(conn net.Conn, duration time.Duration) (down, up floa
 		downDone <- downRes{mbps: float64(total*8) / secs / 1e6, err: e}
 	}()
 
-	chunk := make([]byte, 256*1024)
+	chunk := make([]byte, connectStreamBufLen)
 	var upTotal int64
 	stop := time.Now().Add(duration)
 	for time.Now().Before(stop) {

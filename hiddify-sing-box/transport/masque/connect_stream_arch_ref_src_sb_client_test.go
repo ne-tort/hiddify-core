@@ -2,8 +2,6 @@ package masque
 
 import (
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // TestArchREFSRCSBClientAudit (REF-SRC-SB-C1/C2): frozen TunnelConn vs Invisv differential + non-RFC table.
@@ -31,10 +29,14 @@ func TestArchREFSRCSBClientAudit(t *testing.T) {
 			t.Fatalf("incomplete non-RFC row: %+v", row)
 		}
 	}
-	if h3.CurrentConnectStreamMode() != h3.ConnectStreamModeSingleBidi {
-		t.Fatal("REF-SRC-SB-C2: prod must use nil Body (pipe off)")
+	if h := startConnectStreamDownloadHarness(t, instantBidiLink{}); h != nil {
+		tc, ok := unwrapH3TunnelConn(h.conn)
+		h.close()
+		if !ok || !tc.UsesH3Stream() {
+			t.Fatal("REF-SRC-SB-C2: prod must use one http3 stream")
+		}
 	}
-	t.Log("REF-SRC-SB-C1/C2 verdict: h3_stream prod default; pipe/feeder opt-in legacy; duplex_coord keep")
+	t.Log("REF-SRC-SB-C1/C2 verdict: single RFC CONNECT-stream dataplane; no pipe/feeder split")
 }
 
 // TestArchREFSRCSBClientC3PeerAttribution (REF-SRC-SB-C3): same client harness, h2o-peer vs windowed sb-peer.

@@ -66,9 +66,7 @@ func (i localizeInjectors) connectIPOpts() connectIPUploadHarnessOpts {
 }
 
 func (i localizeInjectors) connectStreamOpts() connectStreamHarnessOpts {
-	return connectStreamHarnessOpts{
-		BidiWakeSink: i.BidiWake,
-	}
+	return connectStreamHarnessOpts{}
 }
 
 // TestLocalizeHarnessBenchContract keeps L2/L3 packet and bidi models on one bench profile.
@@ -97,25 +95,7 @@ func TestLocalizeHarnessBenchContract(t *testing.T) {
 	if inj.BidiWake == nil {
 		t.Fatal("BidiWake injectors not allocated")
 	}
-	opts := inj.connectStreamOpts()
-	if opts.BidiWakeSink != inj.BidiWake {
-		t.Fatal("connectStreamOpts must alias BidiWake injectors")
-	}
-}
-
-// TestLocalizeConnectStreamInjectorsContract (S41): connectStreamOpts wires BidiWakeSink for harness probes.
-func TestLocalizeConnectStreamInjectorsContract(t *testing.T) {
-	t.Parallel()
-	inj := newLocalizeInjectors()
-	opts := inj.connectStreamOpts()
-	if opts.BidiWakeSink == nil {
-		t.Fatal("connectStreamOpts must wire BidiWakeSink")
-	}
-	opts.BidiWakeSink.NoteUploadWake()
-	opts.BidiWakeSink.NoteDownloadWake()
-	if inj.BidiWake.Upload.Load() != 1 || inj.BidiWake.Download.Load() != 1 {
-		t.Fatalf("BidiWakeSink must share counters with localizeInjectors")
-	}
+	_ = inj.connectStreamOpts()
 }
 
 // TestLocalizeBenchMinBytesContract (S44): windowed CONNECT-stream WriteTo bench must move at least

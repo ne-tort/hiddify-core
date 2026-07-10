@@ -9,7 +9,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -37,7 +36,6 @@ func (s *coreSession) streamH3Hooks(options ClientOptions) strmclient.H3Hooks {
 }
 
 func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, options ClientOptions, targetHost string, targetPort uint16, tcpHTTP *http3.Transport) (net.Conn, error) {
-	ctx = strm.ContextWithConnectStreamMode(ctx, options.ConnectStreamMode)
 	return strmclient.DialHTTP3(ctx, s.streamH3Hooks(options), s.streamH3Host(), tcpURL, strmclient.H3DialInput{
 		Tag:        options.Tag,
 		TCPURLHost: tcpURL.Host,

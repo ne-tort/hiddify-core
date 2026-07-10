@@ -1,9 +1,6 @@
 package h3
 
-import (
-	"bytes"
-	"testing"
-)
+import "testing"
 
 func TestH3UploadFlushChunkBytesProdDefault(t *testing.T) {
 	if H3UploadFlushChunkBytes != 64*1024 {
@@ -11,38 +8,12 @@ func TestH3UploadFlushChunkBytesProdDefault(t *testing.T) {
 	}
 }
 
-func TestH3UploadChunkBytesDuplexUsesFlushChunk(t *testing.T) {
-	if got := H3UploadChunkBytes(true, false, true); got != H3UploadFlushChunkBytes {
-		t.Fatalf("duplex chunk: got %d want %d", got, H3UploadFlushChunkBytes)
+func TestH3UploadChunkBytesUsesConnectStreamBufLen(t *testing.T) {
+	want := connectStreamBufLen
+	if got := H3UploadChunkBytes(true, true, true); got != want {
+		t.Fatalf("duplex chunk: got %d want %d", got, want)
 	}
-	if got := H3UploadChunkBytes(false, false, false); got != TunnelWriteToBufLen {
-		t.Fatalf("sequential upload chunk: got %d want %d", got, TunnelWriteToBufLen)
-	}
-}
-
-func TestH3WriteChunkedSplitsWrites(t *testing.T) {
-	var got []int
-	w := &chunkRecordWriter{fn: func(p []byte) (int, error) {
-		got = append(got, len(p))
-		return len(p), nil
-	}}
-	if _, err := writeChunked(w, bytes.Repeat([]byte("x"), 10*1024), 4*1024); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) < 2 {
-		t.Fatalf("expected multiple chunks, got %v", got)
-	}
-	for _, n := range got {
-		if n > 4*1024 {
-			t.Fatalf("chunk %d exceeds 4 KiB", n)
-		}
+	if got := H3UploadChunkBytes(false, false, false); got != want {
+		t.Fatalf("sequential upload chunk: got %d want %d", got, want)
 	}
 }
-
-type chunkRecordWriter struct {
-	fn func([]byte) (int, error)
-}
-
-func (w *chunkRecordWriter) Write(p []byte) (int, error) { return w.fn(p) }
-
-func (w *chunkRecordWriter) Close() error { return nil }

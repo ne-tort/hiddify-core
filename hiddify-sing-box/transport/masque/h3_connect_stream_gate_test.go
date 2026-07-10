@@ -10,8 +10,8 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-// TestGATEH3ConnectStreamThinSocksSmoke verifies thin_bidi dataplane through in-process SOCKS router.
-func TestGATEH3ConnectStreamThinSocksSmoke(t *testing.T) {
+// TestGATEH3ConnectStreamSocksSmoke verifies the single RFC CONNECT-stream dataplane through in-process SOCKS.
+func TestGATEH3ConnectStreamSocksSmoke(t *testing.T) {
 	targetPort := startH2FakeIperfStreamingDownloadTarget(t)
 	proxyPort := startInProcessTCPConnectStreamRelayProxy(t)
 	waitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -19,7 +19,6 @@ func TestGATEH3ConnectStreamThinSocksSmoke(t *testing.T) {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
-		ConnectStreamMode:        "thin_bidi",
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 	})

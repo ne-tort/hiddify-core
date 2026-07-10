@@ -9,7 +9,6 @@ import (
 	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 type connectStreamHarness struct {
 	conn     net.Conn
@@ -19,25 +18,15 @@ type connectStreamHarness struct {
 }
 
 // connectStreamHarnessOpts configures in-process CONNECT-stream harness probes (S41, S89).
-type connectStreamHarnessOpts struct {
-	BidiWakeSink h3.BidiWakeSink
-}
+type connectStreamHarnessOpts struct{}
 
 func wrapConnectStreamHarnessConn(link bidiLink, conn net.Conn) net.Conn {
 	return link.wrap(conn)
 }
 
 func applyConnectStreamTunnelHook(o connectStreamHarnessOpts) func() {
-	prev := h3.TunnelConnParamsHook
-	if o.BidiWakeSink != nil {
-		sink := o.BidiWakeSink
-		h3.TunnelConnParamsHook = func(p *h3.TunnelConnParams) {
-			p.BidiWakeSink = sink
-		}
-	}
-	return func() {
-		h3.TunnelConnParamsHook = prev
-	}
+	_ = o
+	return func() {}
 }
 
 func (h *connectStreamHarness) close() {

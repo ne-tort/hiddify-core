@@ -1,4 +1,4 @@
-package h3
+﻿package h3
 
 import (
 	"errors"
@@ -34,20 +34,17 @@ func benchWindowedBidiLinkRTT(rtt time.Duration, windowBytes int) float64 {
 	return benchWindowedH3WriteToMbps(rtt, windowBytes, benchWindowedDuration)
 }
 
-// benchWindowedThinTunnelConnMbps measures thin TunnelConn WriteTo through a windowed sink.
-func benchWindowedThinTunnelConnMbps(rtt time.Duration, windowBytes int) float64 {
-	stream := newRefBenchInfiniteStream()
-	conn := NewThinTunnelConn(ThinTunnelConnParams{H3Stream: stream})
-	sink := newBenchWindowedSink(rtt, windowBytes, benchWindowedDuration)
-	n, _ := conn.WriteTo(sink)
-	secs := benchWindowedDuration.Seconds()
-	if secs <= 0 {
-		secs = 1
-	}
-	return float64(n*8) / secs / 1e6
+// ExportBenchWindowedBidiLink measures download Mbps through WrapBidiWindow @ prod RTT/window anchors.
+func ExportBenchWindowedBidiLink() float64 {
+	return benchWindowedBidiLink()
 }
 
-// benchWindowedProdTunnelConnMbps measures prod TunnelConn WriteTo through a windowed sink.
+// ExportBenchWindowedBidiLinkRTT measures WriteTo download Mbps at synthetic WAN RTT and window.
+func ExportBenchWindowedBidiLinkRTT(rtt time.Duration, windowBytes int) float64 {
+	return benchWindowedBidiLinkRTT(rtt, windowBytes)
+}
+
+// benchWindowedProdTunnelConnMbps measures TunnelConn WriteTo through a windowed sink.
 func benchWindowedProdTunnelConnMbps(rtt time.Duration, windowBytes int) float64 {
 	stream := newRefBenchInfiniteStream()
 	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})

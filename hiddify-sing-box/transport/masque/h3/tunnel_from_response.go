@@ -19,8 +19,6 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, tar
 		return nil, errors.Join(ErrTunnelConnFailed, errors.New("nil CONNECT response"))
 	}
 	remoteAddr, _ := net.ResolveTCPAddr("tcp", net.JoinHostPort(targetHost, strconv.Itoa(int(targetPort))))
-	// ctx is handshake-scoped (ConnectStreamHandshakeContext / WithoutCancel).
-	streamCtx := ctx
 	hs, ok := resp.Body.(http3.HTTPStreamer)
 	if !ok {
 		return nil, ErrHTTPStreamerMissing
@@ -33,18 +31,14 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, tar
 		rel.ReleaseHTTPStream()
 	}
 	http3.EnableMasqueConnectStream(str)
-	params := TunnelConnParams{
-		H3Stream:         str,
-		Ctx:              streamCtx,
-		Local:            &net.TCPAddr{},
-		Remote:           remoteAddr,
-		RouteBidiDuplex:  strm.ConnectStreamRouteBidiDuplex(ctx),
-		ConnectStreamLeg: strm.ConnectStreamLegFromContext(ctx),
-	}
-	applyTunnelConnParamsHook(&params)
-	conn := NewTunnelConn(params)
-	_ = PrimeH3UploadBootstrapOnConn(conn)
-	return conn, nil
+	primeH3ConnectStream(str)
+	return NewTunnelConn(TunnelConnParams{
+		H3Stream:        str,
+		Ctx:             ctx,
+		Local:           &net.TCPAddr{},
+		Remote:          remoteAddr,
+		RouteBidiDuplex: strm.ConnectStreamRouteBidiDuplex(ctx),
+	}), nil
 }
 
 // TunnelConnFromCONNECT maps a completed HTTP/3 CONNECT RoundTrip to a tunneled net.Conn.

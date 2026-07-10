@@ -2,8 +2,6 @@ package masque
 
 import (
 	"testing"
-
-	"github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // Arch investigation synth guards (ARCH-INVESTIGATION wave A2).
@@ -44,10 +42,13 @@ func TestArchBidiWindowModelsCeiling(t *testing.T) {
 	assertConnectStreamWindowedCeilingBand(t, r.mbps, "A2-7 WrapBidiWindow ceiling")
 }
 
-// TestArchREFSRCProdDefaultH3Stream (REF-SRC-SB-C2): prod dial is single-bidi Invisv (nil Body).
+// TestArchREFSRCProdDefaultH3Stream (REF-SRC-SB-C2): prod dial uses one RFC CONNECT bidi stream.
 func TestArchREFSRCProdDefaultH3Stream(t *testing.T) {
-	if h3.CurrentConnectStreamMode() != h3.ConnectStreamModeSingleBidi {
-		t.Fatalf("expected single_bidi mode, got %q", h3.CurrentConnectStreamMode())
+	h := startConnectStreamDownloadHarness(t, instantBidiLink{})
+	defer h.close()
+	tc, ok := unwrapH3TunnelConn(h.conn)
+	if !ok || !tc.UsesH3Stream() {
+		t.Fatal("prod dial must use one http3 stream (nil Body)")
 	}
 }
 

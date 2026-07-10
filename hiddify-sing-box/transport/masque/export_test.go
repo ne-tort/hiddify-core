@@ -10,7 +10,6 @@ import (
 
 	"github.com/sagernet/sing-box/transport/masque/h3"
 	"github.com/sagernet/sing-box/transport/masque/session"
-	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 var (
@@ -163,15 +162,12 @@ func ExportBenchMasqueradeDuplexMinMbps(duration time.Duration) float64 {
 	return benchMasqueradeDuplexMinMbpsOnly(duration)
 }
 
-// ExportInstallDuplexDownloadArmedHook wires beginDuplexDownload barrier for prod-stack duplex synth.
+// ExportInstallDuplexDownloadArmedHook wires beginDownload barrier for prod-stack duplex synth.
 func ExportInstallDuplexDownloadArmedHook(hook chan struct{}) func() {
-	prevH3 := h3.TestDuplexDownloadArmedHook
-	prevH2 := strmconn.TestDuplexDownloadArmedHook
+	prev := h3.TestDuplexDownloadArmedHook
 	h3.TestDuplexDownloadArmedHook = hook
-	strmconn.TestDuplexDownloadArmedHook = hook
 	return func() {
-		h3.TestDuplexDownloadArmedHook = prevH3
-		strmconn.TestDuplexDownloadArmedHook = prevH2
+		h3.TestDuplexDownloadArmedHook = prev
 	}
 }
 

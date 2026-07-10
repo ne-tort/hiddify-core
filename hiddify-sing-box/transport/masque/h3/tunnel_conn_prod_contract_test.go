@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// TestTunnelConnH3OnlyProdContract locks STR-4a1: prod TunnelConn is single *http3.Stream only;
-// legacy pipe_upload reader/writer split lives in pipe_upload_conn.go.
-func TestTunnelConnH3OnlyProdContract(t *testing.T) {
+// TestTunnelConnH3OnlyProdContract locks STR-4a1: prod TunnelConn is single *http3.Stream only.
+func TestTunnelConnH3OnlyProdContractSource(t *testing.T) {
 	t.Parallel()
 	src := readH3Source(t, "tunnel_conn.go")
 	for _, needle := range []string{
@@ -17,18 +16,15 @@ func TestTunnelConnH3OnlyProdContract(t *testing.T) {
 		"c.writer",
 		"Reader       io.ReadCloser",
 		"Writer       io.WriteCloser",
+		"PipeUpload",
 	} {
 		if strings.Contains(src, needle) {
-			t.Fatalf("tunnel_conn.go must not contain %q (pipe split → pipe_upload_conn.go)", needle)
+			t.Fatalf("tunnel_conn.go must not contain %q", needle)
 		}
 	}
 	fromResp := readH3Source(t, "tunnel_from_response.go")
 	if strings.Contains(fromResp, "Reader:") || strings.Contains(fromResp, "Writer:") {
 		t.Fatal("tunnel_from_response must dial H3Stream only")
-	}
-	pipe := readH3Source(t, "pipe_upload_conn.go")
-	if !strings.Contains(pipe, "PipeUploadTunnelConn") {
-		t.Fatal("pipe_upload_conn.go must define PipeUploadTunnelConn")
 	}
 }
 

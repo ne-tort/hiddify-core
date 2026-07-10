@@ -3,6 +3,7 @@ package h3
 import (
 	"io"
 	"net"
+	"sync/atomic"
 )
 
 // TunnelFacade is the minimal route-facing H3 TCP tunnel contract.
@@ -13,30 +14,18 @@ type TunnelFacade interface {
 	TunnelPolicySnapshot() TunnelPolicySnapshot
 }
 
-// TunnelPolicySnapshot captures the effective H3 tunnel mode without exposing mutable internals.
+// TunnelPolicySnapshot captures the effective H3 tunnel dataplane.
 type TunnelPolicySnapshot struct {
-	Mode            ConnectStreamMode
-	Role            ConnectStreamRole
 	RouteBidiDuplex bool
 	UsesH3Stream    bool
-	SchedPolicy     ConnectStreamSchedPolicy
 }
 
 func (c *TunnelConn) TunnelPolicySnapshot() TunnelPolicySnapshot {
 	if c == nil {
-		return TunnelPolicySnapshot{Mode: CurrentConnectStreamMode(), SchedPolicy: ProdConnectStreamSchedPolicy()}
-	}
-	policy := ProdConnectStreamSchedPolicy()
-	if c.scheduler != nil {
-		policy = c.scheduler.policy
+		return TunnelPolicySnapshot{}
 	}
 	return TunnelPolicySnapshot{
-		Mode:            CurrentConnectStreamMode(),
-		Role:            c.connectStreamRole,
-		RouteBidiDuplex: c.routeBidiDuplex,
+		RouteBidiDuplex: atomic.LoadInt32(&c.routeBidiDuplex) != 0,
 		UsesH3Stream:    c.h3 != nil,
-		SchedPolicy:     policy,
 	}
 }
-
-var _ TunnelFacade = (*TunnelConn)(nil)

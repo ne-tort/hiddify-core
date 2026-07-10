@@ -274,7 +274,6 @@ func (e *Endpoint) startRuntime() {
 		HTTPLayerAuto:            normalizeHTTPLayer(e.options.HTTPLayer) == option.MasqueHTTPLayerAuto,
 		HTTPLayerSuccess:         recordHL,
 		TCPIPv6PathBracket:       e.options.TCPIPv6PathBracket,
-		ConnectStreamMode:        e.options.ConnectStreamMode,
 	})
 	const masqueRuntimeStartMaxAttempts = 3
 	var startErr error

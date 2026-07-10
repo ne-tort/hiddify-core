@@ -3,6 +3,11 @@ package h3
 // TunnelConnParamsHook is invoked before NewTunnelConn on every CONNECT tunnel (tests only; nil in prod).
 var TunnelConnParamsHook func(*TunnelConnParams)
 
+var testBidiDownloadActiveHook func(active bool)
+
+// TestDuplexDownloadArmedHook fires when beginDownload runs (synth duplex barrier).
+var TestDuplexDownloadArmedHook chan struct{}
+
 func applyTunnelConnParamsHook(p *TunnelConnParams) {
 	if TunnelConnParamsHook != nil && p != nil {
 		TunnelConnParamsHook(p)

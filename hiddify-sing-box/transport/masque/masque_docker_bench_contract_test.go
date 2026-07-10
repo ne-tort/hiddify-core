@@ -499,15 +499,15 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		"masque-client-core",
 		"MASQUE_BENCH_SKIP_URL_TEST",
 	)
-	h3DrainGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "bidi_wake.go"))
+	h3TunnelGo := readRepoSource(t, filepath.Join("hiddify-core", "hiddify-sing-box", "transport", "masque", "h3", "tunnel_conn.go"))
 	requireSubstrings(t, localProfiles, "connect-stream-h3 zero-env client",
 		`def client_env`,
 		`MASQUE_BENCH_SKIP_URL_TEST`,
 		`skip_monitoring`,
 	)
-	requireSubstrings(t, h3DrainGo, "h3 bidi wake prod",
-		"wakeBidiSendAfterUpload",
-		"BidiWakeSink",
+	requireSubstrings(t, h3TunnelGo, "h3 connect stream upload flush",
+		"FlushMasqueCoalesce",
+		"MasqueWakeStreamSend",
 	)
 	requireSubstrings(t, localProfiles, "connect-stream-h3-tun field parity",
 		`name="connect-stream-h3-tun"`,

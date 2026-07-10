@@ -154,8 +154,6 @@ type MasqueEndpointOptions struct {
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
 	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
 	HTTPLayer string `json:"http_layer,omitempty"`
-	// ConnectStreamMode selects H3 CONNECT-stream dataplane: single_bidi (default), thin_bidi (Invisv A/B), or split_legs (deferred).
-	ConnectStreamMode string `json:"connect_stream_mode,omitempty"`
 	// HTTPLayerCacheTTL overrides the in-memory TTL for http_layer auto (default 5m).
 	HTTPLayerCacheTTL badoption.Duration `json:"http_layer_cache_ttl,omitempty"`
 	// Parsed only so validateMasqueOptions can reject removed JSON keys.
