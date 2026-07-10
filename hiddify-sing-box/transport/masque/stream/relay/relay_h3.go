@@ -114,7 +114,7 @@ func relayTCPTunnelH3DownloadLeg(ctx context.Context, targetConn net.Conn, reqBo
 		w.prepareDownloadPrimary()
 		w.enableDownloadSend()
 	}
-	_, err := relayTunnelDownloadRelayH3Plain(bidi, targetConn)
+	_, err := relayTunnelDownloadRelayH3Leg(bidi, targetConn)
 	return err
 }
 
@@ -133,7 +133,7 @@ func relayTCPTunnelH3UploadLeg(ctx context.Context, targetConn net.Conn, reqBody
 	if w := relayBidiWakerFromRW(bidi); w != nil {
 		w.enableConnectStream()
 	}
-	_, err := relayTunnelCopyBufferH3BidiUpload(targetConn, uploadSrc, bidi)
+	_, err := relayTunnelCopyBufferH3LegUpload(targetConn, uploadSrc)
 	if reqBody != nil {
 		_ = reqBody.Close()
 	}
@@ -141,6 +141,43 @@ func relayTCPTunnelH3UploadLeg(ctx context.Context, targetConn net.Conn, reqBody
 		_ = cw.CloseWrite()
 	}
 	return err
+}
+
+func relayTunnelDownloadRelayH3Leg(dst io.Writer, src net.Conn) (int64, error) {
+	if prime, err := relayTunnelPrimeDownload(src); err != nil {
+		return 0, err
+	} else if len(prime) > 0 {
+		if _, err := dst.Write(prime); err != nil {
+			return int64(len(prime)), err
+		}
+		if w := relayBidiWakerFromWriter(dst); w != nil {
+			_ = w.flushDownloadPrime()
+		}
+	}
+	return relayTunnelCopyBufferH3Leg(dst, src)
+}
+
+func relayTunnelCopyBufferH3Leg(dst io.Writer, src io.Reader) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	n, err := io.CopyBuffer(dst, src, *bp)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, err
+	}
+	if w := relayBidiWakerFromWriter(dst); w != nil {
+		w.wakeAfterDownloadWrite()
+	}
+	return n, nil
+}
+
+func relayTunnelCopyBufferH3LegUpload(dst io.Writer, src io.Reader) (int64, error) {
+	bp := relayTunnelBufPool.Get().(*[]byte)
+	defer relayTunnelBufPool.Put(bp)
+	n, err := io.CopyBuffer(dst, src, *bp)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, err
+	}
+	return n, nil
 }
 
 func relayTunnelDownloadRelayH3Plain(dst io.Writer, src net.Conn) (int64, error) {

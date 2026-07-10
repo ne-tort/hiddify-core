@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const RelayTunnelBufLen = 256 * 1024
+const RelayTunnelBufLen = 64 * 1024
 
 // RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
 const RelayTunnelFlushBytes = RelayTunnelBufLen

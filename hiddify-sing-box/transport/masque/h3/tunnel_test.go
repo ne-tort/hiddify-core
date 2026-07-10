@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 func TestH3ConnectRequestStreamUsesNilBody(t *testing.T) {
@@ -18,17 +17,6 @@ func TestH3ConnectRequestStreamUsesNilBody(t *testing.T) {
 	}
 	if req.Body != nil {
 		t.Fatalf("CONNECT stream upload needs nil Body (not http.NoBody), got %T", req.Body)
-	}
-}
-
-func TestH3ConnectRequestOmitsLegHeader(t *testing.T) {
-	ctx := strm.ContextWithConnectStreamLeg(context.Background(), strm.ConnectStreamLegUpload)
-	req, err := ConnectRequest(ctx, "https://example.com/masque/tcp/h/p", "example.com", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != "" {
-		t.Fatalf("leg header=%q want empty (RFC single bidi)", got)
 	}
 }
 

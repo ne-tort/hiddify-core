@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	// masqueStreamWriteToBufLen matches transport/masque h3 tunnelWriteToBufLen (256 KiB).
-	masqueStreamWriteToBufLen = 256 * 1024
+	// masqueStreamWriteToBufLen matches transport/masque h3 connectStreamBufLen (64 KiB, h2o parity).
+	masqueStreamWriteToBufLen = 64 * 1024
 )
 
 var (

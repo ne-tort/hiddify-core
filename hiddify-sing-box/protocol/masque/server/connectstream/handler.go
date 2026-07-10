@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/relay"
-	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -29,6 +28,8 @@ type Hooks struct {
 	AllowTCPPort          func(portStr string, allowed, blocked []uint16) bool
 	OnwardTCPDialAddr     func(host string, port uint16) string
 	DialTCPTargetSerial   func(ctx context.Context, dialer net.Dialer, addrs []netip.Addr, port uint16) (net.Conn, netip.Addr, error)
+	// ResolveErrorHTTPStatus maps onward resolve/policy errors to HTTP status (wired from server package).
+	ResolveErrorHTTPStatus func(err error) int
 }
 
 // Host carries CONNECT-stream handler dependencies from the parent endpoint.
@@ -87,8 +88,8 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 	resolvedAddrs, allowErr := resolveAddrs(r.Context(), targetHost, host.Options.AllowPrivateTargets)
 	if allowErr != nil {
 		status := http.StatusBadGateway
-		if errors.Is(allowErr, connectudp.ErrPrivateTargetDenied) {
-			status = http.StatusForbidden
+		if mapStatus := h.Hooks.ResolveErrorHTTPStatus; mapStatus != nil {
+			status = mapStatus(allowErr)
 		}
 		if status == http.StatusForbidden {
 			debugf("masque tcp connect policy denied host=%s port=%s status=403 error_class=policy err=%v", targetHost, targetPort, allowErr)
@@ -115,33 +116,41 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	var (
-		targetConn   net.Conn
-		dialErr      error
-		resolvedHost string
-	)
-	debugf("masque tcp connect dial start host=%s resolved_addrs=%v port=%s", targetHost, resolvedAddrs, targetPort)
-	if len(resolvedAddrs) == 0 {
-		dialAddrFn := h.Hooks.OnwardTCPDialAddr
-		if dialAddrFn == nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+	leg := strm.ConnectStreamLegFromRequest(r)
+	pairKey := strm.ConnectStreamPairKeyFromRequest(r, targetHost, targetPort)
+	var resolvedHost string
+	debugf("masque tcp connect dial start host=%s resolved_addrs=%v port=%s leg=%s", targetHost, resolvedAddrs, targetPort, leg)
+	dialOnward := func(ctx context.Context) (net.Conn, error) {
+		var (
+			targetConn net.Conn
+			dialErr    error
+		)
+		if len(resolvedAddrs) == 0 {
+			dialAddrFn := h.Hooks.OnwardTCPDialAddr
+			if dialAddrFn == nil {
+				return nil, errors.New("onward dial addr hook missing")
+			}
+			dialAddr := dialAddrFn(targetHost, uint16(portNum))
+			targetConn, dialErr = host.Dialer.DialContext(ctx, "tcp", dialAddr)
+			resolvedHost = targetHost
+		} else {
+			var dialedAddr netip.Addr
+			targetConn, dialedAddr, dialErr = dialSerial(ctx, host.Dialer, resolvedAddrs, uint16(portNum))
+			resolvedHost = dialedAddr.String()
 		}
-		dialAddr := dialAddrFn(targetHost, uint16(portNum))
-		targetConn, dialErr = host.Dialer.DialContext(r.Context(), "tcp", dialAddr)
-		resolvedHost = targetHost
-	} else {
-		var dialedAddr netip.Addr
-		targetConn, dialedAddr, dialErr = dialSerial(r.Context(), host.Dialer, resolvedAddrs, uint16(portNum))
-		resolvedHost = dialedAddr.String()
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		relay.TuneTCPOutbound(targetConn)
+		return targetConn, nil
 	}
+	targetConn, releaseOnward, dialErr := strm.AcquireDualLegOnward(r.Context(), leg, pairKey, dialOnward)
 	if dialErr != nil {
 		debugf("masque tcp connect dial failed host=%s resolved_addrs=%v port=%s status=502 error_class=%s err=%v", targetHost, resolvedAddrs, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, dialErr)), dialErr)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	relay.TuneTCPOutbound(targetConn)
-	defer targetConn.Close()
+	defer releaseOnward()
 	// RFC 8441 CONNECT-stream: relay onward TCP→response while request body may still be idle
 	// (iperf3 waits for server banner before sending). Without full-duplex the HTTP stack can
 	// block response DATA until the request body is consumed (TUN bench hang at 0 Mbit/s).
@@ -152,7 +161,7 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		flusher.Flush()
 	}
 	debugf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort)
-	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w, strm.ConnectStreamLegFromRequest(r))
+	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w, leg)
 	if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
 		debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr)
 		return

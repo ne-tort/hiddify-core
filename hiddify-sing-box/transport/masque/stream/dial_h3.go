@@ -98,6 +98,9 @@ func DialHTTP3ConnectStreamLeg(
 		}
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
 		legCtx := ContextWithConnectStreamLeg(streamCtx, legLabel)
+		if pairID := ConnectStreamPairFromContext(ctx); pairID != "" {
+			legCtx = ContextWithConnectStreamPair(legCtx, pairID)
+		}
 		req, reqErr := hooks.BuildRequest(legCtx, hooks.RequestURL(tcpURL), serverHost)
 		if reqErr != nil {
 			stopReqCtxRelay(false)

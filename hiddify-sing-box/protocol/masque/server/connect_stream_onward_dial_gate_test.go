@@ -37,9 +37,10 @@ func TestGATEConnectStreamOnwardDialSerialIPv4Fallback(t *testing.T) {
 			ResolveTCPTargetAddrs: func(_ context.Context, _ string, _ bool) ([]netip.Addr, error) {
 				return []netip.Addr{unreachableV6, v4}, nil
 			},
-			AllowTCPPort:      AllowTCPPort,
-			OnwardTCPDialAddr: OnwardTCPDialAddr,
-			DialTCPTargetSerial: DialTCPTargetSerial,
+			AllowTCPPort:           AllowTCPPort,
+			OnwardTCPDialAddr:      OnwardTCPDialAddr,
+			DialTCPTargetSerial:    DialTCPTargetSerial,
+			ResolveErrorHTTPStatus: ConnectStreamResolveHTTPStatus,
 		},
 	}
 	host := cstrm.Host{

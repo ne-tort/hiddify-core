@@ -51,16 +51,6 @@ type Stream struct {
 	masqueCoalesceBuf []byte // batched CONNECT DATA frames (h2o/Invisv bulk coalesce)
 
 	masqueTunnelData bool // CONNECT tunnel bulk DATA phase (fast frame parse)
-
-	masqueMS3DownloadDelivery bool // MS3 TunnelConn owns delivery wake (suppress per-Read http3 wake)
-}
-
-// SetMasqueMS3DownloadDelivery marks MS3-owned download delivery (TunnelConn WriteTo).
-// While set, Stream.Read does not emit per-chunk http3 wakes — MS3 noteDownloadDelivery batches them.
-func (s *Stream) SetMasqueMS3DownloadDelivery(on bool) {
-	if s != nil {
-		s.masqueMS3DownloadDelivery = on
-	}
 }
 
 func newStream(
@@ -129,7 +119,7 @@ func (s *Stream) Read(b []byte) (int, error) {
 		n, err = s.datagramStream.Read(b)
 	}
 	s.bytesRemainingInFrame -= uint64(n)
-	if n > 0 && !s.masqueMS3DownloadDelivery {
+	if n > 0 {
 		masqueWakeSendAfterReceiveRead(s, n)
 	}
 	return n, err
@@ -143,7 +133,7 @@ func masqueStreamDuplexUploadWake(s *Stream) bool {
 	return qs != nil && quic.MasqueIsBidiDuplexUploadStarted(qs)
 }
 
-const masqueHTTP3WriteToBufLen = 256 * 1024
+const masqueHTTP3WriteToBufLen = 64 * 1024
 
 func masqueStreamDownloadPrimaryReceive(s *Stream) bool {
 	if s == nil || s.datagramStream == nil {
@@ -153,12 +143,8 @@ func masqueStreamDownloadPrimaryReceive(s *Stream) bool {
 	return qs != nil && quic.MasqueIsBidiDownloadReceiveOnly(qs) && !quic.MasqueIsBidiDuplexUploadStarted(qs)
 }
 
-// WriteTo drains tunneled CONNECT payload. h2o/Invisv parity: per-delivery wake (no RTT batch).
-// Prod client download uses TunnelConn.WriteTo (MS3); WriteTo is disabled while MS3 owns delivery.
+// WriteTo drains tunneled CONNECT payload (h2o/Invisv parity: per-delivery wake).
 func (s *Stream) WriteTo(w io.Writer) (int64, error) {
-	if s.masqueMS3DownloadDelivery {
-		return 0, errors.New("http3: WriteTo disabled while MS3 owns CONNECT download delivery")
-	}
 	buf := make([]byte, masqueHTTP3WriteToBufLen)
 	var total int64
 	for {
@@ -225,7 +211,7 @@ func (s *Stream) flushMasqueWriteCoalesce() error {
 	return err
 }
 
-// Write queues tunneled CONNECT payload. Bulk uploads coalesce into 256 KiB DATA frames (h2o/Invisv).
+// Write queues tunneled CONNECT payload. Bulk uploads coalesce into 64 KiB DATA frames (h2o parity).
 func (s *Stream) Write(b []byte) (int, error) {
 	coalesceLen := masqueHTTP3WriteToBufLen
 	total := len(b)

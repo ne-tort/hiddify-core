@@ -17,6 +17,7 @@ var defaultConnectStreamHandler = cstrm.Handler{
 		AllowTCPPort:          AllowTCPPort,
 		OnwardTCPDialAddr:     OnwardTCPDialAddr,
 		DialTCPTargetSerial:   DialTCPTargetSerial,
+		ResolveErrorHTTPStatus: ConnectStreamResolveHTTPStatus,
 	},
 }
 

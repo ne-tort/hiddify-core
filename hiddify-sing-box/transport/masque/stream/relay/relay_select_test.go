@@ -18,9 +18,10 @@ type unblockOnDeadlineConn struct {
 	blockOnce sync.Once
 	blocked   chan struct{}
 
-	mu        sync.Mutex
-	deadline  time.Time
-	hasDeadln bool
+	mu           sync.Mutex
+	deadline     time.Time
+	hasDeadln    bool
+	pulseUnblock bool
 }
 
 func newUnblockOnDeadlineConn(chunks ...[]byte) *unblockOnDeadlineConn {
@@ -47,6 +48,10 @@ func (c *unblockOnDeadlineConn) Read(p []byte) (int, error) {
 	c.blockOnce.Do(func() { close(c.blocked) })
 	for {
 		c.mu.Lock()
+		if c.pulseUnblock {
+			c.mu.Unlock()
+			return 0, io.EOF
+		}
 		if c.hasDeadln && !c.deadline.IsZero() && !time.Now().Before(c.deadline) {
 			c.mu.Unlock()
 			return 0, io.EOF
@@ -65,6 +70,9 @@ func (c *unblockOnDeadlineConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (c *unblockOnDeadlineConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
+	if t.IsZero() && c.hasDeadln && !c.deadline.IsZero() {
+		c.pulseUnblock = true
+	}
 	c.deadline = t
 	c.hasDeadln = true
 	c.mu.Unlock()

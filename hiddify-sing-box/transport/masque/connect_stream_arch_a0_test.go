@@ -19,9 +19,12 @@ import (
 
 // Arch investigation wave A0 — root cause code map + contention matrix (synth contracts).
 
+const connectStreamParallelStreams = 4
+
 // TestArchA0CodeMapConnectStreamBytePath (A0-2): iperf -R download in prod uses
 // route connectionCopy writer_to → h3.TunnelConn.WriteTo → S2C DATA (reader or h3 stream).
 func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	t.Run("prod_h3_stream_write_to_drain", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 		defer h.close()
@@ -72,6 +75,7 @@ func TestArchA0CodeMapConnectStreamBytePath(t *testing.T) {
 
 // TestArchA0WireVsAppPipePath (A0-1a): prod uses one HTTP/3 CONNECT bidi stream (UsesH3Stream=true).
 func TestArchA0WireVsAppPipePath(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	t.Run("prod_h3_stream_one_http3_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
@@ -90,6 +94,7 @@ func TestArchA0WireVsAppPipePath(t *testing.T) {
 
 // TestArchA0ContentionPointsContract (A0-2a): documents RFC dataplane anchors — 64 KiB buffers.
 func TestArchA0ContentionPointsContract(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	const wantUploadFlushChunk = 64 * 1024
 	const wantWriteToBuf = 64 * 1024
 	const wantBidiWindow = 64 * 1024
@@ -116,6 +121,7 @@ func TestArchA0ContentionPointsContract(t *testing.T) {
 
 // TestArchA0ContentionMatrixC2SDuringS2C (A0-3): who writes C2S while S2C WriteTo drains.
 func TestArchA0ContentionMatrixC2SDuringS2C(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	t.Run("prod_h3_stream_c2s_contends_on_same_stream", func(t *testing.T) {
 		h := startConnectStreamDownloadHarness(t, benchWindowedBidiLink())
 		defer h.close()
@@ -177,6 +183,7 @@ func TestArchA0OneTCPVsNTCPMatrix(t *testing.T) {
 	}
 
 	t.Run("P1_one_connect_one_conn", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		if !strm.ProdDialShapeOf(h.conn).OK() {
@@ -188,8 +195,20 @@ func TestArchA0OneTCPVsNTCPMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("P2_removed_dual_connect", func(t *testing.T) {
-		t.Skip("P2 dual CONNECT removed — prod is single-bidi Invisv path")
+	t.Run("P2_dual_connect_composite", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
+		defer h.close()
+		if !strm.ProdDialShapeOf(h.conn).OK() {
+			t.Fatal("P2 dial must expose composite net.Conn to route")
+		}
+		dual, ok := unwrapDualTunnelConn(h.conn)
+		if !ok {
+			t.Fatal("P2 prod must use *h3.DualTunnelConn under stream.TunnelConn")
+		}
+		if dual.TunnelPolicySnapshot().RouteBidiDuplex {
+			t.Fatal("P2 legs must not share one bidi stream (RouteBidiDuplex=false)")
+		}
 	})
 
 	t.Run("P6_parallel_n_conns", func(t *testing.T) {
@@ -217,6 +236,7 @@ func TestArchA0OneTCPVsNTCPMatrix(t *testing.T) {
 
 // TestArchA0OrchestrationBoundary (A0-2b): route/session/stream/h3/server ownership map.
 func TestArchA0OrchestrationBoundary(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 	if len(ArchOrchestrationBoundaries) < 5 {
 		t.Fatalf("A0-2b boundary table: %d rows want >= 5", len(ArchOrchestrationBoundaries))
 	}
@@ -404,6 +424,7 @@ func TestArchA0RouteScopeOutOfPattern(t *testing.T) {
 	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
 
 	t.Run("P1_route_markers_unchanged", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "0")
 		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
 		defer h.close()
 		if !strm.ProdDialShapeOf(h.conn).OK() {
@@ -411,8 +432,20 @@ func TestArchA0RouteScopeOutOfPattern(t *testing.T) {
 		}
 	})
 
-	t.Run("P2_removed_dual_connect", func(t *testing.T) {
-		t.Skip("P2 dual CONNECT removed — prod is single-bidi Invisv path")
+	t.Run("P2_dual_connect_composite", func(t *testing.T) {
+		t.Setenv("MASQUE_CONNECT_STREAM_DUAL_CONNECT", "1")
+		h := startConnectStreamDownloadHarness(t, instantBidiLink{})
+		defer h.close()
+		if !strm.ProdDialShapeOf(h.conn).OK() {
+			t.Fatal("P2 dial must expose composite net.Conn to route")
+		}
+		dual, ok := unwrapDualTunnelConn(h.conn)
+		if !ok {
+			t.Fatal("P2 prod must use *h3.DualTunnelConn under stream.TunnelConn")
+		}
+		if dual.TunnelPolicySnapshot().RouteBidiDuplex {
+			t.Fatal("P2 legs must not share one bidi stream (RouteBidiDuplex=false)")
+		}
 	})
 
 	t.Logf("A0-5 route ADR: dial policy session/stream/h3; route/conn.go connectionCopy unchanged")
