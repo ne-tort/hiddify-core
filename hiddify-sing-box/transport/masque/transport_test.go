@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1159,52 +1160,38 @@ func TestListenPacketH2UDPTransportChurnBeforeHopPivot(t *testing.T) {
 	}
 }
 
-func TestDialTCPStreamHTTPFallbackRunsAfterReconnectRoundTripSwitchableFailure(t *testing.T) {
-	var h3RoundTrips atomic.Uint32
-	session := newTestCoreSession(msess.CoreSession{
-			Options: ClientOptions{
-			Server:                   "example.com",
-			ServerPort:               443,
-			TemplateTCP:              "https://example.com/masque/tcp/{target_host}/{target_port}",
-			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH3,
-			TCPDial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				return nil, errors.New("tcp dial stub")
-			},
-		},
-			Caps: CapabilitySet{ConnectTCP: true},
-			HTTPLayerAuto: true,
-		})
-	session.TCPRoundTripper = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if session.currentUDPHTTPLayer() == option.MasqueHTTPLayerH3 {
-			n := h3RoundTrips.Add(1)
-			switch n {
-			case 1:
-				return nil, errors.New("nonswitchable_tcp_rt_outer_1")
-			case 2:
-				return nil, errors.New("Extended CONNECT not supported on this path")
-			default:
-				t.Fatalf("unexpected extra HTTP/3 CONNECT-stream RoundTrip #%d", n)
-			}
-		}
-		return nil, errors.New("h2_connect_stream_round_trip_stub")
+func TestHTTPFallbackSwitchOnConnectStreamSwitchableFailure(t *testing.T) {
+	s := newTestCoreSession(msess.CoreSession{
+		HTTPLayerAuto: true,
 	})
-	session.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 
-	_, dialErr := session.dialTCPStream(context.Background(), M.ParseSocksaddrHostPort("example.com", 443))
-	if dialErr == nil {
-		t.Fatal("expected error once h2 path hits tcp dial stub")
+	s.Mu.Lock()
+	switched := s.tryHTTPFallbackSwitchLockedAssumeMu(errors.New("Extended CONNECT not supported on this path"))
+	s.Mu.Unlock()
+	if !switched {
+		t.Fatal("expected http layer fallback switch on switchable CONNECT-stream failure")
 	}
-	if len(session.HopOrder) != 0 {
-		t.Fatalf("test expects no masque hop chain, got %+v", session.HopOrder)
+	if layer, _ := s.UDPHTTPLayer.Load().(string); layer != option.MasqueHTTPLayerH2 {
+		t.Fatalf("expected overlay pivot to h2, got %q", layer)
 	}
-	if session.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
-		t.Fatalf("expected http_layer fallback after transport churn exposes switchable failure, overlay=%q", session.currentUDPHTTPLayer())
+}
+
+func TestHTTPFallbackSwitchRejectsConnectStreamOnward502(t *testing.T) {
+	s := newTestCoreSession(msess.CoreSession{
+		HTTPLayerAuto: true,
+	})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
+
+	err502 := fmt.Errorf("%w: status=%d url=%s", msess.ErrTCPConnectStreamFailed, 502, "https://example.com/masque/tcp/1.2.3.4/443")
+	s.Mu.Lock()
+	switched := s.tryHTTPFallbackSwitchLockedAssumeMu(err502)
+	s.Mu.Unlock()
+	if switched {
+		t.Fatal("onward 502 must not consume http_layer_fallback")
 	}
-	if got := h3RoundTrips.Load(); got != 2 {
-		t.Fatalf("expected exactly two CONNECT-stream RoundTrips on overlay h3 before switch, got %d", got)
-	}
-	if session.HTTPFallbackConsumed.Load() {
-		t.Fatal("expected httpFallbackConsumed cleared after exhausted dialTCPStream so retries can pivot again")
+	if layer, _ := s.UDPHTTPLayer.Load().(string); layer != option.MasqueHTTPLayerH3 {
+		t.Fatalf("expected overlay to stay on h3 after onward 502, got %q", layer)
 	}
 }
 

@@ -100,13 +100,17 @@ func TestHTTPLayerSwitchableFailure(t *testing.T) {
 	if !switchable(errors.New("masque h2: tcp connect-stream roundtrip: reset by peer")) {
 		t.Fatal("expected H2 CONNECT-stream errors with canonical masque h2 prefix to be switchable")
 	}
-	if !switchable(fmt.Errorf("%w: status=%d url=%s",
+	if switchable(fmt.Errorf("%w: status=%d url=%s",
 		errTCPConnectStreamFailed, http.StatusBadGateway, "https://example.invalid/connect")) {
-		t.Fatal("expected H3 CONNECT-stream non-2xx ErrTCPConnectStreamFailed shape to be switchable")
+		t.Fatal("onward CONNECT-stream 502 must not flip HTTP layer (per-target server fault)")
 	}
-	if !switchable(fmt.Errorf("masque h2: %w: status=%d url=%s",
+	if !switchable(fmt.Errorf("%w: status=%d url=%s",
+		errTCPConnectStreamFailed, http.StatusNotImplemented, "https://example.invalid/connect")) {
+		t.Fatal("expected 501 CONNECT-stream policy status to remain switchable")
+	}
+	if switchable(fmt.Errorf("masque h2: %w: status=%d url=%s",
 		errTCPConnectStreamFailed, http.StatusBadGateway, "https://example.invalid/connect")) {
-		t.Fatal("expected H2 CONNECT-stream non-2xx (aligned ErrTCP shape) to be switchable")
+		t.Fatal("onward H2 CONNECT-stream 502 must not flip HTTP layer")
 	}
 	if !switchable(errors.New("masque: server responded with 502")) {
 		t.Fatal("expected masque-go CONNECT-UDP non-2xx to be switchable for H3→H2 fallback")
@@ -173,5 +177,13 @@ func TestHTTPLayerSwitchableFailure(t *testing.T) {
 	}
 	if switchable(nil) {
 		t.Fatal("nil err")
+	}
+}
+
+func TestHTTPLayerSwitchableFailureRejectsLocalGracefulH3Close(t *testing.T) {
+	switchable := httpx.IsLayerSwitchableFailure
+	err := errors.New("masque tcp connect-stream failed | connect roundtrip: H3 error (0x0) (local)")
+	if switchable(err) {
+		t.Fatal("local graceful H3 close must not consume http_layer_fallback")
 	}
 }

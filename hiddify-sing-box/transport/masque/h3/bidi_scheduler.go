@@ -14,19 +14,17 @@ type BidiWakeSink interface {
 
 // ConnectStreamSchedPolicy holds prod scheduling constants (MS3 — zero-env).
 type ConnectStreamSchedPolicy struct {
-	WriteToBufLen                  int
-	UploadFlushChunkBytes          int
-	DownloadDeliveryWakeBatchBytes int
-	DuplexStarvedDownloadReadCap   int
+	WriteToBufLen                int
+	UploadFlushChunkBytes        int
+	DuplexStarvedDownloadReadCap int
 }
 
 // ProdConnectStreamSchedPolicy is the default CONNECT-stream H3 scheduler policy.
 func ProdConnectStreamSchedPolicy() ConnectStreamSchedPolicy {
 	return ConnectStreamSchedPolicy{
-		WriteToBufLen:                  TunnelWriteToBufLen,
-		UploadFlushChunkBytes:          H3UploadFlushChunkBytes,
-		DownloadDeliveryWakeBatchBytes: TunnelWriteToBufLen,
-		DuplexStarvedDownloadReadCap:   16 * 1024,
+		WriteToBufLen:                TunnelWriteToBufLen,
+		UploadFlushChunkBytes:        H3UploadFlushChunkBytes,
+		DuplexStarvedDownloadReadCap: 16 * 1024,
 	}
 }
 
@@ -38,9 +36,9 @@ func (p ConnectStreamSchedPolicy) UploadChunkBytes(downloadActive bool) int {
 	return p.WriteToBufLen
 }
 
-// CapDownloadRead limits download read size when upload send is starved (WAN bidi fairness).
-func (p ConnectStreamSchedPolicy) CapDownloadRead(uploadSendStarved bool, bufLen int) int {
-	if uploadSendStarved && bufLen > p.DuplexStarvedDownloadReadCap {
+// CapDownloadRead limits download read size when saturated duplex upload is FC-starved.
+func (p ConnectStreamSchedPolicy) CapDownloadRead(duplexUploadStarted, uploadSendStarved bool, bufLen int) int {
+	if duplexUploadStarted && uploadSendStarved && bufLen > p.DuplexStarvedDownloadReadCap {
 		return p.DuplexStarvedDownloadReadCap
 	}
 	return bufLen
@@ -66,11 +64,11 @@ func (s *bidiScheduler) uploadChunkBytes() int {
 	return s.policy.UploadChunkBytes(s.conn.DownloadActive())
 }
 
-func (s *bidiScheduler) capDownloadRead(p []byte, uploadSendStarved bool) []byte {
+func (s *bidiScheduler) capDownloadRead(p []byte, duplexUploadStarted, uploadSendStarved bool) []byte {
 	if s == nil {
 		return p
 	}
-	if cap := s.policy.CapDownloadRead(uploadSendStarved, len(p)); cap < len(p) {
+	if cap := s.policy.CapDownloadRead(duplexUploadStarted, uploadSendStarved, len(p)); cap < len(p) {
 		return p[:cap]
 	}
 	return p
@@ -86,10 +84,18 @@ func (s *bidiScheduler) noteDownloadDelivery(delivered int) {
 		s.wakeAfterDownloadDelivery()
 		return
 	}
+	if c.DownloadActive() && atomic.LoadInt32(&c.duplexUploadStarted) == 0 {
+		batch := int32(s.downloadDeliveryWakeBatch())
+		if int32(delivered) < batch {
+			s.wakeAfterDownloadDelivery()
+			return
+		}
+	}
 	pending := atomic.AddInt32(&c.downloadDeliveryPending, int32(delivered))
-	batch := int32(s.policy.DownloadDeliveryWakeBatchBytes)
-	if pending >= batch {
+	batch := int32(s.downloadDeliveryWakeBatch())
+	for pending >= batch {
 		atomic.AddInt32(&c.downloadDeliveryPending, -batch)
+		pending -= batch
 		s.wakeAfterDownloadDelivery()
 	}
 }

@@ -12,6 +12,13 @@ import (
 // ConnectTunnelFromResponse builds the H3 CONNECT tunnel implementation after CONNECT succeeds.
 // Callers in transport/masque/stream wrap with stream.NewTunnelConn for TCP dial error mapping.
 func ConnectTunnelFromResponse(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error) {
+	if strm.IsConnectStreamThinBidi(ctx) {
+		conn, err := ThinTunnelConnFromCONNECT(ctx, resp, targetHost, targetPort)
+		if err != nil {
+			return nil, errors.Join(strm.Errs.TCPConnectStreamFailed, err)
+		}
+		return conn, nil
+	}
 	conn, err := TunnelConnFromCONNECT(ctx, resp, targetHost, targetPort)
 	if err != nil {
 		return nil, errors.Join(strm.Errs.TCPConnectStreamFailed, err)
@@ -35,15 +42,5 @@ func ConnectRequest(ctx context.Context, url string, serverHost string, setAuth 
 	if setAuth != nil {
 		setAuth(req.Header)
 	}
-	setConnectStreamLegHeader(req.Header, ctx)
 	return req, nil
-}
-
-func setConnectStreamLegHeader(h http.Header, ctx context.Context) {
-	if h == nil || !ConnectStreamUsesSplitLegs() {
-		return
-	}
-	if leg := strm.ConnectStreamLegFromContext(ctx); leg != "" {
-		h.Set(strm.ConnectStreamLegHeader, leg)
-	}
 }

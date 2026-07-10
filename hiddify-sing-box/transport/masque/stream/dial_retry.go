@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
 
@@ -41,6 +42,9 @@ func TCPConnectStreamErrMayBenefitFromNextHop(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if IsLocalGracefulH3Close(err) {
+		return false
+	}
 	return true
 }
 
@@ -52,12 +56,58 @@ func connectStreamRoundTripShouldRetry(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if IsLocalGracefulH3Close(err) {
+		return false
+	}
 	return IsRetryableTCPStreamError(err)
 }
 
 // IsRetryableTCPStreamError reports whether dialTCPStreamHTTP3/H2 may retry the round trip.
 func IsRetryableTCPStreamError(err error) bool {
 	return isRetryableTCPStreamErrorWalk(err)
+}
+
+// IsLocalGracefulH3Close reports locally initiated QUIC/H3 close-with-no-error.
+// This should not trigger overlay-wide churn: it's often a byproduct of local
+// lifecycle/teardown and can cascade browser traffic failures when treated as
+// a global transport death signal.
+func IsLocalGracefulH3Close(err error) bool {
+	return isLocalGracefulH3CloseWalk(err)
+}
+
+func isLocalGracefulH3CloseWalk(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isLocalGracefulH3CloseOne(err) {
+		return true
+	}
+	type joinUnwrapper interface {
+		Unwrap() []error
+	}
+	if u, ok := err.(joinUnwrapper); ok {
+		for _, e := range u.Unwrap() {
+			if isLocalGracefulH3CloseWalk(e) {
+				return true
+			}
+		}
+	}
+	if u := errors.Unwrap(err); u != nil {
+		return isLocalGracefulH3CloseWalk(u)
+	}
+	return false
+}
+
+func isLocalGracefulH3CloseOne(err error) bool {
+	var h3Err *http3.Error
+	if errors.As(err, &h3Err) {
+		return !h3Err.Remote && h3Err.ErrorCode == 0
+	}
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		return !appErr.Remote && uint64(appErr.ErrorCode) == 0
+	}
+	return false
 }
 
 func isRetryableTCPStreamErrorWalk(err error) bool {
@@ -86,6 +136,9 @@ func isRetryableTCPStreamErrorWalk(err error) bool {
 func isRetryableTCPStreamErrorOne(err error) bool {
 	var appErr *quic.ApplicationError
 	if errors.As(err, &appErr) {
+		if !appErr.Remote && uint64(appErr.ErrorCode) == 0 {
+			return false
+		}
 		return true
 	}
 	var idleErr *quic.IdleTimeoutError

@@ -372,11 +372,8 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 			if nw > 0 {
 				c.noteUploadTrafficStarted()
 				total += int64(nw)
-				if c.routeBidiDuplex && c.DownloadActive() {
-					atomic.StoreInt32(&c.duplexUploadStarted, 1)
-					if qs := c.h3.QUICStream(); qs != nil {
-						quic.MasqueSetBidiDuplexUploadStarted(qs, true)
-					}
+				if c.DownloadActive() {
+					c.noteDuplexUploadTraffic()
 				}
 				if ew == nil {
 					if f, ok := c.h3.(interface{ FlushMasqueCoalesce() error }); ok && nr < H3UploadFlushChunkBytes {
@@ -392,9 +389,6 @@ func (c *TunnelConn) readFromH3Thin(r io.Reader) (int64, error) {
 			}
 			if nr != nw {
 				return total, io.ErrShortWrite
-			}
-			if c.DownloadActive() {
-				c.noteDuplexUploadTraffic()
 			}
 		}
 		if er != nil {
@@ -449,10 +443,12 @@ type tunnelH3Reader struct{ c *TunnelConn }
 func (r *tunnelH3Reader) Read(p []byte) (int, error) {
 	r.c.activateDownloadReceiveOnRead()
 	uploadStarved := false
+	duplexUpload := false
 	if qs := r.c.h3.QUICStream(); qs != nil {
 		uploadStarved = quic.MasqueUploadSendStarved(qs)
+		duplexUpload = quic.MasqueIsBidiDuplexUploadStarted(qs)
 	}
-	p = r.c.scheduler.capDownloadRead(p, uploadStarved)
+	p = r.c.scheduler.capDownloadRead(p, duplexUpload, uploadStarved)
 	if len(p) >= H3UploadFlushChunkBytes {
 		r.c.scheduler.wakeUploadDuringDownload()
 	}

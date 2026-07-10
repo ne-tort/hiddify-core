@@ -115,7 +115,9 @@ func DialHTTP3ConnectStreamLeg(
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
 			if attempt+1 < maxAttempts && connectStreamRoundTripShouldRetry(roundTripErr) {
-				tcpHTTP = host.ResetHTTP3Transport()
+				// Overlay rebuild is session/hop-chain only (ResetTCPHTTPTransport).
+				// Per-dial transport reset kills the shared QUIC conn and cascades
+				// H3 error (0x0) (local) across parallel browser dials.
 				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, JoinConnectStreamPhase("connect roundtrip backoff", backoffErr)
 				}

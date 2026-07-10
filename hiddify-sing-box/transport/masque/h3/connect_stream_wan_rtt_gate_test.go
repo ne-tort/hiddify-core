@@ -202,3 +202,21 @@ func TestGATEH3WindowedBidiLinkBaseline(t *testing.T) {
 		t.Fatalf("benchWindowedBidiLink=%.1f want >=21", mbps)
 	}
 }
+
+// TestGATEH3SynthThinVsProdWindowed (FIX-THIN A/B): thin client vs prod MS3 @35ms windowed mock.
+func TestGATEH3SynthThinVsProdWindowed(t *testing.T) {
+	const rtt = 35 * time.Millisecond
+	prod := benchWindowedProdTunnelConnMbps(rtt, TunnelWriteToBufLen)
+	thin := benchWindowedThinTunnelConnMbps(rtt, TunnelWriteToBufLen)
+	ratio := thin / prod
+	t.Logf("FIX-THIN A/B @35ms: prod=%.1f Mbit/s thin=%.1f Mbit/s ratio=%.2f", prod, thin, ratio)
+	if prod < 50.0 {
+		t.Fatalf("prod %.1f Mbit/s want >=50 (regression)", prod)
+	}
+	if thin < 50.0 {
+		t.Fatalf("thin %.1f Mbit/s want >=50", thin)
+	}
+	if ratio < 0.85 {
+		t.Fatalf("thin/prod=%.2f want >=0.85 (thin should not regress vs prod on mock)", ratio)
+	}
+}

@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go/http3"
+	sched "github.com/sagernet/sing-box/transport/masque/stream/sched"
 )
 
-// relayDuplexArmUploadBytes avoids arming saturated duplex on iperf -R params (FAKEIPERF / cookie).
-const relayDuplexArmUploadBytes = 4 * 1024
-
+// relayDuplexArmUploadBytes is shared with MS3/sched (HTTPS bulk upload before saturated duplex).
 type relayH3UploadLegMode int
 
 const (
@@ -174,9 +173,6 @@ func relayTunnelCopyBufferH3(dst io.Writer, src io.Reader) (int64, error) {
 	var pendingWake int
 	dstWaker := relayBidiWakerFromWriter(dst)
 	wakeBatch := RelayTunnelFlushBytes
-	if dstWaker != nil && !dstWaker.isDuplexUploadStarted() {
-		wakeBatch = 4 * 1024
-	}
 	flushWake := func(w RelayBidiWaker) {
 		if w == nil || pendingWake < wakeBatch {
 			return
@@ -237,7 +233,7 @@ func relayTunnelCopyBufferH3BidiUpload(dst io.Writer, src io.Reader, bidi io.Rea
 			return
 		}
 		uploadRelayTotal += uploaded
-		if uploadRelayTotal < relayDuplexArmUploadBytes {
+		if uploadRelayTotal < sched.RelayDuplexArmUploadBytes {
 			return
 		}
 		armDuplexOnce.Do(func() {

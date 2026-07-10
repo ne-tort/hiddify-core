@@ -84,34 +84,7 @@ func (in H3DialInput) logInput() strm.DialH3LogInput {
 
 // DialHTTP3 performs one HTTP/3 CONNECT-stream dial with retry on transport faults.
 func DialHTTP3(ctx context.Context, hooks strm.DialH3Hooks, host H3Host, tcpURL *url.URL, in H3DialInput, tcpHTTP *http3.Transport) (net.Conn, error) {
-	if h3.ConnectStreamUsesSplitLegs() {
-		return dialHTTP3SplitLegs(ctx, hooks, host, tcpURL, in, tcpHTTP)
-	}
 	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, in.logInput(), in.TargetHost, in.TargetPort, tcpHTTP)
-}
-
-func dialHTTP3SplitLegs(ctx context.Context, hooks strm.DialH3Hooks, host H3Host, tcpURL *url.URL, in H3DialInput, tcpHTTP *http3.Transport) (net.Conn, error) {
-	logIn := in.logInput()
-	download, err := strm.DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, in.TargetHost, in.TargetPort, tcpHTTP, strm.ConnectStreamLegDownload)
-	if err != nil {
-		return nil, err
-	}
-	var local, remote net.Addr
-	if download != nil {
-		local = download.LocalAddr()
-		remote = download.RemoteAddr()
-	}
-	relayCtx := context.WithoutCancel(ctx)
-	dc := h3.NewDualTunnelConn(h3.DualTunnelConnParams{
-		Download: download,
-		Ctx:      relayCtx,
-		Local:    local,
-		Remote:   remote,
-	})
-	dc.SetUploadDial(func() (net.Conn, error) {
-		return strm.DialHTTP3ConnectStreamLeg(relayCtx, hooks, host, tcpURL, logIn, in.TargetHost, in.TargetPort, tcpHTTP, strm.ConnectStreamLegUpload)
-	})
-	return strm.NewTunnelConn(dc), nil
 }
 
 // SessionH3Host implements H3Host via callbacks (wired from package masque on coreSession).

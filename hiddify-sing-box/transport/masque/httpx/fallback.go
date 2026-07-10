@@ -66,6 +66,16 @@ func IsLayerSwitchableFailure(err error) bool {
 		strings.Contains(es, "masque connect-udp h3 skip-capsules") {
 		return false
 	}
+	// Onward TCP dial failures (502/503) are per-target server errors, not H2↔H3 overlay faults.
+	if strings.Contains(es, "tcp connect-stream failed: status=502") ||
+		strings.Contains(es, "tcp connect-stream failed: status=503") {
+		return false
+	}
+	// Local graceful H3/QUIC close is often a cascade artifact from shared-session teardown,
+	// not a transport-layer fault that should burn http_layer_fallback on sibling dials.
+	if strings.Contains(es, "h3 error (0x0) (local)") {
+		return false
+	}
 	switch {
 	case httpAuthStatusRE.MatchString(es),
 		strings.Contains(es, "unauthorized"),

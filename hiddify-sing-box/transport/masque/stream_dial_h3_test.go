@@ -115,7 +115,7 @@ func TestStreamDialHTTP3ConnectStreamReturnsCanceledAfterRoundTripSuccess(t *tes
 	}
 }
 
-func TestStreamDialHTTP3ConnectStreamResetsOverlayAfterRetryExhausted(t *testing.T) {
+func TestStreamDialHTTP3ConnectStreamRetriesWithoutOverlayReset(t *testing.T) {
 	u, err := url.Parse("https://example.com/masque/tcp")
 	if err != nil {
 		t.Fatalf("parse tcp url: %v", err)
@@ -139,10 +139,11 @@ func TestStreamDialHTTP3ConnectStreamResetsOverlayAfterRetryExhausted(t *testing
 	if !errors.Is(dialErr, session.ErrTCPConnectStreamFailed) {
 		t.Fatalf("expected session.ErrTCPConnectStreamFailed joined, got %v", dialErr)
 	}
-	if got := attempts.Load(); got != 5 {
-		t.Fatalf("expected 5 RoundTrip attempts, got %d", got)
+	wantAttempts := uint32(strm.ConnectStreamDialMaxAttempts())
+	if got := attempts.Load(); got != wantAttempts {
+		t.Fatalf("expected %d RoundTrip attempts, got %d", wantAttempts, got)
 	}
-	if got := host.resetN.Load(); got != 5 {
-		t.Fatalf("expected overlay reset on each retry plus final failure (resets=5), got %d", got)
+	if got := host.resetN.Load(); got != 0 {
+		t.Fatalf("per-dial retry must not reset shared overlay transport, got resets=%d", got)
 	}
 }

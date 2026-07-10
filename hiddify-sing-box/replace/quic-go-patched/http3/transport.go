@@ -244,12 +244,17 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 			return nil, err
 		}
 
-		t.removeClient(hostname)
-		req, err = canRetryRequest(err, req)
-		if err != nil {
+		retryReq, retryErr := canRetryRequest(err, req)
+		if retryErr != nil {
 			return nil, err
 		}
-		return t.doRoundTripOpt(req, opt, true)
+		// Parallel CONNECT-stream dials share one pooled QUIC client. Evicting it while
+		// other RoundTrips are in flight cascades H3 error (0x0) (local) across browser dials.
+		if cl.useCount.Load() > 1 {
+			return nil, err
+		}
+		t.removeClient(hostname)
+		return t.doRoundTripOpt(retryReq, opt, true)
 	}
 	return rsp, nil
 }
@@ -258,6 +263,9 @@ func canRetryRequest(err error, req *http.Request) (*http.Request, error) {
 	// error occurred while opening the stream, we can be sure that the request wasn't sent out
 	var connErr *errConnUnusable
 	if errors.As(err, &connErr) {
+		if isNonRetryableOpenStreamError(connErr.e) {
+			return nil, err
+		}
 		return req, nil
 	}
 
@@ -283,6 +291,24 @@ func canRetryRequest(err error, req *http.Request) (*http.Request, error) {
 		return &reqCopy, nil
 	}
 	return nil, fmt.Errorf("http3: Transport: cannot retry err [%w] after Request.Body was written; define Request.GetBody to avoid this error", err)
+}
+
+func isNonRetryableOpenStreamError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var h3Err *Error
+	if errors.As(err, &h3Err) {
+		return !h3Err.Remote && h3Err.ErrorCode == 0
+	}
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) {
+		return !appErr.Remote && uint64(appErr.ErrorCode) == 0
+	}
+	return false
 }
 
 // RoundTrip does a round trip.

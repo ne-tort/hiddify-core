@@ -159,7 +159,7 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque: invalid http_layer: ", rawHTTPLayer)
 	}
 	csMode := strings.ToLower(strings.TrimSpace(o.ConnectStreamMode))
-	if csMode != "" && csMode != "single_bidi" && csMode != "split_legs" {
+	if csMode != "" && csMode != "single_bidi" && csMode != "split_legs" && csMode != "thin_bidi" {
 		return E.New("masque: invalid connect_stream_mode: ", o.ConnectStreamMode)
 	}
 	if httpLayerNorm == option.MasqueHTTPLayerH2 && o.QUICExperimental != nil && o.QUICExperimental.Enabled {

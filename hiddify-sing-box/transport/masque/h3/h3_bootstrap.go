@@ -46,7 +46,15 @@ func PrimeH3UploadBootstrapOnConn(c *TunnelConn) error {
 	if c == nil || c.h3 == nil {
 		return nil
 	}
-	qs := c.h3.QUICStream()
+	primeH3ConnectStream(c.h3)
+	return nil
+}
+
+func primeH3ConnectStream(str h3ConnectStream) {
+	if str == nil {
+		return
+	}
+	qs := str.QUICStream()
 	if qs != nil {
 		quic.MasqueSetBidiDownloadReceiveActive(qs, true)
 		quic.MasqueSetPeerDuplexLazyFC(qs, false)
@@ -55,5 +63,4 @@ func PrimeH3UploadBootstrapOnConn(c *TunnelConn) error {
 		quic.MasquePokeConnPeerUploadCredit(qs)
 		quic.MasqueWakeStreamSend(qs)
 	}
-	return nil
 }

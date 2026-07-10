@@ -34,6 +34,19 @@ func benchWindowedBidiLinkRTT(rtt time.Duration, windowBytes int) float64 {
 	return benchWindowedH3WriteToMbps(rtt, windowBytes, benchWindowedDuration)
 }
 
+// benchWindowedThinTunnelConnMbps measures thin TunnelConn WriteTo through a windowed sink.
+func benchWindowedThinTunnelConnMbps(rtt time.Duration, windowBytes int) float64 {
+	stream := newRefBenchInfiniteStream()
+	conn := NewThinTunnelConn(ThinTunnelConnParams{H3Stream: stream})
+	sink := newBenchWindowedSink(rtt, windowBytes, benchWindowedDuration)
+	n, _ := conn.WriteTo(sink)
+	secs := benchWindowedDuration.Seconds()
+	if secs <= 0 {
+		secs = 1
+	}
+	return float64(n*8) / secs / 1e6
+}
+
 // benchWindowedProdTunnelConnMbps measures prod TunnelConn WriteTo through a windowed sink.
 func benchWindowedProdTunnelConnMbps(rtt time.Duration, windowBytes int) float64 {
 	stream := newRefBenchInfiniteStream()

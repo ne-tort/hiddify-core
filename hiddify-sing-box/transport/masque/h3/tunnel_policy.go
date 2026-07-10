@@ -7,32 +7,12 @@ type ConnectStreamMode string
 
 const (
 	ConnectStreamModeSingleBidi ConnectStreamMode = "single_bidi"
-	ConnectStreamModeSplitLegs  ConnectStreamMode = "split_legs"
+	ConnectStreamModeThinBidi   ConnectStreamMode = "thin_bidi"
 )
 
-var testConnectStreamMode *ConnectStreamMode
-
-// SetTestConnectStreamMode overrides CurrentConnectStreamMode for synth gates (tests only).
-func SetTestConnectStreamMode(mode ConnectStreamMode) {
-	testConnectStreamMode = &mode
-}
-
-// ClearTestConnectStreamMode clears the test-only mode override.
-func ClearTestConnectStreamMode() {
-	testConnectStreamMode = nil
-}
-
-// CurrentConnectStreamMode reports the effective H3 CONNECT-stream mode.
+// CurrentConnectStreamMode reports the effective H3 CONNECT-stream mode (default prod stack).
 func CurrentConnectStreamMode() ConnectStreamMode {
-	if testConnectStreamMode != nil {
-		return *testConnectStreamMode
-	}
 	return ConnectStreamModeSingleBidi
-}
-
-// ConnectStreamUsesSplitLegs reports PROD-P dual CONNECT (download + upload legs).
-func ConnectStreamUsesSplitLegs() bool {
-	return CurrentConnectStreamMode() == ConnectStreamModeSplitLegs
 }
 
 // ConnectStreamRole is the role of one H3 CONNECT stream in the selected dataplane.

@@ -85,7 +85,7 @@ type ClientOptions struct {
 	ProfileLocalIPv6            string
 	// TCPIPv6PathBracket mirrors option.MasqueEndpointOptions.tcp_ipv6_path_bracket (CONNECT-stream path only).
 	TCPIPv6PathBracket bool
-	// ConnectStreamMode mirrors option.MasqueEndpointOptions.connect_stream_mode (single_bidi | split_legs).
+	// ConnectStreamMode mirrors option.MasqueEndpointOptions.connect_stream_mode (single_bidi | thin_bidi | split_legs).
 	ConnectStreamMode string
 }
 

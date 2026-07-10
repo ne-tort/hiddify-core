@@ -20,8 +20,7 @@ type DialHopChainHost interface {
 	AdvanceHopLocked() (advanced bool, resetErr error)
 }
 
-// DialWithHopChain runs CONNECT-stream dial with http_layer fallback pivot, overlay churn,
-// and hopOrder advance — outer loop extracted from transport.go dialTCPStream.
+// DialWithHopChain runs CONNECT-stream dial with http_layer fallback pivot and hopOrder advance.
 func DialWithHopChain(ctx context.Context, host DialHopChainHost, destination M.Socksaddr) (net.Conn, error) {
 	var lastErr error
 	for {
@@ -47,34 +46,7 @@ func DialWithHopChain(ctx context.Context, host DialHopChainHost, destination M.
 			}
 		}
 
-		authFail := host.IsAuthFailure(lastErr)
-		churnEligible := host.HTTPLayerAutoEnabled() && !authFail && ctx.Err() == nil &&
-			IsRetryableTCPStreamError(lastErr)
-		if churnEligible {
-			host.RebuildOverlayTransport()
-			conn3, err3 := host.DialAttempt(ctx, destination)
-			if err3 == nil {
-				return conn3, nil
-			}
-			lastErr = err3
-			if !TCPConnectStreamErrMayBenefitFromNextHop(lastErr) {
-				host.ClearHTTPFallbackAfterGiveUp()
-				return nil, lastErr
-			}
-			if lastErr != nil && host.TryHTTPFallbackSwitch(lastErr) {
-				conn4, err4 := host.DialAttempt(ctx, destination)
-				if err4 == nil {
-					return conn4, nil
-				}
-				lastErr = err4
-				if !TCPConnectStreamErrMayBenefitFromNextHop(lastErr) {
-					host.ClearHTTPFallbackAfterGiveUp()
-					return nil, lastErr
-				}
-			}
-		}
-
-		if authFail {
+		if authFail := host.IsAuthFailure(lastErr); authFail {
 			host.ClearHTTPFallbackAfterGiveUp()
 			return nil, lastErr
 		}

@@ -181,11 +181,8 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 	if c == nil || !c.DownloadActive() {
 		return
 	}
-	atomic.StoreInt32(&c.duplexUploadStarted, 1)
-	c.upgradeDuplexDownloadActiveQUIC()
 	if c.h3 != nil {
 		if qs := c.h3.QUICStream(); qs != nil {
-			quic.MasqueSetBidiDuplexUploadStarted(qs, true)
 			quic.MasqueSyncDuplexUploadStarved(qs)
 			quic.MasqueRepromoteDuplexUploadSend(qs)
 			quic.MasqueWakeStreamSend(qs)
