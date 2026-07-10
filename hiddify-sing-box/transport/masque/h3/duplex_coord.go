@@ -92,9 +92,19 @@ func (c *TunnelConn) waitConcurrentUploadAnnounce() {
 	}
 }
 
+func (c *TunnelConn) setMS3DownloadDelivery(on bool) {
+	if c == nil || c.h3 == nil {
+		return
+	}
+	if s, ok := c.h3.(interface{ SetMasqueMS3DownloadDelivery(bool) }); ok {
+		s.SetMasqueMS3DownloadDelivery(on)
+	}
+}
+
 func (c *TunnelConn) beginDuplexDownload() {
 	atomic.StoreInt32(&c.downloadDelivered, 0)
 	atomic.AddInt32(&c.downloadActive, 1)
+	c.setMS3DownloadDelivery(true)
 	c.maybeSendH3BootstrapBeforeDuplexDownload()
 	c.waitConcurrentUploadAnnounce()
 	c.syncArmRouteBidiDuplex()
@@ -191,6 +201,7 @@ func (c *TunnelConn) noteDuplexUploadTraffic() {
 }
 
 func (c *TunnelConn) endDuplexDownload() {
+	c.setMS3DownloadDelivery(false)
 	c.setBidiDownloadActive(false)
 	atomic.AddInt32(&c.downloadActive, -1)
 	if atomic.LoadInt32(&c.uploadEOFClosed) != 0 {

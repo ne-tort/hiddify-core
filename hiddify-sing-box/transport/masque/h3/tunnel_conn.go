@@ -405,22 +405,6 @@ func (c *TunnelConn) writeH3DownloadToThin(w io.Writer) (int64, error) {
 	c.stopDownloadDrain()
 	defer c.endDuplexDownload()
 
-	if wt, ok := c.h3.(io.WriterTo); ok {
-		c.lockReadMuForWriteTo()
-		c.applyH3ReadDeadlineLocked()
-		err := c.ctx.Err()
-		c.readMu.Unlock()
-		if err != nil {
-			return 0, err
-		}
-		n, werr := wt.WriteTo(w)
-		if n > 0 {
-			c.noteDownloadDelivered()
-			c.scheduler.noteDownloadDelivery(int(n))
-		}
-		return n, werr
-	}
-
 	bp := tunnelWriteToBufPool.Get().(*[]byte)
 	defer tunnelWriteToBufPool.Put(bp)
 	c.lockReadMuForWriteTo()
