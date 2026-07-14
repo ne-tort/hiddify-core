@@ -11,11 +11,15 @@ import (
 
 func TestBBR2PacingRampsWithSyntheticAcks(t *testing.T) {
 	const mss = 1420
-	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, 0, false)
+	iw := qcong.ByteCount(32) * mss
+	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, iw, false)
 	s.SetRTTStatsProvider(&fakeRTT{srtt: 28 * time.Millisecond})
 
 	initRate := s.PacingRate()
 	t.Logf("initial_pacing_bps=%d (~%.1f Mbit/s) cwnd=%d", uint64(initRate), float64(initRate)/1e6, s.GetCongestionWindow())
+	if float64(initRate)/1e6 < 20 {
+		t.Fatalf("expected bootstrap >=20 Mbit/s with IW=32 MinRTT=28ms, got %.1f", float64(initRate)/1e6)
+	}
 
 	now := monotime.Now()
 	var pn qcong.PacketNumber

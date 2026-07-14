@@ -540,13 +540,15 @@ type bandwidthSample struct {
 func (s *BandwidthSampler) onPacketLost(packetNumber congestion.PacketNumber, bytesLost congestion.ByteCount) SendTimeState {
 	var sendTimeState SendTimeState
 
-	s.totalBytesLost += bytesLost
 	state := s.connectionStateMap.take(packetNumber)
-	if state != nil {
-		sendTimeState = state.sendTimeState
-		sendTimeState.IsValid = true
+	if state == nil {
+		// Packet was never OnPacketSent into this sampler (pre-CC-swap / phantom).
+		// Do not inflate TotalBytesLost — that drives bandwidth_lo reductions.
+		return sendTimeState
 	}
-
+	s.totalBytesLost += bytesLost
+	sendTimeState = state.sendTimeState
+	sendTimeState.IsValid = true
 	return sendTimeState
 }
 

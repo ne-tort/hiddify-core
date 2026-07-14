@@ -223,13 +223,19 @@ func (m *BBRv2NetworkModel) MaxAckHeight() congestion.ByteCount {
 
 // BandwidthEstimate returns the estimated bandwidth.
 func (m *BBRv2NetworkModel) BandwidthEstimate() Bandwidth {
+	maxBW := m.MaxBandwidth()
 	if m.bandwidthLo == nil {
-		return m.MaxBandwidth()
+		return maxBW
 	}
-	if *m.bandwidthLo < m.MaxBandwidth() {
+	// Zero bandwidth_lo is treated as unset: phantom losses after SetCongestionControl
+	// can initialize lo from MaxBandwidth()==0 and permanently pin estimate to zero.
+	if *m.bandwidthLo == 0 {
+		return maxBW
+	}
+	if *m.bandwidthLo < maxBW {
 		return *m.bandwidthLo
 	}
-	return m.MaxBandwidth()
+	return maxBW
 }
 
 // BDP calculates the bandwidth-delay product with a gain factor.
@@ -449,9 +455,13 @@ func (m *BBRv2NetworkModel) adaptLowerBounds(congestionEvent *BBRv2CongestionEve
 	}
 
 	// Decrease bandwidth_lo whenever there is loss.
-	// Set bandwidth_lo if it is not yet set.
+	// Set bandwidth_lo if it is not yet set. Skip when MaxBandwidth is still
+	// zero (e.g. loss events for packets never recorded after CC swap).
 	if m.bandwidthLo == nil {
 		bw := m.MaxBandwidth()
+		if bw.IsZero() {
+			return
+		}
 		m.bandwidthLo = &bw
 	}
 

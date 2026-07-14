@@ -44,10 +44,11 @@ func ApplyCongestionControl(conn *quic.Conn, name string) {
 		))
 	case quic.CongestionControlBBR2:
 		packetSize := datagramSize(conn)
+		// IW=32 like meta2/HY2 — stock quiche IW=10 traps WAN pacing ~3 Mbit/s.
 		conn.SetCongestionControl(bbr2.NewBBR2Sender(
 			bbr2.DefaultClock{TimeFunc: time.Now},
 			packetSize,
-			0, // default InitialCongestionWindowPackets (10)
+			qcong.ByteCount(bbrInitialCongestionWindowPackets)*packetSize,
 			false,
 		))
 	case quic.CongestionControlBBR2Aggressive:
@@ -55,7 +56,7 @@ func ApplyCongestionControl(conn *quic.Conn, name string) {
 		conn.SetCongestionControl(bbr2.NewBBR2Sender(
 			bbr2.DefaultClock{TimeFunc: time.Now},
 			packetSize,
-			32*packetSize,
+			qcong.ByteCount(bbrInitialCongestionWindowPackets)*packetSize,
 			true,
 		))
 	}

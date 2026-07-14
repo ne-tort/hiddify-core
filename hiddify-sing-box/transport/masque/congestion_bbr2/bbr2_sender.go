@@ -123,9 +123,10 @@ func NewBBR2Sender(
 		clock:       clock,
 	}
 
-	// Initialize pacer with a callback to get the current pacing rate
+	// Pacer reads effectivePacingRate so bootstrap (handshake MinRTT×gain) applies
+	// before BandwidthEstimate is non-zero — matches meta2 PacingRate() fallback.
 	s.pacer = newPacer(func() Bandwidth {
-		return s.pacingRate
+		return s.effectivePacingRate()
 	}, maxDatagramSize)
 
 	return s
@@ -136,12 +137,55 @@ func initialPacingRate(cwnd congestion.ByteCount, rtt time.Duration, params *Par
 	if params.InitialPacingRateBytesPerSecond != nil {
 		return BandwidthFromBytesPerSecond(*params.InitialPacingRateBytesPerSecond)
 	}
-	return BandwidthFromBytesAndTimeDelta(cwnd, rtt).Mul(2.885)
+	gain := 2.885
+	if params != nil && params.StartupPacingGain > 0 {
+		gain = params.StartupPacingGain
+	}
+	return BandwidthFromBytesAndTimeDelta(cwnd, rtt).Mul(gain)
 }
 
 // SetRTTStatsProvider sets the RTT stats provider.
 func (s *BBR2Sender) SetRTTStatsProvider(provider congestion.RTTStatsProvider) {
 	s.rttStats = provider
+	// Rebake seed with handshake MinRTT (not hardcoded 100ms) once SPH attaches stats.
+	if s.model.BandwidthEstimate().IsZero() {
+		if boot := s.bootstrapPacingRate(); boot > s.pacingRate {
+			s.pacingRate = boot
+		}
+	}
+}
+
+// effectiveMinRtt prefers measured handshake/path RTT over the 100ms model seed.
+func (s *BBR2Sender) effectiveMinRtt() time.Duration {
+	if s.rttStats != nil {
+		if r := s.rttStats.MinRTT(); r > 0 {
+			return r
+		}
+	}
+	if r := s.model.MinRtt(); r > 0 {
+		return r
+	}
+	return 100 * time.Millisecond
+}
+
+// bootstrapPacingRate is the meta2-style floor: IW × StartupPacingGain / MinRTT.
+func (s *BBR2Sender) bootstrapPacingRate() Bandwidth {
+	return initialPacingRate(s.initialCwnd, s.effectiveMinRtt(), s.params)
+}
+
+// effectivePacingRate never drops below bootstrap while BW estimate is still zero.
+func (s *BBR2Sender) effectivePacingRate() Bandwidth {
+	if !s.model.BandwidthEstimate().IsZero() && s.pacingRate > 0 {
+		return s.pacingRate
+	}
+	boot := s.bootstrapPacingRate()
+	if boot > s.pacingRate {
+		return boot
+	}
+	if s.pacingRate > 0 {
+		return s.pacingRate
+	}
+	return boot
 }
 
 // TimeUntilSend returns when the next packet should be sent.
@@ -378,9 +422,9 @@ func (s *BBR2Sender) InRecovery() bool {
 	return false
 }
 
-// PacingRate returns the current pacing rate.
+// PacingRate returns the effective pacing rate (bootstrap floor when estimate is zero).
 func (s *BBR2Sender) PacingRate() Bandwidth {
-	return s.pacingRate
+	return s.effectivePacingRate()
 }
 
 // BandwidthEstimate returns the current bandwidth estimate.
@@ -442,12 +486,23 @@ func (s *BBR2Sender) targetBytesInflight() congestion.ByteCount {
 func (s *BBR2Sender) updatePacingRate(bytesAcked congestion.ByteCount) {
 	bandwidthEstimate := s.model.BandwidthEstimate()
 	if bandwidthEstimate.IsZero() {
+		// Do not freeze at IW/100ms seed: raise to IW×gain/measured MinRTT (meta2 parity).
+		if boot := s.bootstrapPacingRate(); boot > s.pacingRate {
+			s.pacingRate = boot
+		}
 		return
 	}
 
 	if s.model.TotalBytesAcked() == bytesAcked {
-		// After the first ACK, cwnd is still the initial congestion window.
-		s.pacingRate = BandwidthFromBytesAndTimeDelta(s.cwnd, s.model.MinRtt())
+		// After the first ACK, seed with STARTUP gain (not bare cwnd/MinRtt).
+		rtt := s.model.MinRtt()
+		if rtt <= 0 {
+			rtt = s.effectiveMinRtt()
+		}
+		s.pacingRate = BandwidthFromBytesAndTimeDelta(s.cwnd, rtt).Mul(s.params.StartupPacingGain)
+		if boot := s.bootstrapPacingRate(); boot > s.pacingRate {
+			s.pacingRate = boot
+		}
 
 		if s.params.InitialPacingRateBytesPerSecond != nil {
 			// Do not allow the pacing rate calculated from the first RTT

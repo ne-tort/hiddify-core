@@ -18,17 +18,22 @@ func TestBBR2AfterMTUGrowNoScale(t *testing.T) {
 	// ScalePacingRateByMss=false by default → pacing unchanged while cwnd scales up
 }
 
-func TestBBR2FirstAckZeroEstimateEarlyReturn(t *testing.T) {
-	// Document: updatePacingRate returns early when BandwidthEstimate==0;
-	// phantom ACKs that don't hit sampler leave pacing at initial forever until a valid sample.
+func TestBBR2FirstAckZeroEstimateKeepsBootstrap(t *testing.T) {
+	// Phantom ACKs miss sampler → BandwidthEstimate stays 0, but effective pacing
+	// must stay at handshake bootstrap (not freeze at IW/100ms seed once MinRTT is known).
 	const mss = 1420
-	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, 0, false)
-	init := s.PacingRate()
+	iw := qcong.ByteCount(32) * mss
+	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, iw, false)
+	s.SetRTTStatsProvider(&fakeRTT{srtt: 28 * time.Millisecond})
+	boot := s.PacingRate()
 	now := monotime.Now()
-	// only phantom
 	s.OnCongestionEventEx(mss*5, now, []qcong.AckedPacketInfo{{PacketNumber: 1, BytesAcked: mss, SentTime: now.Add(-30 * time.Millisecond)}}, nil)
-	if s.PacingRate() != init || s.BandwidthEstimate() != 0 {
-		t.Fatalf("expected stuck at init after phantom; pacing=%d bw=%d", s.PacingRate(), s.BandwidthEstimate())
+	if s.BandwidthEstimate() != 0 {
+		t.Fatalf("expected zero BW after phantom ACK, got %d", s.BandwidthEstimate())
 	}
-	t.Logf("documented stuck-at-initial after samples miss: %.2f Mbit/s", float64(init)/1e6)
+	after := s.PacingRate()
+	if float64(after)/1e6 < 20 {
+		t.Fatalf("bootstrap lost after phantom ACK: pacing=%d (boot=%d)", after, boot)
+	}
+	t.Logf("after phantom ACK pacing=%.1f Mbit/s (boot=%.1f)", float64(after)/1e6, float64(boot)/1e6)
 }

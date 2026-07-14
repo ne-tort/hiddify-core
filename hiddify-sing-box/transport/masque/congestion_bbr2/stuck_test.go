@@ -13,7 +13,9 @@ import (
 // packet numbers that were never OnPacketSent into BBR2's sampler.
 func TestBBR2StuckWhenEarlyAcksMissSampler(t *testing.T) {
 	const mss = 1420
-	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, 0, false)
+	iw := qcong.ByteCount(32) * mss
+	s := bbr2.NewBBR2Sender(bbr2.DefaultClock{TimeFunc: time.Now}, mss, iw, false)
+	s.SetRTTStatsProvider(&fakeRTT{srtt: 28 * time.Millisecond})
 	initM := float64(s.PacingRate()) / 1e6
 	now := monotime.Now()
 
@@ -44,7 +46,7 @@ func TestBBR2StuckWhenEarlyAcksMissSampler(t *testing.T) {
 	}
 	final := float64(s.PacingRate()) / 1e6
 	t.Logf("after_real_traffic pacing=%.2f Mbit/s bw=%d cwnd=%d", final, uint64(s.BandwidthEstimate()), s.GetCongestionWindow())
-	if final < initM*1.5 && s.BandwidthEstimate() == 0 {
-		t.Fatalf("stuck near initial after real traffic: %.2f" , final)
+	if final < 10 {
+		t.Fatalf("stuck after real traffic: %.2f (bootstrap was %.2f)", final, initM)
 	}
 }
