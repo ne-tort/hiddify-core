@@ -62,6 +62,10 @@ const (
 	defaultStartupFullLossCount  = 8
 	quicBbr2DefaultLossThreshold = 0.02
 	maxBbrBurstPackets           = 10
+	// Soft drain: stock BBR uses 1/highGain≈0.35 which collapses paced rate for ~1 RTT
+	// after STARTUP and shows as peak→plateau on consumer SOCKS/browser samples.
+	// 0.75 drains less aggressively while still exiting the overshoot queue.
+	drainGainSoft = 0.75
 )
 
 type bbrMode int
@@ -273,7 +277,7 @@ func newBbrSender(
 		minCongestionWindow:          defaultMinimumCongestionWindow,
 		highGain:                     defaultHighGain,
 		highCwndGain:                 defaultHighGain,
-		drainGain:                    1.0 / defaultHighGain,
+		drainGain:                    drainGainSoft,
 		pacingGain:                   1.0,
 		congestionWindowGain:         1.0,
 		congestionWindowGainConstant: 2.0,
@@ -715,6 +719,11 @@ func (b *bbrSender) maybeApplimited(bytesInFlight congestion.ByteCount) {
 // appropriate.
 func (b *bbrSender) maybeExitStartupOrDrain(now monotime.Time) {
 	if b.mode == bbrModeStartup && b.isAtFullBandwidth {
+		// Already near target BDP — skip the hard DRAIN cliff into ProbeBW.
+		if b.bytesInFlight <= b.getTargetCongestionWindow(1.25) {
+			b.enterProbeBandwidthMode(now)
+			return
+		}
 		b.mode = bbrModeDrain
 		// b.maybeTraceStateChange(logging.CongestionStateDrain)
 		b.pacingGain = b.drainGain
