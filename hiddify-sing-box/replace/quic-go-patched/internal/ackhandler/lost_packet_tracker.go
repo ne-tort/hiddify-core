@@ -11,6 +11,7 @@ import (
 type lostPacket struct {
 	PacketNumber protocol.PacketNumber
 	SendTime     monotime.Time
+	Length       protocol.ByteCount
 }
 
 type lostPacketTracker struct {
@@ -27,23 +28,34 @@ func newLostPacketTracker(maxLength int) *lostPacketTracker {
 	}
 }
 
-func (t *lostPacketTracker) Add(p protocol.PacketNumber, sendTime monotime.Time) {
+// Add records a declared-lost packet for spurious-loss detection.
+// If the tracker is full, the oldest entry is evicted; the caller must undo
+// connStats for evicted (see sentPacketHandler.undoDeclaredLoss).
+func (t *lostPacketTracker) Add(p protocol.PacketNumber, sendTime monotime.Time, length protocol.ByteCount) (evicted lostPacket, evictedOK bool) {
 	if len(t.lostPackets) == t.maxLength {
+		evicted = t.lostPackets[0]
+		evictedOK = true
 		t.lostPackets = t.lostPackets[1:]
 	}
 	t.lostPackets = append(t.lostPackets, lostPacket{
 		PacketNumber: p,
 		SendTime:     sendTime,
+		Length:       length,
 	})
+	return evicted, evictedOK
 }
 
-// Delete deletes a packet from the lost packet tracker.
-// This function is not optimized for performance if many packets are lost,
-// but it is only used when a spurious loss is detected, which is rare.
-func (t *lostPacketTracker) Delete(pn protocol.PacketNumber) {
+// Delete removes a packet and returns its recorded length (0 if not found).
+func (t *lostPacketTracker) Delete(pn protocol.PacketNumber) protocol.ByteCount {
+	var length protocol.ByteCount
 	t.lostPackets = slices.DeleteFunc(t.lostPackets, func(p lostPacket) bool {
-		return p.PacketNumber == pn
+		if p.PacketNumber == pn {
+			length = p.Length
+			return true
+		}
+		return false
 	})
+	return length
 }
 
 func (t *lostPacketTracker) All() iter.Seq2[protocol.PacketNumber, monotime.Time] {
@@ -56,12 +68,14 @@ func (t *lostPacketTracker) All() iter.Seq2[protocol.PacketNumber, monotime.Time
 	}
 }
 
-func (t *lostPacketTracker) DeleteBefore(ti monotime.Time) {
+// DeleteBefore removes entries older than ti. Returns removed packets so the
+// caller can undo connStats (they were declared lost but never proved spurious).
+func (t *lostPacketTracker) DeleteBefore(ti monotime.Time) []lostPacket {
 	if len(t.lostPackets) == 0 {
-		return
+		return nil
 	}
 	if !t.lostPackets[0].SendTime.Before(ti) {
-		return
+		return nil
 	}
 	var idx int
 	for ; idx < len(t.lostPackets); idx++ {
@@ -69,5 +83,7 @@ func (t *lostPacketTracker) DeleteBefore(ti monotime.Time) {
 			break
 		}
 	}
+	removed := slices.Clone(t.lostPackets[:idx])
 	t.lostPackets = slices.Delete(t.lostPackets, 0, idx)
+	return removed
 }

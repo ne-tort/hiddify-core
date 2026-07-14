@@ -47,6 +47,7 @@ func OpenH3ClientConn(ctx context.Context, s *CoreSession) (*http3.ClientConn, e
 				return nil, err
 			}
 			h3t.ApplyExternalCongestionControl(conn, s.Options.CongestionControl)
+			h3t.TrackQUICConn("client", conn)
 			return conn, nil
 		},
 	}
@@ -195,6 +196,7 @@ func NewTCPConnectStreamHTTP3Transport(s *CoreSession) *http3.Transport {
 				return nil, err
 			}
 			h3t.ApplyExternalCongestionControl(conn, s.Options.CongestionControl)
+			h3t.TrackQUICConn("client", conn)
 			return conn, nil
 		},
 	}

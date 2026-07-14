@@ -11,4 +11,7 @@ type ConnectionStats struct {
 	PacketsReceived atomic.Uint64
 	BytesLost       atomic.Uint64
 	PacketsLost     atomic.Uint64
+	// SpuriousPacketsLost counts packets previously declared lost that were later ACKed.
+	// PacketsLost/BytesLost are decremented on that path (see detectSpuriousLosses).
+	SpuriousPacketsLost atomic.Uint64
 }

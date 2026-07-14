@@ -88,8 +88,14 @@ func (c *baseFlowController) effectiveWindowUpdateThreshold() float64 {
 	if c.masquePeerDuplexLazyFC {
 		return 0.005
 	}
-	// MASQUE prod: per-read MAX_*_DATA (B7 instant_credit wire model).
-	return 0
+	// Stock quic-go hysteresis. A prior "instant_credit" return 0 made
+	// hasWindowUpdate() always true after getWindowUpdate (bytesRemaining ==
+	// receiveWindowSize ≤ receiveWindowSize·(1-0)), so every ReceiveStream.Read
+	// queued MAX_STREAM_DATA/MAX_DATA. Those frames are ack-eliciting → BIF/cwnd
+	// burn on the upload ACKer (server) → more SendAck-only packs without FC
+	// → peer upload false declared loss. Download ACKer is the client; residual
+	// showed up as upload-only in lab.
+	return protocol.WindowUpdateThreshold
 }
 
 func (c *baseFlowController) setMasqueDuplexEagerFC(eager bool) {

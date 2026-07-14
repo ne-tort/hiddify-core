@@ -20,8 +20,10 @@ func TestConnectionFlowControlWindowUpdate(t *testing.T) {
 		utils.NewRTTStats(),
 		utils.DefaultLogger,
 	)
-	require.True(t, fc.AddBytesRead(1))
-	require.Equal(t, protocol.ByteCount(101), fc.GetWindowUpdate(monotime.Now()))
+	require.False(t, fc.AddBytesRead(1))
+	require.Zero(t, fc.GetWindowUpdate(monotime.Now()))
+	require.True(t, fc.AddBytesRead(99))
+	require.Equal(t, protocol.ByteCount(200), fc.GetWindowUpdate(monotime.Now()))
 }
 
 func TestConnectionWindowAutoTuningNotAllowed(t *testing.T) {

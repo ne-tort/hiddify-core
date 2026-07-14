@@ -37,8 +37,10 @@ const DefaultMaxReceiveStreamFlowControlWindow = 6 * (1 << 20) // 6 MB
 const DefaultMaxReceiveConnectionFlowControlWindow = 15 * (1 << 20) // 15 MB
 
 // WindowUpdateThreshold is the fraction of the receive window that has to be consumed before an higher offset is advertised to the client.
-// MASQUE CONNECT-stream bench: at 0.15 and ~512 KiB default stream windows, updates land ~77 KiB apart (~15 Mbit/s at 35–40 ms RTT).
-const WindowUpdateThreshold = 0.05
+// Stock quic-go (0.25). Prior MASQUE 0.05 was for ~512 KiB windows; with bulk
+// InitialStreamReceiveWindow (128 MiB+) the stock fraction is enough, and the
+// dead "instant_credit" path (threshold 0 in hasWindowUpdate) is gone.
+const WindowUpdateThreshold = 0.25
 
 // DefaultMaxIncomingStreams is the maximum number of streams that a peer may open
 const DefaultMaxIncomingStreams = 100
@@ -153,10 +155,10 @@ const AckDelayExponent = 3
 const TimerGranularity = time.Millisecond
 
 // MaxAckDelay is the maximum time by which we delay sending ACKs.
-// MASQUE CONNECT-stream benches showed upload≫download while sharing one fat bidi
-// HTTP/3 stream: a tighter ACK delay helps the bulk sender (response body → client)
-// advance cwnd when the receiver is CPU- or syscall-bound and defers ACK batches.
-const MaxAckDelay = 10 * time.Millisecond
+// Stock quic-go value (25ms). A prior MASQUE override of 10ms intended to help
+// upload cwnd advance but made ACK holes visible sooner under RTT → more
+// packet-threshold false declares on the peer sender; restore upstream default.
+const MaxAckDelay = 25 * time.Millisecond
 
 // MaxAckDelayInclGranularity is the max_ack_delay including the timer granularity.
 // This is the value that should be advertised to the peer.

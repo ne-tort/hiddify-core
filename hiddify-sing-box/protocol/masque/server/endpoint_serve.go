@@ -54,6 +54,7 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 		Addr:            addr,
 		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
 			h3t.ApplyExternalCongestionControl(c, cfg.CongestionControl)
+			h3t.TrackQUICConn("server", c)
 			return ctx
 		},
 	}

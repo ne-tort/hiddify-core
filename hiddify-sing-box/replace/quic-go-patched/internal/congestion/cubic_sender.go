@@ -200,8 +200,8 @@ func (c *cubicSender) OnPacketAcked(
 }
 
 func (c *cubicSender) OnCongestionEvent(packetNumber protocol.PacketNumber, lostBytes, priorInFlight protocol.ByteCount) {
-	c.connStats.PacketsLost.Add(1)
-	c.connStats.BytesLost.Add(uint64(lostBytes))
+	// PacketsLost/BytesLost are incremented in sent_packet_handler.detectLostPackets
+	// so ConnectionStats work for BBR as well as Cubic (avoid double-count here).
 
 	// TCP NewReno (RFC6582) says that once a loss occurs, any losses in packets
 	// already sent should be treated as a single loss event, since it's expected.

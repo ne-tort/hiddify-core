@@ -180,7 +180,7 @@ func newSentPacketHandler(
 		initialPackets:                 newPacketNumberSpace(initialPN, false),
 		handshakePackets:               newPacketNumberSpace(0, false),
 		appDataPackets:                 newPacketNumberSpace(0, true),
-		lostPackets:                    *newLostPacketTracker(64),
+		lostPackets:                    *newLostPacketTracker(65536),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     sendAlgo,
@@ -434,7 +434,7 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 
 	priorInFlight := h.bytesInFlight
 	ackedPackets, hasAckEliciting, err := h.detectAndRemoveAckedPackets(ack, encLevel)
-	if err != nil || len(ackedPackets) == 0 {
+	if err != nil {
 		return false, err
 	}
 	cc := h.getCongestionControl()
@@ -501,14 +501,16 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 		}
 	}
 
-	// detect spurious losses for application data packets, if the ACK was not reordered
-	if encLevel == protocol.Encryption1RTT && largestAcked == pnSpace.largestAcked {
+	// detect spurious losses for application data packets on every 1-RTT ACK
+	// (including gap-only ACKs with no newly-acked in-flight packets, and reordered ACKs).
+	if encLevel == protocol.Encryption1RTT {
 		h.detectSpuriousLosses(
 			ack,
 			rcvTime.Add(-min(ack.DelayTime, h.rttStats.MaxAckDelay())),
 		)
-		// clean up lost packet history
-		h.lostPackets.DeleteBefore(rcvTime.Add(-3 * h.rttStats.PTO(false)))
+		for _, p := range h.lostPackets.DeleteBefore(rcvTime.Add(-3 * h.rttStats.PTO(false))) {
+			h.undoDeclaredLoss(p.Length)
+		}
 	}
 
 	// After this point, we must not use ackedPackets any longer!
@@ -536,43 +538,60 @@ func (h *sentPacketHandler) ReceivedAck(ack *wire.AckFrame, encLevel protocol.En
 	return acked1RTTPacket, nil
 }
 
-func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime monotime.Time) {
-	var maxPacketReordering protocol.PacketNumber
-	var maxTimeReordering time.Duration
-	ackRangeIdx := len(ack.AckRanges) - 1
-	var spuriousLosses []protocol.PacketNumber
-	for pn, sendTime := range h.lostPackets.All() {
-		ackRange := ack.AckRanges[ackRangeIdx]
-		for pn > ackRange.Largest {
-			// this should never happen, since detectSpuriousLosses is only called for ACKs that increase the largest acked
-			if ackRangeIdx == 0 {
-				break
-			}
-			ackRangeIdx--
-			ackRange = ack.AckRanges[ackRangeIdx]
-		}
-		if pn < ackRange.Smallest {
-			continue
-		}
-		if pn <= ackRange.Largest {
-			packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
-			timeReordering := ackTime.Sub(sendTime)
-			maxPacketReordering = max(maxPacketReordering, packetReordering)
-			maxTimeReordering = max(maxTimeReordering, timeReordering)
-
-			if h.qlogger != nil {
-				h.qlogger.RecordEvent(qlog.SpuriousLoss{
-					EncryptionLevel:  protocol.Encryption1RTT,
-					PacketNumber:     pn,
-					PacketReordering: uint64(packetReordering),
-					TimeReordering:   timeReordering,
-				})
-			}
-			spuriousLosses = append(spuriousLosses, pn)
+func (h *sentPacketHandler) undoDeclaredLoss(length protocol.ByteCount) {
+	if h.connStats == nil {
+		return
+	}
+	for {
+		v := h.connStats.PacketsLost.Load()
+		if v == 0 || h.connStats.PacketsLost.CompareAndSwap(v, v-1) {
+			break
 		}
 	}
+	if length > 0 {
+		n := uint64(length)
+		for {
+			v := h.connStats.BytesLost.Load()
+			if v < n {
+				n = v
+			}
+			if n == 0 || h.connStats.BytesLost.CompareAndSwap(v, v-n) {
+				break
+			}
+		}
+	}
+}
+
+func (h *sentPacketHandler) trackDeclaredLost(pn protocol.PacketNumber, sendTime monotime.Time, length protocol.ByteCount) {
+	if evicted, ok := h.lostPackets.Add(pn, sendTime, length); ok {
+		h.undoDeclaredLoss(evicted.Length)
+	}
+}
+
+func (h *sentPacketHandler) detectSpuriousLosses(ack *wire.AckFrame, ackTime monotime.Time) {
+	var spuriousLosses []protocol.PacketNumber
+	for pn, sendTime := range h.lostPackets.All() {
+		if !ack.AcksPacket(pn) {
+			continue
+		}
+		if h.qlogger != nil {
+			packetReordering := h.appDataPackets.history.Difference(ack.LargestAcked(), pn)
+			timeReordering := ackTime.Sub(sendTime)
+			h.qlogger.RecordEvent(qlog.SpuriousLoss{
+				EncryptionLevel:  protocol.Encryption1RTT,
+				PacketNumber:     pn,
+				PacketReordering: uint64(packetReordering),
+				TimeReordering:   timeReordering,
+			})
+		}
+		spuriousLosses = append(spuriousLosses, pn)
+	}
 	for _, pn := range spuriousLosses {
-		h.lostPackets.Delete(pn)
+		length := h.lostPackets.Delete(pn)
+		if h.connStats != nil {
+			h.connStats.SpuriousPacketsLost.Add(1)
+			h.undoDeclaredLoss(length)
+		}
 	}
 }
 
@@ -902,16 +921,22 @@ func (h *sentPacketHandler) detectLostPackets(now monotime.Time, encLevel protoc
 			pnSpace.lossTime = lossTime
 		}
 		if packetLost {
-			if encLevel == protocol.Encryption0RTT || encLevel == protocol.Encryption1RTT {
-				h.lostPackets.Add(pn, p.SendTime)
-			}
 			pnSpace.history.DeclareLost(pn)
 			if !p.isPathProbePacket && p.IsAckEliciting() {
+				if encLevel == protocol.Encryption0RTT || encLevel == protocol.Encryption1RTT {
+					h.trackDeclaredLost(pn, p.SendTime, p.Length)
+				}
 				// the bytes in flight need to be reduced no matter if the frames in this packet will be retransmitted
 				h.removeFromBytesInFlight(p)
 				h.queueFramesForRetransmission(p)
 				if !p.IsPathMTUProbePacket {
 					cc.OnCongestionEvent(pn, p.Length, priorInFlight)
+				}
+				// Count declared losses on ConnectionStats for ALL CCs (Cubic used to be the
+				// only writer — BBR/BBRv2 left PacketsLost stuck at 0 and hid WAN loss).
+				if h.connStats != nil {
+					h.connStats.PacketsLost.Add(1)
+					h.connStats.BytesLost.Add(uint64(p.Length))
 				}
 				h.lostPacketsInfo = append(h.lostPacketsInfo, congestionExt.LostPacketInfo{
 					PacketNumber: congestionExt.PacketNumber(pn),

@@ -657,15 +657,8 @@ func (p *packetPacker) packDatagramFramesIntoPayload(pl *payload, maxPayloadSize
 			p.datagramQueue.Pop()
 			continue
 		}
-		// Prioritize DATAGRAM payload when ACK co-packing is the only thing preventing progress.
-		if pl.ack != nil && size <= maxPayloadSize && len(pl.frames) == 0 {
-			pl.length -= pl.ack.Length(v)
-			pl.ack = nil
-			pl.frames = append(pl.frames, ackhandler.Frame{Frame: f})
-			pl.length += size
-			p.datagramQueue.Pop()
-			continue
-		}
+		// Upstream: if DATAGRAM does not fit with ACK already packed, keep ACK
+		// and retry DATAGRAM in a later packet. Never strip ACK for fountain.
 		if pl.ack != nil || len(pl.frames) > 0 {
 			return
 		}
@@ -716,13 +709,13 @@ func (p *packetPacker) composeNextPacket(
 
 	var pl payload
 	if ackAllowed {
-		skipAckForDatagramBurst := p.datagramQueue != nil && p.datagramQueue.SendLen() > 0
-		if !skipAckForDatagramBurst {
-			if ack := p.acks.GetAckFrame(protocol.Encryption1RTT, now, !hasRetransmission && !hasData); ack != nil {
-				ack.Truncate(maxPayloadSize, v)
-				pl.ack = ack
-				pl.length += ack.Length(v)
-			}
+		// Always co-pack ACK first (upstream). A prior skipAckForDatagramBurst
+		// dropped ACK generation whenever any DATAGRAM was queued — server
+		// ACKer under CONNECT-UDP fountain starved peer upload CWND.
+		if ack := p.acks.GetAckFrame(protocol.Encryption1RTT, now, !hasRetransmission && !hasData); ack != nil {
+			ack.Truncate(maxPayloadSize, v)
+			pl.ack = ack
+			pl.length += ack.Length(v)
 		}
 	}
 

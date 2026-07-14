@@ -820,15 +820,16 @@ type ConnectionStats struct {
 	// PacketsReceived is the number of total packets received on the underlying
 	// connection, including packets that were not processable.
 	PacketsReceived uint64
-	// BytesLost is the number of bytes lost on the underlying connection (does
-	// not monotonically increase, because packets that are declared lost can
-	// subsequently be received). Does not include UDP or any other outer
-	// framing.
+	// BytesLost is the number of bytes currently counted as lost (decrements when
+	// a declare later proves spurious). Does not include UDP or any other outer framing.
 	BytesLost uint64
-	// PacketsLost is the number of packets lost on the underlying connection
-	// (does not monotonically increase, because packets that are declared lost
-	// can subsequently be received).
+	// PacketsLost is the number of packets currently counted as lost (decrements when
+	// a declare later proves spurious). SpuriousPacketsLost counts how many times that happened.
 	PacketsLost uint64
+	// SpuriousPacketsLost counts packets that were declared lost and later ACKed
+	// (false positive of loss detection). Net outstanding lost ≈ PacketsLost;
+	// cumulative declares ≈ PacketsLost + SpuriousPacketsLost (approx after adjust).
+	SpuriousPacketsLost uint64
 }
 
 func (c *Conn) ConnectionStats() ConnectionStats {
@@ -842,8 +843,9 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 		PacketsSent:     c.connStats.PacketsSent.Load(),
 		BytesReceived:   c.connStats.BytesReceived.Load(),
 		PacketsReceived: c.connStats.PacketsReceived.Load(),
-		BytesLost:       c.connStats.BytesLost.Load(),
-		PacketsLost:     c.connStats.PacketsLost.Load(),
+		BytesLost:           c.connStats.BytesLost.Load(),
+		PacketsLost:         c.connStats.PacketsLost.Load(),
+		SpuriousPacketsLost: c.connStats.SpuriousPacketsLost.Load(),
 	}
 }
 
@@ -2603,17 +2605,17 @@ func (c *Conn) sendPacketsWithoutGSO(now monotime.Time) error {
 				return nil
 			}
 		}
-		// Prioritize receiving of packets over sending out more packets,
-		// unless batched CONNECT-UDP C2S datagrams are still queued (duplex echo).
+		// Prioritize receiving of packets over sending out more STREAM packets.
+		// Only keep TX bursting when CONNECT-UDP datagrams are actually queued
+		// (fountain/duplex). Previously EnableDatagrams alone skipped RX priority
+		// even with empty backlog — server ACKer starved under LOAD → peer upload
+		// false declared loss (paced up≃1.2% vs down 0% at same Mbps).
 		c.receivedPacketMx.Lock()
 		hasPackets := !c.receivedPackets.Empty()
 		c.receivedPacketMx.Unlock()
 		if hasPackets && c.datagramSendBacklog() == 0 {
-			// CONNECT-UDP fountain S2C: keep bursting while CC allows even if ACKs are queued.
-			if !(c.config.EnableDatagrams && (sendMode == ackhandler.SendAny || sendMode == ackhandler.SendPacingLimited)) {
-				c.pacingDeadline = deadlineSendImmediately
-				return nil
-			}
+			c.pacingDeadline = deadlineSendImmediately
+			return nil
 		}
 	}
 }
@@ -2679,17 +2681,14 @@ func (c *Conn) sendPacketsWithGSO(now monotime.Time) error {
 			return nil
 		}
 
-		// Prioritize receiving of packets over sending out more packets (non-datagram paths).
-		sendMode := c.sentPacketHandler.SendMode(now)
+		// Prioritize receiving of packets over sending out more STREAM packets.
+		// Only keep TX bursting when CONNECT-UDP datagrams are actually queued.
 		c.receivedPacketMx.Lock()
 		hasPackets := !c.receivedPackets.Empty()
 		c.receivedPacketMx.Unlock()
 		if hasPackets && c.datagramSendBacklog() == 0 {
-			// CONNECT-UDP fountain S2C: keep bursting while CC allows even if ACKs are queued.
-			if !(c.config.EnableDatagrams && (sendMode == ackhandler.SendAny || sendMode == ackhandler.SendPacingLimited)) {
-				c.pacingDeadline = deadlineSendImmediately
-				return nil
-			}
+			c.pacingDeadline = deadlineSendImmediately
+			return nil
 		}
 
 		ecn = nextECN
