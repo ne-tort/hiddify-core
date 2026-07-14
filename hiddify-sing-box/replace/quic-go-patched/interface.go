@@ -175,8 +175,29 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
 	EnableStreamResetPartialDelivery bool
+	// CongestionControl selects the local QUIC send algorithm (RFC 9002).
+	// Empty/"new_reno" = CubicSender Reno CA (prod default). "cubic" = Cubic CA.
+	// This is endpoint-local and does not change MASQUE/H3 wire framing.
+	CongestionControl string
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
+}
+
+// QUIC congestion_control string values (masque / quic.Config).
+const (
+	CongestionControlNewReno = "new_reno"
+	CongestionControlCubic   = "cubic"
+)
+
+// CongestionControlUseReno reports whether CongestionControl selects NewReno CA inside CubicSender.
+// Empty / unknown → Reno (safe status-quo default).
+func CongestionControlUseReno(name string) bool {
+	switch name {
+	case CongestionControlCubic:
+		return false
+	default:
+		return true
+	}
 }
 
 // ClientInfo contains information about an incoming connection attempt.

@@ -90,8 +90,10 @@ type sentPacketHandler struct {
 	bytesInFlight protocol.ByteCount
 
 	congestion congestion.SendAlgorithmWithDebugInfos
-	rttStats   *utils.RTTStats
-	connStats  *utils.ConnectionStats
+	// congestionUseReno remembers CubicSender Reno vs Cubic for path migration reset.
+	congestionUseReno bool
+	rttStats          *utils.RTTStats
+	connStats         *utils.ConnectionStats
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -128,6 +130,7 @@ func NewSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	useReno bool,
 ) SentPacketHandler {
 	return newSentPacketHandler(
 		initialPN,
@@ -140,6 +143,7 @@ func NewSentPacketHandler(
 		pers,
 		qlogger,
 		logger,
+		useReno,
 	)
 }
 
@@ -154,13 +158,14 @@ func newSentPacketHandler(
 	pers protocol.Perspective,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
+	useReno bool,
 ) SentPacketHandler {
 	sendAlgo := congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		rttStats,
 		connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
+		useReno,
 		qlogger,
 	)
 
@@ -174,6 +179,7 @@ func newSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     sendAlgo,
+		congestionUseReno:              useReno,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -1162,7 +1168,7 @@ func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSi
 		h.rttStats,
 		h.connStats,
 		initialMaxDatagramSize,
-		true, // use Reno
+		h.congestionUseReno,
 		h.qlogger,
 	)
 	h.setLossDetectionTimer(now)

@@ -29,13 +29,13 @@ func MasqueTCPConnectStreamQUICConfig(opts ClientOptions) *quic.Config {
 }
 
 // MasqueHTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
-func MasqueHTTPServerQUICConfig() *quic.Config {
-	return session.HTTPServerQUICConfig()
+func MasqueHTTPServerQUICConfig(congestionControl ...string) *quic.Config {
+	return session.HTTPServerQUICConfig(congestionControl...)
 }
 
 // MasqueH3HTTPServerQUICConfig is QUIC tuning for standalone HTTP/3 listeners (no datagram plane).
-func MasqueH3HTTPServerQUICConfig() *quic.Config {
-	return session.H3HTTPServerQUICConfig()
+func MasqueH3HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
+	return session.H3HTTPServerQUICConfig(congestionControl...)
 }
 
 func unsupportedNetworkError(network string) error {

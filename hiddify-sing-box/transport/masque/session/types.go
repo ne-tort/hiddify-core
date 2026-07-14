@@ -68,6 +68,8 @@ type ClientOptions struct {
 	// MasqueTCPDialTLS performs client TLS over TCP for HTTP/2 overlay (stdlib or uTLS via sing-box).
 	MasqueTCPDialTLS         func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
 	QUICExperimental         QUICExperimentalOptions
+	// CongestionControl mirrors option.MasqueEndpointOptions.congestion_control (new_reno|cubic).
+	CongestionControl string
 	ConnectIPDatagramCeiling uint32
 	Hops                     []HopOptions
 	QUICDial                 QUICDialFunc

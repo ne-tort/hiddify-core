@@ -11,6 +11,7 @@ func H3QUICDialProfile(opts ClientOptions) h3t.QUICDialProfile {
 		WarpMasqueClientCert:     opts.WarpMasqueClientCert,
 		WarpMasqueLegacyH3Extras: opts.WarpMasqueLegacyH3Extras,
 		WarpConnectIPProtocol:    opts.WarpConnectIPProtocol,
+		CongestionControl:        opts.CongestionControl,
 	}
 }
 
@@ -30,13 +31,13 @@ func TCPConnectStreamHTTP3EnableDatagrams(opts ClientOptions) bool {
 }
 
 // HTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
-func HTTPServerQUICConfig() *quic.Config {
-	return h3t.HTTPServerQUICConfig()
+func HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
+	return h3t.HTTPServerQUICConfig(congestionControl...)
 }
 
 // H3HTTPServerQUICConfig is QUIC tuning for standalone HTTP/3 listeners without datagram plane.
-func H3HTTPServerQUICConfig() *quic.Config {
-	cfg := HTTPServerQUICConfig()
+func H3HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
+	cfg := HTTPServerQUICConfig(congestionControl...)
 	if cfg != nil {
 		cfg.EnableDatagrams = false
 	}

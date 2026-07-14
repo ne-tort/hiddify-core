@@ -52,6 +52,13 @@ const (
 	MasqueHTTPLayerAuto = "auto"
 )
 
+// Masque congestion_control (QUIC send algorithm; RFC 9002 local policy, not wire).
+const (
+	MasqueCongestionControlNewReno = "new_reno" // default — CubicSender Reno CA (status quo)
+	MasqueCongestionControlCubic   = "cubic"    // CubicSender Cubic CA
+	// Reserved (not yet in quic-go-patched): bbr, bbr2, brutal — rejected at validate until ported.
+)
+
 // MasqueServerAuthPolicy controls how HTTP (Basic/Bearer) and optional mTLS must succeed together.
 const (
 	MasqueServerAuthPolicyFirstMatch  = "first_match"  // default: any configured layer may grant access
@@ -154,6 +161,10 @@ type MasqueEndpointOptions struct {
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
 	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
 	HTTPLayer string `json:"http_layer,omitempty"`
+	// CongestionControl selects the QUIC send CC for this masque endpoint (client and/or server).
+	// Empty / "new_reno" (default), "cubic". Wire MASQUE framing unchanged (RFC 9002 local).
+	// "bbr"/"bbr2"/"brutal" are not in quic-go-patched yet — validation rejects them.
+	CongestionControl string `json:"congestion_control,omitempty"`
 	// HTTPLayerCacheTTL overrides the in-memory TTL for http_layer auto (default 5m).
 	HTTPLayerCacheTTL badoption.Duration `json:"http_layer_cache_ttl,omitempty"`
 	// Parsed only so validateMasqueOptions can reject removed JSON keys.

@@ -156,7 +156,7 @@ func startRuntimeInProcessTCPConnectProxy(tb testing.TB) int {
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w, "")
+		_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w)
 	})
 	server := http3.Server{
 		TLSConfig:       serverTLS,

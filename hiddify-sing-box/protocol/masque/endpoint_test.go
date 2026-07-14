@@ -293,13 +293,14 @@ func TestServerModeValidation(t *testing.T) {
 	}
 	_, err = NewEndpoint(context.TODO(), nil, nil, "srv3", option.MasqueEndpointOptions{
 		Role: option.MasqueRoleServer,
-		Listen:        "127.0.0.1",
-		ListenPort:    8443,
+		Listen:     "127.0.0.1",
+		ListenPort: 8443,
 		InboundTLS: &option.InboundTLSOptions{
 			Enabled:         true,
 			CertificatePath: "cert.pem",
 			KeyPath:         "key.pem",
 		},
+		Mode: option.MasqueDataplaneConnectIP, // client-only
 	})
 	if err == nil {
 		t.Fatal("expected server mode to reject client transport fields")

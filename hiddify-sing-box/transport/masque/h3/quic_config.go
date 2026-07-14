@@ -13,6 +13,8 @@ type QUICDialProfile struct {
 	WarpMasqueClientCert     tls.Certificate
 	WarpMasqueLegacyH3Extras bool
 	WarpConnectIPProtocol    string
+	// CongestionControl: empty/"new_reno" (default) or "cubic". Applied to quic.Config.
+	CongestionControl string
 }
 
 func (p QUICDialProfile) hasWarpClientCert() bool {
@@ -120,6 +122,21 @@ func FinalizeConnectStreamQUICConfig(cfg *quic.Config) {
 	boostTCPBulkStreamQUICReceiveWindows(cfg)
 }
 
+func applyCongestionControl(cfg *quic.Config, name string) {
+	if cfg == nil {
+		return
+	}
+	switch name {
+	case "", quic.CongestionControlNewReno:
+		cfg.CongestionControl = quic.CongestionControlNewReno
+	case quic.CongestionControlCubic:
+		cfg.CongestionControl = quic.CongestionControlCubic
+	default:
+		// Validation rejects unknown values earlier; keep Reno if something slips through.
+		cfg.CongestionControl = quic.CongestionControlNewReno
+	}
+}
+
 // NewPacketPlaneQUICConfig returns CONNECT-UDP/IP defaults with datagrams enabled.
 func NewPacketPlaneQUICConfig() *quic.Config {
 	return PacketPlaneQUICConfig(&quic.Config{
@@ -145,6 +162,7 @@ func QUICConfigForDial(profile QUICDialProfile) *quic.Config {
 		cfg = NewPacketPlaneQUICConfig()
 	}
 	FinalizeConnectStreamQUICConfig(cfg)
+	applyCongestionControl(cfg, profile.CongestionControl)
 	return cfg
 }
 
@@ -160,6 +178,7 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 		})
 	}
 	FinalizeConnectStreamQUICConfig(cfg)
+	applyCongestionControl(cfg, profile.CongestionControl)
 	return cfg
 }
 
@@ -188,11 +207,17 @@ func packetPlaneHandshakeIdleTimeout() time.Duration {
 }
 
 // HTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
-func HTTPServerQUICConfig() *quic.Config {
+// congestionControl: empty/"new_reno" (default) or "cubic".
+func HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
+	cc := ""
+	if len(congestionControl) > 0 {
+		cc = congestionControl[0]
+	}
 	cfg := PacketPlaneQUICConfig(&quic.Config{
 		EnableDatagrams:   true,
 		InitialPacketSize: packetPlaneInitialPacketSize(),
 	})
 	FinalizeConnectStreamQUICConfig(cfg)
+	applyCongestionControl(cfg, cc)
 	return cfg
 }

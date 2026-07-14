@@ -267,6 +267,7 @@ func (e *Endpoint) startRuntime() {
 		MasqueTCPDialTLS:         tcpDialTLS,
 		ConnectIPDatagramCeiling: e.options.MTU,
 		QUICExperimental:         toTransportQUICExperimental(e.options.QUICExperimental),
+		CongestionControl:        normalizeCongestionControl(e.options.CongestionControl),
 		Chain:                    chain,
 		QUICDial:                 quicDial,
 		TCPDial:                  tcpDial,

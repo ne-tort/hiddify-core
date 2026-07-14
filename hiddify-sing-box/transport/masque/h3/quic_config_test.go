@@ -129,3 +129,24 @@ func TestH3QUICConfigForDialPacketSize(t *testing.T) {
 		t.Fatalf("warp packet-plane InitialPacketSize: got %d want 0", warp.InitialPacketSize)
 	}
 }
+
+func TestTCPConnectStreamQUICConfigCongestionControl(t *testing.T) {
+	reno := TCPConnectStreamQUICConfig(QUICDialProfile{})
+	if reno.CongestionControl != quic.CongestionControlNewReno {
+		t.Fatalf("default CongestionControl=%q want %q", reno.CongestionControl, quic.CongestionControlNewReno)
+	}
+	cubic := TCPConnectStreamQUICConfig(QUICDialProfile{CongestionControl: quic.CongestionControlCubic})
+	if cubic.CongestionControl != quic.CongestionControlCubic {
+		t.Fatalf("cubic CongestionControl=%q", cubic.CongestionControl)
+	}
+	srv := HTTPServerQUICConfig(quic.CongestionControlCubic)
+	if srv.CongestionControl != quic.CongestionControlCubic {
+		t.Fatalf("server cubic CongestionControl=%q", srv.CongestionControl)
+	}
+	if !quic.CongestionControlUseReno(reno.CongestionControl) {
+		t.Fatal("new_reno should use Reno CA")
+	}
+	if quic.CongestionControlUseReno(cubic.CongestionControl) {
+		t.Fatal("cubic should not use Reno CA")
+	}
+}

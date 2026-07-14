@@ -102,6 +102,29 @@ func normalizeHTTPLayer(layer string) string {
 	}
 }
 
+func normalizeCongestionControl(cc string) string {
+	switch strings.ToLower(strings.TrimSpace(cc)) {
+	case "", option.MasqueCongestionControlNewReno:
+		return option.MasqueCongestionControlNewReno
+	case option.MasqueCongestionControlCubic:
+		return option.MasqueCongestionControlCubic
+	default:
+		return strings.ToLower(strings.TrimSpace(cc))
+	}
+}
+
+func validateCongestionControl(cc string) error {
+	n := normalizeCongestionControl(cc)
+	switch n {
+	case option.MasqueCongestionControlNewReno, option.MasqueCongestionControlCubic:
+		return nil
+	case "bbr", "bbr2", "bbr2_aggressive", "brutal":
+		return E.New("masque: congestion_control=", n, " not available yet (quic-go-patched has CubicSender only; use new_reno|cubic; BBR lives on HY2/TUIC today)")
+	default:
+		return E.New("masque: invalid congestion_control: ", cc, " (want new_reno|cubic)")
+	}
+}
+
 // applyMasqueClientMasqueDefaults runs before validateMasqueOptions for client role only.
 func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.MasqueEndpointOptions {
 	if normalizeRole(o.Role) == option.MasqueRoleServer {
@@ -157,6 +180,9 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	if rawHTTPLayer != "" && httpLayerNorm != option.MasqueHTTPLayerH3 &&
 		httpLayerNorm != option.MasqueHTTPLayerH2 && httpLayerNorm != option.MasqueHTTPLayerAuto {
 		return E.New("masque: invalid http_layer: ", rawHTTPLayer)
+	}
+	if err := validateCongestionControl(o.CongestionControl); err != nil {
+		return err
 	}
 	if httpLayerNorm == option.MasqueHTTPLayerH2 && o.QUICExperimental != nil && o.QUICExperimental.Enabled {
 		return E.New("masque: http_layer h2 is incompatible with quic_experimental.enabled")
@@ -298,6 +324,9 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 
 func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if err := rejectRemovedMasqueClientFields(o); err != nil {
+		return err
+	}
+	if err := validateCongestionControl(o.CongestionControl); err != nil {
 		return err
 	}
 	if strings.TrimSpace(o.HTTPLayer) != "" {

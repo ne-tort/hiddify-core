@@ -75,7 +75,7 @@ func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartR
 		ListenPort:        cfg.Options.ListenPort,
 		HTTP3TLS:          tlsOutcome.HTTP3TLS,
 		CollateralTLS:     tlsOutcome.CollateralTLS,
-		H3QUICConfig:      TM.MasqueHTTPServerQUICConfig(),
+		H3QUICConfig:      TM.MasqueHTTPServerQUICConfig(cfg.Options.CongestionControl),
 		EnableH3Datagrams: true,
 		ValidateUDP: func(pc net.PacketConn) error {
 			return TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen")
