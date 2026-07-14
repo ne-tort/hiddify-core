@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 import strm "github.com/sagernet/sing-box/transport/masque/stream"

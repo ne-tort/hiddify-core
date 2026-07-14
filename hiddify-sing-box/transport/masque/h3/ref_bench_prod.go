@@ -1,4 +1,4 @@
-﻿package h3
+package h3
 
 // Prod TunnelConn benches on infinite mock stream for REF paired delta tests (masque package).
 
@@ -75,7 +75,7 @@ func NewRefBenchInfiniteStream() *refBenchInfiniteStream {
 // ExportBenchProdTunnelConnDuplexMinMbps measures prod TunnelConn concurrent duplex on infinite mock stream.
 func ExportBenchProdTunnelConnDuplexMinMbps(duration time.Duration) float64 {
 	stream := newRefBenchInfiniteStream()
-	c := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	c := NewTunnelConn(TunnelConnParams{H3Stream: stream})
 	down, up, err := exportBenchDuplexMbps(c, duration)
 	if err != nil {
 		return 0

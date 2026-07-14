@@ -23,20 +23,3 @@ func unwrapH3TunnelConn(conn net.Conn) (*h3.TunnelConn, bool) {
 	}
 	return nil, false
 }
-
-func unwrapDualTunnelConn(conn net.Conn) (*h3.DualTunnelConn, bool) {
-	for conn != nil {
-		if dual, ok := conn.(*h3.DualTunnelConn); ok {
-			return dual, true
-		}
-		switch u := conn.(type) {
-		case *strm.TunnelConn:
-			conn = u.Inner
-		case interface{ TunnelInner() net.Conn }:
-			conn = u.TunnelInner()
-		default:
-			return nil, false
-		}
-	}
-	return nil, false
-}

@@ -10,6 +10,3 @@ func CurrentRelayTCPPolicy(string) RelayTCPPolicy {
 
 // RelayUseHTTP3StreamHijack enables hijacked HTTP/3 stream relay (prod always on).
 func RelayUseHTTP3StreamHijack() bool { return true }
-
-// RelayUploadFromStream reads client upload from the hijacked HTTP/3 stream (prod always on).
-func RelayUploadFromStream() bool { return true }

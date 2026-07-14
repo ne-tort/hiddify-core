@@ -79,9 +79,6 @@ func NewH3ConnWithConfig(str http3Stream, local, remote net.Addr, cfg H3ConnConf
 	c.readCtxCancel = cancel
 	c.readCtxStore.Store(&ctx)
 	c.write = newH3C2SWriter(str, 0)
-	if cfg.LegRole == H3LegDownload {
-		armH3AsymmetricDownloadLeg(str)
-	}
 	go func() {
 		defer close(c.readDone)
 		if err := frame.SkipRequestStreamCapsules(quicvarint.NewReader(str)); err != nil && !errors.Is(err, io.EOF) && !c.closed.Load() {
@@ -231,9 +228,6 @@ func (c *H3Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
-		if c.legRole == H3LegDownload {
-			disarmH3AsymmetricDownloadLeg(c.str)
-		}
 		if c.write != nil {
 			c.write.shutdown()
 		}

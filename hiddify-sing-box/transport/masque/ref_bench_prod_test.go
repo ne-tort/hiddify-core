@@ -10,8 +10,7 @@ import (
 // using the same measureSegmentDuplexMbps harness as REF paired tests.
 func benchProdTunnelConnMockDuplexMinMbps(duration time.Duration) float64 {
 	c := h3.NewTunnelConn(h3.TunnelConnParams{
-		H3Stream:        h3.NewRefBenchInfiniteStream(),
-		RouteBidiDuplex: true,
+		H3Stream: h3.NewRefBenchInfiniteStream(),
 	})
 	_, _, minLeg, err := measureSegmentDuplexMbps(c, duration)
 	if err != nil {

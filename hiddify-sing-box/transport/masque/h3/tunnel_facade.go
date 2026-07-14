@@ -3,7 +3,6 @@ package h3
 import (
 	"io"
 	"net"
-	"sync/atomic"
 )
 
 // TunnelFacade is the minimal route-facing H3 TCP tunnel contract.
@@ -25,7 +24,7 @@ func (c *TunnelConn) TunnelPolicySnapshot() TunnelPolicySnapshot {
 		return TunnelPolicySnapshot{}
 	}
 	return TunnelPolicySnapshot{
-		RouteBidiDuplex: atomic.LoadInt32(&c.routeBidiDuplex) != 0,
+		RouteBidiDuplex: false,
 		UsesH3Stream:    c.h3 != nil,
 	}
 }

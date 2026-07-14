@@ -28,7 +28,7 @@ func TestRelayTCPTunnelDuplex(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := io.NopCloser(bytes.NewReader(nil))
-	err := TCPForward(context.Background(), clientConn, body, rec, "")
+	err := TCPForward(context.Background(), clientConn, body, rec)
 	wg.Wait()
 	if err != nil && !errorsIsEOF(err) {
 		t.Fatalf("relay: %v", err)
@@ -54,7 +54,7 @@ func TestRelayTCPTunnelDownloadToResponse(t *testing.T) {
 	reqBody := io.NopCloser(bytes.NewReader(nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	err := TCPForward(ctx, clientConn, reqBody, rec, "")
+	err := TCPForward(ctx, clientConn, reqBody, rec)
 	if err != nil && !errorsIsEOF(err) {
 		t.Fatalf("relay: %v", err)
 	}

@@ -3,33 +3,21 @@ package client
 import (
 	"context"
 	"testing"
-
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
-func TestH3ConnectRequestSetsPairHeader(t *testing.T) {
-	ctx := strm.ContextWithConnectStreamPair(
-		strm.ContextWithConnectStreamLeg(context.Background(), strm.ConnectStreamLegDownload),
-		"pair-test",
-	)
+func TestH3ConnectRequestBuildsCONNECT(t *testing.T) {
 	hooks := NewH3Hooks(H3Wire{})
-	req, err := hooks.BuildRequest(ctx, "https://example.com/masque/tcp/h/p", "example.com")
+	req, err := hooks.BuildRequest(context.Background(), "https://example.com/masque/tcp/h/p", "example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := req.Header.Get(strm.ConnectStreamPairHeader); got != "pair-test" {
-		t.Fatalf("pair header=%q want pair-test", got)
+	if req.Method != "CONNECT" {
+		t.Fatalf("method=%q want CONNECT", req.Method)
 	}
-}
-
-func TestH3ConnectRequestSetsLegHeader(t *testing.T) {
-	ctx := strm.ContextWithConnectStreamLeg(context.Background(), strm.ConnectStreamLegUpload)
-	hooks := NewH3Hooks(H3Wire{})
-	req, err := hooks.BuildRequest(ctx, "https://example.com/masque/tcp/h/p", "example.com")
-	if err != nil {
-		t.Fatal(err)
+	if req.Header.Get("Masque-Connect-Stream-Leg") != "" {
+		t.Fatal("single bidi dial must not set leg header")
 	}
-	if got := req.Header.Get(strm.ConnectStreamLegHeader); got != strm.ConnectStreamLegUpload {
-		t.Fatalf("leg header=%q want %q", got, strm.ConnectStreamLegUpload)
+	if req.Header.Get("Masque-Connect-Stream-Pair") != "" {
+		t.Fatal("single bidi dial must not set pair header")
 	}
 }

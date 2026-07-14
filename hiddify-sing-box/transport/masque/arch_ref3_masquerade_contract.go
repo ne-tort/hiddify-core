@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchMasqueradeThinRow documents one masquerade client.rs attribute vs sb CONNECT-stream (REF3-2).

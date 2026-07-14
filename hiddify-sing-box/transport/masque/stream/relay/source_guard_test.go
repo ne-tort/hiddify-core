@@ -14,9 +14,6 @@ var relayH3AuditSource string
 //go:embed relay_copy.go
 var relayCopyAuditSource string
 
-//go:embed relay_bidi_waker.go
-var relayBidiWakerAuditSource string
-
 func relayGoAuditBundle() string {
-	return relayEntryAuditSource + relayH2AuditSource + relayH3AuditSource + relayCopyAuditSource + relayBidiWakerAuditSource
+	return relayEntryAuditSource + relayH2AuditSource + relayH3AuditSource + relayCopyAuditSource
 }

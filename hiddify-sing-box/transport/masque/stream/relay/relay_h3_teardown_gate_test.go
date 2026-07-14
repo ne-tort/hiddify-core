@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+type gateH3RelayLeg struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (l *gateH3RelayLeg) Read(p []byte) (int, error)  { return l.r.Read(p) }
+func (l *gateH3RelayLeg) Write(p []byte) (int, error) { return l.w.Write(p) }
+func (l *gateH3RelayLeg) Close() error                { return nil }
+
 // gateH3CloseTrackBody fails Close if download payload is incomplete (early H3 cancel).
 type gateH3CloseTrackBody struct {
 	leg           *gateH3RelayLeg
@@ -59,7 +68,7 @@ func TestGATERelayH3BidiUploadEOFBeforeDownloadDoneNoEarlyBodyClose(t *testing.T
 	body, h3Out := gateH3TrackDownloadBody(uploadR, payloadLen)
 	tcp := &gateMemTCPConn{readPayload: bytes.Repeat([]byte("d"), payloadLen), wantRead: payloadLen}
 
-	err := RelayTCPTunnel(context.Background(), tcp, body, httptest.NewRecorder(), "")
+	err := RelayTCPTunnel(context.Background(), tcp, body, httptest.NewRecorder())
 	tcp.relayDone.Store(true)
 	if err != nil {
 		t.Fatalf("RelayTCPTunnel: %v", err)
@@ -74,6 +83,30 @@ func TestGATERelayH3BidiUploadEOFBeforeDownloadDoneNoEarlyBodyClose(t *testing.T
 		t.Fatalf("hijacked H3 relay must not Close reqBody, got %d", body.closeN.Load())
 	}
 }
+
+type gateMemTCPConn struct {
+	readPayload []byte
+	wantRead    int
+	off         int
+	relayDone   atomic.Bool
+}
+
+func (c *gateMemTCPConn) Read(p []byte) (int, error) {
+	if c.off >= len(c.readPayload) {
+		return 0, io.EOF
+	}
+	n := copy(p, c.readPayload[c.off:])
+	c.off += n
+	return n, nil
+}
+func (c *gateMemTCPConn) Write(p []byte) (int, error) { return len(p), nil }
+func (c *gateMemTCPConn) Close() error                { return nil }
+func (c *gateMemTCPConn) CloseWrite() error           { return nil }
+func (c *gateMemTCPConn) LocalAddr() net.Addr         { return nil }
+func (c *gateMemTCPConn) RemoteAddr() net.Addr        { return nil }
+func (c *gateMemTCPConn) SetDeadline(time.Time) error      { return nil }
+func (c *gateMemTCPConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *gateMemTCPConn) SetWriteDeadline(time.Time) error { return nil }
 
 // gateSlowTCPConn yields TCP payload in small chunks to keep download relay active.
 type gateSlowTCPConn struct {
@@ -117,7 +150,7 @@ func TestGATERelayH3BidiSlowDownloadSurvivesUploadEOF(t *testing.T) {
 	tcp := &gateSlowTCPConn{payload: bytes.Repeat([]byte("x"), payloadLen)}
 
 	start := time.Now()
-	err := RelayTCPTunnel(context.Background(), tcp, body, httptest.NewRecorder(), "")
+	err := RelayTCPTunnel(context.Background(), tcp, body, httptest.NewRecorder())
 	tcp.relayDone.Store(true)
 	elapsed := time.Since(start)
 	if err != nil {

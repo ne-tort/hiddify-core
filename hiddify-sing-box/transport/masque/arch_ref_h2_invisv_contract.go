@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchREFSRCH2InvisvRow documents one Invisv H2 CONNECT-stream attribute vs sing-box (REF-SRC-INVISV-H2).

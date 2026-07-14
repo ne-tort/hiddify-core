@@ -37,7 +37,6 @@ type CoreSession struct {
 	// tcpHTTPWarm marks the TCPHTTP instance with a completed QUIC handshake (CONNECT-stream warm).
 	tcpHTTPWarm              *http3.Transport
 	tcpHTTPWarmFlight        singleflight.Group
-	p6UploadWarm             p6UploadWarmPool
 	TemplateUDP              *uritemplate.Template
 	TemplateIP               *uritemplate.Template
 	TemplateTCP              *uritemplate.Template

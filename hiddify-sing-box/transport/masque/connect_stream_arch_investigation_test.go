@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 import (
@@ -9,8 +11,6 @@ import (
 
 // TestArchBidiContentionReproducesCeiling (A2-1): windowed bidi WriteTo stays in credit/RTT band.
 func TestArchBidiContentionReproducesCeiling(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
 	r := benchConnectStreamDownloadLayerWriteTo(t, "L3", benchWindowedBidiLink(), localizeBenchDuration)
 	if r.err != nil {
 		t.Fatalf("windowed WriteTo: %v", r.err)
@@ -21,8 +21,6 @@ func TestArchBidiContentionReproducesCeiling(t *testing.T) {
 
 // TestArchDuplexUploadPulseKillsDownload (A2-3): upload pulse on bidi windowed caps download in ceiling band.
 func TestArchDuplexUploadPulseKillsDownload(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
 	dlOnly := benchConnectStreamDownloadLayerWriteTo(t, "L3", benchWindowedBidiLink(), localizeBenchDuration)
 	duplex := runConnectStreamDuplexWriteToBench(t, benchWindowedBidiLink(), connectStreamLocalizeDownloadKPIMin/2)
 	t.Logf("A2-3 download-only=%.1f duplex=%.1f Mbit/s", dlOnly.mbps, duplex.mbps)

@@ -8,7 +8,6 @@ import (
 	"strconv"
 
 	"github.com/quic-go/quic-go/http3"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 )
 
 // ErrHTTPStreamerMissing is returned when the CONNECT response cannot expose *http3.Stream.
@@ -31,13 +30,14 @@ func tunnelConnFromConnectResponse(ctx context.Context, resp *http.Response, tar
 		rel.ReleaseHTTPStream()
 	}
 	http3.EnableMasqueConnectStream(str)
-	primeH3ConnectStream(str)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return NewTunnelConn(TunnelConnParams{
-		H3Stream:        str,
-		Ctx:             ctx,
-		Local:           &net.TCPAddr{},
-		Remote:          remoteAddr,
-		RouteBidiDuplex: strm.ConnectStreamRouteBidiDuplex(ctx),
+		H3Stream: str,
+		Ctx:      context.WithoutCancel(ctx),
+		Local:    &net.TCPAddr{},
+		Remote:   remoteAddr,
 	}), nil
 }
 

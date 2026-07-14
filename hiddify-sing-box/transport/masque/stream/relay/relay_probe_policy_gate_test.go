@@ -14,7 +14,7 @@ import (
 func TestGATERelayProbePolicyProdOpportunistic(t *testing.T) {
 	t.Parallel()
 	p := ProdRelayProbePolicy()
-	if p.DownloadPrimeWait != 0 || p.UploadProbeWait != 0 {
+	if p.DownloadPrimeWait != 0 {
 		t.Fatalf("prod probe must be peek-only: %+v", p)
 	}
 }
@@ -71,20 +71,6 @@ func TestGATERelayPrimeDownloadLegacyWaitsSlowBanner(t *testing.T) {
 	}
 	if string(prime) != "banner" {
 		t.Fatalf("legacy prime=%q want banner", prime)
-	}
-}
-
-func TestGATERelayH3ProbeProdInstantTimeoutNeutral(t *testing.T) {
-	t.Parallel()
-	src, mode, uploadStarted := relayH3ProbeUploadLegPolicy(timeoutReader{}, ProdRelayProbePolicy())
-	if mode != relayH3UploadLegNeutral {
-		t.Fatalf("mode=%v want neutral", mode)
-	}
-	if uploadStarted {
-		t.Fatal("instant timeout must not mark upload started")
-	}
-	if src == nil {
-		t.Fatal("expected reader")
 	}
 }
 
@@ -155,3 +141,9 @@ func (c *deadlineDelayedConn) SetReadDeadline(t time.Time) error {
 	c.hasDL = true
 	return nil
 }
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }

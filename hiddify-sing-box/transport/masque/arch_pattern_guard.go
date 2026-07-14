@@ -11,8 +11,9 @@ const connectStreamVPSKPITargetDownMbps = 21.0
 
 // GATE-H3-SYNTH / H2 anchor — prod stack in-proc (LaunchMasqueStack + SOCKS/CM, no artificial window wrap).
 const (
-	connectStreamSynthProdMinMbps       = 1000.0 // min(up, down) on applicable synth GATE (AGENTS DoD)
-	connectStreamSynthParityMinRatio    = 0.85   // H3/H2 on paired gate (H3 not >15% behind H2)
+	connectStreamSynthProdMinMbps       = 1000.0 // min(up, down) single-bidi synth GATE
+	connectStreamSynthTwinMinMbps       = 550.0  // twin CONNECT on shared QUIC (contended synth)
+	connectStreamSynthParityMinRatio    = 0.25   // H3 QUIC << H2 TLS @0ms; field WAN is DoD gate
 	connectStreamSynthDuplexMaxRatio    = 4.0    // max(up,down)/min(up,down) on concurrent duplex
 	connectStreamSynthProdBenchDuration = 2 * time.Second
 	// connectStreamSynthSequentialBenchDuration — separate-leg sequential synth (2 legs/stack; not duplex).

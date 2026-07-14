@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchREFSRCMasqueradeRow documents one masquerade client.rs attribute vs sing-box port action (REF-SRC-MASQ).

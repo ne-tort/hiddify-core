@@ -381,7 +381,7 @@ func startInProcessH2TCPConnectStreamProxy(tb testing.TB) int {
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		w.WriteHeader(http.StatusOK)
 		_ = http.NewResponseController(w).Flush()
-		relayErr := strm.RelayTCPTunnel(r.Context(), target, r.Body, w, "")
+		relayErr := strm.RelayTCPTunnel(r.Context(), target, r.Body, w)
 		_ = target.Close()
 		if relayErr != nil && relayErr != io.EOF {
 			tb.Logf("relay finished: %v", relayErr)

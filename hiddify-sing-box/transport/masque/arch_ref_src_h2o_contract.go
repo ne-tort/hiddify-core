@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchREFSRCH2oAudit — frozen h2o proxy.tunnel relay contract (Invisv testdata/h2o/connect.conf parity in stream/relay.go).

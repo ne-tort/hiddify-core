@@ -14,18 +14,12 @@ import (
 )
 
 const (
-	connectStreamFieldCeilingMbps       = 14.5 // VPS invoke.py BENCH_KPI_DOWN_MBIT
-	connectStreamCeilingTolerancePct    = 0.35
 	connectStreamParallelStreams        = 4
 	connectStreamParallelSumMinMbps     = 50.0 // iperf -P4 field ~58 Mbit/s; synth guard
 	connectStreamParallelPerStreamFloor = 4.0  // parallel streams share windowed credit; guard against full stall
 )
 
-func connectStreamCeilingBand() (min, max float64) {
-	min = connectStreamFieldCeilingMbps * (1 - connectStreamCeilingTolerancePct)
-	max = connectStreamFieldCeilingMbps * (1 + connectStreamCeilingTolerancePct)
-	return min, max
-}
+// connectStreamCeilingBand uses connectStreamVPSKPITargetDownMbps from arch_pattern_guard.go.
 
 // TestMeasureTCPDownloadWriteToMbpsContract guards prod download helper (S63).
 func TestMeasureTCPDownloadWriteToMbpsContract(t *testing.T) {
@@ -104,8 +98,6 @@ func TestMasqueConnectStreamMeasureTCPDownloadMbpsAntiPattern(t *testing.T) {
 // TestMasqueConnectStreamReadPathSkipsDownloadActive (S104/S83): Read-path drain never toggles
 // downloadActive or QUIC framer boost; WriteTo prod path does — explains false Read-path KPI confidence.
 func TestMasqueConnectStreamReadPathSkipsDownloadActive(t *testing.T) {
-	t.Setenv("MASQUE_H3_BIDI_DUPLEX_COORD", "1")
-
 	var readHookActive atomic.Int32
 	h3.SetTestBidiDownloadActiveHook(func(active bool) {
 		if active {

@@ -7,11 +7,8 @@ import (
 	"testing"
 )
 
-// TestMasqueRelayProdDefaults (S54): prod relay always uses hijacked H3 stream upload (env knobs CUT).
+// TestMasqueRelayProdDefaults: prod relay always hijacks H3 stream (no alt modes).
 func TestMasqueRelayProdDefaults(t *testing.T) {
-	if !RelayUploadFromStream() {
-		t.Fatal("RelayUploadFromStream must be true in prod")
-	}
 	if !RelayUseHTTP3StreamHijack() {
 		t.Fatal("RelayUseHTTP3StreamHijack must be true in prod")
 	}
@@ -25,4 +22,3 @@ func TestMasqueRelayLogHijackProbe(t *testing.T) {
 		t.Fatal("expected nil stream without HTTPStreamer even with log hijack env")
 	}
 }
-

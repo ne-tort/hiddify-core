@@ -129,7 +129,33 @@ func NewSentPacketHandler(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 ) SentPacketHandler {
-	congestion := congestion.NewCubicSender(
+	return newSentPacketHandler(
+		initialPN,
+		initialMaxDatagramSize,
+		rttStats,
+		connStats,
+		clientAddressValidated,
+		enableECN,
+		ignorePacketsBelow,
+		pers,
+		qlogger,
+		logger,
+	)
+}
+
+func newSentPacketHandler(
+	initialPN protocol.PacketNumber,
+	initialMaxDatagramSize protocol.ByteCount,
+	rttStats *utils.RTTStats,
+	connStats *utils.ConnectionStats,
+	clientAddressValidated bool,
+	enableECN bool,
+	ignorePacketsBelow func(protocol.PacketNumber),
+	pers protocol.Perspective,
+	qlogger qlogwriter.Recorder,
+	logger utils.Logger,
+) SentPacketHandler {
+	sendAlgo := congestion.NewCubicSender(
 		congestion.DefaultClock{},
 		rttStats,
 		connStats,
@@ -147,7 +173,7 @@ func NewSentPacketHandler(
 		lostPackets:                    *newLostPacketTracker(64),
 		rttStats:                       rttStats,
 		connStats:                      connStats,
-		congestion:                     congestion,
+		congestion:                     sendAlgo,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,

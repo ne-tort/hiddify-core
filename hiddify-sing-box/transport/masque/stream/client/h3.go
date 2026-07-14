@@ -54,12 +54,6 @@ func NewH3Hooks(w H3Wire) strm.DialH3Hooks {
 			if err != nil {
 				return nil, err
 			}
-			if leg := strm.ConnectStreamLegFromContext(ctx); leg != "" {
-				req.Header.Set(strm.ConnectStreamLegHeader, leg)
-			}
-			if pairID := strm.ConnectStreamPairFromContext(ctx); pairID != "" {
-				req.Header.Set(strm.ConnectStreamPairHeader, pairID)
-			}
 			return req, nil
 		},
 		TunnelFromResponse: func(ctx context.Context, resp *http.Response, targetHost string, targetPort uint16) (net.Conn, error) {
@@ -92,52 +86,9 @@ func (in H3DialInput) logInput() strm.DialH3LogInput {
 	}
 }
 
-// DialHTTP3 performs HTTP/3 CONNECT-stream dial (single bidi by default; P2 dual when env=1).
+// DialHTTP3 performs one HTTP/3 CONNECT bidi-stream dial (Invisv thin path).
 func DialHTTP3(ctx context.Context, hooks strm.DialH3Hooks, host H3Host, tcpURL *url.URL, in H3DialInput, tcpHTTP *http3.Transport) (net.Conn, error) {
-	logIn := in.logInput()
-	if strm.ConnectStreamUseDualConnect() {
-		return dialHTTP3DualConnect(ctx, hooks, host, tcpURL, logIn, in.TargetHost, in.TargetPort, tcpHTTP)
-	}
-	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, logIn, in.TargetHost, in.TargetPort, tcpHTTP)
-}
-
-func dialHTTP3DualConnect(
-	ctx context.Context,
-	hooks strm.DialH3Hooks,
-	host H3Host,
-	tcpURL *url.URL,
-	logIn strm.DialH3LogInput,
-	targetHost string,
-	targetPort uint16,
-	tcpHTTP *http3.Transport,
-) (net.Conn, error) {
-	pairCtx := strm.ContextWithConnectStreamPair(ctx, strm.NewConnectStreamPairID())
-	dlConn, err := strm.DialHTTP3ConnectStreamLeg(pairCtx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, strm.ConnectStreamLegDownload)
-	if err != nil {
-		return nil, err
-	}
-	ulConn, err := strm.DialHTTP3ConnectStreamLeg(pairCtx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, strm.ConnectStreamLegUpload)
-	if err != nil {
-		_ = dlConn.Close()
-		return nil, err
-	}
-	remote := dlConn.RemoteAddr()
-	if remote == nil {
-		remote = ulConn.RemoteAddr()
-	}
-	inner := h3.NewDualTunnelConn(h3.DualTunnelConnParams{
-		Download: dlConn,
-		Upload:   ulConn,
-		Ctx:      context.WithoutCancel(ctx),
-		Local:    dlConn.LocalAddr(),
-		Remote:   remote,
-	})
-	if inner == nil {
-		_ = dlConn.Close()
-		_ = ulConn.Close()
-		return nil, strm.Errs.TCPConnectStreamFailed
-	}
-	return strm.NewTunnelConn(inner), nil
+	return strm.DialHTTP3ConnectStream(ctx, hooks, host, tcpURL, in.logInput(), in.TargetHost, in.TargetPort, tcpHTTP)
 }
 
 // SessionH3Host implements H3Host via callbacks (wired from package masque on coreSession).

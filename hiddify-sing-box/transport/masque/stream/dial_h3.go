@@ -41,7 +41,7 @@ type DialH3Hooks struct {
 	AuthFailed         error
 }
 
-// DialHTTP3ConnectStream performs one HTTP/3 CONNECT-stream dial with retry on transport faults.
+// DialHTTP3ConnectStream performs one HTTP/3 CONNECT bidi-stream dial with retry on transport faults.
 func DialHTTP3ConnectStream(
 	ctx context.Context,
 	hooks DialH3Hooks,
@@ -51,21 +51,6 @@ func DialHTTP3ConnectStream(
 	targetHost string,
 	targetPort uint16,
 	tcpHTTP *http3.Transport,
-) (net.Conn, error) {
-	return DialHTTP3ConnectStreamLeg(ctx, hooks, host, tcpURL, logIn, targetHost, targetPort, tcpHTTP, "")
-}
-
-// DialHTTP3ConnectStreamLeg dials one CONNECT-stream leg (P2 dual dial).
-func DialHTTP3ConnectStreamLeg(
-	ctx context.Context,
-	hooks DialH3Hooks,
-	host DialH3Host,
-	tcpURL *url.URL,
-	logIn DialH3LogInput,
-	targetHost string,
-	targetPort uint16,
-	tcpHTTP *http3.Transport,
-	legLabel string,
 ) (net.Conn, error) {
 	serverHost := tcpURL.Host
 	if serverHost == "" {
@@ -88,8 +73,8 @@ func DialHTTP3ConnectStreamLeg(
 		return nil, JoinConnectStreamPhase("connect handshake", context.Cause(ctx))
 	default:
 	}
-	log.Printf("masque_http_layer_attempt layer=h3 tag=%s tcp_stream=1 target=%s dial=%s%s",
-		strings.TrimSpace(logIn.Tag), tcpLogHost, dialAddr, dialH3LegLogSuffix(legLabel))
+	log.Printf("masque_http_layer_attempt layer=h3 tag=%s tcp_stream=1 target=%s dial=%s",
+		strings.TrimSpace(logIn.Tag), tcpLogHost, dialAddr)
 	maxAttempts := ConnectStreamDialMaxAttempts()
 	var lastRoundTripErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -97,17 +82,11 @@ func DialHTTP3ConnectStreamLeg(
 			return nil, JoinConnectStreamPhase("connect handshake", ctxErr)
 		}
 		streamCtx, stopReqCtxRelay := hooks.NewRequestContext(ctx)
-		legCtx := ContextWithConnectStreamLeg(streamCtx, legLabel)
-		if pairID := ConnectStreamPairFromContext(ctx); pairID != "" {
-			legCtx = ContextWithConnectStreamPair(legCtx, pairID)
-		}
-		req, reqErr := hooks.BuildRequest(legCtx, hooks.RequestURL(tcpURL), serverHost)
+		req, reqErr := hooks.BuildRequest(streamCtx, hooks.RequestURL(tcpURL), serverHost)
 		if reqErr != nil {
 			stopReqCtxRelay(false)
 			return nil, errors.Join(Errs.TCPConnectStreamFailed, reqErr)
 		}
-		// Request context can be canceled by detach/cascade boundary before RoundTrip starts.
-		// Entering RoundTrip on an already-canceled request may still hit OpenStreamSync path.
 		if reqCtxErr := context.Cause(req.Context()); reqCtxErr != nil {
 			stopReqCtxRelay(false)
 			return nil, JoinConnectStreamPhase("connect handshake", reqCtxErr)
@@ -118,9 +97,6 @@ func DialHTTP3ConnectStreamLeg(
 			stopReqCtxRelay(false)
 			lastRoundTripErr = roundTripErr
 			if attempt+1 < maxAttempts && connectStreamRoundTripShouldRetry(roundTripErr) {
-				// Overlay rebuild is session/hop-chain only (ResetTCPHTTPTransport).
-				// Per-dial transport reset kills the shared QUIC conn and cascades
-				// H3 error (0x0) (local) across parallel browser dials.
 				if backoffErr := waitContextBackoff(ctx, ConnectStreamDialBackoff(attempt)); backoffErr != nil {
 					return nil, JoinConnectStreamPhase("connect roundtrip backoff", backoffErr)
 				}
@@ -141,13 +117,12 @@ func DialHTTP3ConnectStreamLeg(
 			_ = resp.Body.Close()
 			return nil, JoinConnectStreamPhase("connect handshake", ctxErr)
 		}
-		conn, err := hooks.TunnelFromResponse(legCtx, resp, targetHost, targetPort)
+		conn, err := hooks.TunnelFromResponse(streamCtx, resp, targetHost, targetPort)
 		if err != nil {
 			stopReqCtxRelay(false)
 			_ = resp.Body.Close()
 			return nil, err
 		}
-		// Detach after tunnel is wired; early detach can tear down the live H3 stream during bootstrap.
 		stopReqCtxRelay(true)
 		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil
@@ -170,11 +145,4 @@ func waitContextBackoff(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
-}
-
-func dialH3LegLogSuffix(legLabel string) string {
-	if legLabel == "" {
-		return ""
-	}
-	return " dual_leg=" + legLabel
 }

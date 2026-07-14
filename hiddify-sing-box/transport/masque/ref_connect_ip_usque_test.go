@@ -52,11 +52,9 @@ func TestREFUsqueShapeConnectIPLeg(t *testing.T) {
 	_ = refUsqueShapeCeilingMbps // informational anchor vs field ~238
 }
 
-// TestREFUsqueNetstackPoolAudit verifies frozen REF-SRC usque contract + connectip buffer pool.
+// TestREFUsqueNetstackPoolAudit verifies connectip inbound frame clone (usque-shaped device pump).
+// Arch REF-SRC-USQUE ledger lives under //go:build masque_arch_ledger.
 func TestREFUsqueNetstackPoolAudit(t *testing.T) {
-	if len(ArchREFSRCUsqueAudit) == 0 {
-		t.Fatal("ArchREFSRCUsqueAudit empty")
-	}
 	frame := connectip.CloneInboundFrame([]byte{0x45, 0x00, 0x00, 0x1c})
 	if len(frame) == 0 {
 		t.Fatal("connectip.CloneInboundFrame returned empty")

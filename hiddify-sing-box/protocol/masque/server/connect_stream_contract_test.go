@@ -22,8 +22,6 @@ func TestConnectStreamServerWireContract(t *testing.T) {
 		`Hooks.DialTCPTargetSerial`,
 		`Hooks.AllowTCPPort`,
 		`relay.TuneTCPOutbound`,
-		`AcquireDualLegOnward`,
-		`ConnectStreamPairKeyFromRequest`,
 		`EnableFullDuplex()`,
 		`WriteHeader(http.StatusOK)`,
 		`relay.TCPForward`,

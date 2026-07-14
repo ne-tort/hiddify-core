@@ -121,7 +121,7 @@ func benchRelayTCPTunnelDownload(t *testing.T, link relayHijackLink, setup func(
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- strm.RelayTCPTunnel(ctx, targetConn, uploadR, resp, "")
+		done <- strm.RelayTCPTunnel(ctx, targetConn, uploadR, resp)
 	}()
 
 	client := link.wrap(clientLeg)
@@ -231,7 +231,7 @@ func TestRelayTunnelPrimeDownloadIperfBanner(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- strm.RelayTCPTunnel(ctx, target, http.NoBody, resp, "")
+		done <- strm.RelayTCPTunnel(ctx, target, http.NoBody, resp)
 	}()
 
 	buf := make([]byte, len(banner)+len(payload))

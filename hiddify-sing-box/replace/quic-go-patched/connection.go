@@ -3043,34 +3043,6 @@ func (c *Conn) queueControlFrame(f wire.Frame) {
 
 func (c *Conn) onHasConnectionData() { c.scheduleSending() }
 
-func (c *Conn) masqueSetBidiDuplexFair(id protocol.StreamID, fair bool) {
-	c.framer.setMasqueDuplexFair(id, fair)
-}
-
-func (c *Conn) masqueSetBidiDuplexFairRelay(id protocol.StreamID, relay bool) {
-	c.framer.setMasqueDuplexFairRelay(id, relay)
-}
-
-func (c *Conn) masqueSetBidiDuplexFairClient(id protocol.StreamID, client bool) {
-	c.framer.setMasqueDuplexFairClient(id, client)
-}
-
-func (c *Conn) masqueSetBidiDuplexLimitSend(id protocol.StreamID, limit bool) {
-	c.framer.setMasqueDuplexLimit(id, limit)
-}
-
-func (c *Conn) masqueSetBidiDuplexUploadStarved(id protocol.StreamID, starved bool) {
-	c.framer.setMasqueDuplexUploadStarved(id, starved)
-}
-
-func (c *Conn) masqueRepromoteActiveStream(id protocol.StreamID) bool {
-	if c.framer.repromoteActiveStream(id) {
-		c.scheduleSending()
-		return true
-	}
-	return false
-}
-
 func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
 	c.framer.AddActiveStream(id, str)
 	c.scheduleSending()
@@ -3079,11 +3051,7 @@ func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
 func (c *Conn) onHasStreamControlFrame(id protocol.StreamID, str streamControlFrameGetter) {
 	c.framer.AddStreamWithControlFrames(id, str)
 	if sendHandler, err := c.streamsMap.getSendStream(id); err == nil {
-		if st, ok := sendHandler.(*Stream); ok {
-			// First MAX_STREAM_DATA queue and renotify: nudge send when download-active
-			// (windowed bidi download stall when receive Read queues FC but upload Write blocked).
-			masqueWakeOnControlFrameRenotify(st)
-		}
+		_ = sendHandler
 	}
 	c.scheduleSending()
 }

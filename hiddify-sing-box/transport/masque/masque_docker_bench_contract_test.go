@@ -505,9 +505,9 @@ func TestMasqueDockerBenchConnectStreamH3KPIContract(t *testing.T) {
 		`MASQUE_BENCH_SKIP_URL_TEST`,
 		`skip_monitoring`,
 	)
-	requireSubstrings(t, h3TunnelGo, "h3 connect stream upload flush",
-		"FlushMasqueCoalesce",
-		"MasqueWakeStreamSend",
+	requireSubstrings(t, h3TunnelGo, "h3 connect stream thin tunnel",
+		"connectStreamBufLen",
+		"io.CopyBuffer",
 	)
 	requireSubstrings(t, localProfiles, "connect-stream-h3-tun field parity",
 		`name="connect-stream-h3-tun"`,

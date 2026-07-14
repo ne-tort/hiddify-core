@@ -4,17 +4,18 @@
 
 | Файл | Назначение |
 |------|------------|
-| `masque_wake.go` | `MasqueWakeStreamSend`, `MasqueWakeBidiDuplex`, `MasquePokeDownloadReceiveWindow`; eager WINDOW **always on** |
-| `internal/flowcontrol/masque_threshold.go` | threshold 0 → MAX_STREAM_DATA per read |
-| `http3/masque_wake.go` | wake after Stream.Read / Write on bidi CONNECT |
-| `masque_framer.go` | bidi download-active queue front |
+| `http3/frames_masque.go` | `EnableMasqueConnectStream` — fast tunnel DATA parse |
+| `http3/stream.go` | per-Write DATA frame; `WriteTo` plain Read loop (Invisv) |
+| `masque_wake.go` | CONNECT-UDP/IP only: `MasqueWakeConnSend*` |
+| `internal/flowcontrol/masque_threshold.go` | optional eager WINDOW (CONNECT-UDP) |
 
-## Prod always-on (no env)
+## CONNECT-stream (Invisv thin)
 
-- Eager download WINDOW (`MasqueDownloadEagerWindowEnabled` → true)
-- Client `wakeBidiSendAfterDownloadDelivery` — 64 KiB batched during WriteTo
-- Server hijack relay — batched duplex wake (`UseBatchedDuplexWake`)
+- **Нет** wake/duplex/fair-defer/coalesce/AggressiveCC
+- Client: `HTTPStreamer` → `*http3.Stream` → `h3.TunnelConn` (deadlines/context only)
+- Server: `relay_h3.go` plain `io.CopyBuffer` 64 KiB
 
-## Optional debug env (not prod dataplane switches)
+## CONNECT-UDP / CONNECT-IP (KEEP)
 
-`MASQUE_QUIC_WAKE_SEND_ON_RECEIVE_READ=0`, `MASQUE_QUIC_BIDI_CONN_WAKE=0`, `MASQUE_H3_BIDI_DOWNLOAD_DRAIN=0`, dial retry `MASQUE_CONNECT_STREAM_DIAL_*`.
+- `MasqueWakeConnSend` / `MasqueWakeConnSendDatagramCoalesced`
+- Datagram send batching in `http3/conn.go`

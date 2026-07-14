@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchREFSRCSBClientRow documents TunnelConn vs Invisv HTTPStreamer path (REF-SRC-SB-C1).

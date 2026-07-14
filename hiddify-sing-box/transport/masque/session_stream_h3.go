@@ -78,7 +78,7 @@ func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritem
 	})
 }
 
-// streamH3RoundTripper returns defaultTransport for ephemeral P6 dual-connect legs;
+// streamH3RoundTripper returns defaultTransport for ephemeral RoundTrippers;
 // shared TCPHTTP pool dials use the session TCPRoundTripper hook when set.
 func (s *coreSession) streamH3RoundTripper(defaultTransport http.RoundTripper) http.RoundTripper {
 	if defaultTransport != nil && defaultTransport != s.TCPHTTP {

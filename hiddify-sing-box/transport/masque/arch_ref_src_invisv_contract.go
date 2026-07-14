@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchREFSRCInvisvRow documents one Invisv H3 CONNECT-stream attribute vs sing-box thin dial (REF-SRC-INVISV).

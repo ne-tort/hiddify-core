@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 // ArchInvisvThinRow documents one Invisv H3 CreateTCPStream attribute vs thin CONNECT-stream dial (REF3-1).

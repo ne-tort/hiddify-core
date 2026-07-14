@@ -22,11 +22,10 @@ func TestH3ConnectRequestStreamUsesNilBody(t *testing.T) {
 
 func TestTunnelPolicySnapshot(t *testing.T) {
 	c := NewTunnelConn(TunnelConnParams{
-		H3Stream:        &testH3ConnectStream{},
-		RouteBidiDuplex: true,
+		H3Stream: &testH3ConnectStream{},
 	})
 	s := c.TunnelPolicySnapshot()
-	if !s.RouteBidiDuplex || !s.UsesH3Stream {
+	if s.RouteBidiDuplex || !s.UsesH3Stream {
 		t.Fatalf("unexpected snapshot: %+v", s)
 	}
 }
@@ -77,7 +76,7 @@ func (s *gateH3CancelOnCloseStream) CancelWrite(quic.StreamErrorCode) {
 
 func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
-	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})
 	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
@@ -101,7 +100,7 @@ func TestGATEH3TunnelConnCloseDuringDownloadOnlyHalfClosesUpload(t *testing.T) {
 
 func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
-	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})
 	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
@@ -122,7 +121,7 @@ func TestGATEH3TunnelConnClosePendingRunsFullTeardownAfterDownload(t *testing.T)
 
 func TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
-	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})
 	conn.beginDownload()
 	var canceled bool
 	conn.SetConnectStreamRequestCancel(func(error) { canceled = true })
@@ -136,7 +135,7 @@ func TestGATEH3TunnelConnCloseDuringDownloadAbortFullTeardown(t *testing.T) {
 
 func TestGATEH3TunnelConnCloseAfterDownloadFullTeardown(t *testing.T) {
 	stream := &gateH3CancelOnCloseStream{}
-	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream, RouteBidiDuplex: true})
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})
 	conn.beginDownload()
 	conn.endDownload()
 	var canceled bool

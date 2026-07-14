@@ -15,9 +15,6 @@ const RelayTunnelBufLen = 64 * 1024
 // RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
 const RelayTunnelFlushBytes = RelayTunnelBufLen
 
-// RelayTunnelUploadWakeBytes batches upload-relay credit wakes (2× cadence vs download flush).
-const RelayTunnelUploadWakeBytes = 128 * 1024
-
 var relayTunnelBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, RelayTunnelBufLen)
@@ -105,13 +102,7 @@ func (f *relayTunnelFlushWriter) flushNow() {
 }
 
 func relayTunnelUploadSource(reqBody io.ReadCloser, uploadLeg io.Reader) io.Reader {
-	if uploadLeg == nil {
-		return reqBody
-	}
-	if reqBody == nil || reqBody == http.NoBody {
-		return uploadLeg
-	}
-	if RelayUploadFromStream() {
+	if uploadLeg != nil {
 		return uploadLeg
 	}
 	return reqBody

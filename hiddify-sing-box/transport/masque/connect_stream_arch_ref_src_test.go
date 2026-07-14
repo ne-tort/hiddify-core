@@ -1,3 +1,5 @@
+//go:build masque_arch_ledger
+
 package masque
 
 import (

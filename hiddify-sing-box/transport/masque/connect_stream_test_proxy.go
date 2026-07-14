@@ -3,7 +3,6 @@ package masque
 // In-process HTTP/3 CONNECT-stream relay proxy for inttest/localize (W-STR-4 PR6).
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"sync"
@@ -16,27 +15,18 @@ import (
 )
 
 func connectStreamRelayHandler(targetHost, targetPort string, r *http.Request, w http.ResponseWriter) {
-	leg := strm.ConnectStreamLegFromRequest(r)
-	pairKey := strm.ConnectStreamPairKeyFromRequest(r, targetHost, targetPort)
-	dialOnward := func(ctx context.Context) (net.Conn, error) {
-		upstream, err := net.DialTimeout("tcp", net.JoinHostPort(targetHost, targetPort), 2*time.Second)
-		if err != nil {
-			return nil, err
-		}
-		_ = upstream.SetDeadline(time.Now().Add(30 * time.Second))
-		return upstream, nil
-	}
-	upstream, release, err := strm.AcquireDualLegOnward(r.Context(), leg, pairKey, dialOnward)
+	upstream, err := net.DialTimeout("tcp", net.JoinHostPort(targetHost, targetPort), 2*time.Second)
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	defer release()
+	defer upstream.Close()
+	_ = upstream.SetDeadline(time.Now().Add(30 * time.Second))
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w, leg)
+	_ = strm.RelayTCPTunnel(r.Context(), upstream, r.Body, w)
 }
 
 func startInProcessTCPConnectProxy(tb testing.TB, handler func(targetHost, targetPort string, r *http.Request, w http.ResponseWriter)) int {

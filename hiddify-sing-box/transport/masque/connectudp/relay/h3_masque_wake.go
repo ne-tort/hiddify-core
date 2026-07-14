@@ -4,14 +4,13 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// wakeH3RelayAfterC2SConsume grants sibling upload QUIC FC after HTTP/3 DATAGRAM drain
-// (quic-go-patched http3.WakeMasqueRelayAfterUploadRead; asymmetric upload + bidi C2S relay).
+// wakeH3RelayAfterC2SConsume nudges QUIC send after HTTP/3 DATAGRAM drain (CONNECT-UDP).
 func wakeH3RelayAfterC2SConsume(str h3C2SStream) {
 	if str == nil {
 		return
 	}
 	if s, ok := str.(*http3.Stream); ok {
-		http3.WakeMasqueRelayAfterUploadRead(s)
+		http3.WakeMasqueClientAfterDatagramReceive(s)
 	}
 }
 
@@ -24,6 +23,6 @@ func wakeH3RelayAfterS2CSendPressure(str h3DatagramSender) {
 		f.FlushProxiedIPDatagramSend()
 	}
 	if s, ok := str.(*http3.Stream); ok {
-		http3.WakeMasqueRelayAfterUploadRead(s)
+		http3.WakeMasqueClientAfterDatagramReceive(s)
 	}
 }

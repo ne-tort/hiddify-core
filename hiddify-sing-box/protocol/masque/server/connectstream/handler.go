@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/relay"
-	strm "github.com/sagernet/sing-box/transport/masque/stream"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/yosida95/uritemplate/v3"
@@ -116,41 +115,31 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	leg := strm.ConnectStreamLegFromRequest(r)
-	pairKey := strm.ConnectStreamPairKeyFromRequest(r, targetHost, targetPort)
 	var resolvedHost string
-	debugf("masque tcp connect dial start host=%s resolved_addrs=%v port=%s leg=%s", targetHost, resolvedAddrs, targetPort, leg)
-	dialOnward := func(ctx context.Context) (net.Conn, error) {
-		var (
-			targetConn net.Conn
-			dialErr    error
-		)
-		if len(resolvedAddrs) == 0 {
-			dialAddrFn := h.Hooks.OnwardTCPDialAddr
-			if dialAddrFn == nil {
-				return nil, errors.New("onward dial addr hook missing")
-			}
-			dialAddr := dialAddrFn(targetHost, uint16(portNum))
-			targetConn, dialErr = host.Dialer.DialContext(ctx, "tcp", dialAddr)
-			resolvedHost = targetHost
-		} else {
-			var dialedAddr netip.Addr
-			targetConn, dialedAddr, dialErr = dialSerial(ctx, host.Dialer, resolvedAddrs, uint16(portNum))
-			resolvedHost = dialedAddr.String()
+	debugf("masque tcp connect dial start host=%s resolved_addrs=%v port=%s", targetHost, resolvedAddrs, targetPort)
+	var targetConn net.Conn
+	var dialErr error
+	if len(resolvedAddrs) == 0 {
+		dialAddrFn := h.Hooks.OnwardTCPDialAddr
+		if dialAddrFn == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
-		if dialErr != nil {
-			return nil, dialErr
-		}
-		relay.TuneTCPOutbound(targetConn)
-		return targetConn, nil
+		dialAddr := dialAddrFn(targetHost, uint16(portNum))
+		targetConn, dialErr = host.Dialer.DialContext(r.Context(), "tcp", dialAddr)
+		resolvedHost = targetHost
+	} else {
+		var dialedAddr netip.Addr
+		targetConn, dialedAddr, dialErr = dialSerial(r.Context(), host.Dialer, resolvedAddrs, uint16(portNum))
+		resolvedHost = dialedAddr.String()
 	}
-	targetConn, releaseOnward, dialErr := strm.AcquireDualLegOnward(r.Context(), leg, pairKey, dialOnward)
 	if dialErr != nil {
 		debugf("masque tcp connect dial failed host=%s resolved_addrs=%v port=%s status=502 error_class=%s err=%v", targetHost, resolvedAddrs, targetPort, session.ClassifyError(errors.Join(session.ErrTCPDial, dialErr)), dialErr)
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	defer releaseOnward()
+	defer targetConn.Close()
+	relay.TuneTCPOutbound(targetConn)
 	// RFC 8441 CONNECT-stream: relay onward TCP→response while request body may still be idle
 	// (iperf3 waits for server banner before sending). Without full-duplex the HTTP stack can
 	// block response DATA until the request body is consumed (TUN bench hang at 0 Mbit/s).
@@ -161,7 +150,7 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		flusher.Flush()
 	}
 	debugf("masque tcp connect accepted host=%s resolved_host=%s port=%s status=200", targetHost, resolvedHost, targetPort)
-	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w, leg)
+	relayErr := relay.TCPForward(r.Context(), targetConn, r.Body, w)
 	if relayErr != nil && !errors.Is(relayErr, io.EOF) && !errors.Is(relayErr, context.Canceled) {
 		debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=relay_error error_class=relay_io err=%v", targetHost, resolvedHost, targetPort, relayErr)
 		return

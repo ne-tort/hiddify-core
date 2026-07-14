@@ -113,6 +113,9 @@ func EnforceConnectStreamBulkFCFloor(cfg *quic.Config) {
 
 // FinalizeConnectStreamQUICConfig applies P8 bulk FC floor then prod window boost after experimental merge.
 func FinalizeConnectStreamQUICConfig(cfg *quic.Config) {
+	if cfg == nil {
+		return
+	}
 	EnforceConnectStreamBulkFCFloor(cfg)
 	boostTCPBulkStreamQUICReceiveWindows(cfg)
 }
