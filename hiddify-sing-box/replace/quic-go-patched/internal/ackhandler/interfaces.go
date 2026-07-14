@@ -1,6 +1,7 @@
 package ackhandler
 
 import (
+	"github.com/quic-go/quic-go/congestion"
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/wire"
@@ -36,4 +37,9 @@ type SentPacketHandler interface {
 	OnLossDetectionTimeout(now monotime.Time) error
 
 	MigratedPath(now monotime.Time, initialMaxPacketSize protocol.ByteCount)
+
+	// SetCongestionControl replaces the send CC (RFC 9002 local). Used by MASQUE/HY2-style BBR.
+	SetCongestionControl(congestion.CongestionControl)
+	// MaybeNotifyAppLimited notifies Ex CC when the application has nothing to send but cwnd has room.
+	MaybeNotifyAppLimited()
 }

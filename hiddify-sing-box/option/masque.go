@@ -54,9 +54,12 @@ const (
 
 // Masque congestion_control (QUIC send algorithm; RFC 9002 local policy, not wire).
 const (
-	MasqueCongestionControlNewReno = "new_reno" // default — CubicSender Reno CA (status quo)
-	MasqueCongestionControlCubic   = "cubic"    // CubicSender Cubic CA
-	// Reserved (not yet in quic-go-patched): bbr, bbr2, brutal — rejected at validate until ported.
+	MasqueCongestionControlBBR            = "bbr"             // default — congestion_meta2 (HY2-parity)
+	MasqueCongestionControlNewReno        = "new_reno"        // CubicSender Reno CA
+	MasqueCongestionControlCubic          = "cubic"           // CubicSender Cubic CA
+	MasqueCongestionControlBBR2           = "bbr2"            // congestion_bbr2 default params
+	MasqueCongestionControlBBR2Aggressive = "bbr2_aggressive" // congestion_bbr2 aggressive
+	// Reserved: brutal — needs explicit Mbps; rejected until wired.
 )
 
 // MasqueServerAuthPolicy controls how HTTP (Basic/Bearer) and optional mTLS must succeed together.
@@ -162,8 +165,8 @@ type MasqueEndpointOptions struct {
 	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
 	HTTPLayer string `json:"http_layer,omitempty"`
 	// CongestionControl selects the QUIC send CC for this masque endpoint (client and/or server).
-	// Empty / "new_reno" (default), "cubic". Wire MASQUE framing unchanged (RFC 9002 local).
-	// "bbr"/"bbr2"/"brutal" are not in quic-go-patched yet — validation rejects them.
+	// Empty → "bbr" (prod default). Also: new_reno, cubic, bbr2, bbr2_aggressive.
+	// Wire MASQUE framing unchanged (RFC 9002 local). "brutal" not wired yet.
 	CongestionControl string `json:"congestion_control,omitempty"`
 	// HTTPLayerCacheTTL overrides the in-memory TTL for http_layer auto (default 5m).
 	HTTPLayerCacheTTL badoption.Duration `json:"http_layer_cache_ttl,omitempty"`

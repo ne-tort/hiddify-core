@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
+	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 	E "github.com/sagernet/sing/common/exceptions"
 	"golang.org/x/net/http2"
 )
@@ -35,10 +37,11 @@ type LaunchMasqueStackConfig struct {
 	ListenPort        uint16
 	HTTP3TLS          *tls.Config
 	CollateralTLS     *tls.Config
-	H3QUICConfig      *quic.Config
-	EnableH3Datagrams bool
-	ValidateUDP       func(net.PacketConn) error
-	Hooks             MasqueServeHooks
+	H3QUICConfig       *quic.Config
+	CongestionControl  string
+	EnableH3Datagrams  bool
+	ValidateUDP        func(net.PacketConn) error
+	Hooks              MasqueServeHooks
 }
 
 // LaunchMasqueStack binds UDP and TCP, starts HTTP/3 and HTTP/2 servers.
@@ -49,6 +52,10 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 		TLSConfig:       cfg.HTTP3TLS,
 		EnableDatagrams: cfg.EnableH3Datagrams,
 		Addr:            addr,
+		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+			h3t.ApplyExternalCongestionControl(c, cfg.CongestionControl)
+			return ctx
+		},
 	}
 	h3Srv.QUICConfig = cfg.H3QUICConfig
 	bind, bindErr := DualBindMasqueListeners(DualBindConfig{

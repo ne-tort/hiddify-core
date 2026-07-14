@@ -104,10 +104,16 @@ func normalizeHTTPLayer(layer string) string {
 
 func normalizeCongestionControl(cc string) string {
 	switch strings.ToLower(strings.TrimSpace(cc)) {
-	case "", option.MasqueCongestionControlNewReno:
+	case "", option.MasqueCongestionControlBBR:
+		return option.MasqueCongestionControlBBR
+	case option.MasqueCongestionControlNewReno:
 		return option.MasqueCongestionControlNewReno
 	case option.MasqueCongestionControlCubic:
 		return option.MasqueCongestionControlCubic
+	case option.MasqueCongestionControlBBR2:
+		return option.MasqueCongestionControlBBR2
+	case option.MasqueCongestionControlBBR2Aggressive:
+		return option.MasqueCongestionControlBBR2Aggressive
 	default:
 		return strings.ToLower(strings.TrimSpace(cc))
 	}
@@ -116,12 +122,16 @@ func normalizeCongestionControl(cc string) string {
 func validateCongestionControl(cc string) error {
 	n := normalizeCongestionControl(cc)
 	switch n {
-	case option.MasqueCongestionControlNewReno, option.MasqueCongestionControlCubic:
+	case option.MasqueCongestionControlBBR,
+		option.MasqueCongestionControlNewReno,
+		option.MasqueCongestionControlCubic,
+		option.MasqueCongestionControlBBR2,
+		option.MasqueCongestionControlBBR2Aggressive:
 		return nil
-	case "bbr", "bbr2", "bbr2_aggressive", "brutal":
-		return E.New("masque: congestion_control=", n, " not available yet (quic-go-patched has CubicSender only; use new_reno|cubic; BBR lives on HY2/TUIC today)")
+	case "brutal":
+		return E.New("masque: congestion_control=brutal not available yet (needs explicit Mbps; use bbr|bbr2|new_reno|cubic)")
 	default:
-		return E.New("masque: invalid congestion_control: ", cc, " (want new_reno|cubic)")
+		return E.New("masque: invalid congestion_control: ", cc, " (want bbr|bbr2|bbr2_aggressive|new_reno|cubic)")
 	}
 }
 

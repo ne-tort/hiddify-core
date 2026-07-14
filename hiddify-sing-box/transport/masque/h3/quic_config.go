@@ -13,7 +13,8 @@ type QUICDialProfile struct {
 	WarpMasqueClientCert     tls.Certificate
 	WarpMasqueLegacyH3Extras bool
 	WarpConnectIPProtocol    string
-	// CongestionControl: empty/"new_reno" (default) or "cubic". Applied to quic.Config.
+	// CongestionControl: empty/"new_reno" (default), "cubic", or "bbr". Applied via quic.Config
+	// and (for bbr) post-dial SetCongestionControl.
 	CongestionControl string
 }
 
@@ -127,13 +128,19 @@ func applyCongestionControl(cfg *quic.Config, name string) {
 		return
 	}
 	switch name {
-	case "", quic.CongestionControlNewReno:
+	case "", quic.CongestionControlBBR:
+		// Default prod: post-dial ApplyCongestionControl installs meta2 BBR.
+		cfg.CongestionControl = quic.CongestionControlBBR
+	case quic.CongestionControlNewReno:
 		cfg.CongestionControl = quic.CongestionControlNewReno
 	case quic.CongestionControlCubic:
 		cfg.CongestionControl = quic.CongestionControlCubic
+	case quic.CongestionControlBBR2:
+		cfg.CongestionControl = quic.CongestionControlBBR2
+	case quic.CongestionControlBBR2Aggressive:
+		cfg.CongestionControl = quic.CongestionControlBBR2Aggressive
 	default:
-		// Validation rejects unknown values earlier; keep Reno if something slips through.
-		cfg.CongestionControl = quic.CongestionControlNewReno
+		cfg.CongestionControl = quic.CongestionControlBBR
 	}
 }
 

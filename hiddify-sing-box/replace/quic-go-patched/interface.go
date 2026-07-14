@@ -177,6 +177,7 @@ type Config struct {
 	EnableStreamResetPartialDelivery bool
 	// CongestionControl selects the local QUIC send algorithm (RFC 9002).
 	// Empty/"new_reno" = CubicSender Reno CA (prod default). "cubic" = Cubic CA.
+	// Advanced algos (bbr, …) are applied post-dial via Conn.SetCongestionControl.
 	// This is endpoint-local and does not change MASQUE/H3 wire framing.
 	CongestionControl string
 
@@ -185,16 +186,22 @@ type Config struct {
 
 // QUIC congestion_control string values (masque / quic.Config).
 const (
-	CongestionControlNewReno = "new_reno"
-	CongestionControlCubic   = "cubic"
+	CongestionControlNewReno        = "new_reno"
+	CongestionControlCubic          = "cubic"
+	CongestionControlBBR            = "bbr" // prod default (meta2)
+	CongestionControlBBR2           = "bbr2"
+	CongestionControlBBR2Aggressive = "bbr2_aggressive"
 )
 
 // CongestionControlUseReno reports whether CongestionControl selects NewReno CA inside CubicSender.
-// Empty / unknown → Reno (safe status-quo default).
+// Empty / unknown → Reno only if not an advanced CC (advanced CCs are swapped post-dial).
 func CongestionControlUseReno(name string) bool {
 	switch name {
 	case CongestionControlCubic:
 		return false
+	case CongestionControlBBR, CongestionControlBBR2, CongestionControlBBR2Aggressive:
+		// Transient CubicSender before SetCongestionControl — Reno is fine.
+		return true
 	default:
 		return true
 	}

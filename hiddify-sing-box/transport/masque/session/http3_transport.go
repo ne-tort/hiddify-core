@@ -42,7 +42,12 @@ func OpenH3ClientConn(ctx context.Context, s *CoreSession) (*http3.ClientConn, e
 		TLSClientConfig:    tlsConf,
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
 			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
-			return quicDial(ctx, addr, tlsCfg, cfg)
+			conn, err := quicDial(ctx, addr, tlsCfg, cfg)
+			if err != nil {
+				return nil, err
+			}
+			h3t.ApplyExternalCongestionControl(conn, s.Options.CongestionControl)
+			return conn, nil
 		},
 	}
 	ApplyWarpHTTP3TransportFields(transport, s.Options)
@@ -185,7 +190,12 @@ func NewTCPConnectStreamHTTP3Transport(s *CoreSession) *http3.Transport {
 			target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
 			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
 			h3t.FinalizeConnectStreamQUICConfig(cfg)
-			return quicDial(ctx, target, tlsCfg, cfg)
+			conn, err := quicDial(ctx, target, tlsCfg, cfg)
+			if err != nil {
+				return nil, err
+			}
+			h3t.ApplyExternalCongestionControl(conn, s.Options.CongestionControl)
+			return conn, nil
 		},
 	}
 	ApplyWarpHTTP3TransportFields(transport, s.Options)

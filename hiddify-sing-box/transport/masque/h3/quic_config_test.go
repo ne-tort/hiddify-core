@@ -131,9 +131,13 @@ func TestH3QUICConfigForDialPacketSize(t *testing.T) {
 }
 
 func TestTCPConnectStreamQUICConfigCongestionControl(t *testing.T) {
-	reno := TCPConnectStreamQUICConfig(QUICDialProfile{})
+	def := TCPConnectStreamQUICConfig(QUICDialProfile{})
+	if def.CongestionControl != quic.CongestionControlBBR {
+		t.Fatalf("default CongestionControl=%q want %q", def.CongestionControl, quic.CongestionControlBBR)
+	}
+	reno := TCPConnectStreamQUICConfig(QUICDialProfile{CongestionControl: quic.CongestionControlNewReno})
 	if reno.CongestionControl != quic.CongestionControlNewReno {
-		t.Fatalf("default CongestionControl=%q want %q", reno.CongestionControl, quic.CongestionControlNewReno)
+		t.Fatalf("new_reno CongestionControl=%q", reno.CongestionControl)
 	}
 	cubic := TCPConnectStreamQUICConfig(QUICDialProfile{CongestionControl: quic.CongestionControlCubic})
 	if cubic.CongestionControl != quic.CongestionControlCubic {
@@ -142,6 +146,10 @@ func TestTCPConnectStreamQUICConfigCongestionControl(t *testing.T) {
 	srv := HTTPServerQUICConfig(quic.CongestionControlCubic)
 	if srv.CongestionControl != quic.CongestionControlCubic {
 		t.Fatalf("server cubic CongestionControl=%q", srv.CongestionControl)
+	}
+	bbr2 := TCPConnectStreamQUICConfig(QUICDialProfile{CongestionControl: quic.CongestionControlBBR2})
+	if bbr2.CongestionControl != quic.CongestionControlBBR2 {
+		t.Fatalf("bbr2 CongestionControl=%q", bbr2.CongestionControl)
 	}
 	if !quic.CongestionControlUseReno(reno.CongestionControl) {
 		t.Fatal("new_reno should use Reno CA")
