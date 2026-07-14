@@ -13,7 +13,6 @@ type (
 	IPPacketSession            = session.IPPacketSession
 	IPPacketSessionWithContext = session.IPPacketSessionWithContext
 	HTTPLayerCacheDialIdentity = session.HTTPLayerCacheDialIdentity
-	QUICExperimentalOptions    = session.QUICExperimentalOptions
 	QUICDialFunc               = session.QUICDialFunc
-	MasqueTCPDialFunc = session.MasqueTCPDialFunc
+	MasqueTCPDialFunc          = session.MasqueTCPDialFunc
 )

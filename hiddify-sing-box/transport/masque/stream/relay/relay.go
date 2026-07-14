@@ -38,7 +38,7 @@ func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadClo
 		_, err := relayTunnelDownloadRelayH2(responseWriter, responseWriter, targetConn)
 		downloadErrCh <- err
 	}()
-	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh)
+	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh, nil)
 }
 
 // RelayTCPTunnelBidiStream runs the HTTP/3 hijack relay path (h2o plain io.CopyBuffer both halves).

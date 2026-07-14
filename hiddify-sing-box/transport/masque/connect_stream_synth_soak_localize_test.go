@@ -10,12 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/sagernet/sing-box/transport/masque"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
 const (
-	// synthChurnN — above typical peer bidi stream limit (~100); leaks surface before post-probe.
+	// synthChurnN — concurrent browser/speedtest churn sample; prod peer bidi is 4096.
 	synthChurnN              = 100
 	synthChurnMinOKRate      = 0.95
 	synthChurnPostProbeWait  = 10 * time.Second
@@ -44,8 +45,13 @@ func dialDirectOnce(ctx context.Context, session masque.ClientSession, dest M.So
 
 func setupSynthChurnHarness(t *testing.T) (socksPort, targetPort uint16, session masque.ClientSession, ctx context.Context) {
 	t.Helper()
+	return setupSynthChurnHarnessWithServerQUIC(t, nil)
+}
+
+func setupSynthChurnHarnessWithServerQUIC(t *testing.T, serverQUIC *quic.Config) (socksPort, targetPort uint16, session masque.ClientSession, ctx context.Context) {
+	t.Helper()
 	targetPort = startShortHTTPBurstTargetSimple(t)
-	proxyPort := startLaunchMasqueStackH3ConnectStreamServer(t)
+	proxyPort := startLaunchMasqueStackH3ConnectStreamServerWithQUIC(t, serverQUIC)
 	session, ctx = masque.ExportNewConnectStreamH3ProdSessionWithTimeout(t, proxyPort, 3*time.Minute)
 	socksPort = masque.ExportStartH3ConnectStreamSocksRouterWithSession(t, session)
 	return socksPort, targetPort, session, ctx
@@ -109,8 +115,8 @@ func TestGATEH3ConnectStreamDirectSessionChurnNoPoison(t *testing.T) {
 	postChurnProbeDirect(t, session, ctx, targetPort)
 }
 
-// TestGATEH3ConnectStreamDirectChurn90SubMaxStreams (GATE-SYNTH-MAXSTREAMS-90) — below QUIC
-// DefaultMaxIncomingStreams (100): post-probe must PASS when Close recycles slots.
+// TestGATEH3ConnectStreamDirectChurn90SubMaxStreams (GATE-SYNTH-MAXSTREAMS-90) — sequential
+// dial+close; post-probe must PASS when Close recycles slots (regression vs ghost streams).
 func TestGATEH3ConnectStreamDirectChurn90SubMaxStreams(t *testing.T) {
 	_, targetPort, session, ctx := setupSynthChurnHarness(t)
 	dest := M.ParseSocksaddrHostPort("127.0.0.1", targetPort)

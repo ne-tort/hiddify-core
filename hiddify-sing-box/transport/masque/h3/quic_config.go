@@ -13,8 +13,8 @@ type QUICDialProfile struct {
 	WarpMasqueClientCert     tls.Certificate
 	WarpMasqueLegacyH3Extras bool
 	WarpConnectIPProtocol    string
-	// CongestionControl: empty/"new_reno" (default), "cubic", or "bbr". Applied via quic.Config
-	// and (for bbr) post-dial SetCongestionControl.
+	// CongestionControl: empty → bbr (prod). Also cubic, new_reno, bbr2, bbr2_aggressive.
+	// Applied via quic.Config and post-dial ApplyExternalCongestionControl for meta2 BBR.
 	CongestionControl string
 }
 
@@ -35,6 +35,11 @@ const (
 	// BulkStreamFCFloorBytes is the minimum CONNECT-stream QUIC stream FC that escapes the
 	// bench-shaped 64 KiB/RTT ceiling (S43 L256 → >21 Mbit/s @ 35 ms). Prod configs use 128 MiB.
 	BulkStreamFCFloorBytes = 256 * 1024
+
+	// ConnectStreamMaxIncomingStreams is the peer bidi budget on the MASQUE HTTP/3 listener.
+	// Stock quic-go DefaultMaxIncomingStreams=100 deadlocks OpenStreamSync under concurrent
+	// browser/speedtest flows on a shared QUIC (dial hangs → connect roundtrip context canceled @60s).
+	ConnectStreamMaxIncomingStreams int64 = 4096
 
 	defaultInitialStreamRecvWindow     = 16 << 20  // 16 MiB
 	defaultMaxStreamRecvWindow         = 96 << 20  // 96 MiB
@@ -94,7 +99,6 @@ func boostTCPBulkStreamQUICReceiveWindows(cfg *quic.Config) {
 }
 
 // EnforceConnectStreamBulkFCFloor raises QUIC receive windows to at least BulkStreamFCFloorBytes.
-// Called after quic_experimental merge so lab knobs cannot reintroduce the 64 KiB/RTT ceiling.
 func EnforceConnectStreamBulkFCFloor(cfg *quic.Config) {
 	if cfg == nil {
 		return
@@ -114,13 +118,29 @@ func EnforceConnectStreamBulkFCFloor(cfg *quic.Config) {
 	}
 }
 
-// FinalizeConnectStreamQUICConfig applies P8 bulk FC floor then prod window boost after experimental merge.
+// EnforceConnectStreamPeerBidiBudget raises MaxIncomingStreams so peer OpenStreamSync cannot stall
+// at stock 100 under concurrent CONNECT-stream VPN traffic. MaxIncomingStreams < 0 means "disabled"
+// (HTTP/3 client refuses peer-initiated bidi) and is left alone.
+func EnforceConnectStreamPeerBidiBudget(cfg *quic.Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.MaxIncomingStreams < 0 {
+		return
+	}
+	if cfg.MaxIncomingStreams < ConnectStreamMaxIncomingStreams {
+		cfg.MaxIncomingStreams = ConnectStreamMaxIncomingStreams
+	}
+}
+
+// FinalizeConnectStreamQUICConfig applies P8 bulk FC floor, prod window boost, and peer stream budget.
 func FinalizeConnectStreamQUICConfig(cfg *quic.Config) {
 	if cfg == nil {
 		return
 	}
 	EnforceConnectStreamBulkFCFloor(cfg)
 	boostTCPBulkStreamQUICReceiveWindows(cfg)
+	EnforceConnectStreamPeerBidiBudget(cfg)
 }
 
 func applyCongestionControl(cfg *quic.Config, name string) {
@@ -185,6 +205,8 @@ func TCPConnectStreamQUICConfig(profile QUICDialProfile) *quic.Config {
 		})
 	}
 	FinalizeConnectStreamQUICConfig(cfg)
+	// HTTP/3 client must not advertise peer bidi budget; server MaxIncomingStreams limits dials.
+	cfg.MaxIncomingStreams = -1
 	applyCongestionControl(cfg, profile.CongestionControl)
 	return cfg
 }
@@ -214,7 +236,7 @@ func packetPlaneHandshakeIdleTimeout() time.Duration {
 }
 
 // HTTPServerQUICConfig returns QUIC settings for the MASQUE HTTP/3 server listener.
-// congestionControl: empty/"new_reno" (default) or "cubic".
+// congestionControl: empty → bbr (prod). Also cubic, new_reno, bbr2, bbr2_aggressive.
 func HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
 	cc := ""
 	if len(congestionControl) > 0 {

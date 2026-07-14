@@ -41,8 +41,7 @@ func OpenH3ClientConn(ctx context.Context, s *CoreSession) (*http3.ClientConn, e
 		DisableCompression: true, // CONNECT-UDP/IP/stream are not gzip HTTP bodies
 		TLSClientConfig:    tlsConf,
 		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, _ *quic.Config) (*quic.Conn, error) {
-			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
-			conn, err := quicDial(ctx, addr, tlsCfg, cfg)
+			conn, err := quicDial(ctx, addr, tlsCfg, quicCfgBase)
 			if err != nil {
 				return nil, err
 			}
@@ -52,10 +51,7 @@ func OpenH3ClientConn(ctx context.Context, s *CoreSession) (*http3.ClientConn, e
 		},
 	}
 	ApplyWarpHTTP3TransportFields(transport, s.Options)
-	conn, err := transport.Dial(ctx, target, tlsConf, ApplyQUICExperimentalOptions(
-		quicCfgBase,
-		s.Options.QUICExperimental,
-	))
+	conn, err := transport.Dial(ctx, target, tlsConf, quicCfgBase)
 	if err != nil {
 		log.Printf("masque openHTTP3ClientConn failed target=%s sni=%s err=%v", target, tlsConf.ServerName, err)
 		return nil, err
@@ -145,7 +141,7 @@ func EnsureTCPHTTPQuicConn(s *CoreSession) error {
 	return err
 }
 
-// WarmTCPConnectStreamHTTP3Transport completes the QUIC handshake on a CONNECT-stream transport (P6 warm dial).
+// WarmTCPConnectStreamHTTP3Transport completes the shared QUIC handshake on a CONNECT-stream transport.
 func WarmTCPConnectStreamHTTP3Transport(ctx context.Context, s *CoreSession, tr *http3.Transport) error {
 	if tr == nil {
 		return errors.New("nil CONNECT-stream HTTP/3 transport")
@@ -189,8 +185,10 @@ func NewTCPConnectStreamHTTP3Transport(s *CoreSession) *http3.Transport {
 				port = 443
 			}
 			target := MasqueDialTarget(QuicDialCandidateHost(s.Options), port)
-			cfg := ApplyQUICExperimentalOptions(quicCfgBase, s.Options.QUICExperimental)
+			cfg := quicCfgBase.Clone()
 			h3t.FinalizeConnectStreamQUICConfig(cfg)
+			// HTTP/3 client: never advertise peer bidi (Finalize floor must not stick on client dial).
+			cfg.MaxIncomingStreams = -1
 			conn, err := quicDial(ctx, target, tlsCfg, cfg)
 			if err != nil {
 				return nil, err

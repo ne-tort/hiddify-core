@@ -211,10 +211,7 @@ func (h connectUDPPlaneHost) WrapDatagramSplit(pc net.PacketConn, writeMax int, 
 func (h connectUDPPlaneHost) NewQUICClient() *qmasque.Client {
 	return cudpclient.NewQUICClient(cudpclient.QUICClientConfig{
 		TLSClientConfig: masqueClientTLSConfig(h.s.Options),
-		QUICConfig: session.ApplyQUICExperimentalOptions(
-			masqueQUICConfigForDial(h.s.Options),
-			h.s.Options.QUICExperimental,
-		),
+		QUICConfig:     masqueQUICConfigForDial(h.s.Options),
 		QUICDial:       h.s.quicDialWithPolicy("client_connect_udp"),
 		BearerToken:    strings.TrimSpace(h.s.Options.ServerToken),
 		LegacyH3Extras: h.s.Options.WarpMasqueLegacyH3Extras,

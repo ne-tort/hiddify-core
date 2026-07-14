@@ -71,7 +71,6 @@ type RuntimeOptions struct {
 	MasqueQUICCryptoTLS *tls.Config
 	// MasqueTCPDialTLS performs TLS over TCP for HTTP/2 overlay (supports uTLS when configured in outbound_tls).
 	MasqueTCPDialTLS            func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
-	QUICExperimental            T.QUICExperimentalOptions
 	CongestionControl           string
 	ConnectIPDatagramCeiling    uint32
 	Chain                       []ChainHop
@@ -177,7 +176,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			ClientBasicPassword:         r.options.ClientBasicPassword,
 			MasqueQUICCryptoTLS:         r.options.MasqueQUICCryptoTLS,
 			MasqueTCPDialTLS:            r.options.MasqueTCPDialTLS,
-			QUICExperimental:            r.options.QUICExperimental,
 			CongestionControl:           r.options.CongestionControl,
 			ConnectIPDatagramCeiling:    r.options.ConnectIPDatagramCeiling,
 			Hops:                        toTransportHops(r.options.Chain),

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 type gateH3RelayLeg struct {
@@ -168,14 +170,98 @@ func TestGATERelayH3BidiSlowDownloadSurvivesUploadEOF(t *testing.T) {
 }
 
 // TestGATERelayTunnelSelectNilReqBodyDownloadErrorNoPanic: hijacked H3 passes nil reqBody.
+// Early download error must still wait for the upload leg (slot recycle).
 func TestGATERelayTunnelSelectNilReqBodyDownloadErrorNoPanic(t *testing.T) {
 	t.Parallel()
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	downloadErrCh <- io.ErrClosedPipe
+	uploadErrCh <- nil
 	tcp := &gateMemTCPConn{}
-	err := relayTunnelSelect(context.Background(), tcp, nil, uploadErrCh, downloadErrCh)
+	err := relayTunnelSelect(context.Background(), tcp, nil, uploadErrCh, downloadErrCh, nil)
 	if err == nil {
 		t.Fatal("want download error")
 	}
 }
+
+type gateH3AbortTrackLeg struct {
+	uploadR      io.Reader
+	downloadW    io.Writer
+	cancelReadN  atomic.Int32
+	closeN       atomic.Int32
+	unblockRead  chan struct{}
+}
+
+func (l *gateH3AbortTrackLeg) Read(p []byte) (int, error) {
+	if l.unblockRead != nil {
+		<-l.unblockRead
+	}
+	if l.uploadR == nil {
+		return 0, io.EOF
+	}
+	return l.uploadR.Read(p)
+}
+func (l *gateH3AbortTrackLeg) Write(p []byte) (int, error) {
+	if l.downloadW == nil {
+		return 0, io.ErrClosedPipe
+	}
+	return l.downloadW.Write(p)
+}
+func (l *gateH3AbortTrackLeg) Close() error {
+	l.closeN.Add(1)
+	l.wakeRead()
+	return nil
+}
+func (l *gateH3AbortTrackLeg) CancelRead(_ quic.StreamErrorCode) {
+	l.cancelReadN.Add(1)
+	l.wakeRead()
+}
+func (l *gateH3AbortTrackLeg) wakeRead() {
+	if l.unblockRead == nil {
+		return
+	}
+	select {
+	case <-l.unblockRead:
+	default:
+		close(l.unblockRead)
+	}
+}
+
+// TestGATERelayH3BidiDownloadAbortCancelsReceiveHalf: download error must CancelRead so
+// a blocked upload Read wakes and the QUIC stream can leave MaxIncomingStreams.
+func TestGATERelayH3BidiDownloadAbortCancelsReceiveHalf(t *testing.T) {
+	t.Parallel()
+	leg := &gateH3AbortTrackLeg{
+		uploadR:     bytes.NewReader(nil), // blocks until CancelRead/Close wakes Read
+		downloadW:   &bytes.Buffer{},
+		unblockRead: make(chan struct{}),
+	}
+	// Infinite block on upload Read until CancelRead; download fails immediately via bad target.
+	tcp := &gateFailWriteTCPConn{}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- RelayTCPTunnelBidiStream(context.Background(), tcp, nil, leg)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("want download error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay hung after download abort (upload Read not woken)")
+	}
+	if leg.cancelReadN.Load() == 0 {
+		t.Fatal("expected CancelRead on H3 bidi after abort")
+	}
+	if leg.closeN.Load() == 0 {
+		t.Fatal("expected Close on H3 bidi after abort")
+	}
+}
+
+type gateFailWriteTCPConn struct {
+	gateMemTCPConn
+}
+
+func (c *gateFailWriteTCPConn) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+func (c *gateFailWriteTCPConn) Read([]byte) (int, error)  { return 0, io.ErrUnexpectedEOF }

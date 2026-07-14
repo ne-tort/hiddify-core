@@ -58,7 +58,12 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 			return ctx
 		},
 	}
-	h3Srv.QUICConfig = cfg.H3QUICConfig
+	if cfg.H3QUICConfig != nil {
+		h3Srv.QUICConfig = cfg.H3QUICConfig
+	} else {
+		// Synth/lab stacks often omit H3QUICConfig; never fall back to stock MaxIncomingStreams=100.
+		h3Srv.QUICConfig = h3t.HTTPServerQUICConfig(cfg.CongestionControl)
+	}
 	bind, bindErr := DualBindMasqueListeners(DualBindConfig{
 		ListenHost:  cfg.ListenHost,
 		ListenPort:  cfg.ListenPort,

@@ -22,6 +22,8 @@ func TestGATEH3ConnectStreamChurnGatesPresent(t *testing.T) {
 		"TestGATEH3ConnectStreamSocksCMParallelChurnNoPoison",
 		"TestGATEH3ConnectStreamParallelCanceledParentDialSucceeds",
 		"TestGATEH3ConnectStreamQUICMaxStreamsBackpressure",
+		"TestGATEH3ConnectStreamAbortReloadRecyclesBudget",
+		"TestGATEH3ConnectStreamProdBidiBudgetHoldsConcurrent",
 		"TestGATEH3ConnectStreamBrowserParallelParent30sDeadline",
 		"TestGATEH3ConnectStreamBrowserBurstWithHeldStreams",
 		"TestGATEH3ConnectStreamBenchAbortStaleQUICPostProbe",

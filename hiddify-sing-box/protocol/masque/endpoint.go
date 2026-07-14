@@ -6,7 +6,6 @@ import (
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
-	TM "github.com/sagernet/sing-box/transport/masque"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -74,6 +73,9 @@ func rejectRemovedMasqueClientFields(o option.MasqueEndpointOptions) error {
 	}
 	if o.HTTPLayerFallback {
 		return E.New("masque: removed field http_layer_fallback; use http_layer auto")
+	}
+	if o.QUICExperimental != nil {
+		return E.New("masque: removed field quic_experimental; QUIC knobs are baked in (FinalizeConnectStreamQUICConfig)")
 	}
 	return nil
 }
@@ -151,24 +153,6 @@ func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.Masq
 	return o
 }
 
-func toTransportQUICExperimental(o *option.MasqueQUICExperimentalOptions) TM.QUICExperimentalOptions {
-	if o == nil {
-		return TM.QUICExperimentalOptions{}
-	}
-	out := TM.QUICExperimentalOptions{
-		Enabled:                    o.Enabled,
-		KeepAlivePeriod:            o.KeepAlivePeriod.Build(),
-		MaxIdleTimeout:             o.MaxIdleTimeout.Build(),
-		InitialStreamReceiveWindow: o.InitialStreamReceiveWindow,
-		MaxStreamReceiveWindow:     o.MaxStreamReceiveWindow,
-		InitialConnectionWindow:    o.InitialConnectionWindow,
-		MaxConnectionWindow:        o.MaxConnectionWindow,
-		MaxIncomingStreams:         o.MaxIncomingStreams,
-		DisablePathMTUDiscovery:    o.DisablePathMTUDiscovery,
-	}
-	return out
-}
-
 func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	role := normalizeRole(o.Role)
 	if role != option.MasqueRoleClient && role != option.MasqueRoleServer {
@@ -193,9 +177,6 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 	}
 	if err := validateCongestionControl(o.CongestionControl); err != nil {
 		return err
-	}
-	if httpLayerNorm == option.MasqueHTTPLayerH2 && o.QUICExperimental != nil && o.QUICExperimental.Enabled {
-		return E.New("masque: http_layer h2 is incompatible with quic_experimental.enabled")
 	}
 	if o.HTTPLayerCacheTTL.Build() > 0 && httpLayerNorm != option.MasqueHTTPLayerAuto {
 		return E.New("masque: http_layer_cache_ttl is only used when http_layer is auto")

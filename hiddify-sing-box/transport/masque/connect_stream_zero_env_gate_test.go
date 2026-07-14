@@ -11,9 +11,11 @@ import (
 
 var connectStreamProdForbiddenEnv = regexp.MustCompile(`os\.(Getenv|LookupEnv)\(`)
 
-var connectStreamProdZeroEnvDirs = []string{"stream", "h2"}
+var connectStreamProdZeroEnvDirs = []string{"stream", "h2", "h3", "session"}
 
 var connectStreamXNetMasqueGlob = filepath.Join("..", "..", "replace", "x-net-patched", "http2", "masque_*.go")
+
+var connectStreamHTTP3ClientPath = filepath.Join("..", "..", "replace", "quic-go-patched", "http3", "client.go")
 
 func TestGATEConnectStreamProdZeroEnv(t *testing.T) {
 	t.Parallel()
@@ -37,6 +39,47 @@ func TestGATEConnectStreamProdZeroEnv(t *testing.T) {
 		}
 		if connectStreamProdForbiddenEnv.Match(data) {
 			t.Fatalf("%s: os.Getenv in x-net masque patch", path)
+		}
+	}
+	http3Client, err := os.ReadFile(connectStreamHTTP3ClientPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connectStreamProdForbiddenEnv.Match(http3Client) {
+		t.Fatalf("%s: os.Getenv in http3 CONNECT client", connectStreamHTTP3ClientPath)
+	}
+}
+
+func TestGATEConnectStreamProdNoExperimentalQUICMerge(t *testing.T) {
+	t.Parallel()
+	forbidden := []string{
+		"ApplyQUICExperimentalOptions",
+		"QUICExperimentalOptions",
+		"QUICExperimental:",
+	}
+	roots := []string{"session", "stream", "h3", "h2"}
+	for _, root := range roots {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			src := string(data)
+			for _, needle := range forbidden {
+				if strings.Contains(src, needle) {
+					t.Errorf("%s: forbidden experimental QUIC symbol %q", path, needle)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
 		}
 	}
 }

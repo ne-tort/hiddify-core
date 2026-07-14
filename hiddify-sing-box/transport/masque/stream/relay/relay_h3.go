@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
@@ -15,9 +16,39 @@ func relayEnableH3ConnectStream(leg io.ReadWriteCloser) {
 	}
 }
 
+func releaseH3ConnectRelayStream(bidi io.ReadWriteCloser) {
+	if bidi == nil {
+		return
+	}
+	// http3.Server non-hijack path always CancelRead+Close. Hijacked CONNECT must mirror that:
+	// stream.Close() alone only finishes the send half; without CancelRead (or Read-to-EOF)
+	// the server receive half never onStreamCompleted → MaxIncomingStreams slot stays ghosted.
+	const code = quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
+	type cancelReader interface {
+		CancelRead(quic.StreamErrorCode)
+	}
+	if cr, ok := bidi.(cancelReader); ok {
+		cr.CancelRead(code)
+	}
+	_ = bidi.Close()
+}
+
+func abortH3ConnectRelayReceive(bidi io.ReadWriteCloser) {
+	if bidi == nil {
+		return
+	}
+	const code = quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
+	type cancelReader interface {
+		CancelRead(quic.StreamErrorCode)
+	}
+	if cr, ok := bidi.(cancelReader); ok {
+		cr.CancelRead(code)
+	}
+}
+
 func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, bidi io.ReadWriteCloser) error {
 	if bidi != nil {
-		defer func() { _ = bidi.Close() }()
+		defer releaseH3ConnectRelayStream(bidi)
 	}
 	relayEnableH3ConnectStream(bidi)
 	ctx, cancel := context.WithCancel(ctx)
@@ -39,7 +70,9 @@ func relayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 		_, err := relayTunnelDownloadRelayH3(bidi, targetConn)
 		downloadErrCh <- err
 	}()
-	return relayTunnelSelect(ctx, targetConn, nil, uploadErrCh, downloadErrCh)
+	return relayTunnelSelect(ctx, targetConn, nil, uploadErrCh, downloadErrCh, func() {
+		abortH3ConnectRelayReceive(bidi)
+	})
 }
 
 func relayTunnelCopyBufferH3Plain(dst io.Writer, src io.Reader) (int64, error) {

@@ -149,4 +149,21 @@ func TestGATEH3TunnelConnCloseAfterDownloadFullTeardown(t *testing.T) {
 	if stream.closeN.Load() == 0 {
 		t.Fatal("expected h3.Close during full teardown")
 	}
+	if stream.cancelRead.Load() == 0 {
+		t.Fatal("expected CancelRead so peer stream slot can recycle")
+	}
+}
+
+func TestGATEH3TunnelConnIdleCloseCancelsReceiveHalf(t *testing.T) {
+	stream := &gateH3CancelOnCloseStream{}
+	conn := NewTunnelConn(TunnelConnParams{H3Stream: stream})
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if stream.closeN.Load() == 0 {
+		t.Fatal("expected h3.Close")
+	}
+	if stream.cancelRead.Load() == 0 {
+		t.Fatal("idle Close must CancelRead (prevent ghost MaxIncomingStreams)")
+	}
 }

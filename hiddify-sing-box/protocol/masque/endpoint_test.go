@@ -650,7 +650,7 @@ func TestEndpointScopeFieldsRequireTemplateIPFlowVariables(t *testing.T) {
 	}
 }
 
-func TestEndpointAcceptsQUICExperimentalFromJSON(t *testing.T) {
+func TestEndpointRejectsQUICExperimental(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
@@ -658,8 +658,8 @@ func TestEndpointAcceptsQUICExperimentalFromJSON(t *testing.T) {
 			Enabled: true,
 		},
 	}
-	if err := validateMasqueOptions(opts); err != nil {
-		t.Fatalf("quic_experimental.enabled must be opt-in via JSON only (no env gate): %v", err)
+	if err := validateMasqueOptions(opts); err == nil {
+		t.Fatal("quic_experimental must be rejected (baked QUIC defaults only)")
 	}
 }
 

@@ -191,7 +191,7 @@ func TestClassifyMasqueFailure(t *testing.T) {
 	}
 }
 
-func TestValidateMasqueHTTPLayerH2VersusQuicExperimental(t *testing.T) {
+func TestValidateMasqueRejectsQuicExperimental(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
 		HTTPLayer:     option.MasqueHTTPLayerH2,
@@ -200,7 +200,7 @@ func TestValidateMasqueHTTPLayerH2VersusQuicExperimental(t *testing.T) {
 		},
 	}
 	if err := validateMasqueOptions(opts); err == nil {
-		t.Fatal("expected error: h2 vs quic_experimental")
+		t.Fatal("expected error: quic_experimental removed")
 	}
 }
 
@@ -228,6 +228,15 @@ func TestValidateMasqueOptionsRejectsRemovedFields(t *testing.T) {
 			opts: option.MasqueEndpointOptions{
 				ServerOptions:     option.ServerOptions{Server: "x", ServerPort: 443},
 				HTTPLayerFallback: true,
+			},
+		},
+		{
+			name: "quic_experimental",
+			opts: option.MasqueEndpointOptions{
+				ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
+				QUICExperimental: &option.MasqueQUICExperimentalOptions{
+					Enabled: true,
+				},
 			},
 		},
 	}

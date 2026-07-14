@@ -14,9 +14,9 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// TestRuntimeConnectStreamDialP8FloorAfterExperimental (A6-1): CoreClientFactory → Runtime → session
-// CONNECT-stream dial must apply FinalizeConnectStreamQUICConfig after quic_experimental shrink.
-func TestRuntimeConnectStreamDialP8FloorAfterExperimental(t *testing.T) {
+// TestRuntimeConnectStreamDialP8Floor: CoreClientFactory → Runtime → session
+// CONNECT-stream dial applies FinalizeConnectStreamQUICConfig (bulk FC floors).
+func TestRuntimeConnectStreamDialP8Floor(t *testing.T) {
 	var captured *quic.Config
 
 	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -32,11 +32,6 @@ func TestRuntimeConnectStreamDialP8FloorAfterExperimental(t *testing.T) {
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		QUICExperimental: T.QUICExperimentalOptions{
-			Enabled:                    true,
-			InitialStreamReceiveWindow: 4096,
-			MaxStreamReceiveWindow:     4096,
-		},
 		QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			captured = cfg.Clone()
 			return nil, errors.New("masque: capture quic config")

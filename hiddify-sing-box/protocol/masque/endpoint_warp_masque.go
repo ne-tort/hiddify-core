@@ -457,7 +457,7 @@ func (e *WarpEndpoint) startRuntime() {
 			MasqueQUICCryptoTLS:         quicTLS,
 			MasqueTCPDialTLS:            tcpDialTLS,
 			ConnectIPDatagramCeiling:    e.options.MasqueEndpointOptions.MTU,
-			QUICExperimental:            toTransportQUICExperimental(e.options.QUICExperimental),
+			CongestionControl:           normalizeCongestionControl(e.options.CongestionControl),
 			Chain:                       chain,
 			QUICDial:                    quicDial,
 			WarpMasqueClientCert:        warpCert,

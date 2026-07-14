@@ -123,38 +123,57 @@ func relayTunnelUnblockPeerRead(conn net.Conn) {
 	_ = conn.Close()
 }
 
-func relayTunnelSelect(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, uploadErrCh, downloadErrCh <-chan error) error {
+func relayTunnelSelect(ctx context.Context, targetConn net.Conn, reqBody io.ReadCloser, uploadErrCh, downloadErrCh <-chan error, onAbort func()) error {
 	select {
 	case <-ctx.Done():
+		if onAbort != nil {
+			onAbort()
+		}
 		_ = targetConn.Close()
 		uploadErr := <-uploadErrCh
 		downloadErr := <-downloadErrCh
 		return errors.Join(context.Cause(ctx), uploadErr, downloadErr)
 	case uploadErr := <-uploadErrCh:
 		if uploadErr != nil && !errors.Is(uploadErr, io.EOF) {
+			if onAbort != nil {
+				onAbort()
+			}
 			_ = targetConn.Close()
-			return uploadErr
+			downloadErr := <-downloadErrCh
+			return relayTunnelJoinErrors(uploadErr, downloadErr)
 		}
 		relayTunnelUnblockPeerRead(targetConn)
 		select {
 		case downloadErr := <-downloadErrCh:
 			return relayTunnelJoinErrors(uploadErr, downloadErr)
 		case <-ctx.Done():
-			return context.Cause(ctx)
+			if onAbort != nil {
+				onAbort()
+			}
+			downloadErr := <-downloadErrCh
+			return errors.Join(context.Cause(ctx), downloadErr)
 		}
 	case downloadErr := <-downloadErrCh:
 		if downloadErr != nil && !errors.Is(downloadErr, io.EOF) {
+			if onAbort != nil {
+				onAbort()
+			}
 			_ = targetConn.Close()
 			if reqBody != nil {
 				_ = reqBody.Close()
 			}
-			return downloadErr
+			uploadErr := <-uploadErrCh
+			return relayTunnelJoinErrors(uploadErr, downloadErr)
 		}
 		select {
 		case uploadErr := <-uploadErrCh:
 			return relayTunnelJoinErrors(uploadErr, downloadErr)
 		case <-ctx.Done():
-			return context.Cause(ctx)
+			if onAbort != nil {
+				onAbort()
+			}
+			uploadErr := <-uploadErrCh
+			return errors.Join(context.Cause(ctx), uploadErr)
 		}
 	}
 }

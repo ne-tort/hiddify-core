@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"net"
-	"time"
 
 	"github.com/quic-go/quic-go"
 	M "github.com/sagernet/sing/common/metadata"
@@ -67,7 +66,6 @@ type ClientOptions struct {
 	MasqueQUICCryptoTLS *tls.Config
 	// MasqueTCPDialTLS performs client TLS over TCP for HTTP/2 overlay (stdlib or uTLS via sing-box).
 	MasqueTCPDialTLS         func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
-	QUICExperimental         QUICExperimentalOptions
 	// CongestionControl mirrors option.MasqueEndpointOptions.congestion_control (new_reno|cubic|bbr).
 	CongestionControl string
 	ConnectIPDatagramCeiling uint32
@@ -87,19 +85,6 @@ type ClientOptions struct {
 	ProfileLocalIPv6            string
 	// TCPIPv6PathBracket mirrors option.MasqueEndpointOptions.tcp_ipv6_path_bracket (CONNECT-stream path only).
 	TCPIPv6PathBracket bool
-}
-
-// QUICExperimentalOptions tunes QUIC transport knobs for lab / WARP profiles.
-type QUICExperimentalOptions struct {
-	Enabled                    bool
-	KeepAlivePeriod            time.Duration
-	MaxIdleTimeout             time.Duration
-	InitialStreamReceiveWindow uint64
-	MaxStreamReceiveWindow     uint64
-	InitialConnectionWindow    uint64
-	MaxConnectionWindow        uint64
-	MaxIncomingStreams         int64
-	DisablePathMTUDiscovery    bool
 }
 
 // QUICDialFunc dials a QUIC connection for HTTP/3 MASQUE overlays.

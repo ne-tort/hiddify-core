@@ -2,40 +2,15 @@ package session
 
 import (
 	"testing"
-	"time"
 
 	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
 
-func TestApplyQUICExperimentalOptions(t *testing.T) {
-	cfg := ApplyQUICExperimentalOptions(nil, QUICExperimentalOptions{
-		Enabled:                    true,
-		KeepAlivePeriod:            5 * time.Second,
-		MaxIdleTimeout:             10 * time.Second,
-		InitialStreamReceiveWindow: 1234,
-		MaxIncomingStreams:         8,
-	})
-	if cfg.KeepAlivePeriod != 5*time.Second {
-		t.Fatal("expected keepalive period to be applied")
-	}
-	if cfg.MaxIdleTimeout != 10*time.Second {
-		t.Fatal("expected max idle timeout to be applied")
-	}
-	if cfg.InitialStreamReceiveWindow != 1234 {
-		t.Fatal("expected stream window to be applied")
-	}
-	if cfg.MaxIncomingStreams != 8 {
-		t.Fatal("expected max incoming streams to be applied")
-	}
-}
-
-func TestConnectStreamQUICExperimentalFinalizeRestoresBulkFCFloor(t *testing.T) {
+func TestFinalizeConnectStreamQUICConfigRestoresBulkFCFloor(t *testing.T) {
 	base := TCPConnectStreamQUICConfig(ClientOptions{})
-	cfg := ApplyQUICExperimentalOptions(base, QUICExperimentalOptions{
-		Enabled:                    true,
-		InitialStreamReceiveWindow: 4096,
-		MaxStreamReceiveWindow:     4096,
-	})
+	cfg := base.Clone()
+	cfg.InitialStreamReceiveWindow = 4096
+	cfg.MaxStreamReceiveWindow = 4096
 	h3t.FinalizeConnectStreamQUICConfig(cfg)
 	if cfg.InitialStreamReceiveWindow < h3t.BulkStreamFCFloorBytes {
 		t.Fatalf("InitialStreamReceiveWindow: got %d want >= P8 floor %d", cfg.InitialStreamReceiveWindow, h3t.BulkStreamFCFloorBytes)

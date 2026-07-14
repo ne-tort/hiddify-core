@@ -9,9 +9,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
-	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -387,44 +384,15 @@ func (r *cancelingReader) Read(b []byte) (int, error) {
 // connectRequestBodyCopySizeDefault is the io.CopyBuffer chunk for tunneled CONNECT upload (Invisv/h2o 64 KiB).
 const connectRequestBodyCopySizeDefault = 64 * 1024
 
-const (
-	envH3ConnectUploadChunkKB = "MASQUE_H3_CONNECT_UPLOAD_CHUNK"
-	envH2ConnectUploadChunkKB = "MASQUE_H2_CONNECT_UPLOAD_CHUNK"
-)
-
-func connectUploadChunkBytes() int {
-	for _, key := range []string{envH3ConnectUploadChunkKB, envH2ConnectUploadChunkKB} {
-		if kb := parseConnectUploadChunkKB(os.Getenv(key)); kb > 0 {
-			return kb * 1024
-		}
-	}
-	return connectRequestBodyCopySizeDefault
-}
-
 // ConnectUploadChunkBytes is the io.CopyBuffer size for tunneled CONNECT upload on HTTP/3.
-// Kept in sync with sing-box transport/masque/h3.UploadFlushPolicy.
+// Kept in sync with sing-box transport/masque/h3.UploadFlushPolicy (prod fixed 64 KiB).
 func ConnectUploadChunkBytes() int {
-	return connectUploadChunkBytes()
-}
-
-func parseConnectUploadChunkKB(raw string) int {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0
-	}
-	kb, err := strconv.Atoi(raw)
-	if err != nil || kb <= 0 {
-		return -1
-	}
-	if kb > 1024 {
-		kb = 1024
-	}
-	return kb
+	return connectRequestBodyCopySizeDefault
 }
 
 func sendRequestBodyCopySize(method string) int {
 	if method == http.MethodConnect {
-		return connectUploadChunkBytes()
+		return connectRequestBodyCopySizeDefault
 	}
 	return bodyCopyBufferSize
 }

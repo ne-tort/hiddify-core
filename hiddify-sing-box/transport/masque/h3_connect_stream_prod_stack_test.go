@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
@@ -31,6 +32,14 @@ const (
 )
 
 func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
+	t.Helper()
+	return startLaunchMasqueStackH3ConnectStreamServerWithQUIC(t, nil)
+}
+
+// startLaunchMasqueStackH3ConnectStreamServerWithQUIC launches the prod H3 stack.
+// quicCfg nil → HTTPServerQUICConfig (prod peer bidi 4096). Non-nil configs are used as-is
+// (gates that assert OpenStreamSync backpressure under a low MaxIncomingStreams).
+func startLaunchMasqueStackH3ConnectStreamServerWithQUIC(t *testing.T, quicCfg *quic.Config) int {
 	t.Helper()
 	var tcpTemplate *uritemplate.Template
 	mux := http.NewServeMux()
@@ -67,6 +76,7 @@ func startLaunchMasqueStackH3ConnectStreamServer(t *testing.T) int {
 		ListenPort:    0,
 		HTTP3TLS:      h3TLS,
 		CollateralTLS: collateralTLS,
+		H3QUICConfig:  quicCfg,
 		ValidateUDP:   func(net.PacketConn) error { return nil },
 	})
 	if err != nil {

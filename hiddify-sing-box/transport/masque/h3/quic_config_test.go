@@ -27,9 +27,9 @@ func TestH3QUICPacketPlaneConfigIdleAndWindows(t *testing.T) {
 	}
 }
 
-func TestH3QUICConnectStreamExperimentalCannotShrinkBulkFCFloor(t *testing.T) {
+func TestH3QUICConnectStreamFinalizeCannotShrinkBulkFCFloor(t *testing.T) {
 	base := TCPConnectStreamQUICConfig(QUICDialProfile{})
-	// Simulate quic_experimental shrinking windows below P8 floor.
+	// Simulate a shrunk receive window below P8 floor (must be restored by Finalize).
 	base.InitialStreamReceiveWindow = 4096
 	base.MaxStreamReceiveWindow = 4096
 	base.InitialConnectionReceiveWindow = 8192
@@ -44,7 +44,7 @@ func TestH3QUICConnectStreamExperimentalCannotShrinkBulkFCFloor(t *testing.T) {
 	}
 }
 
-func TestH3QUICServerExperimentalCannotShrinkBulkFCFloor(t *testing.T) {
+func TestH3QUICServerFinalizeCannotShrinkBulkFCFloor(t *testing.T) {
 	cfg := HTTPServerQUICConfig()
 	cfg.InitialStreamReceiveWindow = 4096
 	cfg.MaxStreamReceiveWindow = 4096
@@ -92,6 +92,12 @@ func TestH3QUICConnectStreamAndServerWindowFloors(t *testing.T) {
 	}
 	if srv.InitialStreamReceiveWindow < 128<<20 {
 		t.Fatalf("server InitialStreamReceiveWindow: got %d want >= %d", srv.InitialStreamReceiveWindow, 128<<20)
+	}
+	if srv.MaxIncomingStreams < ConnectStreamMaxIncomingStreams {
+		t.Fatalf("server MaxIncomingStreams: got %d want >= %d", srv.MaxIncomingStreams, ConnectStreamMaxIncomingStreams)
+	}
+	if cli.MaxIncomingStreams != -1 {
+		t.Fatalf("client MaxIncomingStreams: got %d want -1 (HTTP/3 client refuses peer bidi)", cli.MaxIncomingStreams)
 	}
 }
 

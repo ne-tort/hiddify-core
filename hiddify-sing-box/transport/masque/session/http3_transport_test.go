@@ -154,20 +154,14 @@ func TestNewTCPConnectStreamHTTP3TransportMatchesResetPath(t *testing.T) {
 	}
 }
 
-// TestNewTCPConnectStreamHTTP3TransportDialP8FloorAfterExperimental (A5-1): prod CONNECT-stream
-// transport must apply FinalizeConnectStreamQUICConfig after quic_experimental merge so lab shrink
-// cannot reintroduce the 64 KiB/RTT ceiling on the dial path.
-func TestNewTCPConnectStreamHTTP3TransportDialP8FloorAfterExperimental(t *testing.T) {
+// TestNewTCPConnectStreamHTTP3TransportDialP8Floor: prod CONNECT-stream Dial applies
+// FinalizeConnectStreamQUICConfig on the shared QUIC path (bulk FC floors).
+func TestNewTCPConnectStreamHTTP3TransportDialP8Floor(t *testing.T) {
 	var captured *quic.Config
 	s := &session.CoreSession{
 		Options: session.ClientOptions{
 			Server:     "127.0.0.1",
 			ServerPort: 443,
-			QUICExperimental: session.QUICExperimentalOptions{
-				Enabled:                    true,
-				InitialStreamReceiveWindow: 4096,
-				MaxStreamReceiveWindow:     4096,
-			},
 			QUICDial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 				captured = cfg.Clone()
 				return nil, errors.New("masque: capture quic config")
@@ -191,5 +185,8 @@ func TestNewTCPConnectStreamHTTP3TransportDialP8FloorAfterExperimental(t *testin
 	}
 	if captured.MaxStreamReceiveWindow < 128<<20 {
 		t.Fatalf("MaxStreamReceiveWindow: got %d want prod boost >= 128 MiB", captured.MaxStreamReceiveWindow)
+	}
+	if captured.MaxIncomingStreams != -1 {
+		t.Fatalf("client MaxIncomingStreams: got %d want -1", captured.MaxIncomingStreams)
 	}
 }

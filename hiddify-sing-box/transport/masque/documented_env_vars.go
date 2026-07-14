@@ -4,6 +4,6 @@ package masque
 // production Go (non-test) under transport/masque and protocol/masque. Keep sorted.
 // Hygiene gate: TestMasqueDocumentedEnvVarsExist (H-S22).
 //
-// CONNECT-IP / CONNECT-UDP dataplane: zero-env — no HIDDIFY_* / MASQUE_CONNECT_* in prod hot path.
-// quic_experimental.enabled is JSON-only (no MASQUE_EXPERIMENTAL_QUIC).
+// Prod CONNECT-stream / H3 / CONNECT-UDP: zero-env. Rejected JSON quic_experimental
+// (baked FinalizeConnectStreamQUICConfig only).
 var MasqueDocumentedEnvVars = []string{}

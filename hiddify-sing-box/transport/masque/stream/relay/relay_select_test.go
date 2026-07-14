@@ -102,7 +102,7 @@ func TestRelayTunnelSelectUploadEOFUnblocksDownload(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- relayTunnelSelect(context.Background(), conn, io.NopCloser(nil), uploadErrCh, downloadErrCh)
+		done <- relayTunnelSelect(context.Background(), conn, io.NopCloser(nil), uploadErrCh, downloadErrCh, nil)
 	}()
 
 	select {

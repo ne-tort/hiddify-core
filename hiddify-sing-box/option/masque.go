@@ -161,7 +161,7 @@ type MasqueEndpointOptions struct {
 	// MTU sets the CONNECT-IP datagram ceiling (max full IPv4/IPv6 packet bytes) on the client; see CoreClientFactory / ConnectIPDatagramCeiling in transport/masque.
 	MTU              uint32                         `json:"mtu,omitempty"`
 	Workers          int                            `json:"workers,omitempty"`
-	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"`
+	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"` // rejected at validate — baked QUIC defaults only
 	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
 	HTTPLayer string `json:"http_layer,omitempty"`
 	// CongestionControl selects the QUIC send CC for this masque endpoint (client and/or server).
@@ -174,7 +174,7 @@ type MasqueEndpointOptions struct {
 	HTTPLayerFallback bool `json:"http_layer_fallback,omitempty"`
 }
 
-type MasqueQUICExperimentalOptions struct {
+type MasqueQUICExperimentalOptions struct { // retained so JSON unmarshals; always rejected
 	Enabled                    bool               `json:"enabled,omitempty"`
 	KeepAlivePeriod            badoption.Duration `json:"keepalive_period,omitempty"`
 	MaxIdleTimeout             badoption.Duration `json:"max_idle_timeout,omitempty"`

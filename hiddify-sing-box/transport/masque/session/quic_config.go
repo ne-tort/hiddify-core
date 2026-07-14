@@ -43,37 +43,3 @@ func H3HTTPServerQUICConfig(congestionControl ...string) *quic.Config {
 	}
 	return cfg
 }
-
-// ApplyQUICExperimentalOptions merges lab/WARP QUIC knobs onto a base config clone.
-func ApplyQUICExperimentalOptions(base *quic.Config, opts QUICExperimentalOptions) *quic.Config {
-	if base == nil {
-		base = &quic.Config{}
-	}
-	config := base.Clone()
-	if !opts.Enabled {
-		return config
-	}
-	if opts.KeepAlivePeriod > 0 {
-		config.KeepAlivePeriod = opts.KeepAlivePeriod
-	}
-	if opts.MaxIdleTimeout > 0 {
-		config.MaxIdleTimeout = opts.MaxIdleTimeout
-	}
-	if opts.InitialStreamReceiveWindow > 0 {
-		config.InitialStreamReceiveWindow = opts.InitialStreamReceiveWindow
-	}
-	if opts.MaxStreamReceiveWindow > 0 {
-		config.MaxStreamReceiveWindow = opts.MaxStreamReceiveWindow
-	}
-	if opts.InitialConnectionWindow > 0 {
-		config.InitialConnectionReceiveWindow = opts.InitialConnectionWindow
-	}
-	if opts.MaxConnectionWindow > 0 {
-		config.MaxConnectionReceiveWindow = opts.MaxConnectionWindow
-	}
-	if opts.MaxIncomingStreams > 0 {
-		config.MaxIncomingStreams = opts.MaxIncomingStreams
-	}
-	config.DisablePathMTUDiscovery = opts.DisablePathMTUDiscovery
-	return config
-}

@@ -293,25 +293,23 @@ func (c *TunnelConn) closeFull() error {
 	if c.h3 != nil {
 		h3 := c.h3
 		cancelCode := quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
-		if atomic.LoadInt32(&c.uploadTrafficStarted) == 0 {
-			err = h3.Close()
-			c.markCloseDone()
-		} else {
-			closeDone := make(chan error, 1)
-			go func() {
-				closeDone <- h3.Close()
-				c.markCloseDone()
-			}()
-			select {
-			case closeErr := <-closeDone:
-				if closeErr != nil {
-					err = errors.Join(err, closeErr)
-				}
-			case <-time.After(connectStreamDownloadCloseTimeout):
-				h3.CancelRead(cancelCode)
-				c.markCloseDone()
+		// Always finish both halves: Close() = send FIN; CancelRead completes receive
+		// locally and STOP_SENDING so the peer (server) can free MaxIncomingStreams.
+		// Idle-only Close() left ghost streams after abrupt browser/speedtest reloads.
+		closeDone := make(chan error, 1)
+		go func() {
+			closeDone <- h3.Close()
+		}()
+		select {
+		case closeErr := <-closeDone:
+			if closeErr != nil {
+				err = errors.Join(err, closeErr)
 			}
+		case <-time.After(connectStreamDownloadCloseTimeout):
+			h3.CancelWrite(cancelCode)
 		}
+		h3.CancelRead(cancelCode)
+		c.markCloseDone()
 	} else {
 		c.markCloseDone()
 	}
