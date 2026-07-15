@@ -161,7 +161,6 @@ const H2ConnectStreamDownloadCloseTimeout = 2 * time.Second
 type bidiTunnelConn struct {
 	ctx          context.Context
 	streamCancel context.CancelCauseFunc
-	uploadTeardown func()
 	paths        TunnelPaths
 	local        net.Addr
 	remote       net.Addr
@@ -422,8 +421,8 @@ func (c *bidiTunnelConn) Close() error {
 	c.stopDownloadDrain()
 	if c.streamCancel != nil {
 		c.streamCancel(context.Canceled)
+		c.streamCancel = nil
 	}
-	c.runUploadTeardown()
 	var err error
 	if c.paths.Upload != nil {
 		err = errors.Join(err, c.paths.Upload.Close())
@@ -435,26 +434,20 @@ func (c *bidiTunnelConn) Close() error {
 		case closeErr := <-closeDone:
 			err = errors.Join(err, closeErr)
 		case <-time.After(H2ConnectStreamDownloadCloseTimeout):
+			// H2-L2: do not wait forever on response Body.Close (x/net can stall on wmu).
+			// Request cancel already fired; abandon wait so tunnel Close returns.
 			c.stopDownloadDrain()
+			_ = c.setDownloadReadDeadline(time.Now())
 		}
 	}
 	return err
 }
 
 func (c *bidiTunnelConn) CloseWrite() error {
-	c.runUploadTeardown()
 	if c.paths.Upload == nil {
 		return nil
 	}
 	return c.paths.Upload.Close()
-}
-
-func (c *bidiTunnelConn) runUploadTeardown() {
-	if c == nil || c.uploadTeardown == nil {
-		return
-	}
-	c.uploadTeardown()
-	c.uploadTeardown = nil
 }
 
 func (c *bidiTunnelConn) LocalAddr() net.Addr  { return c.local }

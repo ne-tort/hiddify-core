@@ -44,13 +44,6 @@ func SetStreamCancel(c net.Conn, cancel context.CancelCauseFunc) {
 	walkRequestCancelSettable(c, cancel)
 }
 
-// SetConnectStreamUploadTeardown registers H2 upload-body half-close (ExtendedConnectUploadBody).
-func SetConnectStreamUploadTeardown(c net.Conn, teardown func()) {
-	if bc := unwrapBidiTunnelConn(c); bc != nil {
-		bc.uploadTeardown = teardown
-	}
-}
-
 func walkRequestCancelSettable(c net.Conn, cancel context.CancelCauseFunc) {
 	if c == nil {
 		return

@@ -38,7 +38,13 @@ func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadClo
 		_, err := relayTunnelDownloadRelayH2(responseWriter, responseWriter, targetConn)
 		downloadErrCh <- err
 	}()
-	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh, nil)
+	// H2-L5: mirror H3 abortH3ConnectRelayReceive — unblock upload Read on ctx/peer abort.
+	onAbort := func() {
+		if reqBody != nil {
+			_ = reqBody.Close()
+		}
+	}
+	return relayTunnelSelect(ctx, targetConn, reqBody, uploadErrCh, downloadErrCh, onAbort)
 }
 
 // RelayTCPTunnelBidiStream runs the HTTP/3 hijack relay path (h2o plain io.CopyBuffer both halves).

@@ -2834,15 +2834,24 @@ func (b transportResponseBody) Close() error {
 		connAdd := cc.inflow.add(unread)
 		cc.mu.Unlock()
 
-		// TODO(dneil): Acquiring this mutex can block indefinitely.
-		// Move flow control return to a goroutine?
-		cc.wmu.Lock()
-		// Return connection-level flow control.
 		if connAdd > 0 {
-			cc.fr.WriteWindowUpdate(0, uint32(connAdd))
+			if cs.masqueExtendedConnect {
+				// H2-L2: tunnel Close must not block on wmu (can HOL forever vs writeRequestBody).
+				go func(add int32) {
+					defer func() { _ = recover() }()
+					cc.wmu.Lock()
+					cc.fr.WriteWindowUpdate(0, uint32(add))
+					_ = cc.bw.Flush()
+					cc.wmu.Unlock()
+				}(connAdd)
+			} else {
+				// TODO(dneil): Acquiring this mutex can block indefinitely for stock HTTP/2.
+				cc.wmu.Lock()
+				cc.fr.WriteWindowUpdate(0, uint32(connAdd))
+				cc.bw.Flush()
+				cc.wmu.Unlock()
+			}
 		}
-		cc.bw.Flush()
-		cc.wmu.Unlock()
 	}
 
 	select {
