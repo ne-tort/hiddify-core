@@ -86,12 +86,7 @@ func NewClientTransport(cfg ClientDialConfig) (*http2.Transport, error) {
 	}
 	tr, err := NewBulkHTTP2Transport(tlsConf, dialTLS)
 	if err != nil {
-		tr = &http2.Transport{
-			TLSClientConfig:    tlsConf,
-			DisableCompression: true,
-			DialTLSContext:     dialTLS,
-		}
-		ApplyBulkHTTP2TransportDefaults(tr)
+		return nil, err
 	}
 	return tr, nil
 }

@@ -1,6 +1,10 @@
 package http2
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -15,6 +19,8 @@ type MasqueH2Stats struct {
 	AwaitFlowControlWaits  uint64
 	AwaitFlowControlWaitNs uint64
 	PeerStreamWindow       uint32 // last SETTINGS_INITIAL_WINDOW_SIZE from peer (0=unset)
+	LocalStreamRecvWindow  uint32 // last client SETTINGS_INITIAL_WINDOW_SIZE we announced
+	LocalConnRecvBump      uint32 // last client WINDOW_UPDATE(0) bump at conn open
 	TransportResets        uint64
 	RecvRSTStream          uint64
 	RecvGOAWAY             uint64
@@ -28,10 +34,13 @@ var (
 	masqueH2AwaitFlowControlWaits  atomic.Uint64
 	masqueH2AwaitFlowControlWaitNs atomic.Uint64
 	masqueH2PeerStreamWindow       atomic.Uint32
+	masqueH2LocalStreamRecvWindow  atomic.Uint32
+	masqueH2LocalConnRecvBump      atomic.Uint32
 	masqueH2TransportResets        atomic.Uint64
 	masqueH2RecvRSTStream          atomic.Uint64
 	masqueH2RecvGOAWAY             atomic.Uint64
 	masqueH2RecvGOAWAYErr          atomic.Uint64
+	masqueH2FCDumpOnce             sync.Once
 )
 
 func masqueH2NoteDownloadBody(n uint64) {
@@ -60,6 +69,15 @@ func masqueH2NotePeerStreamWindow(v uint32) {
 	masqueH2PeerStreamWindow.Store(v)
 }
 
+func masqueH2NoteLocalRecvWindows(streamIW, connBump uint32) {
+	if streamIW > 0 {
+		masqueH2LocalStreamRecvWindow.Store(streamIW)
+	}
+	if connBump > 0 {
+		masqueH2LocalConnRecvBump.Store(connBump)
+	}
+}
+
 // NoteMasqueH2TransportReset increments shared-pool reset counter (session dial retry).
 func NoteMasqueH2TransportReset() {
 	masqueH2TransportResets.Add(1)
@@ -85,6 +103,8 @@ func SnapshotMasqueH2Stats() MasqueH2Stats {
 		AwaitFlowControlWaits:  masqueH2AwaitFlowControlWaits.Load(),
 		AwaitFlowControlWaitNs: masqueH2AwaitFlowControlWaitNs.Load(),
 		PeerStreamWindow:       masqueH2PeerStreamWindow.Load(),
+		LocalStreamRecvWindow:  masqueH2LocalStreamRecvWindow.Load(),
+		LocalConnRecvBump:      masqueH2LocalConnRecvBump.Load(),
 		TransportResets:        masqueH2TransportResets.Load(),
 		RecvRSTStream:          masqueH2RecvRSTStream.Load(),
 		RecvGOAWAY:             masqueH2RecvGOAWAY.Load(),
@@ -100,8 +120,51 @@ func ResetMasqueH2StatsForTest() {
 	masqueH2AwaitFlowControlWaits.Store(0)
 	masqueH2AwaitFlowControlWaitNs.Store(0)
 	masqueH2PeerStreamWindow.Store(0)
+	masqueH2LocalStreamRecvWindow.Store(0)
+	masqueH2LocalConnRecvBump.Store(0)
 	masqueH2TransportResets.Store(0)
 	masqueH2RecvRSTStream.Store(0)
 	masqueH2RecvGOAWAY.Store(0)
 	masqueH2RecvGOAWAYErr.Store(0)
+}
+
+// EnsureMasqueH2FCStatsFileDump writes SnapshotMasqueH2Stats JSON to
+// <tmpdir>/masque-h2-fc-stats.json at most ~1 Hz while body bytes grow (H2-D1/D2 field).
+func EnsureMasqueH2FCStatsFileDump() {
+	masqueH2FCDumpOnce.Do(func() {
+		path := filepath.Join(os.TempDir(), "masque-h2-fc-stats.json")
+		go func() {
+			var lastBody uint64
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for range t.C {
+				s := SnapshotMasqueH2Stats()
+				if s.DownloadBodyBytes == 0 && s.LocalStreamRecvWindow == 0 {
+					continue
+				}
+				if s.DownloadBodyBytes == lastBody && lastBody != 0 {
+					continue
+				}
+				lastBody = s.DownloadBodyBytes
+				type dump struct {
+					MasqueH2Stats
+					AwaitFCAvgMs   float64 `json:"await_fc_avg_ms"`
+					WUBytesPerBody float64 `json:"wu_bytes_per_body"`
+					TsUnixMs       int64   `json:"ts_unix_ms"`
+				}
+				d := dump{MasqueH2Stats: s, TsUnixMs: time.Now().UnixMilli()}
+				if s.AwaitFlowControlWaits > 0 {
+					d.AwaitFCAvgMs = float64(s.AwaitFlowControlWaitNs) / float64(s.AwaitFlowControlWaits) / 1e6
+				}
+				if s.DownloadBodyBytes > 0 {
+					d.WUBytesPerBody = float64(s.WindowUpdateBytes) / float64(s.DownloadBodyBytes)
+				}
+				raw, err := json.MarshalIndent(d, "", "  ")
+				if err != nil {
+					continue
+				}
+				_ = os.WriteFile(path, raw, 0o644)
+			}
+		}()
+	})
 }

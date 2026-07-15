@@ -867,6 +867,8 @@ func (t *Transport) newClientConn(c net.Conn, singleUse bool, internalStateHook 
 	cc.fr.WriteSettings(initialSettings...)
 	cc.fr.WriteWindowUpdate(0, uint32(conf.MaxUploadBufferPerConnection))
 	cc.inflow.init(conf.MaxUploadBufferPerConnection + initialWindowSize)
+	masqueH2NoteLocalRecvWindows(uint32(cc.initialStreamRecvWindowSize), uint32(conf.MaxUploadBufferPerConnection))
+	EnsureMasqueH2FCStatsFileDump()
 	cc.bw.Flush()
 	if cc.werr != nil {
 		cc.Close()

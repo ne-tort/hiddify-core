@@ -65,6 +65,8 @@ func NewBulkHTTP2Transport(tlsConf *tls.Config, dialTLS func(ctx context.Context
 
 // ApplyBulkHTTP2TransportDefaults tunes legacy http2.Transport values when not built via
 // NewBulkHTTP2Transport (e.g. tests constructing &http2.Transport{} directly).
+// Without t1.HTTP2Config the client falls back to stock 4 MiB stream / 1 GiB conn —
+// still wire MaxReadFrameSize so frame size is not the WAN bottleneck.
 func ApplyBulkHTTP2TransportDefaults(tr *http2.Transport) {
 	if tr == nil {
 		return
