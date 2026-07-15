@@ -62,18 +62,6 @@ func TestGATERelayPrimeDownloadProdSkipsSlowBanner(t *testing.T) {
 	}
 }
 
-func TestGATERelayPrimeDownloadLegacyWaitsSlowBanner(t *testing.T) {
-	t.Parallel()
-	src := newDeadlineDelayedConn([]byte("banner"), 20*time.Millisecond)
-	prime, err := relayTunnelPrimeDownloadPolicy(src, LegacyRelayProbePolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(prime) != "banner" {
-		t.Fatalf("legacy prime=%q want banner", prime)
-	}
-}
-
 // deadlineDelayedConn serves payload after delay and honors SetReadDeadline.
 type deadlineDelayedConn struct {
 	payload []byte

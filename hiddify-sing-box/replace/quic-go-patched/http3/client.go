@@ -385,7 +385,7 @@ func (r *cancelingReader) Read(b []byte) (int, error) {
 const connectRequestBodyCopySizeDefault = 64 * 1024
 
 // ConnectUploadChunkBytes is the io.CopyBuffer size for tunneled CONNECT upload on HTTP/3.
-// Kept in sync with sing-box transport/masque/h3.UploadFlushPolicy (prod fixed 64 KiB).
+// Kept in sync with sing-box transport/masque/h3 fixed CopyBuffer (prod 64 KiB).
 func ConnectUploadChunkBytes() int {
 	return connectRequestBodyCopySizeDefault
 }

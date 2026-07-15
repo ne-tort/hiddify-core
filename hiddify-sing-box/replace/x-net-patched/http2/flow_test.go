@@ -33,6 +33,10 @@ func TestInflowAddSmall(t *testing.T) {
 }
 
 func TestInflowAdd(t *testing.T) {
+	// Stock RFC batching (eager off). Prod MASQUE uses eager; see TestMasqueInflowEagerWindowUpdatePerRead.
+	SetMasqueDownloadEagerWindowEnabled(false)
+	t.Cleanup(func() { SetMasqueDownloadEagerWindowEnabled(false) })
+
 	var f inflow
 	f.init(10 * inflowMinRefresh)
 	if got, want := f.add(inflowMinRefresh-1), int32(0); got != want {

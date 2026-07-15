@@ -2,7 +2,4 @@
 
 package http2
 
-// SetMasqueDownloadEagerWindowEnabled toggles eager client WINDOW_UPDATE (inttest only).
-func SetMasqueDownloadEagerWindowEnabled(on bool) {
-	masqueDownloadEagerWindowOn = on
-}
+// Inttest helpers live on the main package symbols (SetMasqueDownloadEagerWindowEnabled).

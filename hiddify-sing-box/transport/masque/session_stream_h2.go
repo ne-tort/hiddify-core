@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
 	M "github.com/sagernet/sing/common/metadata"
+	"golang.org/x/net/http2"
 )
 
 // h2ConnectRequestContextFactory is swappable in transport tests (request relay leak guard).
@@ -17,10 +18,13 @@ var h2ConnectRequestContextFactory = httpx.NewH2ExtendedConnectRequestContext
 func (s *coreSession) streamH2Host() strmclient.SessionH2Host {
 	return strmclient.SessionH2Host{
 		EnsureTransport: func(ctx context.Context) (http.RoundTripper, error) {
-			return s.newMasqueClientH2Transport()
+			return s.ensureH2ConnectStreamTransport(ctx)
 		},
 		GetRoundTripper: s.getTCPRoundTripper,
-		ResetTransport:  func() {},
+		ResetTransport: func() {
+			s.resetH2ConnectStreamTransportLockedAssumeMu()
+			http2.NoteMasqueH2TransportReset()
+		},
 	}
 }
 

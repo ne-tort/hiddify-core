@@ -23,9 +23,11 @@ func (cs *clientStream) masquePokeDownloadReceiveWindow() {
 		cc.wmu.Lock()
 		if connAdd != 0 {
 			cc.fr.WriteWindowUpdate(0, mustUint31(connAdd))
+			masqueH2NoteWindowUpdate(uint32(connAdd))
 		}
 		if streamAdd != 0 {
 			cc.fr.WriteWindowUpdate(cs.ID, mustUint31(streamAdd))
+			masqueH2NoteWindowUpdate(uint32(streamAdd))
 		}
 		cc.bw.Flush()
 		cc.wmu.Unlock()

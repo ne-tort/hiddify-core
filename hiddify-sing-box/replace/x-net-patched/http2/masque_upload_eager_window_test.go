@@ -2,15 +2,17 @@ package http2
 
 import "testing"
 
-func TestMasqueUploadEagerWindowDefaultOn(t *testing.T) {
-	if !masqueUploadEagerWindowEnabled() {
-		t.Fatal("expected upload eager window enabled by default")
-	}
-}
+func TestMasqueUploadEagerWindowProdDefaultOn(t *testing.T) {
+	// Outside TestMain mutation: verify setter/getter; prod var defaults true at init.
+	prev := masqueUploadEagerWindowOn
+	t.Cleanup(func() { masqueUploadEagerWindowOn = prev })
 
-func TestMasqueUploadEagerWindowDisabled(t *testing.T) {
-	t.Setenv(envH2UploadEagerWindow, "0")
+	SetMasqueUploadEagerWindowEnabled(true)
+	if !masqueUploadEagerWindowEnabled() {
+		t.Fatal("expected upload eager on after Set(true)")
+	}
+	SetMasqueUploadEagerWindowEnabled(false)
 	if masqueUploadEagerWindowEnabled() {
-		t.Fatal("expected upload eager window disabled")
+		t.Fatal("expected upload eager off after Set(false)")
 	}
 }

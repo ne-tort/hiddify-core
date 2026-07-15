@@ -139,13 +139,20 @@ func DialHTTP2ConnectStream(
 			return nil, fmt.Errorf("masque h2: %w: status=%d url=%s", Errs.TCPConnectStreamFailed, resp.StatusCode, hooks.RequestURL(tcpURL))
 		}
 		stopReqCtxRelay(true)
+		if ctxErr := context.Cause(ctx); ctxErr != nil {
+			stopReqCtxRelay(false)
+			_ = uploadR.Close()
+			_ = uploadW.Close()
+			_ = resp.Body.Close()
+			return nil, errors.Join(Errs.TCPConnectStreamFailed, ctxErr)
+		}
 		conn, err := hooks.TunnelFromResponse(streamCtx, resp, uploadW, uploadBody, targetHost, targetPort)
 		if err != nil {
 			stopReqCtxRelay(false)
 			_ = uploadR.Close()
 			_ = uploadW.Close()
 			_ = resp.Body.Close()
-			return nil, err
+			return nil, errors.Join(err, context.Cause(ctx))
 		}
 		strmconn.SetStreamCancel(conn, func(error) { stopReqCtxRelay(false) })
 		return conn, nil

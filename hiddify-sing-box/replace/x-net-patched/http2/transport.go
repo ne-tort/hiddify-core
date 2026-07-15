@@ -2221,7 +2221,9 @@ func (cs *clientStream) awaitFlowControl(maxBytes int) (taken int32, err error) 
 			cs.flow.take(take)
 			return take, nil
 		}
+		t0 := time.Now()
 		cc.cond.Wait()
+		masqueH2NoteAwaitFlowControlWait(time.Since(t0))
 	}
 }
 
@@ -2789,14 +2791,21 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 
 	if connAdd != 0 || streamAdd != 0 {
 		cc.wmu.Lock()
-		defer cc.wmu.Unlock()
 		if connAdd != 0 {
 			cc.fr.WriteWindowUpdate(0, mustUint31(connAdd))
+			masqueH2NoteWindowUpdate(uint32(connAdd))
 		}
 		if streamAdd != 0 {
 			cc.fr.WriteWindowUpdate(cs.ID, mustUint31(streamAdd))
+			masqueH2NoteWindowUpdate(uint32(streamAdd))
 		}
 		cc.bw.Flush()
+		// Unlock before wake/Broadcast — holding wmu across masqueWake starved
+		// writeRequestBody (same ClientConn) and produced ~½×(65535/RTT) WAN download.
+		cc.wmu.Unlock()
+	}
+	if n > 0 {
+		masqueH2NoteDownloadBody(uint64(n))
 	}
 	// MASQUE H2 Extended CONNECT bidi: download read must schedule upload
 	// writeRequestBody blocked in awaitFlowControl on the same stream (iperf -R).
@@ -3023,6 +3032,7 @@ func (cs *clientStream) copyTrailers() {
 func (rl *clientConnReadLoop) processGoAway(f *GoAwayFrame) error {
 	cc := rl.cc
 	cc.t.connPool().MarkDead(cc)
+	masqueH2NoteRecvGOAWAY(f.ErrCode)
 	if f.ErrCode != 0 {
 		// TODO: deal with GOAWAY more. particularly the error code
 		cc.vlogf("transport got GOAWAY with error code = %v", f.ErrCode)
@@ -3091,6 +3101,7 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 			for _, cs := range cc.streams {
 				cs.flow.add(delta)
 			}
+			masqueH2NotePeerStreamWindow(s.Val)
 			cc.cond.Broadcast()
 
 			cc.initialWindowSize = s.Val
@@ -3172,6 +3183,7 @@ func (rl *clientConnReadLoop) processResetStream(f *RSTStreamFrame) error {
 		// TODO: return error if server tries to RST_STREAM an idle stream
 		return nil
 	}
+	masqueH2NoteRecvRSTStream()
 	serr := streamError(cs.ID, f.ErrCode)
 	serr.Cause = errFromPeer
 	if f.ErrCode == ErrCodeProtocol {

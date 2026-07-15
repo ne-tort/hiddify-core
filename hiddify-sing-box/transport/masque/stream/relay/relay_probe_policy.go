@@ -14,11 +14,6 @@ func ProdRelayProbePolicy() RelayProbePolicy {
 	return RelayProbePolicy{DownloadPrimeWait: 0}
 }
 
-// LegacyRelayProbePolicy retains colo-shaped waits for regression harnesses.
-func LegacyRelayProbePolicy() RelayProbePolicy {
-	return RelayProbePolicy{DownloadPrimeWait: 250 * time.Millisecond}
-}
-
 func currentRelayProbePolicy() RelayProbePolicy {
 	return ProdRelayProbePolicy()
 }

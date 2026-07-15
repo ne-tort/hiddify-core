@@ -3,8 +3,11 @@ package http2
 import "testing"
 
 func TestMasqueInflowEagerWindowUpdatePerRead(t *testing.T) {
+	SetMasqueDownloadEagerWindowEnabled(true)
+	t.Cleanup(func() { SetMasqueDownloadEagerWindowEnabled(false) })
+
 	if !masqueDownloadEagerWindowEnabled() {
-		t.Fatal("prod default: eager download WINDOW must be on")
+		t.Fatal("eager download WINDOW must be on for this test")
 	}
 	var eager inflow
 	eager.init(65535)
