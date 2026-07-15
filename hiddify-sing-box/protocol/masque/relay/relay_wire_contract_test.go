@@ -57,9 +57,11 @@ func TestRelayTCPForwardWireContract(t *testing.T) {
 	requireContractSubstrings(t, tuneGoSource, "tune.go",
 		`func TuneTCPOutbound`,
 		`SetNoDelay(true)`,
-		`SetReadBuffer(TCPKernelBuf)`,
 		`SetWriteBuffer(TCPKernelBuf)`,
 	)
+	if strings.Contains(tuneGoSource, "SetReadBuffer(") {
+		t.Fatal("tune.go: TuneTCPOutbound must not call SetReadBuffer (SO_RCVBUF lock)")
+	}
 
 	requireContractSubstrings(t, contracts, "CLIENT-SERVER-CONTRACTS CONNECT-stream relay",
 		"## CONNECT-stream (L2)",

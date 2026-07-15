@@ -10,5 +10,6 @@ import (
 func TestMain(m *testing.M) {
 	masqueDownloadEagerWindowOn = false
 	masqueUploadEagerWindowOn = false
+	handlerChunkWriteSize = 4 << 10 // stock suite expects 4 KiB chunkWriter bufio
 	os.Exit(m.Run())
 }

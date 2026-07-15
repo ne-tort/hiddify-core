@@ -27,7 +27,7 @@ func RelayTCPTunnel(ctx context.Context, targetConn net.Conn, reqBody io.ReadClo
 	uploadErrCh := make(chan error, 1)
 	downloadErrCh := make(chan error, 1)
 	go func() {
-		_, err := relayTunnelCopyBufferH2BidiUpload(targetConn, StripH2ClientBootstrapUpload(reqBody), responseWriter)
+		_, err := relayTunnelCopyBufferH2BidiUpload(targetConn, StripH2ClientBootstrapUpload(reqBody))
 		_ = reqBody.Close()
 		if cw, ok := targetConn.(closeWriter); ok {
 			_ = cw.CloseWrite()

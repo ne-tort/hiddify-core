@@ -54,16 +54,22 @@ import (
 )
 
 const (
-	prefaceTimeout        = 10 * time.Second
-	firstSettingsTimeout  = 2 * time.Second // should be in-flight with preface anyway
-	handlerChunkWriteSize = 4 << 10
-	defaultMaxStreams     = 250 // TODO: make this 100 as the GFE seems to?
+	prefaceTimeout       = 10 * time.Second
+	firstSettingsTimeout = 2 * time.Second // should be in-flight with preface anyway
+	defaultMaxStreams    = 250             // TODO: make this 100 as the GFE seems to?
 
 	// maxQueuedControlFrames is the maximum number of control frames like
 	// SETTINGS, PING and RST_STREAM that will be queued for writing before
 	// the connection is closed to prevent memory exhaustion attacks.
 	maxQueuedControlFrames = 10000
 )
+
+// handlerChunkWriteSize is the bufio buffer ahead of chunkWriter.
+// Stock x/net uses 4 KiB; MASQUE Extended CONNECT bulk matches RelayTunnelBufLen (4 MiB)
+// so a filled relay Write is not sliced by a smaller http2 bufio.
+// TestMain resets to 4 KiB for stock RFC http2 tests (H2-S9).
+var handlerChunkWriteSize = 4 << 20
+
 
 var (
 	errClientDisconnected = errors.New("client disconnected")

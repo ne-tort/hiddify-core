@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-const connectUploadShallowPipeBuf = 128 << 10 // CONNECT-stream + CONNECT-UDP upload pipe
+const connectUploadShallowPipeBuf = 256 << 10 // = bulk flush quantum; empty-pipe Flush sends full BDP batch
 
 // uploadPipe is a bounded buffer between CONNECT upload producers and http2 writeRequestBody.
 type uploadPipe struct {
@@ -34,19 +34,15 @@ type ConnectUploadPipeWriter interface {
 	MasqueUploadWriterOpen() bool
 }
 
-// ExportConnectUploadShallowPipeBuf exposes CONNECT-stream upload pipe size for gates.
-func ExportConnectUploadShallowPipeBuf() int { return connectUploadShallowPipeBuf }
-
-// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (128 KiB).
+// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (256 KiB).
 func NewConnectUploadPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
 	p := newUploadPipe(connectUploadShallowPipeBuf)
 	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
 }
 
-// NewConnectUploadShallowPipe returns a bounded upload buffer for CONNECT-UDP.
+// NewConnectUploadShallowPipe is an alias for NewConnectUploadPipe (CONNECT-UDP call sites).
 func NewConnectUploadShallowPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
-	p := newUploadPipe(connectUploadShallowPipeBuf)
-	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
+	return NewConnectUploadPipe()
 }
 
 type uploadPipeReader struct{ p *uploadPipe }

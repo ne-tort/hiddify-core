@@ -112,6 +112,12 @@ func TestHTTPLayerSwitchableFailure(t *testing.T) {
 		errTCPConnectStreamFailed, http.StatusBadGateway, "https://example.invalid/connect")) {
 		t.Fatal("onward H2 CONNECT-stream 502 must not flip HTTP layer")
 	}
+	if switchable(errors.New("masque h2: CONNECT-UDP status 503")) {
+		t.Fatal("H2 CONNECT-UDP 503 must not flip HTTP layer (TUN DNS/QUIC spam; STR-P2-H2-CONNECT-UDP-503)")
+	}
+	if switchable(errors.New("masque h2: asymmetric upload leg timed out waiting for download session target=8.8.8.8:53")) {
+		t.Fatal("H2 CONNECT-UDP asymmetric timeout must not flip HTTP layer")
+	}
 	if !switchable(errors.New("masque: server responded with 502")) {
 		t.Fatal("expected masque-go CONNECT-UDP non-2xx to be switchable for H3→H2 fallback")
 	}

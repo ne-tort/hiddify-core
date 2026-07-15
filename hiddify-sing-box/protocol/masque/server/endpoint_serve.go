@@ -88,7 +88,9 @@ func LaunchMasqueStack(cfg LaunchMasqueStackConfig) (*MasqueStack, error) {
 	}
 	tcpTLS := cfg.CollateralTLS.Clone()
 	tcpTLS.NextProtos = []string{"h2", "http/1.1"}
-	tcpLn := tls.NewListener(tcpRaw, tcpTLS)
+	// Client: MasqueTCPDialerControl (SNDBUF only) before handshake; server Accept
+	// matches SNDBUF + Nagle. Never SO_RCVBUF on H2 TLS underlay (Linux RWND lock).
+	tcpLn := tls.NewListener(&masqueTunedTCPListener{Listener: tcpRaw}, tcpTLS)
 	stack.TCPTLSListener = tcpLn
 	http2Srv := &http.Server{
 		Handler:           cfg.Handler,

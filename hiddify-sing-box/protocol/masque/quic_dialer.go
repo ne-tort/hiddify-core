@@ -16,6 +16,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
+	"github.com/sagernet/sing-box/transport/masque/netutil"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -113,7 +114,7 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 	forceProtect := masqueBootstrapShouldUseSingBoxDefaultDialer(ctx, options)
 	if !requireCustom && !forceProtect {
 		return func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{}
+			d := net.Dialer{Control: netutil.MasqueTCPDialerControl}
 			return d.DialContext(ctx, network, address)
 		}, nil
 	}
@@ -139,7 +140,7 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 	}
 	if outboundDialer == nil {
 		return func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{}
+			d := net.Dialer{Control: netutil.MasqueTCPDialerControl}
 			return d.DialContext(ctx, network, address)
 		}, nil
 	}
@@ -148,7 +149,16 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 		if !destination.IsValid() {
 			return nil, E.New("invalid MASQUE TCP address: ", address)
 		}
-		return outboundDialer.DialContext(ctx, network, destination)
+		conn, err := outboundDialer.DialContext(ctx, network, destination)
+		if err != nil {
+			return nil, err
+		}
+		// Detour dials usually complete handshake before we see the conn — still apply
+		// post-connect tune (Nagle + buffers). Prefer Control path above for WAN RWND.
+		if tc, ok := conn.(*net.TCPConn); ok {
+			netutil.TuneMasqueTCPSocketBuffers(tc)
+		}
+		return conn, nil
 	}, nil
 }
 

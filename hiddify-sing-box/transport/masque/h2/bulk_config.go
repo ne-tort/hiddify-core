@@ -28,7 +28,7 @@ func bulkHTTP2Config() *http.HTTP2Config {
 }
 
 // BulkHTTP2ServerConfig returns http2.Server settings for MASQUE Extended CONNECT listeners.
-// Default x/net server stream recv window is 1 MiB — too small for 8 MiB coalesced relay chunks.
+// Default x/net server stream recv window is 1 MiB — too small for bulk relay.
 // MaxConcurrentStreams=4096 matches H3 ConnectStreamMaxIncomingStreams (browser multi-flow).
 func BulkHTTP2ServerConfig() *http2.Server {
 	return &http2.Server{

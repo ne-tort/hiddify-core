@@ -8,8 +8,8 @@ func TestConnectStreamUploadShallowPipeProdDefault(t *testing.T) {
 	if !ok {
 		t.Fatal("upload pipe reader must implement UploadPipeCap")
 	}
-	if cap := capFn.UploadPipeCap(); cap != ExportConnectUploadShallowPipeBuf() {
-		t.Fatalf("prod pipe cap=%d want=%d", cap, ExportConnectUploadShallowPipeBuf())
+	if cap := capFn.UploadPipeCap(); cap != connectUploadShallowPipeBuf {
+		t.Fatalf("prod pipe cap=%d want=%d", cap, connectUploadShallowPipeBuf)
 	}
 	_ = w.Close()
 	_ = r.Close()

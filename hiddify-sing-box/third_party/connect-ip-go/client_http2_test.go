@@ -40,7 +40,14 @@ func TestH2ExtendedConnectRequestContextDetachesAfterHandshake(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
+	// stop(false) after detach is the Close/teardown path (must cancel). Dialers must not
+	// defer stop(false) on the success return path after stop(true).
 	stop(false)
+	select {
+	case <-reqCtx.Done():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("request context was not canceled by stop(false) after detach")
+	}
 }
 
 func TestH2ExtendedConnectRequestContextDetachWinsConcurrentParentCancel(t *testing.T) {

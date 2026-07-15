@@ -287,9 +287,16 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 
 	pr, pw := io.Pipe()
 	// Keep the CONNECT stream alive after DialHTTP2 returns while still honoring parent
-	// cancellation during the handshake phase.
+	// cancellation during the handshake phase. Do not defer stop(false) after stop(true):
+	// that would cancel Request.Context and tear the Extended CONNECT down on return
+	// (same class of bug as H2 CONNECT-UDP asymmetric download→503).
 	streamCtx, stopReqCtxRelay := NewH2ExtendedConnectRequestContext(ctx)
-	defer stopReqCtxRelay(false)
+	handshakeOK := false
+	defer func() {
+		if !handshakeOK {
+			stopReqCtxRelay(false)
+		}
+	}()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, rawURL, &h2ExtendedConnectDuplexBody{pipe: pr})
 	if err != nil {
 		_ = pw.Close()
@@ -344,6 +351,7 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 		return nil, nil, ctxErr
 	}
 	stopReqCtxRelay(true)
+	handshakeOK = true
 
 	str := &h2CapsulePipeStream{body: resp.Body, pipeW: pw, pipeR: pr}
 	conn := newProxiedConn(str, true)
@@ -359,7 +367,12 @@ func dialHTTP2LegacyConnectIP(ctx context.Context, rt http.RoundTripper, rawURL 
 	}
 	pr, pw := io.Pipe()
 	streamCtx, stopReqCtxRelay := NewH2ExtendedConnectRequestContext(ctx)
-	defer stopReqCtxRelay(false)
+	handshakeOK := false
+	defer func() {
+		if !handshakeOK {
+			stopReqCtxRelay(false)
+		}
+	}()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, rawURL, pr)
 	if err != nil {
 		_ = pw.Close()
@@ -405,6 +418,7 @@ func dialHTTP2LegacyConnectIP(ctx context.Context, rt http.RoundTripper, rawURL 
 		return nil, nil, ctxErr
 	}
 	stopReqCtxRelay(true)
+	handshakeOK = true
 	str := &h2LegacyDatagramStream{requestBody: pw, responseBody: resp.Body}
 	return newDatagramOnlyConn(str), resp, nil
 }

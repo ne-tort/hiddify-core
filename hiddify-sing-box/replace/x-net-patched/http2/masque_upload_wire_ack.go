@@ -57,11 +57,6 @@ func masqueSustainedUploadPumpAfterHeaders(body io.ReadCloser) bool {
 	return masqueUploadWriterOpen(body) || masqueConnectStreamBidiUpload(body)
 }
 
-// MasqueSustainedUploadPumpAfterHeaders is the exported sustained-pump probe for masque tests.
-func MasqueSustainedUploadPumpAfterHeaders(body io.ReadCloser) bool {
-	return masqueSustainedUploadPumpAfterHeaders(body)
-}
-
 // masqueSustainedUploadPumpContinue reports whether the sustained upload pump should keep looping.
 func masqueSustainedUploadPumpContinue(body io.ReadCloser) bool {
 	if masqueUploadWriterOpen(body) {
@@ -84,38 +79,6 @@ func masqueUploadPumpActive(body io.ReadCloser) bool {
 // masqueUploadWireAck is implemented by MASQUE H2 Extended CONNECT upload bodies.
 type masqueUploadWireAck interface {
 	MasqueUploadWireAck(n int)
-}
-
-
-// masquePreserveConnectUploadPump marks upload bodies that must keep writeRequestBody
-// active after response END_STREAM (CONNECT-UDP / CONNECT-IP asymmetric upload leg).
-// CONNECT-stream must not match on wire-ack type alone — only an open upload writer arms duplex.
-func masquePreserveConnectUploadPump(body io.ReadCloser) bool {
-	return masqueUploadWriterOpen(body)
-}
-
-// masqueDeferConnectUploadBodyClose reports upload bodies that must not be torn down when the
-// CONNECT response body arrives (CONNECT-stream sustained pump + asymmetric UDP/IP writer-live).
-func masqueDeferConnectUploadBodyClose(body io.ReadCloser) bool {
-	return masqueSustainedUploadPumpAfterHeaders(body)
-}
-
-// MasquePreserveConnectUploadBody is the exported preserve probe for package masque tests.
-func MasquePreserveConnectUploadBody(body io.ReadCloser) bool {
-	return masquePreserveConnectUploadPump(body)
-}
-
-// MasqueExtendedCONNECTUploadDuplex is the exported duplex probe for package masque tests.
-func MasqueExtendedCONNECTUploadDuplex(isExtendedConnect bool, body io.ReadCloser, contentLen int64) bool {
-	return masqueExtendedCONNECTUploadDuplex(isExtendedConnect, body, contentLen)
-}
-
-// masqueExtendedCONNECTUploadDuplex reports RFC 8441 Extended CONNECT upload streams that must
-// keep pumping after response END_STREAM (connect-ip-go / CONNECT-UDP asymmetric upload leg).
-func masqueExtendedCONNECTUploadDuplex(isExtendedConnect bool, body io.ReadCloser, contentLen int64) bool {
-	_ = isExtendedConnect
-	_ = contentLen
-	return masqueSustainedUploadPumpAfterHeaders(body)
 }
 
 // reqIsMasqueExtendedCONNECT reports RFC 8441 Extended CONNECT (capture at RoundTrip — :protocol may leave req.Header before writeRequest).
@@ -147,7 +110,7 @@ type masqueUploadPipeCap interface {
 }
 
 // masqueUploadPipeFlushWaterMark: flush sub-threshold TLS DATA when upload pipe depth
-// nears capacity (bulk pipe cap is 512KiB; flush at 256KiB = TLS bulk threshold).
+// nears capacity (CONNECT-stream pipe = 256 KiB = TLS bulk threshold).
 var masqueUploadPipeFlushWaterMark = 256 << 10
 
 func masqueUploadPipeFlushMark(body io.ReadCloser) int {
@@ -176,11 +139,6 @@ func masqueShouldInteractiveUploadFlush(body io.ReadCloser, pendingAck int) bool
 	return bp.UploadBootstrapPending()
 }
 
-// masqueShouldBootstrapUploadFlush is an alias for the top-of-loop interactive flush gate.
-func masqueShouldBootstrapUploadFlush(body io.ReadCloser, pendingAck int) bool {
-	return masqueShouldInteractiveUploadFlush(body, pendingAck)
-}
-
 // masqueShouldFlushBeforeBlockingRead flushes sub-threshold DATA before a blocking body.Read.
 func masqueShouldFlushBeforeBlockingRead(body io.ReadCloser, pendingAck int) bool {
 	if pendingAck <= 0 {
@@ -194,11 +152,15 @@ func masqueShouldFlushBeforeBlockingRead(body io.ReadCloser, pendingAck int) boo
 	case buf < 0:
 		return false
 	case buf == 0:
-		// CONNECT-stream (no writer-live): flush pending DATA before blocking Read (H2 bidi FC).
-		if !masqueUploadWriterOpen(body) {
-			return true
+		if masqueUploadWriterOpen(body) {
+			// CONNECT-UDP/IP writer-live: interactive flush only during bootstrap.
+			return masqueShouldInteractiveUploadFlush(body, pendingAck)
 		}
-		return masqueShouldInteractiveUploadFlush(body, pendingAck)
+		// CONNECT-stream: MUST Flush any pending before blocking Read — deadline is not
+		// polled while blocked, so returning false with pendingAck>0 stalls the wire
+		// (field: armed MinPending=256 → up ~7 Mbit). Coalesce lives in bulk Now/deadline
+		// while pipe stays non-empty; empty-pipe quantum = pipe cap (256 KiB).
+		return true
 	default:
 		return buf >= masqueUploadPipeFlushMark(body)
 	}

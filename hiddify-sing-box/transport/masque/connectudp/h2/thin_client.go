@@ -7,7 +7,8 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// dedicatedOverlayTransport returns a per-UDPFlow EnsureTransport when NewTransport is wired.
+// dedicatedOverlayTransport returns a per-UDPFlow EnsureTransport when NewTransport is wired
+// (one TLS/TCP shared by both asymmetric CONNECT-UDP legs).
 func dedicatedOverlayTransport(cfg H2OverlayDialConfig) (H2OverlayDialConfig, func()) {
 	if cfg.NewTransport == nil {
 		return cfg, nil

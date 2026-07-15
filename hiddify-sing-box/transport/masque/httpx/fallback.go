@@ -71,6 +71,13 @@ func IsLayerSwitchableFailure(err error) bool {
 		strings.Contains(es, "tcp connect-stream failed: status=503") {
 		return false
 	}
+	// H2 CONNECT-UDP asymmetric timeout / status 503 is per-flow WAN race (STR-P2-H2-CONNECT-UDP-503),
+	// not a reason to tear down shared H2 CONNECT-stream overlay (http_layer:auto poison).
+	if strings.Contains(es, "connect-udp status 503") ||
+		strings.Contains(es, "asymmetric upload leg timed out") ||
+		strings.Contains(es, "asymmetric upload wait canceled") {
+		return false
+	}
 	// Local graceful H3/QUIC close is often a cascade artifact from shared-session teardown,
 	// not a transport-layer fault that should burn http_layer_fallback on sibling dials.
 	if strings.Contains(es, "h3 error (0x0) (local)") {

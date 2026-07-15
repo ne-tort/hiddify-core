@@ -1,6 +1,6 @@
 package netutil
 
-// MasqueSocketBufferBytes is the kernel snd/rcv buffer size for MASQUE onward sockets.
+// MasqueSocketBufferBytes is the kernel snd/rcv target for MASQUE bulk sockets.
 const MasqueSocketBufferBytes = 4 << 20
 
 type bufferConn interface {
@@ -17,10 +17,16 @@ func TuneMasqueUDPSocketBuffers(conn bufferConn) {
 	_ = conn.SetWriteBuffer(MasqueSocketBufferBytes)
 }
 
-// TuneMasqueTCPSocketBuffers sets bulk snd/rcv buffers on MASQUE H2 TLS underlay.
-// Nagle on (NoDelay false) coalesces small TLS records into fewer TCP segments (upload goodput).
+// TuneMasqueTCPSocketBuffers tunes the MASQUE H2 TLS underlay.
+//
+// Do NOT SetReadBuffer on Linux TCP: SO_RCVBUF locks SOCK_RCVBUF_LOCK and can leave
+// rcv_ssthresh ≈32 KiB on WAN (~8 Mbit @30 ms) despite skmem rb=8 MiB. Rely on
+// tcp_rmem auto-tune for receive; only lock SO_SNDBUF (+ Nagle-on) for send bulk.
 func TuneMasqueTCPSocketBuffers(conn bufferConn) {
-	TuneMasqueUDPSocketBuffers(conn)
+	if conn == nil {
+		return
+	}
+	_ = conn.SetWriteBuffer(MasqueSocketBufferBytes)
 	if tc, ok := conn.(interface{ SetNoDelay(bool) error }); ok {
 		_ = tc.SetNoDelay(false)
 	}

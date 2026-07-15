@@ -89,20 +89,20 @@ func TestMasqueShouldFlushBeforeBlockingRead(t *testing.T) {
 	}
 }
 
-func TestMasqueShouldBootstrapUploadFlush(t *testing.T) {
+func TestMasqueShouldInteractiveUploadFlush(t *testing.T) {
 	t.Parallel()
 	body := &bulkFlushProbeBody{consumed: 1024}
-	if !masqueShouldBootstrapUploadFlush(body, 1024) {
+	if !masqueShouldInteractiveUploadFlush(body, 1024) {
 		t.Fatal("expected bootstrap flush when consumed ahead of wire")
 	}
 	body.acked = 1024
-	if masqueShouldBootstrapUploadFlush(body, 1024) {
+	if masqueShouldInteractiveUploadFlush(body, 1024) {
 		t.Fatal("expected no bootstrap flush when pipe caught up on wire")
 	}
 	body.bulkArmed = true
 	body.consumed = 2048
 	body.acked = 1024
-	if masqueShouldBootstrapUploadFlush(body, 1024) {
+	if masqueShouldInteractiveUploadFlush(body, 1024) {
 		t.Fatal("expected no bootstrap flush when bulk armed")
 	}
 }

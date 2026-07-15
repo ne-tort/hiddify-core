@@ -10,11 +10,13 @@ import (
 	"time"
 )
 
-const RelayTunnelBufLen = 64 * 1024
+// RelayTunnelBufLen is the CONNECT-stream relay CopyBuffer / Flush quantum.
+// Field CF __down stop-wait ≈ BufLen×8/RTT: 256 KiB→~54, 1 MiB→~267 @30 ms.
+// 4 MiB lifts ceiling above path (~1 Gbit @30 ms) while fill-then-Flush still
+// does one Flush per filled buffer (not S3 Flush-less coalesce).
+const RelayTunnelBufLen = 4 << 20
 
-// RelayTunnelFlushBytes documents the load-bearing per-Write Flush quantum (= BufLen).
-// Coalesce>BufLen without Flush is INCOMPATIBLE for H2 Extended CONNECT (field broke TTFB).
-// WAN ~8 Mbit persists with large FC (ServerSendAvailMin≫65535) — not cured by Flush coalesce alone.
+// RelayTunnelFlushBytes is an alias kept for arch/docs (= BufLen; per-Write Flush).
 const RelayTunnelFlushBytes = RelayTunnelBufLen
 
 var relayTunnelBufPool = sync.Pool{
@@ -22,16 +24,6 @@ var relayTunnelBufPool = sync.Pool{
 		b := make([]byte, RelayTunnelBufLen)
 		return &b
 	},
-}
-
-// relayTunnelPrimeDownload reads the first onward-TCP segment (iperf banner, etc.). Timeout with no bytes is OK.
-// Implemented in relay_prime.go (opportunistic peek policy).
-
-// Dead path note (H2-S4): relayTunnelDownloadWriter / batch flushWriter were never wired into
-// RelayTCPTunnel (prod uses relayTunnelDownloadRelayH2 per-chunk Flush). Removed 2026-07-15.
-
-func relayTunnelFlushFinal(out io.Writer, responseWriter http.ResponseWriter) {
-	relayTunnelFlushNow(out, responseWriter)
 }
 
 func relayTunnelFlushNow(out io.Writer, responseWriter http.ResponseWriter) {
@@ -50,12 +42,6 @@ func relayTunnelUploadSource(reqBody io.ReadCloser, uploadLeg io.Reader) io.Read
 		return uploadLeg
 	}
 	return reqBody
-}
-
-func relayTunnelCopyBuffer(dst io.Writer, src io.Reader) (int64, error) {
-	bp := relayTunnelBufPool.Get().(*[]byte)
-	defer relayTunnelBufPool.Put(bp)
-	return io.CopyBuffer(dst, src, *bp)
 }
 
 func relayTunnelUnblockPeerRead(conn net.Conn) {

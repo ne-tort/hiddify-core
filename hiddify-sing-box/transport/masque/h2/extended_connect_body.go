@@ -58,8 +58,10 @@ func (b *ExtendedConnectUploadBody) MarkUploadWriterDone() {
 	}
 }
 
-// uploadBulkArmConsumedMin: arm bulk TLS batching after first real UDP payload (not Prime empty capsule).
-const uploadBulkArmConsumedMin = 512
+// uploadBulkArmConsumedMin: arm bulk TLS batching only after sustained user payload.
+// Must be > CONNECT-stream dial bootstrap (4 KiB): arming on WireAck of bootstrap
+// made empty-pipe coalesce kill interactive HTTPS TTFB (SOCKS smoke EOF).
+const uploadBulkArmConsumedMin = 256 << 10
 
 func (b *ExtendedConnectUploadBody) Read(p []byte) (int, error) {
 	if b == nil || b.Pipe == nil {
@@ -222,11 +224,6 @@ func (b *ExtendedConnectUploadBody) AwaitUploadConsumed(n int64, timeout time.Du
 func uploadWireTailSatisfied(got, need int64) bool {
 	const tailSlack = int64(262144)
 	return got+tailSlack >= need || (need > 0 && got*1000 >= need*995)
-}
-
-// UploadWireTailSatisfied reports whether flushed TLS bytes are close enough for bulk-upload drain.
-func UploadWireTailSatisfied(got, need int64) bool {
-	return uploadWireTailSatisfied(got, need)
 }
 
 func (*ExtendedConnectUploadBody) Close() error {

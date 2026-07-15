@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	"github.com/quic-go/quic-go/http3"
@@ -20,6 +21,12 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/yosida95/uritemplate/v3"
 )
+
+// MasqueOnwardTCPDialTimeout bounds CONNECT-stream/CONNECT-IP onward TCP dials.
+// Zero-value Dialer (no Timeout) lets SYN blackholes hold the Extended CONNECT until the
+// client ConnectStreamHandshakeTimeout (60s) → "roundtrip: context canceled" @1m0s.
+const MasqueOnwardTCPDialTimeout = 15 * time.Second
+
 
 // ConnectIPServerParseDropTotal exposes the parse-drop counter for tests/ops.
 func ConnectIPServerParseDropTotal() uint64 {
@@ -60,6 +67,7 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
 		options: o,
 		router:  router,
 		logger:  logger,
+		dialer:  net.Dialer{Timeout: MasqueOnwardTCPDialTimeout},
 	}, nil
 }
 
