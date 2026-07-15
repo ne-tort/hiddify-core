@@ -73,7 +73,9 @@ func (c *bidiTunnelConn) wakeH2BidiUploadDuringDownload() {
 	c.wakeH2BidiUploadOnDownloadRead()
 }
 
-// wakeH2BidiUploadOnDownloadRead pokes the CONNECT upload leg during response-body reads (Read or WriteTo).
+// wakeH2BidiUploadOnDownloadRead sends one-shot bootstrap upload DATA before the first
+// response-body read. After that, x-net transportResponseBody.Read already wakes
+// writeRequestBody (masqueWake) — steady per-Read poke was overfire (H2-W3).
 func (c *bidiTunnelConn) wakeH2BidiUploadOnDownloadRead() {
 	if c == nil || !uploadPathHasH2BidiWake(c.paths.Upload) {
 		return
@@ -82,7 +84,6 @@ func (c *bidiTunnelConn) wakeH2BidiUploadOnDownloadRead() {
 		return
 	}
 	if !atomic.CompareAndSwapInt32(&c.bootstrapUploadDone, 0, 1) {
-		pokeUploadPathForH2BidiDownload(c.paths.Upload)
 		return
 	}
 	c.uploadMu.Lock()
