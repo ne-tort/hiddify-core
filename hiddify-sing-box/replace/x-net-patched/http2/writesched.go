@@ -116,6 +116,12 @@ func (wr FrameWriteRequest) Consume(n int32) (FrameWriteRequest, FrameWriteReque
 
 	// Might need to split after applying limits.
 	allowed := wr.stream.flow.available()
+	streamN := wr.stream.flow.n
+	connN := int32(0)
+	if wr.stream.flow.conn != nil {
+		connN = wr.stream.flow.conn.n
+	}
+	masqueH2NoteServerSendAvail(allowed, streamN, connN)
 	if n < allowed {
 		allowed = n
 	}

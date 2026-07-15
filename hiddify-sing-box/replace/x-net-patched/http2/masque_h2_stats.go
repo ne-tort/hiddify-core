@@ -21,10 +21,16 @@ type MasqueH2Stats struct {
 	PeerStreamWindow       uint32 // last SETTINGS_INITIAL_WINDOW_SIZE from peer (0=unset)
 	LocalStreamRecvWindow  uint32 // last client SETTINGS_INITIAL_WINDOW_SIZE we announced
 	LocalConnRecvBump      uint32 // last client WINDOW_UPDATE(0) bump at conn open
-	TransportResets        uint64
-	RecvRSTStream          uint64
-	RecvGOAWAY             uint64
-	RecvGOAWAYErr          uint64 // GOAWAY with non-zero ErrCode
+	// Server-side download send (outflow) — min(stream,conn) seen at DATA Consume.
+	ServerSendAvailLast int32
+	ServerSendAvailMin  int32 // 0 = unset; tracks minimum observed positive avail
+	ServerConnOutflow   int32 // sc.flow.n after last conn WINDOW_UPDATE / sample
+	ServerStreamOutflow int32 // st.flow.n sample at DATA Consume
+	ServerConnWUBytes   uint64
+	TransportResets     uint64
+	RecvRSTStream       uint64
+	RecvGOAWAY          uint64
+	RecvGOAWAYErr       uint64 // GOAWAY with non-zero ErrCode
 }
 
 var (
@@ -36,6 +42,11 @@ var (
 	masqueH2PeerStreamWindow       atomic.Uint32
 	masqueH2LocalStreamRecvWindow  atomic.Uint32
 	masqueH2LocalConnRecvBump      atomic.Uint32
+	masqueH2ServerSendAvailLast    atomic.Int32
+	masqueH2ServerSendAvailMin     atomic.Int32
+	masqueH2ServerConnOutflow      atomic.Int32
+	masqueH2ServerStreamOutflow    atomic.Int32
+	masqueH2ServerConnWUBytes      atomic.Uint64
 	masqueH2TransportResets        atomic.Uint64
 	masqueH2RecvRSTStream          atomic.Uint64
 	masqueH2RecvGOAWAY             atomic.Uint64
@@ -78,6 +89,33 @@ func masqueH2NoteLocalRecvWindows(streamIW, connBump uint32) {
 	}
 }
 
+// masqueH2NoteServerSendAvail records server outbound flow available() at DATA Consume
+// and samples stream/conn outflow levels (download send diagnosis on WAN).
+func masqueH2NoteServerSendAvail(avail, streamN, connN int32) {
+	masqueH2ServerSendAvailLast.Store(avail)
+	masqueH2ServerStreamOutflow.Store(streamN)
+	masqueH2ServerConnOutflow.Store(connN)
+	if avail <= 0 {
+		return
+	}
+	for {
+		cur := masqueH2ServerSendAvailMin.Load()
+		if cur != 0 && cur <= avail {
+			return
+		}
+		if masqueH2ServerSendAvailMin.CompareAndSwap(cur, avail) {
+			return
+		}
+	}
+}
+
+func masqueH2NoteServerConnWindowUpdate(inc uint32) {
+	if inc == 0 {
+		return
+	}
+	masqueH2ServerConnWUBytes.Add(uint64(inc))
+}
+
 // NoteMasqueH2TransportReset increments shared-pool reset counter (session dial retry).
 func NoteMasqueH2TransportReset() {
 	masqueH2TransportResets.Add(1)
@@ -105,6 +143,11 @@ func SnapshotMasqueH2Stats() MasqueH2Stats {
 		PeerStreamWindow:       masqueH2PeerStreamWindow.Load(),
 		LocalStreamRecvWindow:  masqueH2LocalStreamRecvWindow.Load(),
 		LocalConnRecvBump:      masqueH2LocalConnRecvBump.Load(),
+		ServerSendAvailLast:    masqueH2ServerSendAvailLast.Load(),
+		ServerSendAvailMin:     masqueH2ServerSendAvailMin.Load(),
+		ServerConnOutflow:      masqueH2ServerConnOutflow.Load(),
+		ServerStreamOutflow:    masqueH2ServerStreamOutflow.Load(),
+		ServerConnWUBytes:      masqueH2ServerConnWUBytes.Load(),
 		TransportResets:        masqueH2TransportResets.Load(),
 		RecvRSTStream:          masqueH2RecvRSTStream.Load(),
 		RecvGOAWAY:             masqueH2RecvGOAWAY.Load(),
@@ -122,6 +165,11 @@ func ResetMasqueH2StatsForTest() {
 	masqueH2PeerStreamWindow.Store(0)
 	masqueH2LocalStreamRecvWindow.Store(0)
 	masqueH2LocalConnRecvBump.Store(0)
+	masqueH2ServerSendAvailLast.Store(0)
+	masqueH2ServerSendAvailMin.Store(0)
+	masqueH2ServerConnOutflow.Store(0)
+	masqueH2ServerStreamOutflow.Store(0)
+	masqueH2ServerConnWUBytes.Store(0)
 	masqueH2TransportResets.Store(0)
 	masqueH2RecvRSTStream.Store(0)
 	masqueH2RecvGOAWAY.Store(0)
@@ -129,23 +177,29 @@ func ResetMasqueH2StatsForTest() {
 }
 
 // EnsureMasqueH2FCStatsFileDump writes SnapshotMasqueH2Stats JSON to
-// <tmpdir>/masque-h2-fc-stats.json at most ~1 Hz while body bytes grow (H2-D1/D2 field).
+// <tmpdir>/masque-h2-fc-stats.json at most ~1 Hz (client body growth or server send samples).
 func EnsureMasqueH2FCStatsFileDump() {
 	masqueH2FCDumpOnce.Do(func() {
 		path := filepath.Join(os.TempDir(), "masque-h2-fc-stats.json")
 		go func() {
 			var lastBody uint64
+			var lastSrvWU uint64
 			t := time.NewTicker(time.Second)
 			defer t.Stop()
 			for range t.C {
 				s := SnapshotMasqueH2Stats()
-				if s.DownloadBodyBytes == 0 && s.LocalStreamRecvWindow == 0 {
+				idle := s.DownloadBodyBytes == 0 && s.LocalStreamRecvWindow == 0 &&
+					s.ServerConnWUBytes == 0 && s.ServerSendAvailLast == 0
+				if idle {
 					continue
 				}
-				if s.DownloadBodyBytes == lastBody && lastBody != 0 {
+				unchanged := s.DownloadBodyBytes == lastBody && s.ServerConnWUBytes == lastSrvWU &&
+					s.DownloadBodyBytes != 0
+				if unchanged {
 					continue
 				}
 				lastBody = s.DownloadBodyBytes
+				lastSrvWU = s.ServerConnWUBytes
 				type dump struct {
 					MasqueH2Stats
 					AwaitFCAvgMs   float64 `json:"await_fc_avg_ms"`

@@ -1680,6 +1680,9 @@ func (sc *serverConn) processWindowUpdate(f *WindowUpdateFrame) error {
 		if !sc.flow.add(int32(f.Increment)) {
 			return goAwayFlowError{}
 		}
+		masqueH2NoteServerConnWindowUpdate(f.Increment)
+		masqueH2NoteServerSendAvail(sc.flow.available(), 0, sc.flow.n)
+		EnsureMasqueH2FCStatsFileDump()
 	}
 	sc.scheduleFrameWrite()
 	return nil

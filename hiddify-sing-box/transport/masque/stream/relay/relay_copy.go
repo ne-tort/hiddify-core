@@ -12,9 +12,9 @@ import (
 
 const RelayTunnelBufLen = 64 * 1024
 
-// RelayTunnelFlushBytes is retained as an arch/contract constant (= RelayTunnelBufLen).
-// Prod H2 download uses per-chunk Flush (relayTunnelDownloadRelayH2); the batched
-// flushWriter path that once used this threshold was never wired and was removed.
+// RelayTunnelFlushBytes documents the load-bearing per-Write Flush quantum (= BufLen).
+// Coalesce>BufLen without Flush is INCOMPATIBLE for H2 Extended CONNECT (field broke TTFB).
+// WAN ~8 Mbit persists with large FC (ServerSendAvailMin≫65535) — not cured by Flush coalesce alone.
 const RelayTunnelFlushBytes = RelayTunnelBufLen
 
 var relayTunnelBufPool = sync.Pool{
