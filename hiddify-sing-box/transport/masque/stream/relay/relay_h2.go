@@ -61,11 +61,7 @@ func relayTunnelCopyBufferH2BidiDownload(dst io.Writer, src io.Reader, responseW
 			nw, ew := dst.Write(buf[:nr])
 			if nw > 0 {
 				written += int64(nw)
-				if fw, ok := dst.(*relayTunnelFlushWriter); ok {
-					fw.flushNow()
-				} else {
-					relayTunnelWakeH2AfterDownloadWrite(responseWriter)
-				}
+				relayTunnelWakeH2AfterDownloadWrite(responseWriter)
 			}
 			if ew != nil {
 				return written, ew

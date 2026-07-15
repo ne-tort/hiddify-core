@@ -148,7 +148,7 @@ func benchRelayH2FlushDownload(t *testing.T, link bidiLink, duration time.Durati
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, _ = strm.RelayTunnelDownloadH2Style(serverLeg, rec, targetConn)
+		_, _ = strm.RelayTunnelDownloadH2(serverLeg, rec, targetConn)
 		_ = serverLeg.Close()
 	}()
 

@@ -1,3 +1,3 @@
-// Package relay implements server-side CONNECT-stream TCP relay: h2o-style tunnel (default)
-// and legacy per-read flush path (MASQUE_RELAY_TCP_LEGACY=1).
+// Package relay is the protocol-facing wrapper for CONNECT-stream TCP relay
+// (thin H2/H3 tunnel — h2o-style bidi). No env toggles; no legacy flush modes.
 package relay

@@ -12,7 +12,9 @@ import (
 
 const RelayTunnelBufLen = 64 * 1024
 
-// RelayTunnelFlushBytes is the H2 EnableFullDuplex batch flush threshold (h2o proxy.tunnel parity).
+// RelayTunnelFlushBytes is retained as an arch/contract constant (= RelayTunnelBufLen).
+// Prod H2 download uses per-chunk Flush (relayTunnelDownloadRelayH2); the batched
+// flushWriter path that once used this threshold was never wired and was removed.
 const RelayTunnelFlushBytes = RelayTunnelBufLen
 
 var relayTunnelBufPool = sync.Pool{
@@ -25,36 +27,10 @@ var relayTunnelBufPool = sync.Pool{
 // relayTunnelPrimeDownload reads the first onward-TCP segment (iperf banner, etc.). Timeout with no bytes is OK.
 // Implemented in relay_prime.go (opportunistic peek policy).
 
-// relayTunnelDownloadRelay copies onward TCP → CONNECT response; H2 path primes iperf banner
-// then bulk-copies with io.CopyBuffer (64 KiB, h2o proxy.tunnel parity) and batch flush at EOF.
-func relayTunnelDownloadRelay(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
-	bp := relayTunnelBufPool.Get().(*[]byte)
-	defer relayTunnelBufPool.Put(bp)
-	buf := *bp
-	var written int64
-	if prime, err := relayTunnelPrimeDownload(src); err != nil {
-		return 0, err
-	} else if len(prime) > 0 {
-		if _, err := out.Write(prime); err != nil {
-			return int64(len(prime)), err
-		}
-		written += int64(len(prime))
-		relayTunnelFlushFinal(out, responseWriter)
-	}
-	n, err := io.CopyBuffer(out, src, buf)
-	written += n
-	if err != nil && !errors.Is(err, io.EOF) {
-		return written, err
-	}
-	relayTunnelFlushFinal(out, responseWriter)
-	return written, nil
-}
+// Dead path note (H2-S4): relayTunnelDownloadWriter / batch flushWriter were never wired into
+// RelayTCPTunnel (prod uses relayTunnelDownloadRelayH2 per-chunk Flush). Removed 2026-07-15.
 
 func relayTunnelFlushFinal(out io.Writer, responseWriter http.ResponseWriter) {
-	if fw, ok := out.(*relayTunnelFlushWriter); ok {
-		fw.flushNow()
-		return
-	}
 	relayTunnelFlushNow(out, responseWriter)
 }
 
@@ -66,38 +42,6 @@ func relayTunnelFlushNow(out io.Writer, responseWriter http.ResponseWriter) {
 	}
 	if f, ok := responseWriter.(http.Flusher); ok {
 		f.Flush()
-	}
-}
-
-type relayTunnelFlushWriter struct {
-	w       io.Writer
-	flusher http.Flusher
-	pending int
-}
-
-func relayTunnelDownloadWriter(w io.Writer) io.Writer {
-	if f, ok := w.(http.Flusher); ok {
-		return &relayTunnelFlushWriter{w: w, flusher: f}
-	}
-	return w
-}
-
-func (f *relayTunnelFlushWriter) Write(p []byte) (int, error) {
-	n, err := f.w.Write(p)
-	if err != nil {
-		return n, err
-	}
-	f.pending += n
-	if f.pending >= RelayTunnelFlushBytes {
-		f.flushNow()
-	}
-	return n, nil
-}
-
-func (f *relayTunnelFlushWriter) flushNow() {
-	if f.flusher != nil && f.pending > 0 {
-		f.flusher.Flush()
-		f.pending = 0
 	}
 }
 

@@ -24,28 +24,6 @@ type flushCountResponseWriter struct {
 func (f *flushCountResponseWriter) Header() http.Header { return http.Header{} }
 func (f *flushCountResponseWriter) WriteHeader(int)     {}
 
-type chunkedReadConn struct {
-	chunks [][]byte
-	idx    int
-}
-
-func (c *chunkedReadConn) Read(p []byte) (int, error) {
-	if c.idx >= len(c.chunks) {
-		return 0, io.EOF
-	}
-	n := copy(p, c.chunks[c.idx])
-	c.idx++
-	return n, nil
-}
-
-func (c *chunkedReadConn) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
-func (c *chunkedReadConn) Close() error              { return nil }
-func (c *chunkedReadConn) LocalAddr() net.Addr       { return nil }
-func (c *chunkedReadConn) RemoteAddr() net.Addr      { return nil }
-func (c *chunkedReadConn) SetDeadline(time.Time) error      { return nil }
-func (c *chunkedReadConn) SetReadDeadline(time.Time) error  { return nil }
-func (c *chunkedReadConn) SetWriteDeadline(time.Time) error { return nil }
-
 type primeThenBlockConn struct {
 	banner  []byte
 	blocked chan struct{}
@@ -83,8 +61,8 @@ func (c *primeThenBlockConn) SetDeadline(time.Time) error      { return nil }
 func (c *primeThenBlockConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *primeThenBlockConn) SetWriteDeadline(time.Time) error { return nil }
 
-// TestRelayTunnelPrimeBannerFlushesEarly verifies the iperf-shaped prime segment is flushed
-// before the relay blocks on a slow onward-TCP read (H2 upload-only / connect-stream-h2 hang).
+// TestRelayTunnelPrimeBannerFlushesEarly: prod H2 download path flushes the iperf banner
+// before blocking on a slow onward-TCP read.
 func TestRelayTunnelPrimeBannerFlushesEarly(t *testing.T) {
 	const banner = "iperf3\r\n"
 	src := newPrimeThenBlockConn([]byte(banner))
@@ -93,7 +71,7 @@ func TestRelayTunnelPrimeBannerFlushesEarly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = RelayTunnelDownloadH2Style(sink, sink, src)
+		_, _ = RelayTunnelDownloadH2(sink, sink, src)
 	}()
 
 	select {
@@ -109,29 +87,3 @@ func TestRelayTunnelPrimeBannerFlushesEarly(t *testing.T) {
 		t.Fatalf("prime body=%q want %q", sink.String(), banner)
 	}
 }
-
-// TestRelayTunnelDownloadH2StyleBatchesFlush verifies H2 download relay coalesces flushes
-// (64 KiB batch + final, h2o proxy.max-buffer-size parity) instead of per-read flush.
-func TestRelayTunnelDownloadH2StyleBatchesFlush(t *testing.T) {
-	const chunk = 4 * 1024
-	const nChunks = 20 // 80 KiB total → expect 2–3 flushes (64 KiB threshold + EOF), not 20
-	chunks := make([][]byte, nChunks)
-	for i := range chunks {
-		chunks[i] = bytes.Repeat([]byte{byte('a' + i%26)}, chunk)
-	}
-	src := &chunkedReadConn{chunks: chunks}
-	sink := &flushCountResponseWriter{}
-
-	n, err := RelayTunnelDownloadH2Style(sink, sink, src)
-	if err != nil {
-		t.Fatalf("relay: %v", err)
-	}
-	if n != chunk*nChunks {
-		t.Fatalf("written %d want %d", n, chunk*nChunks)
-	}
-	flushes := int(sink.n.Load())
-	if flushes < 2 || flushes > 4 {
-		t.Fatalf("expected 2–4 flushes (64 KiB batch + final), got %d", flushes)
-	}
-}
-

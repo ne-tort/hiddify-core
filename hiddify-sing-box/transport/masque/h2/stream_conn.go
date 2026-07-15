@@ -8,7 +8,6 @@ import (
 	"strconv"
 
 	strm "github.com/sagernet/sing-box/transport/masque/stream"
-	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
 // ConnectTunnelFromResponse builds a thin RFC 8441 tunnel after Extended CONNECT succeeds.
@@ -28,8 +27,7 @@ func ConnectTunnelFromResponse(streamCtx context.Context, resp *http.Response, u
 		_ = inner.Close()
 		return nil, err
 	}
-	if b, ok := uploadBody.(*ExtendedConnectUploadBody); ok {
-		strmconn.SetConnectStreamUploadTeardown(inner, b.MarkUploadWriterDone)
-	}
+	// CONNECT-stream does not call BeginUploadWriterLive — MarkUploadWriterDone would be a no-op.
+	// UDP/IP asymmetric legs wire teardown themselves after BeginUploadWriterLive.
 	return strm.NewTunnelConn(inner), nil
 }

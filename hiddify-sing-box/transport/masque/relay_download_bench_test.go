@@ -59,7 +59,7 @@ func runRelayH2FlushDownloadFixed(targetData []byte) (int64, error) {
 	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		_, _ = strm.RelayTunnelDownloadH2Style(serverLeg, rec, target)
+		_, _ = strm.RelayTunnelDownloadH2(serverLeg, rec, target)
 		_ = serverLeg.Close()
 		close(done)
 	}()

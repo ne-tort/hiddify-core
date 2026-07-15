@@ -173,7 +173,7 @@ func TestRelayTunnelPrimeDownloadBanner(t *testing.T) {
 		rest:   []byte(payload),
 	}
 	sink := &bytes.Buffer{}
-	n, err := relayTunnelDownloadRelay(sink, nil, src2)
+	n, err := RelayTunnelDownloadH2(sink, nil, src2)
 	if err != nil {
 		t.Fatalf("relay: %v", err)
 	}

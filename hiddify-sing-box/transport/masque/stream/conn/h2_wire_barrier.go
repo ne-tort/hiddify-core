@@ -7,14 +7,19 @@ import (
 	"time"
 )
 
-// UploadWireBarrier waits until the HTTP/2 transport has consumed upload bytes from
-// the CONNECT request body (proxy for on-wire DATA before first download read).
+// UploadWireBarrier waits until upload bytes have left the client toward TLS
+// (prefer WireSent; Consumed is a weaker pipe proxy).
 type UploadWireBarrier interface {
 	AwaitUploadConsumed(n int64, timeout time.Duration) error
 }
 
+// UploadWireSentBarrier is optional: true TLS DATA flush progress (H2-B2).
+type UploadWireSentBarrier interface {
+	AwaitUploadWireSent(n int64, timeout time.Duration) error
+}
+
 // PrimeH2UploadBootstrapOnConn writes one-shot H2 bidi bootstrap upload DATA at dial
-// completion and optionally waits for transport consumption (docker iperf -R wire-barrier).
+// completion and optionally waits for wire progress (soft-fail on timeout).
 func PrimeH2UploadBootstrapOnConn(c net.Conn, barrier UploadWireBarrier) error {
 	bc := unwrapBidiTunnelConn(c)
 	if bc == nil {
@@ -86,8 +91,15 @@ func (c *bidiTunnelConn) primeH2UploadBootstrapWire(barrier UploadWireBarrier) e
 		return err
 	}
 	pokeUploadPathForH2BidiDownload(c.paths.Upload)
-	if barrier != nil {
-		return barrier.AwaitUploadConsumed(H2BidiBootstrapUploadBytes, 3*time.Second)
+	if barrier == nil {
+		return nil
 	}
+	// H2-B2: prefer TLS WireSent when available; soft-fail so dial is never blocked
+	// forever on consume≠wire mismatch (bootstrap bytes already written).
+	if ws, ok := barrier.(UploadWireSentBarrier); ok {
+		_ = ws.AwaitUploadWireSent(H2BidiBootstrapUploadBytes, 3*time.Second)
+		return nil
+	}
+	_ = barrier.AwaitUploadConsumed(H2BidiBootstrapUploadBytes, 3*time.Second)
 	return nil
 }

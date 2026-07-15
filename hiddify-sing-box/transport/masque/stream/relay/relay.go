@@ -46,7 +46,7 @@ func RelayTCPTunnelBidiStream(ctx context.Context, targetConn net.Conn, reqBody 
 	return relayTCPTunnelBidiStream(ctx, targetConn, reqBody, bidi)
 }
 
-// RelayTunnelDownloadH2Style copies onward TCP → CONNECT response with batched H2 flush (fallback path).
-func RelayTunnelDownloadH2Style(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
-	return relayTunnelDownloadRelay(out, responseWriter, src)
+// RelayTunnelDownloadH2 copies onward TCP → CONNECT response with prod H2 per-chunk Flush.
+func RelayTunnelDownloadH2(out io.Writer, responseWriter http.ResponseWriter, src net.Conn) (int64, error) {
+	return relayTunnelDownloadRelayH2(out, responseWriter, src)
 }

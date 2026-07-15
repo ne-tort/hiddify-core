@@ -14,7 +14,7 @@ const (
 var (
 	RelayTCPTunnel               = relay.RelayTCPTunnel
 	RelayTCPTunnelBidiStream     = relay.RelayTCPTunnelBidiStream
-	RelayTunnelDownloadH2Style   = relay.RelayTunnelDownloadH2Style
+	RelayTunnelDownloadH2        = relay.RelayTunnelDownloadH2
 	RelayUseHTTP3StreamHijack    = relay.RelayUseHTTP3StreamHijack
 	CurrentRelayTCPPolicy        = relay.CurrentRelayTCPPolicy
 	StripH2ClientBootstrapUpload = relay.StripH2ClientBootstrapUpload
