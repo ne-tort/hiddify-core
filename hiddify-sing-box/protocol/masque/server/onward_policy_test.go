@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/netip"
 	"testing"
@@ -57,14 +58,38 @@ func TestResolveTCPTargetAddrsForDial_PrivateLiteralAllowed(t *testing.T) {
 	}
 }
 
-func TestGATEConnectStreamOnwardHostnamePassthroughNoEgressDNS(t *testing.T) {
+func TestGATEConnectStreamOnwardHostnameIPv4FirstResolve(t *testing.T) {
 	t.Parallel()
-	addrs, err := ResolveTCPTargetAddrsForDial(context.Background(), "example.com", true)
+	prev := lookupTCPTargetNetIP
+	t.Cleanup(func() { lookupTCPTargetNetIP = prev })
+	lookupTCPTargetNetIP = func(_ context.Context, _, host string) ([]netip.Addr, error) {
+		if host != "example.com" {
+			t.Fatalf("unexpected host %q", host)
+		}
+		return []netip.Addr{
+			netip.MustParseAddr("2001:db8::1"),
+			netip.MustParseAddr("203.0.113.50"),
+		}, nil
+	}
+	addrs, err := ResolveTCPTargetAddrsForDial(context.Background(), "example.com", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if addrs != nil {
-		t.Fatalf("hostname must passthrough without MASQUE egress DNS, got %v", addrs)
+	if len(addrs) != 2 || !addrs[0].Is4() || addrs[0].String() != "203.0.113.50" {
+		t.Fatalf("want IPv4-first ordered addrs, got %v", addrs)
+	}
+}
+
+func TestResolveTCPTargetAddrsForDial_HostnameLookupFail(t *testing.T) {
+	t.Parallel()
+	prev := lookupTCPTargetNetIP
+	t.Cleanup(func() { lookupTCPTargetNetIP = prev })
+	lookupTCPTargetNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, errors.New("nxdomain")
+	}
+	_, err := ResolveTCPTargetAddrsForDial(context.Background(), "no.such.host.test", false)
+	if err == nil || !errors.Is(err, ErrTCPTargetResolveFailed) {
+		t.Fatalf("want ErrTCPTargetResolveFailed, got %v", err)
 	}
 }
 

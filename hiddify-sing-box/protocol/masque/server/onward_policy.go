@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -17,6 +18,11 @@ var (
 	// ErrTCPTargetSelectFailed is returned when no dialable address remains after policy filter.
 	ErrTCPTargetSelectFailed = errors.New("failed to select resolved tcp target")
 )
+
+// lookupTCPTargetNetIP resolves hostnames for CONNECT-stream onward dial (tests may stub).
+var lookupTCPTargetNetIP = func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, network, host)
+}
 
 // ConnectStreamResolveHTTPStatus maps onward resolve/policy errors to HTTP status for CONNECT-stream.
 func ConnectStreamResolveHTTPStatus(err error) int {
@@ -71,11 +77,10 @@ func filterTCPAddrsForDial(resolved []netip.Addr, allowPrivateTargets bool) ([]n
 
 // ResolveTCPTargetAddrsForDial classifies CONNECT-stream targets for onward dial.
 //
-// Sing-box resolves on the client; MASQUE templates should carry IP literals. IP literals
-// return a single-element slice for serial dial + hairpin. Hostnames return nil addrs so
-// the handler dials the name via the OS resolver (no MASQUE egress DNS/cache).
+// IP literals return a single-element slice (serial dial + hairpin).
+// Hostnames are resolved here and ordered IPv4-first (H2-TUN-5 / H-TUN-Up-6) so onward
+// dial does not hang on AAAA-first OS order; DialTCPTargetSerial then tries addrs in order.
 func ResolveTCPTargetAddrsForDial(ctx context.Context, host string, allowPrivateTargets bool) ([]netip.Addr, error) {
-	_ = ctx
 	trimmedHost := strings.Trim(strings.TrimSpace(host), "[]")
 	lowerHost := strings.ToLower(trimmedHost)
 	if lowerHost == "" || lowerHost == "localhost" || strings.HasSuffix(lowerHost, ".local") {
@@ -91,7 +96,19 @@ func ResolveTCPTargetAddrsForDial(ctx context.Context, host string, allowPrivate
 		}
 		return []netip.Addr{addr}, nil
 	}
-	return nil, nil
+
+	ips, lookupErr := lookupTCPTargetNetIP(ctx, "ip", trimmedHost)
+	if lookupErr != nil {
+		return nil, errors.Join(ErrTCPTargetResolveFailed, lookupErr)
+	}
+	filtered, filterErr := filterTCPAddrsForDial(ips, allowPrivateTargets)
+	if filterErr != nil {
+		return nil, filterErr
+	}
+	if len(filtered) == 0 {
+		return nil, ErrTCPTargetSelectFailed
+	}
+	return OrderResolvedTCPAddrs(filtered), nil
 }
 
 // ResolveTCPTargetForDial applies private-target policy before onward TCP dial.
