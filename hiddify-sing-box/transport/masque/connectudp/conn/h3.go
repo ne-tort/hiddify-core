@@ -16,6 +16,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/flowstats"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 )
@@ -177,8 +178,10 @@ func (c *H3Conn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		return 0, net.ErrClosed
 	}
 	if err := c.write.writeBytes(context.Background(), &c.closed, p); err != nil {
+		flowstats.RecordClientC2SFail()
 		return 0, err
 	}
+	flowstats.RecordClientC2SOK()
 	return len(p), nil
 }
 
@@ -228,6 +231,14 @@ func (c *H3Conn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		c.closed.Store(true)
+		tag := "h3-bidi"
+		switch c.legRole {
+		case H3LegUpload:
+			tag = "h3-upload-leg"
+		case H3LegDownload:
+			tag = "h3-download-leg"
+		}
+		flowstats.LogClientStats(tag)
 		if c.write != nil {
 			c.write.shutdown()
 		}

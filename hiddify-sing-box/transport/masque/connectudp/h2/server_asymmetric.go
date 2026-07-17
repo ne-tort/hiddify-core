@@ -38,6 +38,7 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 	if w == nil || r == nil || conn == nil {
 		return errors.New("masque h2: asymmetric download leg: nil argument")
 	}
+	defer cudprelay.BeginRelaySessionStats("h2-download-leg")()
 	sess, downlinkW, ok := reg.lookupDownloadSession(key)
 	if !ok {
 		downlinkW = newH2DownlinkWriter(w, LegProfileDownloadFountain)
@@ -98,6 +99,7 @@ func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, re
 	if w == nil || r == nil {
 		return errors.New("masque h2: asymmetric upload leg: nil argument")
 	}
+	defer cudprelay.BeginRelaySessionStats("h2-upload-leg")()
 	sess, err := reg.AttachUpload(key)
 	if err != nil {
 		return err

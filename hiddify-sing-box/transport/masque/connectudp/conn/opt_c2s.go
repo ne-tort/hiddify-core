@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/flowstats"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/h3quic"
 	"github.com/sagernet/sing-box/transport/masque/netutil"
 )
@@ -92,6 +93,7 @@ func (w *h3C2SWriter) writeBytes(_ context.Context, closed *atomic.Bool, p []byt
 		if err == nil {
 			break
 		}
+		flowstats.RecordClientC2STransientRetry()
 		w.flushC2SDatagramWake()
 		if !netutil.IsTransientSyscall(err) {
 			*bp = b[:0]

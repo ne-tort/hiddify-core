@@ -66,6 +66,9 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 	readBuf := make([]byte, bodyBufSize)
 	var pending []byte
 	relayOnward := func(payload []byte) error {
+		if relayStatsEnabled() {
+			globalUDPRelayStats.c2sDatagramIn.Add(1)
+		}
 		icmp, err := onward.Queue(payload)
 		if icmp {
 			if onICMP != nil {
@@ -77,6 +80,9 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 		}
 		if err != nil {
 			return fmt.Errorf("masque h2 dataplane connect-udp server udp write: %w", err)
+		}
+		if relayStatsEnabled() {
+			globalUDPRelayStats.c2sUDPPayloadOut.Add(1)
 		}
 		if signalReady != nil {
 			signalReady()
@@ -110,6 +116,9 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 			}
 			udpPayload, ok, uperr := frame.ParseHTTPDatagramUDP(inner)
 			if uperr != nil || !ok {
+				if relayStatsEnabled() && uperr != nil {
+					globalUDPRelayStats.c2sDropMalformed.Add(1)
+				}
 				continue
 			}
 			if len(udpPayload) == 0 {
@@ -176,11 +185,23 @@ func RelayH2ConnectDownlinkImmediate(ctx context.Context, conn *net.UDPConn, rea
 			}
 			return fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
 		}
+		if relayStatsEnabled() {
+			globalUDPRelayStats.s2cUDPIn.Add(1)
+		}
 		if err := validateH2DownlinkPayloadLen(n); err != nil {
+			if relayStatsEnabled() {
+				globalUDPRelayStats.s2cDropOversize.Add(1)
+			}
 			return err
 		}
 		if err := downlink.WriteUDPPayloadAsCapsules(buf[:n]); err != nil {
+			if relayStatsEnabled() {
+				globalUDPRelayStats.s2cDropSendFail.Add(1)
+			}
 			return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", err)
+		}
+		if relayStatsEnabled() {
+			globalUDPRelayStats.s2cDatagramOut.Add(1)
 		}
 	}
 }
@@ -221,11 +242,23 @@ func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, read
 			}
 		}
 		for _, payload := range payloads {
+			if relayStatsEnabled() {
+				globalUDPRelayStats.s2cUDPIn.Add(1)
+			}
 			if vErr := validateH2DownlinkPayloadLen(len(payload)); vErr != nil {
+				if relayStatsEnabled() {
+					globalUDPRelayStats.s2cDropOversize.Add(1)
+				}
 				return vErr
 			}
 			if aErr := downlink.AppendUDPPayloadAsCapsules(payload); aErr != nil {
+				if relayStatsEnabled() {
+					globalUDPRelayStats.s2cDropSendFail.Add(1)
+				}
 				return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", aErr)
+			}
+			if relayStatsEnabled() {
+				globalUDPRelayStats.s2cDatagramOut.Add(1)
 			}
 		}
 		// Flush each RX batch so multi-datagram echo (split upload) is not held below 64KiB threshold.

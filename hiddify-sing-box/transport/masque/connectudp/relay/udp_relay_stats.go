@@ -1,9 +1,22 @@
 package relay
 
 import (
+	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
+	"time"
 )
+
+func init() {
+	// Field/bench: MASQUE_UDP_RELAY_STATS=1 enables RESULT_RELAY_STATS without in-proc EnableRelayStatsForBench.
+	v := strings.TrimSpace(os.Getenv("MASQUE_UDP_RELAY_STATS"))
+	if v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes") {
+		EnableRelayStatsForBench()
+	}
+}
 
 // UDPRelayStatsSnapshot is a point-in-time CONNECT-UDP server relay counter set (UDP-5m1).
 type UDPRelayStatsSnapshot struct {
@@ -52,12 +65,72 @@ func EnableRelayStatsForBench() {
 }
 
 // beginRelaySessionStats resets counters when stats are active; returns an end hook for defer.
+// While the session is open, emits RESULT_RELAY_STATS ~2 Hz so bench can scrape before teardown.
 func beginRelaySessionStats(tag string) func() {
 	if !relayStatsEnabled() {
 		return func() {}
 	}
 	ResetUDPRelayStats()
-	return func() { LogUDPRelayStats(tag) }
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				LogUDPRelayStats(tag)
+				writeUDPRelayStatsFile(tag)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+		LogUDPRelayStats(tag)
+		writeUDPRelayStatsFile(tag)
+	}
+}
+
+func writeUDPRelayStatsFile(tag string) {
+	s := SnapshotUDPRelayStats()
+	type dump struct {
+		Tag              string `json:"tag"`
+		C2SIn            uint64 `json:"c2s_in"`
+		C2SUDPOut        uint64 `json:"c2s_udp_out"`
+		C2SDropMalformed uint64 `json:"c2s_drop_malformed"`
+		C2SDropOversize  uint64 `json:"c2s_drop_oversize"`
+		S2CUDPIn         uint64 `json:"s2c_udp_in"`
+		S2CDgramOut      uint64 `json:"s2c_dgram_out"`
+		S2CDropOversize  uint64 `json:"s2c_drop_oversize"`
+		S2CDropSend      uint64 `json:"s2c_drop_send"`
+		TsUnixMs         int64  `json:"ts_unix_ms"`
+	}
+	d := dump{
+		Tag:              tag,
+		C2SIn:            s.C2SDatagramIn,
+		C2SUDPOut:        s.C2SUDPPayloadOut,
+		C2SDropMalformed: s.C2SDropMalformed,
+		C2SDropOversize:  s.C2SDropOversize,
+		S2CUDPIn:         s.S2CUDPIn,
+		S2CDgramOut:      s.S2CDatagramOut,
+		S2CDropOversize:  s.S2CDropOversize,
+		S2CDropSend:      s.S2CDropSendFail,
+		TsUnixMs:         time.Now().UnixMilli(),
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(os.TempDir(), "masque-udp-relay-stats.json"), raw, 0o644)
+}
+
+// BeginRelaySessionStats is the exported hook for H2/H3 CONNECT-UDP handlers (bench attribution).
+func BeginRelaySessionStats(tag string) func() {
+	return beginRelaySessionStats(tag)
 }
 
 // ResetUDPRelayStats clears process-wide relay counters (bench isolation).

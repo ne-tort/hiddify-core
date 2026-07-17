@@ -86,8 +86,14 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 		if err != nil {
 			var perr *cudpframe.RequestParseError
 			if errors.As(err, &perr) {
+				if host.Logger != nil {
+					host.Logger.Debug("connect-udp parse rejected: status=", perr.HTTPStatus, " err=", perr.Err, " method=", r.Method, " host=", r.Host, " url=", r.URL.String(), " proto=", r.Proto)
+				}
 				w.WriteHeader(perr.HTTPStatus)
 				return
+			}
+			if host.Logger != nil {
+				host.Logger.Debug("connect-udp parse rejected: status=400 err=", err, " method=", r.Method, " host=", r.Host, " url=", r.URL.String())
 			}
 			w.WriteHeader(http.StatusBadRequest)
 			return

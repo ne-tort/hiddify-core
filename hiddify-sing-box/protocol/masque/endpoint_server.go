@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -134,7 +136,9 @@ func (e *ServerEndpoint) endpointMuxFields() server.EndpointMuxFields {
 		Hooks: server.TemplateAuthorityHooks{
 			ResolveTemplates: resolveMasqueServerTemplateURLs,
 			RelaxAuthority:   nil,
-			RequestForParse:  func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request { return r },
+			// Path-only: wildcard listen templates use 127.0.0.1 authority while clients dial via
+			// DNS/SNI (e.g. masque-server-core). Rewrite Host before ParseRequest so path match works.
+			RequestForParse:  masquePathOnlyRequestForParse,
 			AuthorityMatches: func(_, _ string, _ bool) bool { return true },
 		},
 		OnUDPProxyCreated: func(p *cudprelay.Proxy) {
@@ -191,4 +195,50 @@ func (e *ServerEndpoint) lastStartError() error {
 
 func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template, relaxedTCPAuthority bool) {
 	server.HandleTCPConnectRequest(server.BuildTCPConnectHost(e.endpointMuxFields()), w, r, tcpTemplate, relaxedTCPAuthority)
+}
+
+// masquePathOnlyRequestForParse aligns :authority with the server URI template host.
+// Wildcard listen (0.0.0.0) builds templates as https://127.0.0.1:<port>/...; clients often send
+// the real SNI/DNS name. frame.ParseRequest compares Host to template host and Match() needs a
+// candidate whose authority matches the template (H3 often sends absolute RequestURI/URL).
+func masquePathOnlyRequestForParse(r *http.Request, tpl *uritemplate.Template, _ bool) *http.Request {
+	if r == nil || tpl == nil {
+		return r
+	}
+	u, err := url.Parse(tpl.Raw())
+	if err != nil || u.Host == "" {
+		return r
+	}
+	needHost := r.Host != u.Host
+	needURL := r.URL != nil && r.URL.Host != "" && r.URL.Host != u.Host
+	absURI := strings.Contains(strings.ToLower(r.RequestURI), "://")
+	needURI := absURI && !strings.Contains(r.RequestURI, u.Host)
+	if !needHost && !needURL && !needURI {
+		return r
+	}
+	out := r.Clone(r.Context())
+	out.Host = u.Host
+	if out.URL != nil {
+		out.URL.Scheme = u.Scheme
+		out.URL.Host = u.Host
+	}
+	if needURI && out.URL != nil {
+		path := out.URL.EscapedPath()
+		if path == "" {
+			path = out.URL.Path
+		}
+		if path != "" {
+			if !strings.HasPrefix(path, "/") {
+				path = "/" + path
+			}
+			if !strings.HasSuffix(path, "/") && strings.HasSuffix(u.Path, "/") {
+				// keep as-is; template match accepts path from request
+			}
+			out.RequestURI = u.Scheme + "://" + u.Host + path
+			if out.URL.RawQuery != "" {
+				out.RequestURI += "?" + out.URL.RawQuery
+			}
+		}
+	}
+	return out
 }

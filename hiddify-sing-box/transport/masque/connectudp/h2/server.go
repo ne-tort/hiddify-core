@@ -107,6 +107,7 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	if w == nil || r == nil || conn == nil {
 		return errors.New("masque h2: connect-udp relay: nil argument")
 	}
+	defer cudprelay.BeginRelaySessionStats("h2-bidi")()
 	downlinkW := newH2DownlinkWriter(w, LegProfileBidi)
 	var wg sync.WaitGroup
 	var closeUDP sync.Once

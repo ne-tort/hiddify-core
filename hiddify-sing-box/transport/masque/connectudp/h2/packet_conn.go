@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/sing-box/transport/masque/connectudp/flowstats"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
@@ -116,6 +117,11 @@ func (c *PacketConn) Close() error {
 			return
 		}
 		c.closed.Store(true)
+		tag := "h2-bidi"
+		if c.uploadOnly {
+			tag = "h2-upload-leg"
+		}
+		flowstats.LogClientStats(tag)
 		c.writeMu.Lock()
 		wire := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
@@ -253,6 +259,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		pending := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
 		if err := c.flushUploadWire(pending); err != nil {
+			flowstats.RecordClientC2SFail()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
 			}
@@ -260,6 +267,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 		}
 		if err := c.writeEmptyDatagramCapsule(); err != nil {
+			flowstats.RecordClientC2SFail()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
 			}
@@ -273,6 +281,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if !c.uploadOnly {
 		c.writeMu.Unlock()
 		if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
+			flowstats.RecordClientC2SFail()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
 			}
@@ -282,6 +291,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 			_ = c.Close()
 			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 		}
+		flowstats.RecordClientC2SOK()
 		if len(p) > 0 {
 			c.payloadWritePending.Store(true)
 		}
@@ -296,6 +306,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	}
 	if encErr != nil {
 		c.writeMu.Unlock()
+		flowstats.RecordClientC2SFail()
 		if errors.Is(encErr, io.EOF) || errors.Is(encErr, io.ErrClosedPipe) {
 			return 0, encErr
 		}
@@ -318,6 +329,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	c.writeMu.Unlock()
 	if len(wire) > 0 {
 		if err := c.flushUploadWire(wire); err != nil {
+			flowstats.RecordClientC2SFail()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
 			}
@@ -325,6 +337,7 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 			return 0, fmt.Errorf("masque h2 dataplane connect-udp flush body: %w", err)
 		}
 	}
+	flowstats.RecordClientC2SOK()
 	if len(p) > 0 {
 		c.payloadWritePending.Store(true)
 	}
