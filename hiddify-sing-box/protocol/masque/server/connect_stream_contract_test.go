@@ -17,6 +17,7 @@ func TestConnectStreamServerWireContract(t *testing.T) {
 	requireContractSubstrings(t, connectStreamGoSource, "connectstream/handler.go",
 		`r.Method != http.MethodConnect`,
 		`r.Header.Get(":protocol")`,
+		`ConnectTCPProtocol`,
 		`ParseTCPTargetFromRequest`,
 		`Hooks.ResolveTCPTargetAddrs`,
 		`Hooks.DialTCPTargetSerial`,

@@ -480,7 +480,7 @@ func buildWarpCacheKey(options option.WarpMasqueEndpointOptions) string {
 	port := options.ServerPort
 	override := ""
 	if server != "" || port != 0 {
-		override = "|override:" + server + ":" + strconv.Itoa(int(port))
+		override = "|override:" + server + ":"+strconv.Itoa(int(port))
 	}
 	detour := strings.TrimSpace(options.Profile.Detour)
 	httpLayer := normalizeHTTPLayer(options.HTTPLayer)

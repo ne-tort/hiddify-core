@@ -12,10 +12,7 @@ import (
 )
 
 func masqueTemplateHooks() session.TemplateURIHooks {
-	return session.TemplateURIHooks{
-		ExpandHTTPSURI:            ExpandMasqueHTTPSURI,
-		NormalizeTCPUDPTargetHost: NormalizeMasqueTCPUDPTemplateTargetHost,
-	}
+	return session.TemplateURIHooks{}
 }
 
 func joinTemplateCapability(err error) error {
@@ -61,7 +58,6 @@ func masqueQuicDialCandidateHost(options ClientOptions) string {
 func resolveDestinationHost(destination M.Socksaddr) (string, error) {
 	return strm.ResolveDestinationHost(destination)
 }
-
 
 func isTCPMasqueDirectFallbackEligible(err error, ctx context.Context) bool {
 	return session.TCPMasqueDirectFallbackEligible(err, ctx)

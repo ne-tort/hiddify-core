@@ -9,7 +9,7 @@ func ClassifyMalformedScopedTargetClassPair(scopeTarget string) (session.ErrorCl
 	return session.ClassifyMalformedScopedTargetClassPair(session.ClientOptions{
 		Server:               "example.com",
 		ServerPort:           443,
-		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP:               "/.well-known/masque/ip",
 		ConnectIPScopeTarget: scopeTarget,
 	}, masqueTemplateHooks())
 }

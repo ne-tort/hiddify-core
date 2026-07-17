@@ -29,6 +29,8 @@ type Wire struct {
 	SetAuth           Auth
 	ClassifyError     func(err error) string
 	AuthFailed        error
+	// UploadPipeBytes sizes the CONNECT upload pipe (0 = DefaultUploadPipeBytes).
+	UploadPipeBytes int
 }
 
 // NewHooks builds production CONNECT-stream H2 dial hooks (Extended CONNECT + h2 tunnel).
@@ -43,11 +45,12 @@ func NewHooks(w Wire) strm.DialH2Hooks {
 	if w.NewRequestContext != nil {
 		newReqCtx = w.NewRequestContext
 	}
+	pipeCap := w.UploadPipeBytes
 	return strm.DialH2Hooks{
 		NewRequestContext: newReqCtx,
 		NewConnectUploadPipe: func() (io.ReadCloser, io.WriteCloser) {
-			r, w := h2c.NewConnectUploadPipe()
-			return r, w
+			r, wr := h2c.NewConnectUploadPipeSized(pipeCap)
+			return r, wr
 		},
 		NewConnectUploadBody: func(uploadR io.Reader) io.Reader {
 			return &h2c.ExtendedConnectUploadBody{Pipe: uploadR}

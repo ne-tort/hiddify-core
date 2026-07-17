@@ -17,19 +17,22 @@ type H3DialParams struct {
 	Tag                   string
 	BearerToken           string
 	WarpConnectIPProtocol string
-	ExtraRequestHeaders http.Header
+	ExtraRequestHeaders   http.Header
+	PathObfuscationKey    []byte
 }
 
 // BuildH3DialOptions maps overlay params to connect-ip-go DialOptions.
 func BuildH3DialOptions(p H3DialParams) cip.DialOptions {
 	proto := strings.TrimSpace(p.WarpConnectIPProtocol)
 	token := strings.TrimSpace(p.BearerToken)
+	base := cip.DialOptions{
+		BearerToken:          token,
+		PathObfuscationKey:   p.PathObfuscationKey,
+	}
 	if p.ExtraRequestHeaders != nil {
-		dopts := cip.DialOptions{
-			BearerToken:             token,
-			ExtendedConnectProtocol: proto,
-			ExtraRequestHeaders:     p.ExtraRequestHeaders,
-		}
+		dopts := base
+		dopts.ExtendedConnectProtocol = proto
+		dopts.ExtraRequestHeaders = p.ExtraRequestHeaders
 		if strings.EqualFold(proto, "cf-connect-ip") {
 			dopts.IgnoreExtendedConnect = true
 		}
@@ -39,16 +42,14 @@ func BuildH3DialOptions(p H3DialParams) cip.DialOptions {
 		return dopts
 	}
 	if proto != "" {
-		dopts := cip.DialOptions{
-			BearerToken:             token,
-			ExtendedConnectProtocol: proto,
-		}
+		dopts := base
+		dopts.ExtendedConnectProtocol = proto
 		if strings.EqualFold(proto, "cf-connect-ip") {
 			dopts.IgnoreExtendedConnect = true
 		}
 		return dopts
 	}
-	return cip.DialOptions{BearerToken: token}
+	return base
 }
 
 // DialH3Tunnel opens a CONNECT-IP session over an established HTTP/3 client connection.
@@ -57,7 +58,7 @@ func DialH3Tunnel(ctx context.Context, clientConn *http3.ClientConn, template *u
 	var conn *cip.Conn
 	var rsp *http.Response
 	var err error
-	if proto == "" && p.ExtraRequestHeaders == nil {
+	if proto == "" && p.ExtraRequestHeaders == nil && len(p.PathObfuscationKey) == 0 {
 		conn, rsp, err = cip.Dial(ctx, clientConn, template, strings.TrimSpace(p.BearerToken))
 	} else {
 		conn, rsp, err = cip.DialWithOptions(ctx, clientConn, template, BuildH3DialOptions(p))

@@ -55,13 +55,14 @@ var (
 )
 
 func masqueH2NoteDownloadBody(n uint64) {
-	if n > 0 {
-		masqueH2DownloadBodyBytes.Add(n)
+	if !masqueStatsEnabled || n == 0 {
+		return
 	}
+	masqueH2DownloadBodyBytes.Add(n)
 }
 
 func masqueH2NoteWindowUpdate(n uint32) {
-	if n == 0 {
+	if !masqueStatsEnabled || n == 0 {
 		return
 	}
 	masqueH2WindowUpdateBytes.Add(uint64(n))
@@ -69,7 +70,7 @@ func masqueH2NoteWindowUpdate(n uint32) {
 }
 
 func masqueH2NoteAwaitFlowControlWait(d time.Duration) {
-	if d <= 0 {
+	if !masqueStatsEnabled || d <= 0 {
 		return
 	}
 	masqueH2AwaitFlowControlWaits.Add(1)
@@ -77,10 +78,16 @@ func masqueH2NoteAwaitFlowControlWait(d time.Duration) {
 }
 
 func masqueH2NotePeerStreamWindow(v uint32) {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2PeerStreamWindow.Store(v)
 }
 
 func masqueH2NoteLocalRecvWindows(streamIW, connBump uint32) {
+	if !masqueStatsEnabled {
+		return
+	}
 	if streamIW > 0 {
 		masqueH2LocalStreamRecvWindow.Store(streamIW)
 	}
@@ -92,6 +99,9 @@ func masqueH2NoteLocalRecvWindows(streamIW, connBump uint32) {
 // masqueH2NoteServerSendAvail records server outbound flow available() at DATA Consume
 // and samples stream/conn outflow levels (download send diagnosis on WAN).
 func masqueH2NoteServerSendAvail(avail, streamN, connN int32) {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2ServerSendAvailLast.Store(avail)
 	masqueH2ServerStreamOutflow.Store(streamN)
 	masqueH2ServerConnOutflow.Store(connN)
@@ -110,7 +120,7 @@ func masqueH2NoteServerSendAvail(avail, streamN, connN int32) {
 }
 
 func masqueH2NoteServerConnWindowUpdate(inc uint32) {
-	if inc == 0 {
+	if !masqueStatsEnabled || inc == 0 {
 		return
 	}
 	masqueH2ServerConnWUBytes.Add(uint64(inc))
@@ -118,14 +128,23 @@ func masqueH2NoteServerConnWindowUpdate(inc uint32) {
 
 // NoteMasqueH2TransportReset increments shared-pool reset counter (session dial retry).
 func NoteMasqueH2TransportReset() {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2TransportResets.Add(1)
 }
 
 func masqueH2NoteRecvRSTStream() {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2RecvRSTStream.Add(1)
 }
 
 func masqueH2NoteRecvGOAWAY(errCode ErrCode) {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2RecvGOAWAY.Add(1)
 	if errCode != ErrCodeNo {
 		masqueH2RecvGOAWAYErr.Add(1)
@@ -177,29 +196,24 @@ func ResetMasqueH2StatsForTest() {
 }
 
 // EnsureMasqueH2FCStatsFileDump writes SnapshotMasqueH2Stats JSON to
-// <tmpdir>/masque-h2-fc-stats.json at most ~1 Hz (client body growth or server send samples).
+// <tmpdir>/masque-h2-fc-stats.json ~1 Hz while non-idle. No-op with -tags masque_nostats.
 func EnsureMasqueH2FCStatsFileDump() {
+	if !masqueStatsEnabled {
+		return
+	}
 	masqueH2FCDumpOnce.Do(func() {
 		path := filepath.Join(os.TempDir(), "masque-h2-fc-stats.json")
 		go func() {
-			var lastBody uint64
-			var lastSrvWU uint64
 			t := time.NewTicker(time.Second)
 			defer t.Stop()
 			for range t.C {
 				s := SnapshotMasqueH2Stats()
 				idle := s.DownloadBodyBytes == 0 && s.LocalStreamRecvWindow == 0 &&
-					s.ServerConnWUBytes == 0 && s.ServerSendAvailLast == 0
+					s.ServerConnWUBytes == 0 && s.ServerSendAvailLast == 0 &&
+					s.RecvRSTStream == 0 && s.AwaitFlowControlWaits == 0
 				if idle {
 					continue
 				}
-				unchanged := s.DownloadBodyBytes == lastBody && s.ServerConnWUBytes == lastSrvWU &&
-					s.DownloadBodyBytes != 0
-				if unchanged {
-					continue
-				}
-				lastBody = s.DownloadBodyBytes
-				lastSrvWU = s.ServerConnWUBytes
 				type dump struct {
 					MasqueH2Stats
 					AwaitFCAvgMs   float64 `json:"await_fc_avg_ms"`

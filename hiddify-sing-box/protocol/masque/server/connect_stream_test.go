@@ -15,7 +15,7 @@ import (
 )
 
 func TestHandleTCPConnectRequestBlocksUntilRelayEOF(t *testing.T) {
-	template := uritemplate.MustNew("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template := uritemplate.MustNew("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen target tcp: %v", err)
@@ -43,9 +43,10 @@ func TestHandleTCPConnectRequestBlocksUntilRelayEOF(t *testing.T) {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 	reqBody := io.NopCloser(strings.NewReader("upload"))
-	req := httptest.NewRequest(http.MethodConnect, "/masque/tcp/127.0.0.1/"+strconv.Itoa(port), reqBody)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/tcp/127.0.0.1/"+strconv.Itoa(port)+"/", reqBody)
 	req.Host = "masque.local"
-	req.RequestURI = "https://masque.local/masque/tcp/127.0.0.1/" + strconv.Itoa(port)
+	req.Header.Set(":protocol", "connect-tcp")
+	req.RequestURI = "https://masque.local/.well-known/masque/tcp/127.0.0.1/"+strconv.Itoa(port)+"/"
 	rec := httptest.NewRecorder()
 
 	handlerDone := make(chan struct{})

@@ -6,7 +6,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-func TestApplyMasqueClientDefaults_minimalSubscription(t *testing.T) {
+func TestApplyMasqueClientDefaults_isNoOp(t *testing.T) {
 	opts := &option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{
 			Server:     "wiki.example.com",
@@ -18,53 +18,45 @@ func TestApplyMasqueClientDefaults_minimalSubscription(t *testing.T) {
 
 	applyMasqueClientDefaults(opts)
 
-	if opts.OutboundTLS == nil || !opts.OutboundTLS.Enabled {
-		t.Fatalf("expected outbound_tls.enabled, got %#v", opts.OutboundTLS)
+	if opts.OutboundTLS != nil {
+		t.Fatalf("must not invent outbound_tls: %#v", opts.OutboundTLS)
 	}
-	if opts.OutboundTLS.ServerName != "wiki.example.com" {
-		t.Fatalf("server_name: %q", opts.OutboundTLS.ServerName)
+	if opts.TemplateUDP != "" || opts.TemplateTCP != "" {
+		t.Fatalf("must not invent templates: udp=%q tcp=%q", opts.TemplateUDP, opts.TemplateTCP)
 	}
-	if opts.TemplateUDP != masqueDefaultTemplateUDP {
-		t.Fatalf("template_udp: %q", opts.TemplateUDP)
-	}
-	if opts.TemplateTCP != masqueDefaultTemplateTCP {
-		t.Fatalf("template_tcp: %q", opts.TemplateTCP)
-	}
-	if opts.HTTPLayer != option.MasqueHTTPLayerH3 {
-		t.Fatalf("http_layer: %q", opts.HTTPLayer)
+	if opts.HTTPLayer != option.MasqueHTTPLayerAuto {
+		t.Fatalf("http_layer mutated: %q", opts.HTTPLayer)
 	}
 }
 
-func TestApplyMasqueClientDefaults_keepsExplicitOutboundTLS(t *testing.T) {
+func TestApplyMasqueClientDefaults_keepsExplicitOutboundTLSUntouched(t *testing.T) {
 	opts := &option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "wiki.example.com"},
 		OutboundTLS: &option.OutboundTLSOptions{
 			Enabled:    true,
-			ServerName: "custom.example.com",
+			ServerName: "www.allizom.org",
+			UTLS:       &option.OutboundUTLSOptions{Enabled: true, Fingerprint: "chrome"},
+			Reality: &option.OutboundRealityOptions{
+				Enabled:   true,
+				PublicKey: "JwHKF9DzSvmSxmIk_6QuiYJh3h3Xx_vfk00hvgwdvmg",
+				ShortID:   "e7f0a91b",
+			},
 		},
-		HTTPLayer: option.MasqueHTTPLayerAuto,
+		HTTPLayer: option.MasqueHTTPLayerH2,
 	}
 
 	applyMasqueClientDefaults(opts)
 
-	if opts.OutboundTLS.ServerName != "custom.example.com" {
-		t.Fatalf("server_name overwritten: %q", opts.OutboundTLS.ServerName)
+	if opts.OutboundTLS.ServerName != "www.allizom.org" {
+		t.Fatalf("server_name: %q", opts.OutboundTLS.ServerName)
 	}
-	if opts.HTTPLayer != option.MasqueHTTPLayerAuto {
-		t.Fatalf("http_layer should stay auto when outbound_tls was explicit: %q", opts.HTTPLayer)
+	if opts.OutboundTLS.Reality == nil || !opts.OutboundTLS.Reality.Enabled {
+		t.Fatalf("reality stripped: %#v", opts.OutboundTLS.Reality)
 	}
-}
-
-func TestApplyMasqueClientDefaults_skipsServerRole(t *testing.T) {
-	opts := &option.MasqueEndpointOptions{
-		Role:       option.MasqueRoleServer,
-		Listen:     "0.0.0.0",
-		ListenPort: 443,
+	if opts.OutboundTLS.UTLS == nil || !opts.OutboundTLS.UTLS.Enabled {
+		t.Fatalf("utls stripped: %#v", opts.OutboundTLS.UTLS)
 	}
-
-	applyMasqueClientDefaults(opts)
-
-	if opts.OutboundTLS != nil {
-		t.Fatalf("server endpoint must not get outbound_tls: %#v", opts.OutboundTLS)
+	if opts.HTTPLayer != option.MasqueHTTPLayerH2 {
+		t.Fatalf("http_layer: %q", opts.HTTPLayer)
 	}
 }

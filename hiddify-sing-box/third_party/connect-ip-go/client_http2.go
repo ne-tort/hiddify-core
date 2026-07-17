@@ -262,7 +262,7 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 	if err := validateFlowForwardingTemplateVars(template); err != nil {
 		return nil, nil, err
 	}
-	rawURL, err := buildConnectIPRequestURL(template)
+	rawURL, err := buildConnectIPRequestURL(template, opts.PathObfuscationKey)
 	if err != nil {
 		return nil, nil, err
 	}

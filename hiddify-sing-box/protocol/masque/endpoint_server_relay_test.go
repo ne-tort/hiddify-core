@@ -16,7 +16,7 @@ import (
 )
 
 func TestServerHandleTCPConnectRequestSuccess(t *testing.T) {
-	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestServerHandleTCPConnectRequestSuccess(t *testing.T) {
 		},
 	}
 	reqBody := io.NopCloser(strings.NewReader("client-request"))
-	req := newConnectRequest(t, "/masque/tcp/127.0.0.1/"+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port), reqBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/127.0.0.1/"+strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)+"/", reqBody)
 	req.RemoteAddr = "198.18.0.10:12345"
 	rec := httptest.NewRecorder()
 
@@ -68,7 +68,7 @@ func TestServerHandleTCPConnectRequestSuccess(t *testing.T) {
 }
 
 func TestServerHandleTCPConnectRequestRejectsMisusedExtendedProtocol(t *testing.T) {
-	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestServerHandleTCPConnectRequestRejectsMisusedExtendedProtocol(t *testing.
 			AllowPrivateTargets: true,
 		},
 	}
-	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/example.com/443/", http.NoBody)
 	req.Header.Set(":protocol", "connect-udp")
 	rec := httptest.NewRecorder()
 
@@ -89,7 +89,7 @@ func TestServerHandleTCPConnectRequestRejectsMisusedExtendedProtocol(t *testing.
 }
 
 func TestServerHandleTCPConnectRequestAuthDenied(t *testing.T) {
-	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestServerHandleTCPConnectRequestAuthDenied(t *testing.T) {
 			ServerToken: "secret-token",
 		},
 	}
-	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/example.com/443/", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	ep.handleTCPConnectRequest(rec, req, template, false)
@@ -112,7 +112,7 @@ func TestServerHandleTCPConnectRequestAuthDenied(t *testing.T) {
 }
 
 func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
-	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
 			AllowPrivateTargets: false,
 		},
 	}
-	req := newConnectRequest(t, "/masque/tcp/127.0.0.1/443", http.NoBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/127.0.0.1/443/", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	ep.handleTCPConnectRequest(rec, req, template, false)
@@ -135,7 +135,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedPrivateTarget(t *testing.T) {
 }
 
 func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t *testing.T) {
-	template, err := uritemplate.New("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t 
 			BlockedTargetPorts:  []uint16{443},
 		},
 	}
-	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/example.com/443/", http.NoBody)
 	rec := httptest.NewRecorder()
 
 	ep.handleTCPConnectRequest(rec, req, template, false)
@@ -159,8 +159,8 @@ func TestServerHandleTCPConnectRequestPolicyDeniedBlockedPortOverridesAllowed(t 
 	}
 }
 
-func TestServerHandleTCPConnectRequestTemplateHostMismatchRejected(t *testing.T) {
-	template, err := uritemplate.New("https://masque.expected/masque/tcp/{target_host}/{target_port}")
+func TestServerHandleTCPConnectRequestPathOnlyIgnoresAuthorityMismatch(t *testing.T) {
+	template, err := uritemplate.New("https://masque.expected/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -169,14 +169,15 @@ func TestServerHandleTCPConnectRequestTemplateHostMismatchRejected(t *testing.T)
 			AllowPrivateTargets: true,
 		},
 	}
-	req := newConnectRequest(t, "/masque/tcp/example.com/443", http.NoBody)
+	req := newConnectRequest(t, "/.well-known/masque/tcp/example.com/443/", http.NoBody)
 	req.Host = "masque.local"
 	rec := httptest.NewRecorder()
 
 	ep.handleTCPConnectRequest(rec, req, template, false)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unexpected status: %d", rec.Code)
+	// Path-only parse: authority mismatch must not reject before onward dial/policy.
+	if rec.Code == http.StatusBadRequest {
+		t.Fatalf("authority mismatch must not yield 400 after path rewrite; got %d", rec.Code)
 	}
 }
 
@@ -189,6 +190,7 @@ func newConnectRequest(t *testing.T, path string, body io.ReadCloser) *http.Requ
 	}
 	req.Method = http.MethodConnect
 	req.Host = "masque.local"
+	req.Header.Set(":protocol", "connect-tcp")
 	req.RequestURI = rawURL
 	return req
 }

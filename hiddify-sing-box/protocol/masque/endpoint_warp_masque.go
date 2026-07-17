@@ -428,12 +428,12 @@ func (e *WarpEndpoint) startRuntime() {
 		if tlsHost == "" {
 			tlsHost = rtServer
 		}
-		quicTLS, tlsErr := buildMasqueQUICStdTLSConfig(runCtx, log.StdLogger(), tlsHost, &outMerge)
+		quicTLS, tlsErr := buildMasqueQUICStdTLSConfig(runCtx, log.StdLogger(), tlsHost, &outMerge, normalizeHTTPLayer(e.options.HTTPLayer))
 		if tlsErr != nil {
 			e.setStartErr(E.Cause(tlsErr, "warp_masque client tls quic"), "build_quic_tls")
 			return
 		}
-		tcpDialTLS, tlsErr2 := buildMasqueTCPDialTLS(runCtx, log.StdLogger(), tlsHost, &outMerge)
+		tcpDialTLS, tlsErr2 := buildMasqueTCPDialTLS(runCtx, log.StdLogger(), tlsHost, &outMerge, normalizeHTTPLayer(e.options.HTTPLayer))
 		if tlsErr2 != nil {
 			e.setStartErr(E.Cause(tlsErr2, "warp_masque client tls tcp"), "build_tcp_tls")
 			return
@@ -444,11 +444,13 @@ func (e *WarpEndpoint) startRuntime() {
 			DialPeer:                    rtDialPeer,
 			ServerPort:                  rtPort,
 			DataplaneMode:               normalizeDataplaneMode(e.options.Mode),
-			TemplateUDP:                 e.options.TemplateUDP,
-			TemplateIP:                  e.options.TemplateIP,
+			PathUDP:                     e.options.PathUDP,
+			PathTCP:                     e.options.PathTCP,
+			PathIP:                      e.options.PathIP,
+			PathObfuscation:             e.options.PathObfuscation,
+			H2Tuning:                    masqueH2Tuning(e.options.H2Tuning),
 			ConnectIPScopeTarget:        e.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       e.options.ConnectIPScopeIPProto,
-			TemplateTCP:                 e.options.TemplateTCP,
 			FallbackPolicy:              normalizeFallbackPolicy(e.options.FallbackPolicy),
 			TCPMode:                     normalizeTCPMode(e.options.TCPMode),
 			ServerToken:                 e.options.ServerToken,
@@ -471,7 +473,6 @@ func (e *WarpEndpoint) startRuntime() {
 			MasqueEffectiveHTTPLayer:    effectiveMasqueHL,
 			HTTPLayerAuto:               normalizeHTTPLayer(e.options.HTTPLayer) == option.MasqueHTTPLayerAuto,
 			HTTPLayerSuccess:            recordMasqueHL,
-			TCPIPv6PathBracket:          e.options.TCPIPv6PathBracket,
 		})
 		startErr = nil
 		for attempt := 0; attempt < warpRuntimeStartMaxAttempts; attempt++ {

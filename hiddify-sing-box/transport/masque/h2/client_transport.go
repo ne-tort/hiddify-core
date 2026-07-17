@@ -7,20 +7,26 @@ import (
 	"net"
 	"sync"
 
+	masquetls "github.com/sagernet/sing-box/protocol/masque/tls"
 	"github.com/sagernet/sing-box/transport/masque/netutil"
 	"golang.org/x/net/http2"
 )
 
-// ClientDialConfig wires production HTTP/2 overlay dial for MASQUE dataplanes.
+	// ClientDialConfig wires production HTTP/2 overlay dial for MASQUE dataplanes.
 type ClientDialConfig struct {
 	TLSConfig          *tls.Config
 	DialHostCandidates []string
 	TCPDial            func(ctx context.Context, network, addr string) (net.Conn, error)
 	MasqueTCPDialTLS   func(ctx context.Context, conn net.Conn, nextProtos []string, addr string) (net.Conn, error)
 	DebugTCPDial       func(network, dialAddr, candidate string)
+	// H2Tuning overrides baked H2 defaults (SETTINGS / flush / idle PING).
+	// Upload pipe size is applied per CONNECT-stream dial; download relay is server-only.
+	H2Tuning Tuning
 }
 
-// ClientTLSConfig returns an HTTP/2-only TLS config cloned from base (or a fresh config).
+// ClientTLSConfig returns TLS config for MASQUE H2 dial with transparent ALPN:
+// empty NextProtos → ["h2"]; strips inherited "h3" (QUIС-only); preserves other tokens
+// and ensures "h2" (shared MasqueQUICCryptoTLS often carries ["h2","h3"]).
 func ClientTLSConfig(base *tls.Config, serverName string) *tls.Config {
 	if base == nil {
 		return &tls.Config{
@@ -29,7 +35,7 @@ func ClientTLSConfig(base *tls.Config, serverName string) *tls.Config {
 		}
 	}
 	cfg := base.Clone()
-	cfg.NextProtos = []string{http2.NextProtoTLS}
+	cfg.NextProtos = masquetls.ApplyH2ClientNextProtos(cfg.NextProtos)
 	if cfg.ServerName == "" && serverName != "" {
 		cfg.ServerName = serverName
 	}
@@ -72,6 +78,8 @@ func NewClientTransport(cfg ClientDialConfig) (*http2.Transport, error) {
 					lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
 					continue
 				}
+				// Track post-TLS so failed handshakes never become underlay zombies.
+				netutil.TrackTCPUnderlay("h2-client", tlsConn)
 				return tlsConn, nil
 			}
 			tlsConn := tls.Client(conn, tlsCfg)
@@ -80,11 +88,12 @@ func NewClientTransport(cfg ClientDialConfig) (*http2.Transport, error) {
 				lastErr = fmt.Errorf("masque h2: tls handshake %s %s: %w", network, dialAddr, err)
 				continue
 			}
+			netutil.TrackTCPUnderlay("h2-client", tlsConn)
 			return tlsConn, nil
 		}
 		return nil, lastErr
 	}
-	tr, err := NewBulkHTTP2Transport(tlsConf, dialTLS)
+	tr, err := NewBulkHTTP2TransportResolved(Resolve(cfg.H2Tuning), tlsConf, dialTLS)
 	if err != nil {
 		return nil, err
 	}

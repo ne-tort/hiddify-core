@@ -13,9 +13,9 @@ func TestCoreClientFactoryExplicitCtor(t *testing.T) {
 	sess, err := (masque.CoreClientFactory{}).NewSession(context.Background(), session.ClientOptions{
 		Server:        "edge.example",
 		ServerPort:    443,
-		TemplateUDP:   "https://edge.example/masque?h={target_host}&p={target_port}",
-		TemplateIP:    "https://edge.example/cf-connect-ip",
-		TemplateTCP:   "https://edge.example/masque/tcp?h={target_host}&p={target_port}",
+		PathUDP:       "/.well-known/masque/udp",
+		PathIP:        "/.well-known/masque/ip",
+		PathTCP:       "/.well-known/masque/tcp",
 		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {
@@ -29,10 +29,10 @@ func TestCoreClientFactoryExplicitCtor(t *testing.T) {
 
 func TestMasqueAliasesMatchSessionTypes(t *testing.T) {
 	_, _ = (masque.CoreClientFactory{}).NewSession(context.Background(), masque.ClientOptions{
-		Server:      "edge.example",
-		ServerPort:  443,
-		TemplateUDP: "https://edge.example/masque?h={target_host}&p={target_port}",
-		TemplateIP:  "https://edge.example/cf-connect-ip",
-		TemplateTCP: "https://edge.example/masque/tcp?h={target_host}&p={target_port}",
+		Server:     "edge.example",
+		ServerPort: 443,
+		PathUDP:    "/.well-known/masque/udp",
+		PathIP:     "/.well-known/masque/ip",
+		PathTCP:    "/.well-known/masque/tcp",
 	})
 }

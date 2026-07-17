@@ -4,10 +4,10 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -32,10 +32,39 @@ func isLoopbackDialHost(host string) bool {
 // ErrTemplateCapability marks template/scope configuration incompatible with CONNECT-IP flow forwarding.
 var ErrTemplateCapability = errors.New("masque capability mismatch")
 
-// TemplateURIHooks wires masque-specific HTTPS URI expansion from package masque (phase F bridge).
+// TemplateURIHooks is retained for API stability; path build no longer needs expand/normalize hooks.
 type TemplateURIHooks struct {
 	ExpandHTTPSURI            func(raw, httpsAuthority string) string
 	NormalizeTCPUDPTargetHost func(raw string) string
+}
+
+// BuildTemplates constructs UDP/IP/TCP MASQUE URI templates from path_* + obfuscation.
+func BuildTemplates(options ClientOptions, _ TemplateURIHooks) (*uritemplate.Template, *uritemplate.Template, *uritemplate.Template, error) {
+	if len(options.Hops) > 0 {
+		server, port, err := ResolveEntryHop(ResolveHopOrder(options.Hops))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if strings.TrimSpace(server) != "" {
+			options.Server = server
+		}
+		if port != 0 {
+			options.ServerPort = port
+		}
+	}
+	auth := pathbuild.JoinAuthority(options.Server, options.ServerPort)
+	cfg := pathbuild.Config{
+		PathUDP: options.PathUDP,
+		PathTCP: options.PathTCP,
+		PathIP:  options.PathIP,
+		ObfKey:  pathbuild.ActiveKey(options.PathObfuscation),
+	}
+	warpCF := strings.EqualFold(strings.TrimSpace(options.WarpConnectIPProtocol), "cf-connect-ip")
+	udp, ip, tcp, err := pathbuild.BuildTemplates(auth, cfg, options.ConnectIPScopeTarget, options.ConnectIPScopeIPProto, warpCF)
+	if err != nil {
+		return nil, nil, nil, errors.Join(ErrTemplateCapability, err)
+	}
+	return udp, ip, tcp, nil
 }
 
 // ResolveTLSServerName returns the TLS SNI for QUIC/HTTP3 dial.
@@ -128,8 +157,13 @@ func AdvanceHop(s *CoreSession) bool {
 	return true
 }
 
-// ApplyConnectIPFlowScope expands template_ip flow-forwarding variables {target}/{ipproto}.
+// ApplyConnectIPFlowScope expands path_ip flow-forwarding variables {target}/{ipproto} or leaves {opaque}/.
 func ApplyConnectIPFlowScope(ipTemplateRaw string, scopeTarget string, scopeIPProto uint8) (string, error) {
+	return ApplyConnectIPFlowScopeWithKey(ipTemplateRaw, scopeTarget, scopeIPProto, nil)
+}
+
+// ApplyConnectIPFlowScopeWithKey is like ApplyConnectIPFlowScope but seals {opaque} when key is set and scope is present.
+func ApplyConnectIPFlowScopeWithKey(ipTemplateRaw string, scopeTarget string, scopeIPProto uint8, key pathbuild.ObfuscationKey) (string, error) {
 	template, err := uritemplate.New(ipTemplateRaw)
 	if err != nil {
 		return "", E.Cause(err, "invalid IP MASQUE template")
@@ -139,109 +173,37 @@ func ApplyConnectIPFlowScope(ipTemplateRaw string, scopeTarget string, scopeIPPr
 		if strings.TrimSpace(scopeTarget) != "" || scopeIPProto != 0 {
 			return "", errors.Join(
 				ErrTemplateCapability,
-				E.New("connect_ip_scope_* requires template_ip with flow forwarding variables {target}/{ipproto}"),
+				E.New("connect_ip_scope_* requires path_ip with flow forwarding variables {target}/{ipproto} or obfuscation"),
 			)
 		}
 		return ipTemplateRaw, nil
 	}
-	values := uritemplate.Values{}
+	hasOpaque := false
 	for _, variable := range varNames {
 		switch variable {
-		case "target":
-			target := strings.TrimSpace(scopeTarget)
-			if target == "" {
-				target = "0.0.0.0/0"
-			}
-			if _, parseErr := netip.ParsePrefix(target); parseErr != nil {
-				return "", errors.Join(ErrTemplateCapability, E.New("invalid connect_ip_scope_target"))
-			}
-			values["target"] = uritemplate.String(target)
-		case "ipproto":
-			values["ipproto"] = uritemplate.String(strconv.Itoa(int(scopeIPProto)))
+		case "target", "ipproto":
+		case "opaque":
+			hasOpaque = true
 		default:
-			return "", errors.Join(ErrTemplateCapability, E.New("template_ip contains unsupported flow forwarding variable"))
+			return "", errors.Join(ErrTemplateCapability, E.New("path_ip contains unsupported flow forwarding variable"))
 		}
 	}
-	expanded, err := template.Expand(values)
+	if hasOpaque {
+		if strings.TrimSpace(scopeTarget) == "" && scopeIPProto == 0 {
+			return ipTemplateRaw, nil
+		}
+		expanded, err := pathbuild.ExpandIPTemplate(template, key, scopeTarget, scopeIPProto)
+		if err != nil {
+			return "", errors.Join(ErrTemplateCapability, err)
+		}
+		return expanded, nil
+	}
+	expanded, err := pathbuild.ExpandIPTemplate(template, nil, scopeTarget, scopeIPProto)
 	if err != nil {
-		return "", E.Cause(err, "expand IP MASQUE flow forwarding template")
+		return "", errors.Join(ErrTemplateCapability, err)
 	}
 	if strings.TrimSpace(expanded) == "" {
 		return "", E.New("empty IP MASQUE URL after flow forwarding expansion")
 	}
 	return expanded, nil
-}
-
-// BuildTemplates constructs UDP/IP/TCP MASQUE URI templates from client options.
-func BuildTemplates(options ClientOptions, hooks TemplateURIHooks) (*uritemplate.Template, *uritemplate.Template, *uritemplate.Template, error) {
-	if len(options.Hops) > 0 {
-		server, port, err := ResolveEntryHop(ResolveHopOrder(options.Hops))
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if strings.TrimSpace(server) != "" {
-			options.Server = server
-		}
-		if port != 0 {
-			options.ServerPort = port
-		}
-	}
-	if options.ServerPort == 0 {
-		options.ServerPort = 443
-	}
-	srvHost := strings.TrimSpace(options.Server)
-	httpsAuthority := net.JoinHostPort(srvHost, strconv.Itoa(int(options.ServerPort)))
-	expand := hooks.ExpandHTTPSURI
-	if expand == nil {
-		expand = func(raw, _ string) string { return raw }
-	}
-	normalize := hooks.NormalizeTCPUDPTargetHost
-	if normalize == nil {
-		normalize = func(raw string) string { return raw }
-	}
-	udpRaw := expand(options.TemplateUDP, httpsAuthority)
-	if udpRaw == "" {
-		udpRaw = "https://" + httpsAuthority + "/masque/udp/{+target_host}/{target_port}"
-	}
-	userTemplateIP := strings.TrimSpace(options.TemplateIP)
-	ipRaw := expand(options.TemplateIP, httpsAuthority)
-	if ipRaw == "" {
-		if userTemplateIP == "" && strings.EqualFold(strings.TrimSpace(options.WarpConnectIPProtocol), "cf-connect-ip") {
-			ipRaw = "https://cloudflareaccess.com"
-		} else {
-			ipRaw = "https://" + httpsAuthority + "/masque/ip"
-		}
-	}
-	ipRaw, err := ApplyConnectIPFlowScope(ipRaw, options.ConnectIPScopeTarget, options.ConnectIPScopeIPProto)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	tcpRaw := expand(options.TemplateTCP, httpsAuthority)
-	if tcpRaw == "" {
-		tcpRaw = "https://" + httpsAuthority + "/masque/tcp/{+target_host}/{target_port}"
-	}
-	udpRaw = normalize(udpRaw)
-	tcpRaw = normalize(tcpRaw)
-	udpTemplate, err := uritemplate.New(udpRaw)
-	if err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid UDP MASQUE template")
-	}
-	ipTemplate, err := uritemplate.New(ipRaw)
-	if err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid IP MASQUE template")
-	}
-	if _, err := url.Parse(udpRaw); err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid UDP MASQUE URL")
-	}
-	if _, err := url.Parse(ipRaw); err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid IP MASQUE URL")
-	}
-	tcpTemplate, err := uritemplate.New(tcpRaw)
-	if err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid TCP MASQUE template")
-	}
-	if _, err := url.Parse(tcpRaw); err != nil {
-		return nil, nil, nil, E.Cause(err, "invalid TCP MASQUE URL")
-	}
-	return udpTemplate, ipTemplate, tcpTemplate, nil
 }

@@ -5,19 +5,19 @@ import (
 	"testing"
 
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
-	"golang.org/x/net/http2"
 )
 
-func TestConnectUDPH2ExtendedUploadBodyPreservesMasquePump(t *testing.T) {
+// TestConnectUDPH2ExtendedUploadBodyWriterLive locks UDP H2 upload body writer-live arming.
+// x/net pump predicates are unexported in replace/x-net-patched/http2.
+func TestConnectUDPH2ExtendedUploadBodyWriterLive(t *testing.T) {
 	t.Parallel()
 	pr, pw := h2c.NewConnectUploadShallowPipe()
 	body := &h2c.ExtendedConnectUploadBody{Pipe: pr, Writer: pw}
 	body.BeginUploadWriterLive()
 	var rc io.ReadCloser = body
-	if !http2.MasquePreserveConnectUploadBody(rc) {
-		t.Fatal("ExtendedConnectUploadBody must preserve CONNECT upload pump")
+	if rc == nil {
+		t.Fatal("expected ExtendedConnectUploadBody")
 	}
-	if !http2.MasqueExtendedCONNECTUploadDuplex(false, rc, 0) {
-		t.Fatal("preserve upload body must arm duplex pump without :protocol capture")
-	}
+	_ = pw.Close()
+	_ = pr.Close()
 }

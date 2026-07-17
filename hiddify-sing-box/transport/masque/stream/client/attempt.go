@@ -15,9 +15,7 @@ type AttemptSnapshot = strm.AttemptSnapshot
 // SessionAttemptHost wires one CONNECT-stream dial attempt from coreSession.
 type SessionAttemptHost struct {
 	Prepare       func() (AttemptSnapshot, func(), error)
-	Dial          func(ctx context.Context, snap AttemptSnapshot, destination M.Socksaddr, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error)
-	BracketRetry  func(targetHost string) bool
-	OnBracketRetry func(tag, targetHost string, tcpURL *url.URL)
+	Dial          func(ctx context.Context, snap AttemptSnapshot, destination M.Socksaddr, targetHost string, targetPort uint16) (net.Conn, *url.URL, error)
 	RecordSuccess func(snap AttemptSnapshot, tcpURL *url.URL)
 	Tag           func() string
 }
@@ -26,21 +24,8 @@ func (h SessionAttemptHost) PrepareAttemptLocked() (AttemptSnapshot, func(), err
 	return h.Prepare()
 }
 
-func (h SessionAttemptHost) DialOnce(ctx context.Context, snap AttemptSnapshot, destination M.Socksaddr, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error) {
-	return h.Dial(ctx, snap, destination, targetHost, targetPort, pathBracket)
-}
-
-func (h SessionAttemptHost) BracketRetryEligible(targetHost string) bool {
-	if h.BracketRetry != nil {
-		return h.BracketRetry(targetHost)
-	}
-	return false
-}
-
-func (h SessionAttemptHost) OnBracketAutoRetry(tag, targetHost string, tcpURL *url.URL) {
-	if h.OnBracketRetry != nil {
-		h.OnBracketRetry(tag, targetHost, tcpURL)
-	}
+func (h SessionAttemptHost) DialOnce(ctx context.Context, snap AttemptSnapshot, destination M.Socksaddr, targetHost string, targetPort uint16) (net.Conn, *url.URL, error) {
+	return h.Dial(ctx, snap, destination, targetHost, targetPort)
 }
 
 func (h SessionAttemptHost) RecordAttemptSuccess(snap AttemptSnapshot, tcpURL *url.URL) {

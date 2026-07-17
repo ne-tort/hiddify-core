@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -49,6 +50,8 @@ type DialOptions struct {
 	// ExtraRequestHeaders are merged into the CONNECT request after Capsule-Protocol;
 	// BearerToken and cf-connect-ip User-Agent override the same keys when set below.
 	ExtraRequestHeaders http.Header
+	// PathObfuscationKey seals {opaque} path segments when path_obfuscation is enabled (baked-in key).
+	PathObfuscationKey []byte
 }
 
 // Dial dials a proxied CONNECT-IP session. bearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
@@ -61,7 +64,7 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	if err := validateFlowForwardingTemplateVars(template); err != nil {
 		return nil, nil, err
 	}
-	rawURL, err := buildConnectIPRequestURL(template)
+	rawURL, err := buildConnectIPRequestURL(template, opts.PathObfuscationKey)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -149,7 +152,7 @@ func applyDialInteroperability(c *Conn, opts DialOptions) {
 	}
 }
 
-func buildConnectIPRequestURL(template *uritemplate.Template) (string, error) {
+func buildConnectIPRequestURL(template *uritemplate.Template, pathObfuscationKey []byte) (string, error) {
 	if len(template.Varnames()) == 0 {
 		return template.Raw(), nil
 	}
@@ -162,6 +165,12 @@ func buildConnectIPRequestURL(template *uritemplate.Template) (string, error) {
 		case flowVarIPProto:
 			// "0" follows RFC wildcard semantics for all upper-layer protocols.
 			values[flowVarIPProto] = uritemplate.String("0")
+		case flowVarOpaque:
+			opaque, err := pathbuild.SealIPScope(pathObfuscationKey, "0.0.0.0/0", 0)
+			if err != nil {
+				return "", fmt.Errorf("connect-ip: seal opaque path: %w", err)
+			}
+			values[flowVarOpaque] = uritemplate.String(opaque)
 		default:
 			return "", ErrFlowForwardingUnsupported
 		}

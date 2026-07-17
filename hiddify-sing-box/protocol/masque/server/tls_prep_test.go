@@ -81,14 +81,57 @@ func TestPrepareInboundTLS_explicitALPNPreserved(t *testing.T) {
 		CertificatePath: "/tmp/cert.pem",
 		KeyPath:         "/tmp/key.pem",
 	}
-	base.ALPN = []string{"h3", "custom"}
-	out, err := PrepareInboundTLS(base, option.MasqueHTTPLayerH2, false)
+	base.ALPN = []string{"h3", "h2", "custom"}
+	out, err := PrepareInboundTLS(base, option.MasqueHTTPLayerH3, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := inboundALPNAsSlice(t, out)
-	want := []string{"h3", "custom"}
+	want := []string{"h3", "h2", "custom"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("explicit alpn should not be overwritten; got %#v want %#v", got, want)
+	}
+}
+
+func TestPrepareInboundTLS_explicitALPNH2MissingRejected(t *testing.T) {
+	t.Parallel()
+	base := &option.InboundTLSOptions{
+		CertificatePath: "/tmp/cert.pem",
+		KeyPath:         "/tmp/key.pem",
+		ALPN:            []string{"http/1.1"},
+	}
+	_, err := PrepareInboundTLS(base, option.MasqueHTTPLayerH2, false)
+	if err == nil {
+		t.Fatal("expected error when h2 layer alpn lacks h2")
+	}
+}
+
+func TestPrepareInboundTLS_autoExplicitRequiresBoth(t *testing.T) {
+	t.Parallel()
+	base := &option.InboundTLSOptions{
+		CertificatePath: "/tmp/cert.pem",
+		KeyPath:         "/tmp/key.pem",
+		ALPN:            []string{"h3"},
+	}
+	_, err := PrepareInboundTLS(base, option.MasqueHTTPLayerAuto, false)
+	if err == nil {
+		t.Fatal("expected error when auto alpn lacks h2")
+	}
+}
+
+func TestPrepareInboundTLS_autoDefaultDual(t *testing.T) {
+	t.Parallel()
+	base := &option.InboundTLSOptions{
+		CertificatePath: "/tmp/cert.pem",
+		KeyPath:         "/tmp/key.pem",
+	}
+	out, err := PrepareInboundTLS(base, option.MasqueHTTPLayerAuto, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := inboundALPNAsSlice(t, out)
+	want := []string{"h3", "h2", "http/1.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("alpn %#v want %#v", got, want)
 	}
 }

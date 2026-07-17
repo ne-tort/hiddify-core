@@ -43,7 +43,7 @@ func benchServerHandlerDownloadWriteToMbps(t *testing.T, link serverHandlerLink,
 
 	ln := startServerHandlerDownloadTarget(t)
 	port := ln.Addr().(*net.TCPAddr).Port
-	template := uritemplate.MustNew("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template := uritemplate.MustNew("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	host := TCPConnectHost{
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
 		Dialer:  net.Dialer{Timeout: 5 * time.Second},
@@ -59,7 +59,7 @@ func benchServerHandlerDownloadWriteToMbps(t *testing.T, link serverHandlerLink,
 		resp = &serverH3RelayResponse{leg: serverLeg}
 	}
 
-	path := "/masque/tcp/127.0.0.1/" + strconv.Itoa(port)
+	path := "/.well-known/masque/tcp/127.0.0.1/"+strconv.Itoa(port)+"/"
 	ctx, cancel := context.WithCancel(context.Background())
 	uploadR, uploadW := io.Pipe()
 	t.Cleanup(func() {
@@ -71,7 +71,7 @@ func benchServerHandlerDownloadWriteToMbps(t *testing.T, link serverHandlerLink,
 	req = req.WithContext(ctx)
 	req.Host = "masque.local"
 	req.RequestURI = "https://masque.local" + path
-	req.Header.Set(":protocol", "HTTP/2")
+	req.Header.Set(":protocol", "connect-tcp")
 
 	handlerDone := make(chan struct{})
 	go func() {

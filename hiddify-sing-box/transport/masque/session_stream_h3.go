@@ -8,6 +8,7 @@ import (
 
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -49,16 +50,8 @@ func (s *coreSession) dialTCPStreamHTTP3(ctx context.Context, tcpURL *url.URL, o
 	}, tcpHTTP)
 }
 
-func (s *coreSession) streamOnceTemplateWire() strmclient.OnceTemplateWire {
-	return strmclient.OnceTemplateWire{
-		PathHostForTemplate: MasqueTCPPathHostForTemplate,
-		FixExpandedURL:      FixMasqueExpandedTCPConnectStreamURL,
-		RewritePercentIPv6:  RewriteMasqueTCPURLIfPercentEncodedIPv6,
-	}
-}
-
-func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritemplate.Template, options ClientOptions, destination M.Socksaddr, httpLayer string, tcpHTTP *http3.Transport, targetHost string, targetPort uint16, pathBracket bool) (net.Conn, *url.URL, error) {
-	hooks := strmclient.NewOnceHooks(s.streamOnceTemplateWire(), strmclient.OnceDialFuncs{
+func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritemplate.Template, options ClientOptions, destination M.Socksaddr, httpLayer string, tcpHTTP *http3.Transport, targetHost string, targetPort uint16) (net.Conn, *url.URL, error) {
+	hooks := strmclient.NewOnceHooks(strmclient.OnceDialFuncs{
 		DialH2: func(ctx context.Context, tcpURL *url.URL, th string, dest M.Socksaddr) (net.Conn, error) {
 			return s.dialTCPStreamH2(ctx, tcpURL, options, th, dest)
 		},
@@ -67,14 +60,14 @@ func (s *coreSession) dialTCPStreamOnce(ctx context.Context, templateTCP *uritem
 		},
 	})
 	return strmclient.DialOnce(ctx, hooks, strmclient.OnceInput{
-		Template:    templateTCP,
-		Destination: destination,
-		HTTPLayer:   httpLayer,
-		HTTPLayerH2: option.MasqueHTTPLayerH2,
-		TCPHTTP:     tcpHTTP,
-		TargetHost:  targetHost,
-		TargetPort:  targetPort,
-		PathBracket: pathBracket,
+		Template:           templateTCP,
+		Destination:        destination,
+		HTTPLayer:          httpLayer,
+		HTTPLayerH2:        option.MasqueHTTPLayerH2,
+		TCPHTTP:            tcpHTTP,
+		TargetHost:         targetHost,
+		TargetPort:         targetPort,
+		PathObfuscationKey: pathbuild.ActiveKey(options.PathObfuscation),
 	})
 }
 

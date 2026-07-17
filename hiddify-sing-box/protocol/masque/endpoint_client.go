@@ -236,12 +236,12 @@ func (e *Endpoint) startRuntime() {
 		id.DialPortOverride = port
 		RecordMasqueHTTPLayerSuccess(e.Tag(), e.options, layer, id)
 	}
-	quicTLS, err := buildMasqueQUICStdTLSConfig(runCtx, log.StdLogger(), server, e.options.OutboundTLS)
+	quicTLS, err := buildMasqueQUICStdTLSConfig(runCtx, log.StdLogger(), server, e.options.OutboundTLS, normalizeHTTPLayer(e.options.HTTPLayer))
 	if err != nil {
 		e.startErr.Store(E.Cause(err, "masque client tls (quic)"))
 		return
 	}
-	tcpDialTLS, err := buildMasqueTCPDialTLS(runCtx, log.StdLogger(), server, e.options.OutboundTLS)
+	tcpDialTLS, err := buildMasqueTCPDialTLS(runCtx, log.StdLogger(), server, e.options.OutboundTLS, normalizeHTTPLayer(e.options.HTTPLayer))
 	if err != nil {
 		e.startErr.Store(E.Cause(err, "masque client tls (tcp)"))
 		return
@@ -251,13 +251,15 @@ func (e *Endpoint) startRuntime() {
 		Server:                   server,
 		ServerPort:               port,
 		DataplaneMode:            normalizeDataplaneMode(e.options.Mode),
-		TemplateUDP:              e.options.TemplateUDP,
-		TemplateIP:               e.options.TemplateIP,
+		PathUDP:                  e.options.PathUDP,
+		PathTCP:                  e.options.PathTCP,
+		PathIP:                   e.options.PathIP,
+		PathObfuscation:          e.options.PathObfuscation,
+		H2Tuning:                 masqueH2Tuning(e.options.H2Tuning),
 		ConnectIPScopeTarget:     e.options.ConnectIPScopeTarget,
 		ConnectIPScopeIPProto:    e.options.ConnectIPScopeIPProto,
 		ProfileLocalIPv4:         strings.TrimSpace(e.options.ProfileLocalIPv4),
 		ProfileLocalIPv6:         strings.TrimSpace(e.options.ProfileLocalIPv6),
-		TemplateTCP:              e.options.TemplateTCP,
 		FallbackPolicy:           normalizeFallbackPolicy(e.options.FallbackPolicy),
 		TCPMode:                  normalizeTCPMode(e.options.TCPMode),
 		ServerToken:              e.options.ServerToken,
@@ -273,7 +275,6 @@ func (e *Endpoint) startRuntime() {
 		MasqueEffectiveHTTPLayer: effectiveHL,
 		HTTPLayerAuto:            normalizeHTTPLayer(e.options.HTTPLayer) == option.MasqueHTTPLayerAuto,
 		HTTPLayerSuccess:         recordHL,
-		TCPIPv6PathBracket:       e.options.TCPIPv6PathBracket,
 	})
 	const masqueRuntimeStartMaxAttempts = 3
 	var startErr error

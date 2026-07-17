@@ -554,7 +554,7 @@ func TestRuntimeMalformedScopedFlowClassifiedAsCapability(t *testing.T) {
 		Server:               "example.com",
 		ServerPort:           443,
 		DataplaneMode: option.MasqueDataplaneConnectIP,
-		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP: "/.well-known/masque/ip",
 		ConnectIPScopeTarget: "not-a-prefix",
 	})
 	startErr := rt.Start(context.Background())

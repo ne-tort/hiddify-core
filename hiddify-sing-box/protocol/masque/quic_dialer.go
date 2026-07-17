@@ -153,8 +153,7 @@ func buildMasqueTCPDialFunc(ctx context.Context, options option.DialerOptions, r
 		if err != nil {
 			return nil, err
 		}
-		// Detour dials usually complete handshake before we see the conn — still apply
-		// post-connect tune (Nagle + buffers). Prefer Control path above for WAN RWND.
+		// auto_detect_interface / detour skip MasqueTCPDialerControl — pin CC + SNDBUF here.
 		if tc, ok := conn.(*net.TCPConn); ok {
 			netutil.TuneMasqueTCPSocketBuffers(tc)
 		}

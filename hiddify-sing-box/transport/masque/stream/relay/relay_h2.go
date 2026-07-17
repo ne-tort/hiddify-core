@@ -30,14 +30,23 @@ func relayTunnelClearReadDeadline(src net.Conn) {
 	_ = src.SetReadDeadline(time.Time{})
 }
 
-// relayTunnelCopyBufferH2BidiDownload fills up to RelayTunnelBufLen from onward TCP
+func relayDownloadBuf(pol H2DownloadPolicy) (buf []byte, put func()) {
+	if pol.BufferBytes <= 0 || pol.BufferBytes == RelayTunnelBufLen {
+		bp := relayTunnelBufPool.Get().(*[]byte)
+		return *bp, func() { relayTunnelBufPool.Put(bp) }
+	}
+	b := make([]byte, pol.BufferBytes)
+	return b, func() {}
+}
+
+// relayTunnelCopyBufferH2BidiDownload fills up to policy BufferBytes from onward TCP
 // (short coalesce wait after the first byte), then one Write + Flush.
 // Per-short-Read Flush made CF __down stop-wait at ~256KiB/RTT (~54 Mbit @~39 ms);
 // iperf fill stayed high because onward stays saturated. Prime path still Flush-on-Write.
 func relayTunnelCopyBufferH2BidiDownload(dst io.Writer, src net.Conn, responseWriter http.ResponseWriter) (int64, error) {
-	bp := relayTunnelBufPool.Get().(*[]byte)
-	defer relayTunnelBufPool.Put(bp)
-	buf := *bp
+	pol := currentH2DownloadPolicy()
+	buf, put := relayDownloadBuf(pol)
+	defer put()
 	var written int64
 	for {
 		off := 0
@@ -48,7 +57,7 @@ func relayTunnelCopyBufferH2BidiDownload(dst io.Writer, src net.Conn, responseWr
 				if fillStart.IsZero() {
 					fillStart = time.Now()
 				}
-				_ = src.SetReadDeadline(time.Now().Add(h2DownloadFillWait))
+				_ = src.SetReadDeadline(time.Now().Add(pol.FillWait))
 			}
 			var nr int
 			nr, er = src.Read(buf[off:])
@@ -57,8 +66,8 @@ func relayTunnelCopyBufferH2BidiDownload(dst io.Writer, src net.Conn, responseWr
 			}
 			if er != nil {
 				if ne, ok := er.(net.Error); ok && ne.Timeout() &&
-					off > 0 && off < h2DownloadFlushMinBytes &&
-					!fillStart.IsZero() && time.Since(fillStart) < h2DownloadFillMaxWall {
+					off > 0 && off < pol.FlushMinBytes &&
+					!fillStart.IsZero() && time.Since(fillStart) < pol.FillMaxWall {
 					er = nil
 					continue
 				}

@@ -15,10 +15,14 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/relay"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/yosida95/uritemplate/v3"
 )
+
+// ConnectTCPProtocol is the required :protocol for Extended CONNECT TCP (draft-ietf-httpbis-connect-tcp).
+const ConnectTCPProtocol = "connect-tcp"
 
 // Hooks wires server-side ACL helpers from protocol/masque/server (onward_policy).
 type Hooks struct {
@@ -37,17 +41,17 @@ type Host struct {
 	Logger    log.ContextLogger
 	Dialer    net.Dialer
 	Authorize func(*http.Request) bool
-	// AuthorityMatches checks :authority vs template URL host (loopback placeholder relax).
+	// AuthorityMatches is retained for API compatibility; ParseTCPTarget no longer checks authority.
 	AuthorityMatches func(templateHost, requestHost string, relax bool) bool
 }
 
-// Handler serves RFC 8441 Extended CONNECT over the TCP template path.
+// Handler serves Extended CONNECT over the TCP path template.
 type Handler struct {
 	Hooks Hooks
 }
 
-// HandleConnectStream serves CONNECT-stream (RFC 8441) over the TCP MASQUE template.
-func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template, relaxedTCPAuthority bool) {
+// HandleConnectStream serves CONNECT-stream (RFC 8441 / connect-tcp) over the TCP MASQUE path.
+func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template, _ bool) {
 	debugf := func(format string, args ...any) {
 		if host.Logger == nil {
 			return
@@ -64,16 +68,13 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	// RFC 8441 Extended CONNECT over HTTP/2 sets :protocol. Our CONNECT-stream client uses HTTP/2
-	// (see transport/masque/stream/dial_h2.go). HTTP/3 CONNECT-stream peers typically omit
-	// :protocol while Proto carries HTTP/3 — treat empty header as compat. Reject misuse such
-	// as connect-udp/connect-ip targeting the tcp template early (400), before policy/dial work.
-	if p := strings.TrimSpace(r.Header.Get(":protocol")); p != "" && !strings.EqualFold(p, "HTTP/2") {
+	// draft-ietf-httpbis-connect-tcp: :protocol must be exactly "connect-tcp".
+	if p := strings.TrimSpace(r.Header.Get(":protocol")); !strings.EqualFold(p, ConnectTCPProtocol) {
 		debugf("masque tcp connect denied status=400 error_class=bad_extended_protocol proto=%q", p)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	targetHost, targetPort, parseErr := ParseTCPTargetFromRequest(r, tcpTemplate, relaxedTCPAuthority, host.AuthorityMatches)
+	targetHost, targetPort, parseErr := ParseTCPTargetFromRequest(r, tcpTemplate, host.Options.PathObfuscation)
 	if parseErr != nil {
 		debugf("masque tcp connect parse denied status=400 error_class=misconfig err=%v", parseErr)
 		w.WriteHeader(http.StatusBadRequest)
@@ -140,9 +141,6 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 	}
 	defer targetConn.Close()
 	relay.TuneTCPOutbound(targetConn)
-	// RFC 8441 CONNECT-stream: relay onward TCP→response while request body may still be idle
-	// (iperf3 waits for server banner before sending). Without full-duplex the HTTP stack can
-	// block response DATA until the request body is consumed (TUN bench hang at 0 Mbit/s).
 	_ = http.NewResponseController(w).EnableFullDuplex()
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -158,17 +156,15 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 	debugf("masque tcp relay finished host=%s resolved_host=%s port=%s status=ok", targetHost, resolvedHost, targetPort)
 }
 
-// ParseTCPTargetFromRequest extracts target_host/target_port from a CONNECT request URI.
-func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, relaxedTCPAuthority bool, authorityMatches func(templateHost, requestHost string, relax bool) bool) (string, string, error) {
+// ParseTCPTargetFromRequest extracts target host/port from a CONNECT request path (path-only match).
+// When path_obfuscation is enabled, the {opaque} segment is opened with the baked-in key.
+func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, obfuscation bool) (string, string, error) {
 	if r.Method != http.MethodConnect {
 		return "", "", E.New("expected CONNECT request")
 	}
 	templateURL, err := url.Parse(template.Raw())
 	if err != nil {
-		return "", "", E.Cause(err, "parse tcp template")
-	}
-	if templateURL.Host != "" && authorityMatches != nil && !authorityMatches(templateURL.Host, strings.TrimSpace(r.Host), relaxedTCPAuthority) {
-		return "", "", E.New("CONNECT authority does not match TCP template host")
+		return "", "", E.Cause(err, "parse tcp path template")
 	}
 	var candidates []string
 	appendCandidate := func(s string) {
@@ -186,8 +182,6 @@ func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 		}
 	}
 	appendCandidate(r.RequestURI)
-	// Parity with connect-ip-go matchTemplateRequestValues: some HTTP/2 stacks surface
-	// path-only RequestURI; absolute URI templates need https://authority + normalized path.
 	requestURIWithAuthority := ""
 	if auth := strings.TrimSpace(r.Host); auth != "" {
 		switch requestURI := strings.TrimSpace(r.RequestURI); {
@@ -207,7 +201,8 @@ func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 		}
 	}
 	appendCandidate(requestURIWithAuthority)
-	if relaxedTCPAuthority && templateURL.Host != "" {
+	// Also try template authority + path so path-only RequestURI still matches full URI templates.
+	if templateURL.Host != "" {
 		scheme := strings.TrimSpace(templateURL.Scheme)
 		if scheme == "" {
 			scheme = "https"
@@ -230,7 +225,8 @@ func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 			appendCandidate(scheme + "://" + templateURL.Host + p)
 		}
 	}
-	var host, port string
+
+	var host, port, opaque string
 	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
@@ -238,9 +234,20 @@ func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 		match := template.Match(candidate)
 		host = strings.TrimSpace(match.Get("target_host").String())
 		port = strings.TrimSpace(match.Get("target_port").String())
-		if host != "" && port != "" {
+		opaque = strings.TrimSpace(match.Get("opaque").String())
+		if opaque != "" || (host != "" && port != "") {
 			break
 		}
+	}
+	if opaque != "" {
+		if !obfuscation {
+			return "", "", E.New("opaque path segment requires path_obfuscation")
+		}
+		h, p, openErr := pathbuild.OpenHostPort(pathbuild.ActiveKey(true), opaque)
+		if openErr != nil {
+			return "", "", openErr
+		}
+		return h, strconv.Itoa(int(p)), nil
 	}
 	if host == "" || port == "" {
 		return "", "", E.New("invalid tcp target")

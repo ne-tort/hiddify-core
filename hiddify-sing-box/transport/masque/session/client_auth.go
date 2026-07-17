@@ -6,13 +6,14 @@ import (
 	"strings"
 )
 
-// WarpConnectStreamBearerToken chooses Authorization Bearer for CONNECT-stream only.
-// Explicit server_token wins.
+// WarpConnectStreamBearerToken chooses Authorization Bearer for CONNECT-stream and CONNECT-UDP/IP
+// overlays that share the same policy. Explicit server_token wins.
 //
 // Consumer WARP MASQUE dataplane matches dialWarpConnectIPTunnel / usque: CONNECT-IP authenticates via
 // mTLS (WarpMasqueClientCert) without device Bearer on the QUIC overlay. Sending profile auth_token on
 // masque/tcp CONNECT-stream triggers 403 from the edge while the same Bearer is omitted on cf-connect-ip.
 // Generic masque without WARP client cert may still attach WarpMasqueDeviceBearerToken when configured.
+// CONNECT-IP dial uses the same rules via connectip.DialAuthFromInput.
 func WarpConnectStreamBearerToken(opts ClientOptions) string {
 	if t := strings.TrimSpace(opts.ServerToken); t != "" {
 		return t

@@ -1,4 +1,4 @@
-﻿// Copyright 2015 The Go Authors. All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -123,6 +123,11 @@ type Transport struct {
 	// https://datatracker.ietf.org/doc/html/rfc7540#section-6.5.2.
 	// Values are bounded in the range 16k to 16M.
 	MaxReadFrameSize uint32
+
+	// MasqueUploadFlushBytes, when >0, overrides the MASQUE CONNECT-stream
+	// upload bulk flush threshold (default 256 KiB). Chrome-like profiles use
+	// MaxReadFrameSize (16 KiB) so DATA bursts match frame size.
+	MasqueUploadFlushBytes int
 
 	// MaxDecoderHeaderTableSize optionally specifies the http2
 	// SETTINGS_HEADER_TABLE_SIZE to send in the initial settings frame. It
@@ -1989,8 +1994,12 @@ uploadBodyLoop:
 		var sawEOF bool
 		for !sawEOF {
 		if bulkFlush && pendingAck > 0 {
-			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
-				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt) ||
+			flushThr := 0
+			if cc.t != nil {
+				flushThr = cc.t.MasqueUploadFlushBytes
+			}
+			flush := masqueShouldBulkFlushNow(pendingAck, sawEOF, flushThr) ||
+				masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt, flushThr) ||
 				masqueShouldInteractiveUploadFlush(body, pendingAck) ||
 				masqueShouldFlushBeforeBlockingRead(body, pendingAck)
 			if flush {
@@ -2095,8 +2104,12 @@ uploadBodyLoop:
 				if pendingAck > 0 && firstPendingAt.IsZero() {
 					firstPendingAt = time.Now()
 				}
-				flush := masqueShouldBulkFlushNow(pendingAck, sawEOF) ||
-					masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt)
+				flushThr := 0
+				if cc.t != nil {
+					flushThr = cc.t.MasqueUploadFlushBytes
+				}
+				flush := masqueShouldBulkFlushNow(pendingAck, sawEOF, flushThr) ||
+					masqueShouldBulkFlushDeadline(pendingAck, firstPendingAt, flushThr)
 				if flush {
 					cc.wmu.Lock()
 					ack := pendingAck

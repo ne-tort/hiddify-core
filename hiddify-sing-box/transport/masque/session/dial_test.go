@@ -6,15 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing-box/transport/masque/session"
 )
 
 func testTemplateHooks() session.TemplateURIHooks {
-	return session.TemplateURIHooks{
-		ExpandHTTPSURI:            masque.ExpandMasqueHTTPSURI,
-		NormalizeTCPUDPTargetHost: masque.NormalizeMasqueTCPUDPTemplateTargetHost,
-	}
+	return session.TemplateURIHooks{}
 }
 
 func TestResolveHopOrderLinearChain(t *testing.T) {
@@ -108,14 +104,14 @@ func TestBuildTemplatesApplyConnectIPFlowScope(t *testing.T) {
 	_, ip, _, err := session.BuildTemplates(session.ClientOptions{
 		Server:                "example.com",
 		ServerPort:            443,
-		TemplateIP:            "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP: "/.well-known/masque/ip",
 		ConnectIPScopeTarget:  "10.0.0.0/8",
 		ConnectIPScopeIPProto: 6,
 	}, testTemplateHooks())
 	if err != nil {
 		t.Fatalf("BuildTemplates with scope failed: %v", err)
 	}
-	if got := ip.Raw(); got != "https://example.com/masque/ip/10.0.0.0%2F8/6" {
+	if got := ip.Raw(); got != "https://example.com:443/.well-known/masque/ip/10.0.0.0%2F8/6/" {
 		t.Fatalf("unexpected expanded IP template: %s", got)
 	}
 }
@@ -160,7 +156,7 @@ func TestBuildTemplatesDefaultsServerPortTo443WhenZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTemplates failed: %v", err)
 	}
-	if got := udp.Raw(); !strings.Contains(got, "https://example.com:443/masque/udp/") {
+	if got := udp.Raw(); !strings.Contains(got, "https://example.com:443/.well-known/masque/udp/") {
 		t.Fatalf("unexpected udp template: %s", got)
 	}
 }

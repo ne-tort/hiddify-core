@@ -9,8 +9,12 @@ import (
 func TestBulkHTTP2ServerConfigMaxConcurrentStreams(t *testing.T) {
 	t.Parallel()
 	srv := h2c.BulkHTTP2ServerConfig()
-	if srv.MaxConcurrentStreams != 4096 {
-		t.Fatalf("MaxConcurrentStreams=%d want 4096 (H3 peer budget parity)", srv.MaxConcurrentStreams)
+	if srv.MaxConcurrentStreams != h2c.DefaultMaxConcurrentStreams {
+		t.Fatalf("MaxConcurrentStreams=%d want default %d", srv.MaxConcurrentStreams, h2c.DefaultMaxConcurrentStreams)
+	}
+	lab := h2c.BulkHTTP2ServerConfigResolved(h2c.Resolve(h2c.LabBulkTuning()))
+	if lab.MaxConcurrentStreams != h2c.LabBulkMaxConcurrentStreams {
+		t.Fatalf("lab MCS=%d want %d", lab.MaxConcurrentStreams, h2c.LabBulkMaxConcurrentStreams)
 	}
 }
 

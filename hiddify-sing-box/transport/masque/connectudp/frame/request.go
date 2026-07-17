@@ -10,6 +10,7 @@ import (
 
 	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -19,6 +20,7 @@ const (
 
 	uriTemplateTargetHost = "target_host"
 	uriTemplateTargetPort = "target_port"
+	uriTemplateOpaque     = "opaque"
 )
 
 // CapsuleProtocolHeaderValue is the serialized Capsule-Protocol: ?1 header value.
@@ -170,6 +172,7 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 
 	var targetHost string
 	var targetPortStr string
+	var opaque string
 	candidates := connectUDPTemplateMatchCandidates(r, u)
 	for _, candidate := range candidates {
 		if candidate == "" {
@@ -178,14 +181,32 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 		match := template.Match(candidate)
 		targetHost = strings.TrimSpace(match.Get(uriTemplateTargetHost).String())
 		targetPortStr = strings.TrimSpace(match.Get(uriTemplateTargetPort).String())
-		if targetHost != "" && targetPortStr != "" {
+		opaque = strings.TrimSpace(match.Get(uriTemplateOpaque).String())
+		if opaque != "" || (targetHost != "" && targetPortStr != "") {
 			break
 		}
+	}
+	if opaque != "" {
+		if !pathbuild.TemplateHasOpaque(template) {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("opaque path segment requires path_obfuscation"),
+			}
+		}
+		h, p, openErr := pathbuild.OpenHostPort(pathbuild.ActiveKey(true), opaque)
+		if openErr != nil {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("opaque path: %w", openErr),
+			}
+		}
+		targetHost = h
+		targetPortStr = strconv.Itoa(int(p))
 	}
 	if targetHost == "" || targetPortStr == "" {
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusBadRequest,
-			Err:        fmt.Errorf("expected target_host and target_port"),
+			Err:        fmt.Errorf("expected target_host and target_port (or opaque)"),
 		}
 	}
 	targetHost = unescape(targetHost)

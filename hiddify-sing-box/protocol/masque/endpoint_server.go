@@ -36,6 +36,7 @@ func ConnectIPServerParseDropTotal() uint64 {
 // ServerEndpoint is the MASQUE server (CONNECT-UDP / CONNECT-IP / CONNECT-stream over HTTP/3 + HTTP/2).
 type ServerEndpoint struct {
 	endpoint.Adapter
+	ctx          context.Context
 	options      option.MasqueEndpointOptions
 	compiledAuth *auth.Compiled
 	router       adapter.Router
@@ -64,6 +65,7 @@ func NewServerEndpoint(ctx context.Context, router adapter.Router, logger log.Co
 	}
 	return &ServerEndpoint{
 		Adapter: endpoint.NewAdapterWithDialerOptions(C.TypeMasque, tag, []string{N.NetworkTCP, N.NetworkUDP}, o.DialerOptions),
+		ctx:     ctx,
 		options: o,
 		router:  router,
 		logger:  logger,
@@ -75,14 +77,18 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
-	if e.server != nil {
+	if e.server != nil || e.tcpTLSListener != nil {
 		return nil
 	}
 	// Fresh listen/Serve cycle: clear shutdown marker from a previous Close().
 	// Do not reset closing in Close()'s defer — Serve may still be unwinding after Close returns.
 	e.closing.Store(false)
+	startCtx := e.ctx
+	if startCtx == nil {
+		startCtx = context.Background()
+	}
 	startOutcome, startErr := server.RunMasqueEndpointStart(server.MasqueEndpointStartConfig{
-		Ctx:       context.Background(),
+		Ctx:       startCtx,
 		Options:   e.options,
 		TCPRelay:  normalizeTCPRelay(e.options.TCPRelay),
 		HTTPLayer: normalizeHTTPLayer(e.options.HTTPLayer),
@@ -127,9 +133,9 @@ func (e *ServerEndpoint) endpointMuxFields() server.EndpointMuxFields {
 		Authorize: e.authorizeRequest,
 		Hooks: server.TemplateAuthorityHooks{
 			ResolveTemplates: resolveMasqueServerTemplateURLs,
-			RelaxAuthority:   masqueServerShouldRelaxTemplateAuthority,
-			RequestForParse:  masqueHTTPRequestForTemplateParse,
-			AuthorityMatches: masqueRequestAuthorityMatchesTemplate,
+			RelaxAuthority:   nil,
+			RequestForParse:  func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request { return r },
+			AuthorityMatches: func(_, _ string, _ bool) bool { return true },
 		},
 		OnUDPProxyCreated: func(p *cudprelay.Proxy) {
 			e.udpProxy = p
@@ -176,7 +182,7 @@ func (e *ServerEndpoint) ListenPacket(ctx context.Context, destination M.Socksad
 }
 
 func (e *ServerEndpoint) authorizeRequest(r *http.Request) bool {
-	return server.AuthorizeMasqueRequest(r, &e.compiledAuth, e.options, e.server != nil)
+	return server.AuthorizeMasqueRequest(r, &e.compiledAuth, e.options, e.server != nil || e.tcpTLSListener != nil)
 }
 
 func (e *ServerEndpoint) lastStartError() error {

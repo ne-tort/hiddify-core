@@ -32,6 +32,27 @@ const (
 	MasqueTCPRelayTemplate = "template"
 )
 
+// MasqueH2TuningOptions overrides H2 traffic knobs on top of baked defaults (0 = keep default).
+// All durations are plain milliseconds (uint), never Go duration strings.
+type MasqueH2TuningOptions struct {
+	StreamRecvWindow          uint64 `json:"stream_recv_window,omitempty"`
+	ConnRecvWindow            uint64 `json:"conn_recv_window,omitempty"`
+	MaxReadFrameSize          uint32 `json:"max_read_frame_size,omitempty"`
+	MaxConcurrentStreams      uint32 `json:"max_concurrent_streams,omitempty"`
+	UploadBufferPerConnection uint64 `json:"upload_buffer_per_connection,omitempty"`
+	UploadBufferPerStream     uint64 `json:"upload_buffer_per_stream,omitempty"`
+	// ReadIdleTimeout / PingTimeout: milliseconds. 0 = keep default (15000). Use disable_idle_ping to turn off.
+	ReadIdleTimeout uint64 `json:"read_idle_timeout,omitempty"`
+	PingTimeout     uint64 `json:"ping_timeout,omitempty"`
+	DisableIdlePing bool   `json:"disable_idle_ping,omitempty"`
+	UploadFlushBytes          uint64 `json:"upload_flush_bytes,omitempty"`
+	UploadPipeBytes           uint64 `json:"upload_pipe_bytes,omitempty"`
+	DownloadBufferBytes       uint64 `json:"download_buffer_bytes,omitempty"`
+	DownloadFillWait          uint64 `json:"download_fill_wait,omitempty"`       // ms
+	DownloadFlushMinBytes     uint64 `json:"download_flush_min_bytes,omitempty"`
+	DownloadFillMaxWall       uint64 `json:"download_fill_max_wall,omitempty"` // ms
+}
+
 const (
 	WarpMasqueCompatibilityAuto      = "auto"
 	WarpMasqueCompatibilityConsumer  = "consumer"
@@ -109,13 +130,24 @@ type MasqueEndpointOptions struct {
 	// Parsed only so validateMasqueOptions can reject removed JSON keys.
 	TransportMode string `json:"transport_mode,omitempty"`
 	TCPTransport    string `json:"tcp_transport,omitempty"`
-	// TemplateUDP is a URI template for CONNECT-UDP. Use a full https://… URL, or a path-only form
-	// starting with / (e.g. /masque/udp/{target_host}/{target_port}); path-only templates get
-	// https://<server>:<server_port> (client) or https://<derived listen authority> (server) prefixed.
-	// Empty uses default /masque/udp/{target_host}/{target_port}.
-	TemplateUDP string `json:"template_udp,omitempty"`
-	// TemplateIP is a URI template for CONNECT-IP; same path-only rule as TemplateUDP. Empty defaults to /masque/ip.
-	TemplateIP string `json:"template_ip,omitempty"`
+	// PathUDP / PathTCP / PathIP are fixed path prefixes only (no URI-template braces).
+	// Empty → IANA well-known defaults: /.well-known/masque/{udp|tcp|ip}.
+	// Engine appends /{target_host}/{target_port}/ (or /{opaque}/ when path_obfuscation is enabled).
+	PathUDP string `json:"path_udp,omitempty"`
+	PathTCP string `json:"path_tcp,omitempty"`
+	PathIP  string `json:"path_ip,omitempty"`
+	// PathObfuscation, when true, seals target host/port into one opaque path segment using a
+	// compile-time shared key (public in the binary — signature-breaking only, not secrecy).
+	PathObfuscation bool `json:"path_obfuscation,omitempty"`
+	// H2Profile removed — use h2_tuning only (same knobs; one baked default).
+	H2Profile string `json:"h2_profile,omitempty"`
+	// H2Tuning overrides SETTINGS / flush / pipe / download-relay knobs (0 = baked default; durations = ms).
+	H2Tuning *MasqueH2TuningOptions `json:"h2_tuning,omitempty"`
+	// Removed keys — rejected at validate when non-empty.
+	TemplateUDP          string `json:"template_udp,omitempty"`
+	TemplateIP           string `json:"template_ip,omitempty"`
+	TemplateTCP          string `json:"template_tcp,omitempty"`
+	TCPIPv6PathBracket   bool   `json:"tcp_ipv6_path_bracket,omitempty"`
 	ConnectIPScopeTarget  string `json:"connect_ip_scope_target,omitempty"`
 	ConnectIPScopeIPProto uint8  `json:"connect_ip_scope_ipproto,omitempty"`
 	// ProfileLocalIPv4 / ProfileLocalIPv6: client-only WARP-style device profile locals for CONNECT-IP
@@ -123,16 +155,8 @@ type MasqueEndpointOptions struct {
 	// ADDRESS_ASSIGN; these align gVisor source with server AssignAddresses (198.18.0.1/32).
 	ProfileLocalIPv4 string `json:"profile_local_ipv4,omitempty"`
 	ProfileLocalIPv6 string `json:"profile_local_ipv6,omitempty"`
-	// TemplateTCP is a URI template for CONNECT-stream TCP; same path-only rule. Empty defaults to /masque/tcp/{target_host}/{target_port}.
-	TemplateTCP string `json:"template_tcp,omitempty"`
-	// TCPRelay is server-only: template (default) uses template_tcp paths.
+	// TCPRelay is server-only: template (default) uses path_tcp prefixes.
 	TCPRelay string `json:"tcp_relay,omitempty"`
-	// TCPIPv6PathBracket, when true, puts RFC 5952 bracketed IPv6 in the CONNECT-stream path segment
-	// (`/tcp/[2001:db8::1]/443`). Some reverse proxies return HTTP 400 for unbracketed literals because
-	// colons are ambiguous with pseudo-path syntax; others reject brackets — default false keeps the
-	// legacy unbracketed wire form. When false, the client may still retry once with brackets after
-	// HTTP 400 if the TCP target resolves to IPv6 (see transport/masque dialTCPStreamAttempt).
-	TCPIPv6PathBracket bool `json:"tcp_ipv6_path_bracket,omitempty"`
 	FallbackPolicy string `json:"fallback_policy,omitempty"`
 	TCPMode        string `json:"tcp_mode,omitempty"`
 	// InboundTLS is sing-box inbound TLS (same schema as other inbounds). Required for role=server when terminating TLS.
@@ -163,6 +187,7 @@ type MasqueEndpointOptions struct {
 	Workers          int                            `json:"workers,omitempty"`
 	QUICExperimental *MasqueQUICExperimentalOptions `json:"quic_experimental,omitempty"` // rejected at validate — baked QUIC defaults only
 	// HTTPLayer selects the outer HTTP stack: h3 (QUIC/H3 default), h2 (TLS/H2 RFC 8441), auto (H3 first, one H3↔H2 pivot on switchable errors).
+	// Server: empty = dual H3+H2 listen; explicit "h2" = H2-only (required for Reality inbound). auto/h3 rejected on server.
 	HTTPLayer string `json:"http_layer,omitempty"`
 	// CongestionControl selects the QUIC send CC for this masque endpoint (client and/or server).
 	// Empty → "bbr" (prod default). Also: new_reno, cubic, bbr2, bbr2_aggressive.

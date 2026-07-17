@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -102,5 +103,44 @@ func TestParseRequestAcceptsValidConnectUDP(t *testing.T) {
 	}
 	if parsed.Host != "masque.example:443" {
 		t.Fatalf("host: got %q", parsed.Host)
+	}
+}
+
+func TestParseRequestOpaquePath(t *testing.T) {
+	t.Parallel()
+	key := pathbuild.ActiveKey(true)
+	opaque, err := pathbuild.SealHostPort(key, "198.51.100.1", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := "https://masque.example:443/.well-known/masque/udp/{opaque}/"
+	tmpl, err := uritemplate.New(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expanded, err := pathbuild.ExpandHostPort(tmpl, key, "198.51.100.1", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(expanded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := &http.Request{
+		Method: http.MethodConnect,
+		Host:   "masque.example:443",
+		URL:    u,
+		Header: http.Header{
+			":protocol":                   []string{RequestProtocol},
+			http3.CapsuleProtocolHeader: []string{CapsuleProtocolHeaderValue},
+		},
+		Proto: RequestProtocol,
+	}
+	parsed, err := ParseRequest(req, tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Target != "198.51.100.1:443" {
+		t.Fatalf("target: got %q want 198.51.100.1:443 (opaque=%s)", parsed.Target, opaque)
 	}
 }

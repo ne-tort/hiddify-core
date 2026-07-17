@@ -1,5 +1,7 @@
 package netutil
 
+import "syscall"
+
 // MasqueSocketBufferBytes is the kernel snd/rcv target for MASQUE bulk sockets.
 const MasqueSocketBufferBytes = 4 << 20
 
@@ -22,6 +24,8 @@ func TuneMasqueUDPSocketBuffers(conn bufferConn) {
 // Do NOT SetReadBuffer on Linux TCP: SO_RCVBUF locks SOCK_RCVBUF_LOCK and can leave
 // rcv_ssthresh ≈32 KiB on WAN (~8 Mbit @30 ms) despite skmem rb=8 MiB. Rely on
 // tcp_rmem auto-tune for receive; only lock SO_SNDBUF (+ Nagle-on) for send bulk.
+// Also pins TCP_CONGESTION to bbr/cubic so host defaults (hybla) cannot own the underlay —
+// including dials that skip MasqueTCPDialerControl (auto_detect_interface → sing-box dialer).
 func TuneMasqueTCPSocketBuffers(conn bufferConn) {
 	if conn == nil {
 		return
@@ -29,5 +33,8 @@ func TuneMasqueTCPSocketBuffers(conn bufferConn) {
 	_ = conn.SetWriteBuffer(MasqueSocketBufferBytes)
 	if tc, ok := conn.(interface{ SetNoDelay(bool) error }); ok {
 		_ = tc.SetNoDelay(false)
+	}
+	if sc, ok := conn.(syscall.Conn); ok {
+		ApplyMasqueTCPCongestionBestEffort(sc)
 	}
 }

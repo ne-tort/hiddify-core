@@ -32,14 +32,15 @@ type MuxHost struct {
 	Dialer   net.Dialer
 	Authorize func(*http.Request) bool
 
-	ResolveTemplates      func(option.MasqueEndpointOptions) (string, string, string)
-	RelaxAuthority        func(option.MasqueEndpointOptions, string) bool
+	ResolveTemplates func(option.MasqueEndpointOptions) (string, string, string)
+	// RelaxAuthority / RequestForParse / AuthorityMatches are optional legacy hooks (nil-safe).
+	RelaxAuthority   func(option.MasqueEndpointOptions, string) bool
 	RequestForParse  func(*http.Request, *uritemplate.Template, bool) *http.Request
 	AuthorityMatches func(templateHost, requestHost string, relax bool) bool
-	OnUDPProxyCreated       func(*cudprelay.Proxy)
+	OnUDPProxyCreated func(*cudprelay.Proxy)
 }
 
-// BuildMuxHandler constructs the MASQUE server ServeMux (UDP/IP/TCP template paths).
+// BuildMuxHandler constructs the MASQUE server ServeMux (UDP/IP/TCP path templates).
 func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 	if err := cudprelay.ConfigureRelayPayloadPolicyFromConfig(host.Options.ConnectUDPRelayPayloadPolicy); err != nil {
 		return nil, E.Cause(err, "masque server connect-udp relay payload policy")
@@ -73,7 +74,14 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		parseR := host.RequestForParse(r, udpTemplate, host.RelaxAuthority(host.Options, TemplateFieldUDP))
+		parseR := r
+		if host.RequestForParse != nil {
+			relax := false
+			if host.RelaxAuthority != nil {
+				relax = host.RelaxAuthority(host.Options, TemplateFieldUDP)
+			}
+			parseR = host.RequestForParse(r, udpTemplate, relax)
+		}
 		req, err := cudpframe.ParseRequest(parseR, udpTemplate)
 		if err != nil {
 			var perr *cudpframe.RequestParseError
@@ -94,9 +102,8 @@ func BuildMuxHandler(host MuxHost, tcpRelay string) (http.Handler, error) {
 		_ = http.NewResponseController(w).EnableFullDuplex()
 		HandleConnectIPRequest(connectIPHandlerHost(host), w, r, ipTemplate)
 	})
-	tcpRelaxedAuthority := host.RelaxAuthority(host.Options, TemplateFieldTCP)
 	mux.HandleFunc(tcpPath, func(w http.ResponseWriter, r *http.Request) {
-		HandleTCPConnectRequest(tcpConnectHost(host), w, r, tcpTemplate, tcpRelaxedAuthority)
+		HandleTCPConnectRequest(tcpConnectHost(host), w, r, tcpTemplate, false)
 	})
 	return mux, nil
 }
@@ -128,8 +135,7 @@ func PathFromTemplate(raw string) string {
 }
 
 // SanitizeTemplatePathForHTTPMux maps URI-template path segments to patterns valid for
-// net/http.ServeMux (Go 1.22+): wildcard names must be simple identifiers; "{+target_host}"
-// from RFC 6570 reserved expansion is not accepted as a mux wildcard name.
+// net/http.ServeMux (Go 1.22+). Legacy `{+target_host}` is rewritten if present.
 func SanitizeTemplatePathForHTTPMux(path string) string {
 	path = strings.ReplaceAll(path, "{+target_host*}", "{target_host*}")
 	path = strings.ReplaceAll(path, "{+target_host:", "{target_host:")

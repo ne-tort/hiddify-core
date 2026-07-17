@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/adapter"
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
@@ -317,7 +316,7 @@ func TestServerModeValidation(t *testing.T) {
 		TemplateTCP: "https://masque.local/masque/tcp",
 	})
 	if err == nil {
-		t.Fatal("expected server mode template_tcp placeholder validation error")
+		t.Fatal("expected server mode to reject removed template_tcp")
 	}
 }
 
@@ -524,11 +523,11 @@ func TestEndpointMinimalClientAccepted(t *testing.T) {
 	if normalizeDataplaneMode(ep.options.Mode) != option.MasqueDataplaneDefault { t.Fatalf("expected default dataplane mode, got %q", ep.options.Mode) }
 }
 
-func TestEndpointClearsTemplateIPInDefaultMode(t *testing.T) {
-	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-connect-udp-strip-template-ip", option.MasqueEndpointOptions{
-		ServerOptions:   option.ServerOptions{Server: "example.com", ServerPort: 443},
-		HopPolicy:       option.MasqueHopPolicySingle,
-		TemplateIP:      "https://example.com:443/masque/ip",
+func TestEndpointClearsPathIPInDefaultMode(t *testing.T) {
+	epRaw, err := NewEndpoint(context.TODO(), nil, nil, "client-connect-udp-strip-path-ip", option.MasqueEndpointOptions{
+		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
+		HopPolicy:     option.MasqueHopPolicySingle,
+		PathIP:        "/.well-known/masque/ip",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -537,38 +536,38 @@ func TestEndpointClearsTemplateIPInDefaultMode(t *testing.T) {
 	if !ok || ep == nil {
 		t.Fatalf("expected *Endpoint, got %T", epRaw)
 	}
-	if strings.TrimSpace(ep.options.TemplateIP) != "" {
-		t.Fatalf("expected template_ip cleared for connect_udp, got %q", ep.options.TemplateIP)
+	if strings.TrimSpace(ep.options.PathIP) != "" {
+		t.Fatalf("expected path_ip cleared for default mode, got %q", ep.options.PathIP)
 	}
 }
 
-func TestEndpointRejectsClientTemplateTCPWithoutPlaceholders(t *testing.T) {
+func TestEndpointRejectsRemovedTemplateTCP(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "client-template-tcp", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		TemplateTCP:   "https://example.com/masque/tcp",
 	})
 	if err == nil {
-		t.Fatal("expected client mode template_tcp placeholder validation error")
+		t.Fatal("expected removed template_tcp to be rejected")
 	}
 }
 
-func TestEndpointRejectsClientTemplateUDPWithoutPlaceholders(t *testing.T) {
+func TestEndpointRejectsRemovedTemplateUDP(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "client-template-udp", option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:     option.MasqueHopPolicySingle,
 		TemplateUDP:   "https://example.com/masque/udp",
 	})
 	if err == nil {
-		t.Fatal("expected client mode template_udp placeholder validation error")
+		t.Fatal("expected removed template_udp to be rejected")
 	}
 }
 
-func TestEndpointRejectsServerTemplateUDPWithoutPlaceholders(t *testing.T) {
+func TestEndpointRejectsServerRemovedTemplateUDP(t *testing.T) {
 	_, err := NewEndpoint(context.TODO(), nil, nil, "server-template-udp", option.MasqueEndpointOptions{
-		Role: option.MasqueRoleServer,
-		Listen:      "127.0.0.1",
-		ListenPort:  8443,
+		Role:       option.MasqueRoleServer,
+		Listen:     "127.0.0.1",
+		ListenPort: 8443,
 		InboundTLS: &option.InboundTLSOptions{
 			Enabled:         true,
 			CertificatePath: "cert.pem",
@@ -577,25 +576,25 @@ func TestEndpointRejectsServerTemplateUDPWithoutPlaceholders(t *testing.T) {
 		TemplateUDP: "https://example.com/masque/udp",
 	})
 	if err == nil {
-		t.Fatal("expected server mode template_udp placeholder validation error")
+		t.Fatal("expected removed template_udp to be rejected")
 	}
 }
 
-func TestEndpointRejectsServerTemplatePathCollisions(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "server-template-path-collision", option.MasqueEndpointOptions{
-		Role: option.MasqueRoleServer,
-		Listen:      "127.0.0.1",
-		ListenPort:  8443,
+func TestEndpointRejectsServerPathCollisions(t *testing.T) {
+	_, err := NewEndpoint(context.TODO(), nil, nil, "server-path-collision", option.MasqueEndpointOptions{
+		Role:       option.MasqueRoleServer,
+		Listen:     "127.0.0.1",
+		ListenPort: 8443,
 		InboundTLS: &option.InboundTLSOptions{
 			Enabled:         true,
 			CertificatePath: "cert.pem",
 			KeyPath:         "key.pem",
 		},
-		TemplateUDP: "https://example.com/masque/shared/{target_host}/{target_port}",
-		TemplateIP:  "https://example.com/masque/shared/{target_host}/{target_port}",
+		PathUDP: "/shared",
+		PathIP:  "/shared",
 	})
 	if err == nil {
-		t.Fatal("expected server mode template path collision validation error")
+		t.Fatal("expected server path_udp/path_ip collision validation error")
 	}
 }
 
@@ -636,17 +635,16 @@ func TestEndpointScopeFieldsRequireConnectIPMode(t *testing.T) {
 	}
 }
 
-func TestEndpointScopeFieldsRequireTemplateIPFlowVariables(t *testing.T) {
-	_, err := NewEndpoint(context.TODO(), nil, nil, "scope-missing-template-vars", option.MasqueEndpointOptions{
+func TestEndpointScopeFieldsAllowedWithDefaultPathIP(t *testing.T) {
+	_, err := NewEndpoint(context.TODO(), nil, nil, "scope-default-path-ip", option.MasqueEndpointOptions{
 		ServerOptions:         option.ServerOptions{Server: "example.com", ServerPort: 443},
 		HopPolicy:             option.MasqueHopPolicySingle,
 		Mode:                  option.MasqueDataplaneConnectIP,
-		TemplateIP:            "https://example.com/masque/ip",
 		ConnectIPScopeTarget:  "10.0.0.0/8",
 		ConnectIPScopeIPProto: 17,
 	})
-	if err == nil {
-		t.Fatal("expected connect_ip_scope_* to require template_ip flow forwarding variables")
+	if err != nil {
+		t.Fatalf("expected connect_ip_scope_* with default path_ip: %v", err)
 	}
 }
 
@@ -669,7 +667,7 @@ func TestServerEndpointAuthorizeRequest(t *testing.T) {
 			ServerToken: "secret-token",
 		},
 	}
-	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/masque/tcp/example.com/443", nil)
+	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/.well-known/masque/tcp/example.com/443/", nil)
 	if ep.authorizeRequest(req) {
 		t.Fatal("expected unauthorized request without token header")
 	}
@@ -710,18 +708,18 @@ func TestAllowTCPPortPolicy(t *testing.T) {
 }
 
 func TestParseTCPTargetFromRequestRejectsMalformedTarget(t *testing.T) {
-	template, err := uritemplate.New("https://example.com/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://example.com/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
-	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/masque/tcp//bad", nil)
-	if _, _, err := server.ParseTCPTargetFromRequest(req, template, false, masqueRequestAuthorityMatchesTemplate); err == nil {
+	req, _ := http.NewRequest(http.MethodConnect, "https://example.com/.well-known/masque/tcp//bad/", nil)
+	if _, _, err := server.ParseTCPTargetFromRequest(req, template, false); err == nil {
 		t.Fatal("expected malformed target to be rejected")
 	}
 }
 
 func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *testing.T) {
-	template, err := uritemplate.New("https://example.com/masque/tcp/{target_host}/{target_port}")
+	template, err := uritemplate.New("https://example.com/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -730,8 +728,8 @@ func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *tes
 		t.Fatal(err)
 	}
 	req.Host = "example.com"
-	req.RequestURI = "masque/tcp/host.example/9443"
-	host, port, err := server.ParseTCPTargetFromRequest(req, template, false, masqueRequestAuthorityMatchesTemplate)
+	req.RequestURI = ".well-known/masque/tcp/host.example/9443/"
+	host, port, err := server.ParseTCPTargetFromRequest(req, template, false)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -740,26 +738,8 @@ func TestParseTCPTargetFromRequestSchemelessRequestURIWithoutLeadingSlash(t *tes
 	}
 }
 
-func TestMasqueServerShouldRelaxTCPAuthority(t *testing.T) {
-	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "::", ListenPort: 8443}, masqueTemplateFieldTCP) {
-		t.Fatal("expected relax for unspecified listen and empty template_tcp")
-	}
-	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "0.0.0.0"}, masqueTemplateFieldTCP) {
-		t.Fatal("expected relax for 0.0.0.0 listen")
-	}
-	if !masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: ""}, masqueTemplateFieldTCP) {
-		t.Fatal("expected relax for empty listen")
-	}
-	if masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "::", TemplateTCP: "https://x/x"}, masqueTemplateFieldTCP) {
-		t.Fatal("expected no relax when template_tcp set")
-	}
-	if masqueServerShouldRelaxTemplateAuthority(option.MasqueEndpointOptions{Listen: "192.0.2.1"}, masqueTemplateFieldTCP) {
-		t.Fatal("expected no relax for specific listen")
-	}
-}
-
-func TestParseTCPTargetFromRequestRelaxesAuthorityDefaultLoopbackTemplate(t *testing.T) {
-	template, err := uritemplate.New("https://127.0.0.1:8443/masque/tcp/{target_host}/{target_port}")
+func TestParseTCPTargetFromRequestPathOnlyIgnoresAuthorityMismatch(t *testing.T) {
+	template, err := uritemplate.New("https://127.0.0.1:8443/.well-known/masque/tcp/{target_host}/{target_port}/")
 	if err != nil {
 		t.Fatalf("template init: %v", err)
 	}
@@ -768,81 +748,25 @@ func TestParseTCPTargetFromRequestRelaxesAuthorityDefaultLoopbackTemplate(t *tes
 		t.Fatal(err)
 	}
 	req.Host = "203.0.113.1:8443"
-	req.RequestURI = "/masque/tcp/example.com/443"
-	host, port, err := server.ParseTCPTargetFromRequest(req, template, true, masqueRequestAuthorityMatchesTemplate)
+	req.RequestURI = "/.well-known/masque/tcp/example.com/443/"
+	host, port, err := server.ParseTCPTargetFromRequest(req, template, false)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if host != "example.com" || port != "443" {
 		t.Fatalf("unexpected target: host=%s port=%s", host, port)
 	}
-
-	req2, _ := http.NewRequest(http.MethodConnect, "", nil)
-	req2.Host = "203.0.113.1:8443"
-	req2.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := server.ParseTCPTargetFromRequest(req2, template, false, masqueRequestAuthorityMatchesTemplate); err == nil {
-		t.Fatal("expected strict mode to reject authority mismatch")
-	}
-
-	req3, _ := http.NewRequest(http.MethodConnect, "", nil)
-	req3.Host = "203.0.113.1:9443"
-	req3.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := server.ParseTCPTargetFromRequest(req3, template, true, masqueRequestAuthorityMatchesTemplate); err == nil {
-		t.Fatal("expected port mismatch to reject even when relaxed")
-	}
 }
 
-func TestParseTCPTargetFromRequestRelaxedRejectsNonLoopbackTemplateHost(t *testing.T) {
-	template, err := uritemplate.New("https://203.0.113.2:8443/masque/tcp/{target_host}/{target_port}")
-	if err != nil {
-		t.Fatalf("template init: %v", err)
-	}
-	req, _ := http.NewRequest(http.MethodConnect, "", nil)
-	req.Host = "203.0.113.1:8443"
-	req.RequestURI = "/masque/tcp/example.com/443"
-	if _, _, err := server.ParseTCPTargetFromRequest(req, template, true, masqueRequestAuthorityMatchesTemplate); err == nil {
-		t.Fatal("expected failure when template host is not loopback")
-	}
-}
-
-func TestParseConnectUDPRequestWildcardListenStrictAuthorityRejectsPublicHost(t *testing.T) {
+func TestParseConnectUDPRequestWildcardListenUsesDefaultAuthority(t *testing.T) {
 	t.Parallel()
 	opts := option.MasqueEndpointOptions{Listen: "0.0.0.0", ListenPort: 8443}
-	if !masqueServerShouldRelaxTemplateAuthority(opts, masqueTemplateFieldUDP) {
-		t.Fatal("expected relax for wildcard listen with empty template_udp")
-	}
 	udpRaw, _, _ := resolveMasqueServerTemplateURLs(opts)
-	template, err := uritemplate.New(udpRaw)
-	if err != nil {
-		t.Fatalf("template init: %v", err)
-	}
 	if !strings.Contains(udpRaw, "127.0.0.1:8443") {
 		t.Fatalf("default wildcard template authority: got %q", udpRaw)
 	}
-
-	req, err := http.NewRequest(http.MethodConnect, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Host = "203.0.113.1:8443"
-	req.Header.Set(":protocol", "connect-udp")
-	req.RequestURI = "/masque/udp/example.com/443"
-	if _, err := qmasque.ParseRequest(req, template); err == nil {
-		t.Fatal("expected strict parse to reject public :authority vs loopback template")
-	}
-
-	relaxed := masqueHTTPRequestForTemplateParse(req, template, true)
-	if _, err := qmasque.ParseRequest(relaxed, template); err != nil {
-		t.Fatalf("relaxed wildcard parse: %v", err)
-	}
-
-	reqPortMismatch, _ := http.NewRequest(http.MethodConnect, "", nil)
-	reqPortMismatch.Host = "203.0.113.1:9443"
-	reqPortMismatch.Header.Set(":protocol", "connect-udp")
-	reqPortMismatch.RequestURI = "/masque/udp/example.com/443"
-	relaxedPort := masqueHTTPRequestForTemplateParse(reqPortMismatch, template, true)
-	if _, err := qmasque.ParseRequest(relaxedPort, template); err == nil {
-		t.Fatal("expected port mismatch to reject even when relaxed")
+	if !strings.Contains(udpRaw, "/.well-known/masque/udp/") {
+		t.Fatalf("expected well-known udp path, got %q", udpRaw)
 	}
 }
 

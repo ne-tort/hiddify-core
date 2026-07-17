@@ -25,20 +25,19 @@ import (
 	"github.com/yosida95/uritemplate/v3"
 )
 
-func TestMasqueConnectIPRequestForParseRelaxedAuthority(t *testing.T) {
+func TestMasqueConnectIPRequestParseUsesPathOnly(t *testing.T) {
 	t.Parallel()
-	template := uritemplate.MustNew("https://127.0.0.1:4438/masque/ip")
-	req := makeConnectIPTestRequest(t, "https://127.0.0.1:4438/masque/ip")
+	template := uritemplate.MustNew("https://127.0.0.1:4438/.well-known/masque/ip")
+	req := makeConnectIPTestRequest(t, "https://127.0.0.1:4438/.well-known/masque/ip")
 	req.Host = "193.233.216.26:4438"
+	// Path-only templates still require matching authority for connect-ip-go ParseRequest;
+	// server RequestForParse is now identity — clients must use a matching path prefix.
 	if _, err := connectip.ParseRequest(req, template); err == nil {
-		t.Fatal("expected strict host mismatch without relaxed parse request")
+		t.Fatal("expected connect-ip-go ParseRequest to reject authority mismatch")
 	}
-	parseR := masqueHTTPRequestForTemplateParse(req, template, true)
-	if parseR.Host != "127.0.0.1:4438" {
-		t.Fatalf("relaxed parse host: got %q want 127.0.0.1:4438", parseR.Host)
-	}
-	if _, err := connectip.ParseRequest(parseR, template); err != nil {
-		t.Fatalf("relaxed parse request: %v", err)
+	req.Host = "127.0.0.1:4438"
+	if _, err := connectip.ParseRequest(req, template); err != nil {
+		t.Fatalf("path match with template authority: %v", err)
 	}
 }
 

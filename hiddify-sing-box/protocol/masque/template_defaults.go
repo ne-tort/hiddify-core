@@ -6,21 +6,13 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/option"
-	TM "github.com/sagernet/sing-box/transport/masque"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
-// defaultMasqueListenHTTPSAuthority is the https URL authority (for url.URL.Host, always host:port)
-// when template_udp / template_ip / template_tcp are omitted on the MASQUE server.
-//
-// masque-go and connect-ip-go require :authority (r.Host) to match the template host exactly
-// for UDP/IP paths. For TCP CONNECT-stream, when listen binds an unspecified address and
-// server_template_tcp is empty, the server mux uses loopback in the default template URL only
-// as a stable placeholder; parseTCPTargetFromRequest relaxes :authority vs that placeholder
-// (same port, template host loopback) so clients can dial the public address after TLS.
-//
-// Wildcard binds (0.0.0.0, ::) map to 127.0.0.1 in the default template authority. For UDP/IP,
-// deployments where clients dial a different hostname or public IP while listen is wildcard
-// still need explicit template_udp / template_ip so template Host matches client :authority.
+// defaultMasqueListenHTTPSAuthority builds https URL authority for server path templates.
+// Wildcard listen maps to 127.0.0.1 for a stable template URL; path matching does not require
+// client :authority to equal this host (path-only parse).
 func defaultMasqueListenHTTPSAuthority(listen string, listenPort uint16) string {
 	h := normalizeListenHostForMasqueTemplate(listen)
 	if listenPort == 0 {
@@ -56,36 +48,33 @@ func stripIPv6BracketsForParse(s string) string {
 	return s
 }
 
-func masqueListenBindsUnspecified(listen string) bool {
-	h := strings.TrimSpace(listen)
-	if h == "" {
-		return true
-	}
-	hostForParse := stripIPv6BracketsForParse(h)
-	if i := strings.IndexByte(hostForParse, '%'); i >= 0 {
-		hostForParse = hostForParse[:i]
-	}
-	if ip := net.ParseIP(hostForParse); ip != nil {
-		return ip.IsUnspecified()
-	}
-	return false
-}
-
-// resolveMasqueServerTemplateURLs returns full https URI templates for the MASQUE server.
-// Empty template_* fields get default /masque/… paths; path-only values (leading /) get https://authority prefixed.
+// resolveMasqueServerTemplateURLs returns full https URI templates for the MASQUE server mux.
 func resolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, tcp string) {
 	auth := defaultMasqueListenHTTPSAuthority(o.Listen, o.ListenPort)
-	udp = TM.ExpandMasqueHTTPSURI(o.TemplateUDP, auth)
-	if udp == "" {
-		udp = "https://" + auth + "/masque/udp/{+target_host}/{target_port}"
+	cfg := pathbuild.ConfigFromOptions(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation)
+	udpT, ipT, tcpT, err := pathbuild.BuildTemplates(auth, cfg, "", 0, false)
+	if err != nil {
+		return "", "", ""
 	}
-	ip = TM.ExpandMasqueHTTPSURI(o.TemplateIP, auth)
-	if ip == "" {
-		ip = "https://" + auth + "/masque/ip"
+	return udpT.Raw(), ipT.Raw(), tcpT.Raw()
+}
+
+func resolveMasqueServerPathConfig(o option.MasqueEndpointOptions) (pathbuild.Config, error) {
+	if err := pathbuild.ValidateEndpointPaths(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation); err != nil {
+		return pathbuild.Config{}, err
 	}
-	tcp = TM.ExpandMasqueHTTPSURI(o.TemplateTCP, auth)
-	if tcp == "" {
-		tcp = "https://" + auth + "/masque/tcp/{+target_host}/{target_port}"
+	return pathbuild.ConfigFromOptions(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation), nil
+}
+
+func mustResolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, tcp string, err error) {
+	auth := defaultMasqueListenHTTPSAuthority(o.Listen, o.ListenPort)
+	cfg, err := resolveMasqueServerPathConfig(o)
+	if err != nil {
+		return "", "", "", err
 	}
-	return udp, ip, tcp
+	udpT, ipT, tcpT, err := pathbuild.BuildTemplates(auth, cfg, "", 0, false)
+	if err != nil {
+		return "", "", "", E.Cause(err, "masque server path templates")
+	}
+	return udpT.Raw(), ipT.Raw(), tcpT.Raw(), nil
 }

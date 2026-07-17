@@ -46,8 +46,8 @@ func TestExtendedConnectUploadBodyMasqueUploadBufferedShallowPipe(t *testing.T) 
 	if got := body.MasqueUploadBuffered(); got != 0 {
 		t.Fatalf("idle buffered=%d want 0", got)
 	}
-	if got := body.UploadPipeCap(); got != connectUploadShallowPipeBuf {
-		t.Fatalf("cap=%d want %d", got, connectUploadShallowPipeBuf)
+	if got := body.UploadPipeCap(); got != DefaultUploadPipeBytes {
+		t.Fatalf("cap=%d want %d", got, DefaultUploadPipeBytes)
 	}
 	_, _ = pw.Write([]byte("xy"))
 	if got := body.MasqueUploadBuffered(); got != 2 {

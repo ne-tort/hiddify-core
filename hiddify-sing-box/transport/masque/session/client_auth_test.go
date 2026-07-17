@@ -2,31 +2,73 @@ package session
 
 import (
 	"crypto/tls"
+	"net/http"
 	"testing"
 )
 
-func TestWarpConnectStreamBearerToken(t *testing.T) {
-	if got := WarpConnectStreamBearerToken(ClientOptions{ServerToken: "  s  "}); got != "s" {
-		t.Fatalf("server token trim: got %q", got)
+func TestSetAuthorizationHeaderOmitsWhenNoCredentials(t *testing.T) {
+	h := make(http.Header)
+	SetAuthorizationHeader(h, ClientOptions{})
+	if h.Get("Authorization") != "" {
+		t.Fatalf("expected no Authorization, got %q", h.Get("Authorization"))
 	}
-	if got := WarpConnectStreamBearerToken(ClientOptions{WarpMasqueDeviceBearerToken: " d "}); got != "d" {
-		t.Fatalf("device bearer fallback: got %q", got)
+}
+
+func TestSetAuthorizationHeaderBearerFromServerToken(t *testing.T) {
+	h := make(http.Header)
+	SetAuthorizationHeader(h, ClientOptions{ServerToken: "tok"})
+	if got := h.Get("Authorization"); got != "Bearer tok" {
+		t.Fatalf("got %q", got)
 	}
-	if got := WarpConnectStreamBearerToken(ClientOptions{ServerToken: "a", WarpMasqueDeviceBearerToken: "b"}); got != "a" {
-		t.Fatalf("prefer server_token: got %q", got)
-	}
-	warpCert := tls.Certificate{Certificate: [][]byte{[]byte{0x30, 0x03, 0x01, 0x02, 0x03}}}
-	if got := WarpConnectStreamBearerToken(ClientOptions{
-		WarpMasqueClientCert:        warpCert,
-		WarpMasqueDeviceBearerToken: "device-token",
-	}); got != "" {
-		t.Fatalf("WARP mTLS must omit device bearer on connect-stream; got %q", got)
-	}
-	if got := WarpConnectStreamBearerToken(ClientOptions{
-		WarpMasqueClientCert:        warpCert,
-		ServerToken:                 "srv",
+}
+
+func TestSetAuthorizationHeaderBasicWinsOverBearer(t *testing.T) {
+	h := make(http.Header)
+	SetAuthorizationHeader(h, ClientOptions{
+		ClientBasicUsername:         "u",
+		ClientBasicPassword:         "p",
+		ServerToken:                 "tok",
 		WarpMasqueDeviceBearerToken: "device",
-	}); got != "srv" {
-		t.Fatalf("server_token must win with WARP cert; got %q", got)
+	})
+	want := ClientBasicAuthHeader("u", "p")
+	if got := h.Get("Authorization"); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestWarpConnectStreamBearerTokenOmitsDeviceWhenMTLS(t *testing.T) {
+	opts := ClientOptions{
+		WarpMasqueDeviceBearerToken: "device-token",
+		WarpMasqueClientCert: tls.Certificate{
+			Certificate: [][]byte{[]byte("dummy-der")},
+		},
+	}
+	if got := WarpConnectStreamBearerToken(opts); got != "" {
+		t.Fatalf("expected empty bearer with mTLS cert, got %q", got)
+	}
+	h := make(http.Header)
+	SetAuthorizationHeader(h, opts)
+	if h.Get("Authorization") != "" {
+		t.Fatalf("expected no Authorization with mTLS+device token, got %q", h.Get("Authorization"))
+	}
+}
+
+func TestWarpConnectStreamBearerTokenServerTokenWins(t *testing.T) {
+	opts := ClientOptions{
+		ServerToken:                 "explicit",
+		WarpMasqueDeviceBearerToken: "device",
+		WarpMasqueClientCert: tls.Certificate{
+			Certificate: [][]byte{[]byte("dummy-der")},
+		},
+	}
+	if got := WarpConnectStreamBearerToken(opts); got != "explicit" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestWarpConnectStreamBearerTokenDeviceWhenNoMTLS(t *testing.T) {
+	opts := ClientOptions{WarpMasqueDeviceBearerToken: "device"}
+	if got := WarpConnectStreamBearerToken(opts); got != "device" {
+		t.Fatalf("got %q", got)
 	}
 }

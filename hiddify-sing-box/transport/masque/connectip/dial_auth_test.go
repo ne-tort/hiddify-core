@@ -1,28 +1,71 @@
 package connectip
 
 import (
+	"crypto/tls"
 	"testing"
 )
 
-func TestConnectIPDialAuthFromCredentialsBearerOnly(t *testing.T) {
-	auth := DialAuthFromCredentials("  tok  ", "", "")
-	if auth.BearerToken != "tok" {
-		t.Fatalf("bearer=%q want tok", auth.BearerToken)
-	}
-	if auth.ExtraRequestHeaders != nil {
-		t.Fatal("expected nil extra headers for bearer-only auth")
+func TestDialAuthFromInputOmitsWhenEmpty(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{})
+	if auth.BearerToken != "" || auth.ExtraRequestHeaders != nil {
+		t.Fatalf("expected empty auth, got %+v", auth)
 	}
 }
 
-func TestConnectIPDialAuthFromCredentialsBasicOverridesBearer(t *testing.T) {
-	auth := DialAuthFromCredentials("secret", " user ", "pass")
+func TestDialAuthFromInputServerToken(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{ServerToken: "tok"})
+	if auth.BearerToken != "tok" {
+		t.Fatalf("got %q", auth.BearerToken)
+	}
+}
+
+func TestDialAuthFromInputBasicWins(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{
+		ServerToken:                 "tok",
+		ClientBasicUsername:         "u",
+		ClientBasicPassword:         "p",
+		WarpMasqueDeviceBearerToken: "device",
+	})
 	if auth.BearerToken != "" {
-		t.Fatalf("bearer should be cleared, got %q", auth.BearerToken)
+		t.Fatalf("basic must clear bearer, got %q", auth.BearerToken)
 	}
-	if auth.ExtraRequestHeaders == nil {
-		t.Fatal("expected basic auth header")
+	if got := auth.ExtraRequestHeaders.Get("Authorization"); !stringsHasPrefix(got, "Basic ") {
+		t.Fatalf("got %q", got)
 	}
-	if got := auth.ExtraRequestHeaders.Get("Authorization"); got != "Basic dXNlcjpwYXNz" {
-		t.Fatalf("authorization=%q want Basic dXNlcjpwYXNz", got)
+}
+
+func TestDialAuthFromInputOmitsDeviceWhenMTLS(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{
+		WarpMasqueDeviceBearerToken: "device",
+		WarpMasqueClientCert: tls.Certificate{
+			Certificate: [][]byte{[]byte("der")},
+		},
+	})
+	if auth.BearerToken != "" {
+		t.Fatalf("expected omit device bearer with mTLS, got %q", auth.BearerToken)
 	}
+}
+
+func TestDialAuthFromInputDeviceWhenNoMTLS(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{WarpMasqueDeviceBearerToken: "device"})
+	if auth.BearerToken != "device" {
+		t.Fatalf("got %q", auth.BearerToken)
+	}
+}
+
+func TestDialAuthFromInputServerTokenWinsOverMTLS(t *testing.T) {
+	auth := DialAuthFromInput(DialAuthInput{
+		ServerToken: "explicit",
+		WarpMasqueDeviceBearerToken: "device",
+		WarpMasqueClientCert: tls.Certificate{
+			Certificate: [][]byte{[]byte("der")},
+		},
+	})
+	if auth.BearerToken != "explicit" {
+		t.Fatalf("got %q", auth.BearerToken)
+	}
+}
+
+func stringsHasPrefix(s, prefix string) bool {
+	return len(s) >= len(prefix) && s[:len(prefix)] == prefix
 }

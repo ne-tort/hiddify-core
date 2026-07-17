@@ -14,8 +14,9 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/diag"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
-	"github.com/sagernet/sing-box/transport/masque/httpx"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/httpx"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
 )
@@ -43,6 +44,8 @@ type H2OverlayDialConfig struct {
 	WarpConnectIPProtocol string
 	QUICDialCandidateHost string
 	ResolveDialAddr       func() string
+	// PathObfuscationKey is the baked-in key when path_obfuscation=true (nil = plaintext host/port).
+	PathObfuscationKey []byte
 
 	ErrTemplateNotConfigured error
 }
@@ -100,14 +103,7 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 	if template == nil {
 		return nil, cfg.ErrTemplateNotConfigured
 	}
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		return nil, fmt.Errorf("masque h2: bad target: %w", err)
-	}
-	expanded, err := template.Expand(uritemplate.Values{
-		"target_host": uritemplate.String(host),
-		"target_port": uritemplate.String(port),
-	})
+	expanded, err := pathbuild.ExpandHostPortAddr(template, pathbuild.ObfuscationKey(cfg.PathObfuscationKey), target)
 	if err != nil {
 		return nil, fmt.Errorf("masque h2: expand template: %w", err)
 	}

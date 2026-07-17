@@ -14,22 +14,45 @@ const (
 	masqueBulkFlushMaxDelay   = 3 * time.Millisecond
 )
 
-func masqueShouldBulkFlushNow(pendingAck int, sawEOF bool) bool {
+func masqueEffectiveFlushThreshold(override int) int {
+	if override > 0 {
+		return override
+	}
+	return masqueBulkFlushThresholdBytes
+}
+
+func masqueEffectiveFlushMinPending(threshold int) int {
+	if threshold <= 0 {
+		threshold = masqueBulkFlushThresholdBytes
+	}
+	// Scale min pending with threshold so Chrome-like 16 KiB flush is not blocked by 64 KiB floor.
+	minP := threshold / 4
+	if minP < 1 {
+		minP = 1
+	}
+	if minP > masqueBulkFlushMinPending {
+		minP = masqueBulkFlushMinPending
+	}
+	return minP
+}
+
+func masqueShouldBulkFlushNow(pendingAck int, sawEOF bool, flushThreshold int) bool {
 	if pendingAck <= 0 {
 		return false
 	}
 	if sawEOF {
 		return true
 	}
-	return pendingAck >= masqueBulkFlushThresholdBytes
+	return pendingAck >= masqueEffectiveFlushThreshold(flushThreshold)
 }
 
-func masqueShouldBulkFlushDeadline(pendingAck int, firstPendingAt time.Time) bool {
+func masqueShouldBulkFlushDeadline(pendingAck int, firstPendingAt time.Time, flushThreshold int) bool {
 	if pendingAck <= 0 || firstPendingAt.IsZero() {
 		return false
 	}
+	thr := masqueEffectiveFlushThreshold(flushThreshold)
 	// Below MinPending, paced CF upload must not Flush micro-chunks every MaxDelay.
-	if pendingAck < masqueBulkFlushMinPending {
+	if pendingAck < masqueEffectiveFlushMinPending(thr) {
 		return false
 	}
 	return time.Since(firstPendingAt) >= masqueBulkFlushMaxDelay

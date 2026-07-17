@@ -635,13 +635,13 @@ func TestBuildTemplatesDefaultsServerPortTo443WhenZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildTemplates failed with implicit server port: %v", err)
 	}
-	if got := udp.Raw(); !strings.Contains(got, "https://example.com:443/masque/udp/") {
+	if got := udp.Raw(); !strings.Contains(got, "https://example.com:443/.well-known/masque/udp/") {
 		t.Fatalf("unexpected udp template default server_port wiring: %s", got)
 	}
-	if got := ip.Raw(); got != "https://example.com:443/masque/ip" {
+	if got := ip.Raw(); got != "https://example.com:443/.well-known/masque/ip" {
 		t.Fatalf("unexpected ip template default server_port wiring: %s", got)
 	}
-	if got := tcp.Raw(); !strings.Contains(got, "https://example.com:443/masque/tcp/") {
+	if got := tcp.Raw(); !strings.Contains(got, "https://example.com:443/.well-known/masque/tcp/") {
 		t.Fatalf("unexpected tcp template default server_port wiring: %s", got)
 	}
 }
@@ -675,13 +675,13 @@ func TestBuildTemplatesUsesEntryHopServerWithDefaultPortWhenEntryPortZero(t *tes
 	if err != nil {
 		t.Fatalf("buildTemplates failed for zero-port entry hop: %v", err)
 	}
-	if got := udp.Raw(); !strings.Contains(got, "https://entry.example:443/masque/udp/") {
+	if got := udp.Raw(); !strings.Contains(got, "https://entry.example:443/.well-known/masque/udp/") {
 		t.Fatalf("unexpected udp template entry-hop/default-port wiring: %s", got)
 	}
-	if got := ip.Raw(); got != "https://entry.example:443/masque/ip" {
+	if got := ip.Raw(); got != "https://entry.example:443/.well-known/masque/ip" {
 		t.Fatalf("unexpected ip template entry-hop/default-port wiring: %s", got)
 	}
-	if got := tcp.Raw(); !strings.Contains(got, "https://entry.example:443/masque/tcp/") {
+	if got := tcp.Raw(); !strings.Contains(got, "https://entry.example:443/.well-known/masque/tcp/") {
 		t.Fatalf("unexpected tcp template entry-hop/default-port wiring: %s", got)
 	}
 }
@@ -690,14 +690,14 @@ func TestBuildTemplatesApplyConnectIPFlowScope(t *testing.T) {
 	_, ip, _, err := buildTemplates(ClientOptions{
 		Server:                "example.com",
 		ServerPort:            443,
-		TemplateIP:            "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP: "/.well-known/masque/ip",
 		ConnectIPScopeTarget:  "10.0.0.0/8",
 		ConnectIPScopeIPProto: 6,
 	})
 	if err != nil {
 		t.Fatalf("buildTemplates with scope failed: %v", err)
 	}
-	if got := ip.Raw(); got != "https://example.com/masque/ip/10.0.0.0%2F8/6" {
+	if got := ip.Raw(); got != "https://example.com:443/.well-known/masque/ip/10.0.0.0%2F8/6/" {
 		t.Fatalf("unexpected expanded IP template: %s", got)
 	}
 }
@@ -725,15 +725,17 @@ func TestApplyConnectIPFlowScopeRejectsUnsupportedFlowVariable(t *testing.T) {
 	}
 }
 
-func TestBuildTemplatesRejectScopeWithoutTemplateVars(t *testing.T) {
-	_, _, _, err := buildTemplates(ClientOptions{
+func TestBuildTemplatesAcceptsScopeWithDefaultPathIP(t *testing.T) {
+	_, ip, _, err := buildTemplates(ClientOptions{
 		Server:               "example.com",
 		ServerPort:           443,
-		TemplateIP:           "https://example.com/masque/ip",
 		ConnectIPScopeTarget: "10.0.0.0/8",
 	})
-	if err == nil {
-		t.Fatal("expected scope without flow-forwarding template variables to fail fast")
+	if err != nil {
+		t.Fatalf("expected scope with default path_ip: %v", err)
+	}
+	if got := ip.Raw(); got != "https://example.com:443/.well-known/masque/ip/10.0.0.0%2F8/0/" {
+		t.Fatalf("unexpected scoped IP template: %s", got)
 	}
 }
 
@@ -741,7 +743,7 @@ func TestBuildTemplatesRejectInvalidScopeTarget(t *testing.T) {
 	_, _, _, err := buildTemplates(ClientOptions{
 		Server:               "example.com",
 		ServerPort:           443,
-		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP: "/.well-known/masque/ip",
 		ConnectIPScopeTarget: "not-a-prefix",
 	})
 	if err == nil {
@@ -2351,14 +2353,15 @@ func TestCoreSessionListenPacketUDPDialDoesNotBlockLifecycleLock(t *testing.T) {
 }
 
 
-func TestBuildTemplatesRejectsInvalidTCPTemplateURL(t *testing.T) {
+func TestBuildTemplatesRejectsInvalidConnectIPScope(t *testing.T) {
 	_, _, _, err := buildTemplates(ClientOptions{
-		Server:      "example.com",
-		ServerPort:  443,
-		TemplateTCP: "https://example.com/%zz/{target_host}/{target_port}",
+		Server:               "example.com",
+		ServerPort:           443,
+		PathIP:               "/.well-known/masque/ip",
+		ConnectIPScopeTarget: "not-a-prefix",
 	})
 	if err == nil {
-		t.Fatal("expected invalid TCP template URL to fail fast")
+		t.Fatal("expected invalid connect_ip_scope_target to fail fast")
 	}
 }
 
@@ -2383,7 +2386,7 @@ func TestDialContextMasqueOrDirectFallsBackToDirectTCP(t *testing.T) {
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
-			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
@@ -2412,7 +2415,7 @@ func TestDialContextMasqueOrDirectDoesNotFallbackOnAuth(t *testing.T) {
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
-			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 			TCPMode:        option.MasqueTCPModeMasqueOrDirect,
 			FallbackPolicy: option.MasqueFallbackPolicyDirectExplicit,
 		},
@@ -2436,7 +2439,7 @@ func TestDialContextStrictMasqueDoesNotFallbackToDirect(t *testing.T) {
 			Options: ClientOptions{
 			Server:         "masque.local",
 			ServerPort:     443,
-			TemplateTCP:    "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 			TCPMode:        option.MasqueTCPModeStrictMasque,
 			FallbackPolicy: option.MasqueFallbackPolicyStrict,
 		},
@@ -2458,7 +2461,7 @@ func TestDialTCPStreamAuthAndPolicyStatusesMapToAuthClass(t *testing.T) {
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
-					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+					PathTCP: "/.well-known/masque/tcp",
 				},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					if req.Method != http.MethodConnect {
@@ -2492,7 +2495,7 @@ func TestDialTCPStreamNonAuthStatusMapsToDialClass(t *testing.T) {
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
-					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+					PathTCP: "/.well-known/masque/tcp",
 				},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					return &http.Response{
@@ -2526,7 +2529,7 @@ func TestDialTCPStreamRetryableRoundTripErrorsKeepDialClassAndBudget(t *testing.
 			Options: ClientOptions{
 					Server:      "masque.local",
 					ServerPort:  443,
-					TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+					PathTCP: "/.well-known/masque/tcp",
 				},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 					attempts++
@@ -2554,7 +2557,7 @@ func TestDialTCPStreamRetryExhaustedPreservesLastRoundTripCause(t *testing.T) {
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2583,7 +2586,7 @@ func TestDialTCPStreamNonRetryableRoundTripErrorDoesNotRetryAndKeepsDialClass(t 
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2618,7 +2621,7 @@ func TestDialTCPStreamContextCancelDuringRetryBackoffStopsFurtherAttempts(t *tes
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2651,7 +2654,7 @@ func TestDialTCPStreamPreAdvanceHopJoinsCauseWhenCanceledAtChainEnd(t *testing.T
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			return nil, handshakeErr
@@ -2702,7 +2705,7 @@ func TestDialTCPStreamOuterLoopJoinsContextCauseWhenCanceledDuringRoundTrip(t *t
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			close(entered)
@@ -2736,7 +2739,7 @@ func TestDialTCPStreamContextCanceledBeforeFirstRoundTripStopsWithoutAttempt(t *
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2766,7 +2769,7 @@ func TestDialTCPStreamContextDeadlineExceededBeforeFirstRoundTripStopsWithoutAtt
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2796,7 +2799,7 @@ func TestDialTCPStreamContextDeadlineExceededDuringRetryBackoffStopsFurtherAttem
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2824,7 +2827,7 @@ func TestDialTCPStreamContextCanceledRoundTripPreservesCauseWithoutRetry(t *test
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2852,7 +2855,7 @@ func TestDialTCPStreamContextDeadlineExceededRoundTripPreservesCauseWithoutRetry
 			Options: ClientOptions{
 			Server:      "masque.local",
 			ServerPort:  443,
-			TemplateTCP: "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 		},
 			TCPRoundTripper: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			attempts++
@@ -2879,7 +2882,7 @@ func TestDialTCPStreamRelayPhaseDeadlineExceededMapsToDialClass(t *testing.T) {
 			Options: ClientOptions{
 			Server:                   "masque.local",
 			ServerPort:               443,
-			TemplateTCP:              "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 			TCPDial: func(context.Context, string, string) (net.Conn, error) {
 				return nil, errors.New("unexpected tcp dial")
@@ -2925,7 +2928,7 @@ func TestDialTCPStreamRelayPhaseCanceledMapsToDialClass(t *testing.T) {
 			Options: ClientOptions{
 			Server:                   "masque.local",
 			ServerPort:               443,
-			TemplateTCP:              "https://masque.local/masque/tcp/{target_host}/{target_port}",
+			PathTCP: "/.well-known/masque/tcp",
 			MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 			TCPDial: func(context.Context, string, string) (net.Conn, error) {
 				return nil, errors.New("unexpected tcp dial")

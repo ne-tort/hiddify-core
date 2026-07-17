@@ -12,6 +12,7 @@ import (
 
 	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -52,6 +53,7 @@ func init() {
 const (
 	flowVarTarget  = "target"
 	flowVarIPProto = "ipproto"
+	flowVarOpaque  = "opaque"
 )
 
 // Request is the parsed CONNECT-IP request returned from ParseRequest.
@@ -146,6 +148,28 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("connect-ip: request does not match flow forwarding template"),
 		}
 	}
+	opaqueValue := strings.TrimSpace(values.Get(flowVarOpaque).String())
+	if opaqueValue != "" {
+		targetStr, ipproto, openErr := pathbuild.OpenIPScope(pathbuild.ActiveKey(true), opaqueValue)
+		if openErr != nil {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("connect-ip: opaque path: %w", openErr),
+			}
+		}
+		target, err := netip.ParsePrefix(targetStr)
+		if err != nil {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        fmt.Errorf("%w: %s", ErrInvalidFlowForwardingTarget, targetStr),
+			}
+		}
+		request.Target = target
+		request.HasTarget = true
+		request.IPProto = ipproto
+		request.HasIPProto = true
+		return request, nil
+	}
 	targetValue := strings.TrimSpace(values.Get(flowVarTarget).String())
 	if targetValue != "" {
 		target, err := netip.ParsePrefix(targetValue)
@@ -179,7 +203,7 @@ func validateFlowForwardingTemplateVars(template *uritemplate.Template) error {
 	}
 	for _, variable := range template.Varnames() {
 		switch variable {
-		case flowVarTarget, flowVarIPProto:
+		case flowVarTarget, flowVarIPProto, flowVarOpaque:
 		default:
 			return ErrFlowForwardingUnsupported
 		}

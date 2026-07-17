@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/quic-go/quic-go"
+	"github.com/sagernet/sing-box/transport/masque/h2"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -42,20 +43,22 @@ type CapabilitySet struct {
 	ConnectTCP      bool
 }
 
-// ClientOptions configures a MASQUE client session (templates, TLS, hops, WARP fields).
+// ClientOptions configures a MASQUE client session (paths, TLS, hops, WARP fields).
 type ClientOptions struct {
 	Tag    string
 	Server string
 	// DialPeer, when non-empty, is the UDP/QUIC packet destination host (often a literal CF edge IP).
-	// Masque HTTPS templates and default URIs continue to use Server (typically a hostname).
+	// Masque HTTPS path templates continue to use Server (typically a hostname).
 	DialPeer              string
 	ServerPort            uint16
-	DataplaneMode             string
-	TemplateUDP               string
-	TemplateIP            string
+	DataplaneMode         string
+	PathUDP            string
+	PathTCP            string
+	PathIP             string
+	PathObfuscation    bool // baked-in key when true
+	H2Tuning              h2.Tuning
 	ConnectIPScopeTarget  string
 	ConnectIPScopeIPProto uint8
-	TemplateTCP           string
 	FallbackPolicy        string
 	TCPMode               string
 	ServerToken           string
@@ -67,7 +70,7 @@ type ClientOptions struct {
 	// MasqueTCPDialTLS performs client TLS over TCP for HTTP/2 overlay (stdlib or uTLS via sing-box).
 	MasqueTCPDialTLS         func(ctx context.Context, raw net.Conn, nextProtos []string, serverAddr string) (net.Conn, error)
 	// CongestionControl mirrors option.MasqueEndpointOptions.congestion_control (new_reno|cubic|bbr).
-	CongestionControl string
+	CongestionControl        string
 	ConnectIPDatagramCeiling uint32
 	Hops                     []HopOptions
 	QUICDial                 QUICDialFunc
@@ -83,8 +86,6 @@ type ClientOptions struct {
 	WarpMasqueDeviceBearerToken string
 	ProfileLocalIPv4            string
 	ProfileLocalIPv6            string
-	// TCPIPv6PathBracket mirrors option.MasqueEndpointOptions.tcp_ipv6_path_bracket (CONNECT-stream path only).
-	TCPIPv6PathBracket bool
 }
 
 // QUICDialFunc dials a QUIC connection for HTTP/3 MASQUE overlays.

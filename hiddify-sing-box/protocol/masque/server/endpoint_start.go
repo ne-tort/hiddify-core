@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/auth"
 	TM "github.com/sagernet/sing-box/transport/masque"
+	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
 // EndpointLifecycleHooks wires ServerEndpoint atomic state for background serve goroutines.
@@ -75,9 +76,11 @@ func RunMasqueEndpointStart(cfg MasqueEndpointStartConfig) (MasqueEndpointStartR
 		ListenPort:        cfg.Options.ListenPort,
 		HTTP3TLS:          tlsOutcome.HTTP3TLS,
 		CollateralTLS:     tlsOutcome.CollateralTLS,
+		RealityServer:     tlsOutcome.RealityServer,
 		H3QUICConfig:      TM.MasqueHTTPServerQUICConfig(cfg.Options.CongestionControl),
 		CongestionControl: cfg.Options.CongestionControl,
 		EnableH3Datagrams: true,
+		H2Tuning:          mh2.TuningFromOption(cfg.Options.H2Tuning),
 		ValidateUDP: func(pc net.PacketConn) error {
 			return TM.ValidateQUICTransportPacketConn(pc, "server_http3_listen")
 		},

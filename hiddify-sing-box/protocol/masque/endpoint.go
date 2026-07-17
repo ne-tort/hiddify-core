@@ -6,6 +6,9 @@ import (
 	CM "github.com/sagernet/sing-box/common/masque"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/masque/server"
+	masquetls "github.com/sagernet/sing-box/protocol/masque/tls"
+	mh2 "github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
@@ -77,6 +80,15 @@ func rejectRemovedMasqueClientFields(o option.MasqueEndpointOptions) error {
 	if o.QUICExperimental != nil {
 		return E.New("masque: removed field quic_experimental; QUIC knobs are baked in (FinalizeConnectStreamQUICConfig)")
 	}
+	if strings.TrimSpace(o.TemplateUDP) != "" || strings.TrimSpace(o.TemplateTCP) != "" || strings.TrimSpace(o.TemplateIP) != "" {
+		return E.New("masque: removed fields template_udp/template_tcp/template_ip; use path_udp/path_tcp/path_ip (fixed prefix only)")
+	}
+	if o.TCPIPv6PathBracket {
+		return E.New("masque: removed field tcp_ipv6_path_bracket; path uses RFC percent-encoding")
+	}
+	if strings.TrimSpace(o.H2Profile) != "" {
+		return E.New("masque: removed field h2_profile; use h2_tuning (one baked default + numeric overrides; durations in ms)")
+	}
 	return nil
 }
 
@@ -137,13 +149,55 @@ func validateCongestionControl(cc string) error {
 	}
 }
 
+func validateH2Tuning(t *option.MasqueH2TuningOptions) error {
+	if t == nil {
+		return nil
+	}
+	const (
+		minFrame = 16 << 10
+		maxWin   = 512 << 20
+		maxMs    = 24 * 60 * 60 * 1000 // 24h
+	)
+	if t.MaxReadFrameSize != 0 && (t.MaxReadFrameSize < minFrame || t.MaxReadFrameSize > mh2.MaxReadFrameSizeLimit) {
+		return E.New("masque: h2_tuning.max_read_frame_size must be in [16384, 16777215]")
+	}
+	if t.StreamRecvWindow > maxWin || t.ConnRecvWindow > maxWin {
+		return E.New("masque: h2_tuning stream/conn recv window too large (max 512MiB)")
+	}
+	if t.UploadBufferPerConnection > maxWin || t.UploadBufferPerStream > maxWin {
+		return E.New("masque: h2_tuning upload buffer too large (max 512MiB)")
+	}
+	if t.UploadFlushBytes > maxWin || t.UploadPipeBytes > maxWin {
+		return E.New("masque: h2_tuning upload flush/pipe too large")
+	}
+	if t.DownloadBufferBytes > maxWin || t.DownloadFlushMinBytes > maxWin {
+		return E.New("masque: h2_tuning download buffer/flush_min too large")
+	}
+	if t.ReadIdleTimeout > maxMs || t.PingTimeout > maxMs || t.DownloadFillWait > maxMs || t.DownloadFillMaxWall > maxMs {
+		return E.New("masque: h2_tuning timeout/wait ms too large")
+	}
+	// Compare against resolved defaults so a single override cannot violate pairs.
+	p := mh2.Resolve(mh2.TuningFromOption(t))
+	if p.DownloadFlushMinBytes > p.DownloadBufferBytes {
+		return E.New("masque: h2_tuning.download_flush_min_bytes must be ≤ download_buffer_bytes (after defaults)")
+	}
+	if p.DownloadFillWait > p.DownloadFillMaxWall {
+		return E.New("masque: h2_tuning.download_fill_wait must be ≤ download_fill_max_wall (ms, after defaults)")
+	}
+	return nil
+}
+
+func masqueH2Tuning(t *option.MasqueH2TuningOptions) mh2.Tuning {
+	return mh2.TuningFromOption(t)
+}
+
 // applyMasqueClientMasqueDefaults runs before validateMasqueOptions for client role only.
 func applyMasqueClientMasqueDefaults(o option.MasqueEndpointOptions) option.MasqueEndpointOptions {
 	if normalizeRole(o.Role) == option.MasqueRoleServer {
 		return o
 	}
-	if !masqueUsesConnectIPDataplane(o.Mode) && strings.TrimSpace(o.TemplateIP) != "" {
-		o.TemplateIP = ""
+	if !masqueUsesConnectIPDataplane(o.Mode) && strings.TrimSpace(o.PathIP) != "" {
+		o.PathIP = ""
 	}
 	if o.OutboundTLS == nil {
 		o.OutboundTLS = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
@@ -176,6 +230,9 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque: invalid http_layer: ", rawHTTPLayer)
 	}
 	if err := validateCongestionControl(o.CongestionControl); err != nil {
+		return err
+	}
+	if err := validateH2Tuning(o.H2Tuning); err != nil {
 		return err
 	}
 	if o.HTTPLayerCacheTTL.Build() > 0 && httpLayerNorm != option.MasqueHTTPLayerAuto {
@@ -272,23 +329,16 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		if !masqueUsesConnectIPDataplane(o.Mode) {
 			return E.New("masque: connect_ip_scope_* requires mode connect_ip")
 		}
-		tip := strings.TrimSpace(o.TemplateIP)
-		if tip == "" {
-			return E.New("masque: connect_ip scope requires non-empty template_ip with {target} and {ipproto}")
-		}
-		if !strings.Contains(tip, "{target}") || !strings.Contains(tip, "{ipproto}") {
-			return E.New("masque: connect_ip scope requires template_ip to include {target} and {ipproto}")
-		}
 	}
 
 	switch dm {
 	case option.MasqueDataplaneDefault:
-		if strings.TrimSpace(o.TemplateIP) != "" {
-			return E.New("masque: mode default cannot set template_ip")
+		if strings.TrimSpace(o.PathIP) != "" {
+			return E.New("masque: mode default cannot set path_ip")
 		}
 	case option.MasqueDataplaneConnectIP:
-		if strings.TrimSpace(o.TemplateUDP) != "" {
-			return E.New("masque: mode connect_ip cannot set template_udp")
+		if strings.TrimSpace(o.PathUDP) != "" {
+			return E.New("masque: mode connect_ip cannot set path_udp")
 		}
 	}
 
@@ -296,21 +346,7 @@ func validateMasqueOptions(o option.MasqueEndpointOptions) error {
 		return E.New("masque: mtu must be between 1280 and 65535 when set")
 	}
 
-	// Non-empty UDP/TCP/IP templates must carry required placeholders (client contract).
-	tudp := strings.TrimSpace(o.TemplateUDP)
-	if tudp != "" {
-		if !strings.Contains(tudp, "{target_host}") || !strings.Contains(tudp, "{target_port}") {
-			return E.New("masque: template_udp must include {target_host} and {target_port}")
-		}
-	}
-	ttcp := strings.TrimSpace(o.TemplateTCP)
-	if ttcp != "" {
-		if !strings.Contains(ttcp, "{target_host}") || !strings.Contains(ttcp, "{target_port}") {
-			return E.New("masque: template_tcp must include {target_host} and {target_port}")
-		}
-	}
-
-	return nil
+	return pathbuild.ValidateEndpointPaths(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation)
 }
 
 func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
@@ -320,8 +356,15 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if err := validateCongestionControl(o.CongestionControl); err != nil {
 		return err
 	}
-	if strings.TrimSpace(o.HTTPLayer) != "" {
-		return E.New("masque server: http_layer is client-only")
+	if err := validateH2Tuning(o.H2Tuning); err != nil {
+		return err
+	}
+	// Server http_layer: empty = dual H3+H2 (legacy). Explicit "h2" = H2-only listen path
+	// (required for Reality inbound). auto/h3 rejected — Reality/H3 dual is out of scope.
+	if hl := strings.TrimSpace(o.HTTPLayer); hl != "" {
+		if !strings.EqualFold(hl, option.MasqueHTTPLayerH2) {
+			return E.New("masque server: http_layer must be empty or h2 (got ", hl, ")")
+		}
 	}
 	if o.HTTPLayerCacheTTL.Build() != 0 {
 		return E.New("masque server: http_layer_cache_ttl is client-only")
@@ -343,6 +386,10 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	}
 	if o.InboundTLS == nil {
 		return E.New("masque server: tls is required")
+	}
+	// Reality priority early (same rules as PrepareInboundTLS / NewRealityServer).
+	if err := masquetls.ValidateInboundTLSRealityPriority(o.InboundTLS, normalizeHTTPLayer(o.HTTPLayer)); err != nil {
+		return err
 	}
 	if strings.TrimSpace(o.TransportMode) != "" {
 		return E.New("masque server: removed field transport_mode")
@@ -375,32 +422,29 @@ func validateMasqueServerOptions(o option.MasqueEndpointOptions) error {
 	if err := validateMasqueServerAuthOptions(o); err != nil {
 		return err
 	}
-	udpExp, _, tcpExp := resolveMasqueServerTemplateURLs(o)
-	if strings.TrimSpace(o.TemplateUDP) != "" &&
-		(!strings.Contains(udpExp, "{target_host}") || !strings.Contains(udpExp, "{target_port}")) {
-		return E.New("masque server: template_udp must include {target_host} and {target_port}")
-	}
-	if tcpRelay == option.MasqueTCPRelayTemplate && strings.TrimSpace(o.TemplateTCP) != "" &&
-		(!strings.Contains(tcpExp, "{target_host}") || !strings.Contains(tcpExp, "{target_port}")) {
-		return E.New("masque server: template_tcp must include {target_host} and {target_port}")
+	if err := pathbuild.ValidateEndpointPaths(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation); err != nil {
+		return err
 	}
 	return validateMasqueServerMuxPaths(o)
 }
 
 func validateMasqueServerMuxPaths(o option.MasqueEndpointOptions) error {
-	udpRaw, ipRaw, tcpRaw := resolveMasqueServerTemplateURLs(o)
+	udpRaw, ipRaw, tcpRaw, err := mustResolveMasqueServerTemplateURLs(o)
+	if err != nil {
+		return err
+	}
 	paths := []string{
 		server.PathFromTemplate(udpRaw),
 		server.PathFromTemplate(ipRaw),
+		server.PathFromTemplate(tcpRaw),
 	}
-	paths = append(paths, server.PathFromTemplate(tcpRaw))
 	seen := make(map[string]struct{}, len(paths))
 	for _, p := range paths {
 		if p == "/" {
-			return E.New("masque server: template paths must not collapse to '/'")
+			return E.New("masque server: path prefixes must not collapse to '/'")
 		}
 		if _, ok := seen[p]; ok {
-			return E.New("masque server: template paths must be unique")
+			return E.New("masque server: path prefixes must be unique")
 		}
 		seen[p] = struct{}{}
 	}

@@ -28,6 +28,7 @@ func ConnectRequest(ctx context.Context, url string, serverHost string, setAuth 
 	req.Proto = "HTTP/3"
 	req.ProtoMajor = 3
 	req.Header = make(http.Header)
+	req.Header.Set(":protocol", "connect-tcp")
 	if setAuth != nil {
 		setAuth(req.Header)
 	}

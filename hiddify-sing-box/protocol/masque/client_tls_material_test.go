@@ -7,23 +7,24 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsH3Rejected(t *testing.T) {
+func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsH3NotRejected(t *testing.T) {
+	// uTLS is stripped on QUIС apply; shared configs must not fail validate.
 	err := validateMasqueOutboundTLSWithHTTPLayer(&option.OutboundTLSOptions{
 		Enabled: true,
 		UTLS:    &option.OutboundUTLSOptions{Enabled: true},
 	}, option.MasqueHTTPLayerH3)
-	if err == nil || !strings.Contains(err.Error(), "utls") {
-		t.Fatalf("expected utls+h3 error, got %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsAutoRejected(t *testing.T) {
+func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsAutoOK(t *testing.T) {
 	err := validateMasqueOutboundTLSWithHTTPLayer(&option.OutboundTLSOptions{
 		Enabled: true,
 		UTLS:    &option.OutboundUTLSOptions{Enabled: true},
 	}, option.MasqueHTTPLayerAuto)
-	if err == nil || !strings.Contains(err.Error(), "auto") {
-		t.Fatalf("expected utls+auto error, got %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -75,10 +76,19 @@ func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsPresentButDisabledOKOnH3(t *
 	}
 }
 
-func TestValidateMasqueOutboundTLSWithHTTPLayer_utlsUnknownHTTPLayer(t *testing.T) {
+func TestValidateMasqueOutboundTLSWithHTTPLayer_autoALPNRequiresBoth(t *testing.T) {
 	err := validateMasqueOutboundTLSWithHTTPLayer(&option.OutboundTLSOptions{
 		Enabled: true,
-		UTLS:    &option.OutboundUTLSOptions{Enabled: true},
+		ALPN:    []string{"h3"},
+	}, option.MasqueHTTPLayerAuto)
+	if err == nil || !strings.Contains(err.Error(), "h2") {
+		t.Fatalf("expected auto alpn to require h2, got %v", err)
+	}
+}
+
+func TestValidateMasqueOutboundTLSWithHTTPLayer_bogusHTTPLayerALPN(t *testing.T) {
+	err := validateMasqueOutboundTLSWithHTTPLayer(&option.OutboundTLSOptions{
+		Enabled: true,
 	}, "bogus-layer")
 	if err == nil || !strings.Contains(err.Error(), "invalid") {
 		t.Fatalf("expected invalid http_layer error, got %v", err)

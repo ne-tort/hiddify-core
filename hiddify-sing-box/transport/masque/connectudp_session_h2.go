@@ -10,6 +10,7 @@ import (
 
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	"github.com/yosida95/uritemplate/v3"
 	"golang.org/x/net/http2"
@@ -26,6 +27,7 @@ func (s *coreSession) newMasqueClientH2Transport() (*http2.Transport, error) {
 		DialHostCandidates: cudph2.H2DialHostCandidates(strings.TrimSpace(s.Options.WarpConnectIPProtocol), dialOverrideHost, alternateDialHost),
 		TCPDial:            s.Options.TCPDial,
 		MasqueTCPDialTLS:   s.Options.MasqueTCPDialTLS,
+		H2Tuning:           s.Options.H2Tuning,
 	})
 }
 
@@ -83,6 +85,7 @@ func (s *coreSession) h2OverlayDialConfig() cudph2.H2OverlayDialConfig {
 		ResolveDialAddr: func() string {
 			return masqueDialTarget(host, portNum)
 		},
+		PathObfuscationKey:       pathbuild.ActiveKey(opts.PathObfuscation),
 		ErrTemplateNotConfigured: session.ErrConnectUDPTemplateNotConfigured,
 	}
 }

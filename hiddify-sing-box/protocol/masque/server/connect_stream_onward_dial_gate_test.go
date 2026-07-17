@@ -20,7 +20,7 @@ import (
 // TestGATEConnectStreamOnwardDialSerialIPv4Fallback (H2-SERIAL-FALLBACK) — unreachable v6 then v4 OK → 200.
 func TestGATEConnectStreamOnwardDialSerialIPv4Fallback(t *testing.T) {
 	t.Parallel()
-	template := uritemplate.MustNew("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template := uritemplate.MustNew("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -49,9 +49,10 @@ func TestGATEConnectStreamOnwardDialSerialIPv4Fallback(t *testing.T) {
 		Authorize:        func(*http.Request) bool { return true },
 		AuthorityMatches: func(_, _ string, _ bool) bool { return true },
 	}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/tcp/example.test/"+strconv.Itoa(port), io.NopCloser(strings.NewReader("")))
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/tcp/example.test/"+strconv.Itoa(port)+"/", io.NopCloser(strings.NewReader("")))
 	req.Host = "masque.local"
-	req.RequestURI = "https://masque.local/masque/tcp/example.test/" + strconv.Itoa(port)
+	req.Header.Set(":protocol", "connect-tcp")
+	req.RequestURI = "https://masque.local/.well-known/masque/tcp/example.test/"+strconv.Itoa(port)+"/"
 	rec := httptest.NewRecorder()
 
 	handler.HandleConnectStream(host, rec, req, template, true)
@@ -63,7 +64,7 @@ func TestGATEConnectStreamOnwardDialSerialIPv4Fallback(t *testing.T) {
 // TestGATEConnectStreamOnwardDialAAAAFirstUsesIPv4 (H1-AAAA-FIRST) — old first-addr v6-only path would 502.
 func TestGATEConnectStreamOnwardDialAAAAFirstUsesIPv4(t *testing.T) {
 	t.Parallel()
-	template := uritemplate.MustNew("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template := uritemplate.MustNew("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -97,8 +98,9 @@ func TestGATEConnectStreamOnwardDialAAAAFirstUsesIPv4(t *testing.T) {
 		Authorize:        func(*http.Request) bool { return true },
 		AuthorityMatches: func(_, _ string, _ bool) bool { return true },
 	}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/tcp/yandex.ru/"+strconv.Itoa(port), io.NopCloser(strings.NewReader("")))
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/tcp/yandex.ru/"+strconv.Itoa(port)+"/", io.NopCloser(strings.NewReader("")))
 	req.Host = "masque.local"
+	req.Header.Set(":protocol", "connect-tcp")
 	rec := httptest.NewRecorder()
 
 	handler.HandleConnectStream(host, rec, req, template, true)
@@ -110,7 +112,7 @@ func TestGATEConnectStreamOnwardDialAAAAFirstUsesIPv4(t *testing.T) {
 // TestGATEConnectStreamOnwardDialAllFail502 — all resolved addrs unreachable → 502.
 func TestGATEConnectStreamOnwardDialAllFail502(t *testing.T) {
 	t.Parallel()
-	template := uritemplate.MustNew("https://masque.local/masque/tcp/{target_host}/{target_port}")
+	template := uritemplate.MustNew("https://masque.local/.well-known/masque/tcp/{target_host}/{target_port}/")
 	handler := cstrm.Handler{
 		Hooks: cstrm.Hooks{
 			ResolveTCPTargetAddrs: func(_ context.Context, _ string, _ bool) ([]netip.Addr, error) {
@@ -127,8 +129,9 @@ func TestGATEConnectStreamOnwardDialAllFail502(t *testing.T) {
 		Authorize:        func(*http.Request) bool { return true },
 		AuthorityMatches: func(_, _ string, _ bool) bool { return true },
 	}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/tcp/unreachable.test/8443", io.NopCloser(strings.NewReader("")))
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/tcp/unreachable.test/8443/", io.NopCloser(strings.NewReader("")))
 	req.Host = "masque.local"
+	req.Header.Set(":protocol", "connect-tcp")
 	rec := httptest.NewRecorder()
 
 	handler.HandleConnectStream(host, rec, req, template, true)

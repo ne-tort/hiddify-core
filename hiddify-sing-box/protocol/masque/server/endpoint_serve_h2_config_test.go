@@ -16,7 +16,7 @@ func TestEndpointServeUsesH2BulkConfigDirect(t *testing.T) {
 	if strings.Contains(endpointServeSource, "MasqueBulkHTTP2ServerConfig") {
 		t.Fatal("endpoint_serve must not use masque.MasqueBulkHTTP2ServerConfig bridge")
 	}
-	if !strings.Contains(endpointServeSource, "mh2.BulkHTTP2ServerConfig()") {
-		t.Fatal("endpoint_serve must call h2.BulkHTTP2ServerConfig directly")
+	if !strings.Contains(endpointServeSource, "mh2.BulkHTTP2ServerConfigResolved") {
+		t.Fatal("endpoint_serve must call h2.BulkHTTP2ServerConfigResolved (h2_tuning path)")
 	}
 }

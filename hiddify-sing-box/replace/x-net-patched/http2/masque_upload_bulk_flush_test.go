@@ -11,17 +11,26 @@ func TestMasqueUploadBulkFlushThresholdBaked(t *testing.T) {
 	if masqueBulkFlushThresholdBytes != 256<<10 {
 		t.Fatalf("threshold=%d want 256KiB", masqueBulkFlushThresholdBytes)
 	}
-	if !masqueShouldBulkFlushNow(256<<10, false) {
-		t.Fatal("expected flush at threshold")
+	if !masqueShouldBulkFlushNow(256<<10, false, 0) {
+		t.Fatal("expected flush at default threshold")
 	}
-	if masqueShouldBulkFlushNow(32<<10, false) {
-		t.Fatal("expected defer below threshold")
+	if masqueShouldBulkFlushNow(32<<10, false, 0) {
+		t.Fatal("expected defer below default threshold")
 	}
-	if !masqueShouldBulkFlushNow(1, true) {
+	if !masqueShouldBulkFlushNow(16<<10, false, 16<<10) {
+		t.Fatal("expected flush at chrome-like override")
+	}
+	if masqueShouldBulkFlushNow(8<<10, false, 16<<10) {
+		t.Fatal("expected defer below chrome override")
+	}
+	if !masqueShouldBulkFlushNow(1, true, 0) {
 		t.Fatal("expected flush on EOF with pending")
 	}
-	if !masqueShouldBulkFlushDeadline(64<<10, time.Now().Add(-masqueBulkFlushMaxDelay)) {
+	if !masqueShouldBulkFlushDeadline(64<<10, time.Now().Add(-masqueBulkFlushMaxDelay), 0) {
 		t.Fatal("expected flush after max delay")
+	}
+	if !masqueShouldBulkFlushDeadline(4<<10, time.Now().Add(-masqueBulkFlushMaxDelay), 16<<10) {
+		t.Fatal("expected scaled min-pending deadline flush")
 	}
 }
 

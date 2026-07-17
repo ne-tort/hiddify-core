@@ -12,11 +12,30 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func TestClientTLSConfigSetsHTTP2NextProto(t *testing.T) {
+func TestClientTLSConfigDefaultEmptyIsH2(t *testing.T) {
+	cfg := ClientTLSConfig(nil, "example.com")
+	require.Equal(t, []string{http2.NextProtoTLS}, cfg.NextProtos)
+	require.Equal(t, "example.com", cfg.ServerName)
+}
+
+func TestClientTLSConfigPreservesOrderWhenContainsH2(t *testing.T) {
+	base := &tls.Config{ServerName: "example.com", NextProtos: []string{"h2", "http/1.1"}}
+	cfg := ClientTLSConfig(base, "ignored")
+	require.Equal(t, []string{"h2", "http/1.1"}, cfg.NextProtos)
+	require.Equal(t, "example.com", cfg.ServerName)
+}
+
+func TestClientTLSConfigH3OnlyStripsToH2(t *testing.T) {
+	// Inherited QUIС/session list: strip h3 on TCP, ensure h2.
 	base := &tls.Config{ServerName: "example.com", NextProtos: []string{"h3"}}
 	cfg := ClientTLSConfig(base, "ignored")
 	require.Equal(t, []string{http2.NextProtoTLS}, cfg.NextProtos)
-	require.Equal(t, "example.com", cfg.ServerName)
+}
+
+func TestClientTLSConfigStripsH3FromDualList(t *testing.T) {
+	base := &tls.Config{ServerName: "example.com", NextProtos: []string{"h2", "h3"}}
+	cfg := ClientTLSConfig(base, "ignored")
+	require.Equal(t, []string{"h2"}, cfg.NextProtos)
 }
 
 func TestNewClientTransportSetsDisableCompression(t *testing.T) {
@@ -29,6 +48,20 @@ func TestNewClientTransportSetsDisableCompression(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, tr.DisableCompression, "H2 MASQUE dataplane must not negotiate gzip")
+}
+
+func TestNewClientTransportDefaultSetsFrameAndPing(t *testing.T) {
+	tr, err := NewClientTransport(ClientDialConfig{
+		TLSConfig:          ClientTLSConfig(nil, "example.com"),
+		DialHostCandidates: []string{""},
+		TCPDial: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("dial not used")
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint32(DefaultMaxReadFrameSize), tr.MaxReadFrameSize)
+	require.Equal(t, DefaultReadIdleTimeout, tr.ReadIdleTimeout)
+	require.Equal(t, DefaultPingTimeout, tr.PingTimeout)
 }
 
 func TestEnsureTransportCachedReusesSlot(t *testing.T) {

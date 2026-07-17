@@ -210,6 +210,72 @@ func TestBuildConfigMasqueDoesNotInjectTunServerIPBypassRule(t *testing.T) {
 	}
 }
 
+func TestBuildConfigPreservesMasqueRealityOutboundTLS(t *testing.T) {
+	const input = `{
+  "endpoints": [
+    {
+      "type": "masque",
+      "tag": "masque-reality-h2",
+      "server": "wiki.ai-qwerty.ru",
+      "server_port": 443,
+      "server_token": "MsRqR7tyX5rH2w443K9mNpQ2vL",
+      "http_layer": "h2",
+      "template_udp": "/masque/udp/{target_host}/{target_port}",
+      "template_tcp": "/masque/tcp/{target_host}/{target_port}",
+      "outbound_tls": {
+        "enabled": true,
+        "server_name": "www.allizom.org",
+        "alpn": ["h2", "http/1.1"],
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "JwHKF9DzSvmSxmIk_6QuiYJh3h3Xx_vfk00hvgwdvmg",
+          "short_id": "e7f0a91b"
+        }
+      }
+    }
+  ]
+}`
+
+	ctx := libbox.BaseContext(nil)
+	options, err := ReadSingOptions(ctx, &ReadOptions{Content: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := BuildConfig(ctx, DefaultHiddifyOptions(), &ReadOptions{Options: options})
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := marshalSingleEndpoint(t, ctx, built)
+	if endpoint["http_layer"] != "h2" {
+		t.Fatalf("http_layer: %v", endpoint["http_layer"])
+	}
+	otls, ok := endpoint["outbound_tls"].(map[string]any)
+	if !ok {
+		t.Fatalf("outbound_tls missing: %#v", endpoint["outbound_tls"])
+	}
+	if otls["server_name"] != "www.allizom.org" {
+		t.Fatalf("server_name: %v", otls["server_name"])
+	}
+	utls, ok := otls["utls"].(map[string]any)
+	if !ok || utls["enabled"] != true || utls["fingerprint"] != "chrome" {
+		t.Fatalf("utls not preserved: %#v", otls["utls"])
+	}
+	reality, ok := otls["reality"].(map[string]any)
+	if !ok || reality["enabled"] != true {
+		t.Fatalf("reality not preserved: %#v", otls["reality"])
+	}
+	if reality["public_key"] != "JwHKF9DzSvmSxmIk_6QuiYJh3h3Xx_vfk00hvgwdvmg" {
+		t.Fatalf("public_key: %v", reality["public_key"])
+	}
+	if reality["short_id"] != "e7f0a91b" {
+		t.Fatalf("short_id: %v", reality["short_id"])
+	}
+	if endpoint["server_token"] != "MsRqR7tyX5rH2w443K9mNpQ2vL" {
+		t.Fatalf("server_token: %v", endpoint["server_token"])
+	}
+}
+
 func marshalSingleEndpoint(t *testing.T, ctx context.Context, options interface {
 	MarshalJSONContext(context.Context) ([]byte, error)
 }) map[string]any {

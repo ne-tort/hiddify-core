@@ -15,6 +15,8 @@ import (
 type StartupTLSOutcome struct {
 	HTTP3TLS      *tls.Config
 	CollateralTLS *tls.Config
+	// RealityServer is set for H2-only Reality inbound (no STDConfig / no QUIС).
+	RealityServer btls.ServerConfig
 	SingServerTLS btls.ServerConfig
 }
 
@@ -27,6 +29,7 @@ type StartupTLSConfig struct {
 }
 
 // PrepareMasqueStartupTLS builds HTTP/3 and collateral TLS for server startup.
+// Reality → H2-only path: SingServerTLS / RealityServer only; HTTP3TLS and CollateralTLS nil.
 func PrepareMasqueStartupTLS(cfg StartupTLSConfig) (*StartupTLSOutcome, error) {
 	inTLS, err := PrepareInboundTLS(cfg.InboundTLS, cfg.HTTPLayer, false)
 	if err != nil {
@@ -46,6 +49,20 @@ func PrepareMasqueStartupTLS(cfg StartupTLSConfig) (*StartupTLSOutcome, error) {
 	if err := srvCfg.Start(); err != nil {
 		return nil, E.Cause(err, "masque server tls start")
 	}
+
+	reality := inTLS.Reality != nil && inTLS.Reality.Enabled
+	if reality {
+		// Force h2 ALPN on Reality hello-id path.
+		protos := srvCfg.NextProtos()
+		if len(protos) == 0 {
+			srvCfg.SetNextProtos([]string{"h2", "http/1.1"})
+		}
+		return &StartupTLSOutcome{
+			RealityServer: srvCfg,
+			SingServerTLS: srvCfg,
+		}, nil
+	}
+
 	baseTLS, err := srvCfg.STDConfig()
 	if err != nil {
 		_ = srvCfg.Close()

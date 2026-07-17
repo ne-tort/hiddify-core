@@ -11,9 +11,9 @@ func TestCoreClientFactoryExplicitNewSession(t *testing.T) {
 	sess, err := (CoreClientFactory{}).NewSession(context.Background(), ClientOptions{
 		Server:        "edge.example",
 		ServerPort:    443,
-		TemplateUDP:   "https://edge.example/masque?h={target_host}&p={target_port}",
-		TemplateIP:    "https://edge.example/cf-connect-ip",
-		TemplateTCP:   "https://edge.example/masque/tcp?h={target_host}&p={target_port}",
+		PathUDP: "/.well-known/masque/udp",
+		PathIP: "/.well-known/masque/ip",
+		PathTCP: "/.well-known/masque/tcp",
 		DataplaneMode: option.MasqueDataplaneConnectIP,
 	})
 	if err != nil {

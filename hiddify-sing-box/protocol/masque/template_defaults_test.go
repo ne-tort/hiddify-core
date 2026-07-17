@@ -35,16 +35,16 @@ func TestResolveMasqueServerTemplateURLsPathOnly(t *testing.T) {
 	o := option.MasqueEndpointOptions{
 		Listen:     "127.0.0.1",
 		ListenPort: 8443,
-		TemplateIP: "/masque/ip",
+		PathIP:     "/masque/ip",
 	}
 	udp, ip, tcp := resolveMasqueServerTemplateURLs(o)
-	if want := "https://127.0.0.1:8443/masque/udp/{+target_host}/{target_port}"; udp != want {
+	if want := "https://127.0.0.1:8443/.well-known/masque/udp/{target_host}/{target_port}/"; udp != want {
 		t.Fatalf("udp: got %q want %q", udp, want)
 	}
 	if want := "https://127.0.0.1:8443/masque/ip"; ip != want {
 		t.Fatalf("ip: got %q want %q", ip, want)
 	}
-	if want := "https://127.0.0.1:8443/masque/tcp/{+target_host}/{target_port}"; tcp != want {
+	if want := "https://127.0.0.1:8443/.well-known/masque/tcp/{target_host}/{target_port}/"; tcp != want {
 		t.Fatalf("tcp: got %q want %q", tcp, want)
 	}
 }

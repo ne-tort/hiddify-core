@@ -21,6 +21,7 @@ import (
 	cipclient "github.com/sagernet/sing-box/transport/masque/connectip/client"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -188,11 +189,18 @@ func (h connectIPAttemptDialHost) TCPRoundTripper(defaultTransport http.RoundTri
 }
 
 func (h connectIPAttemptDialHost) H2DialParams() cip.H2DialParams {
-	auth := cip.DialAuthFromCredentials(h.s.Options.ServerToken, h.s.Options.ClientBasicUsername, h.s.Options.ClientBasicPassword)
+	auth := cip.DialAuthFromInput(cip.DialAuthInput{
+		ServerToken:                 h.s.Options.ServerToken,
+		ClientBasicUsername:         h.s.Options.ClientBasicUsername,
+		ClientBasicPassword:         h.s.Options.ClientBasicPassword,
+		WarpMasqueDeviceBearerToken: h.s.Options.WarpMasqueDeviceBearerToken,
+		WarpMasqueClientCert:        h.s.Options.WarpMasqueClientCert,
+	})
 	return cip.H2DialParams{
 		BearerToken:           auth.BearerToken,
 		WarpConnectIPProtocol: h.s.Options.WarpConnectIPProtocol,
 		ExtraRequestHeaders:   auth.ExtraRequestHeaders,
+		PathObfuscationKey:    pathbuild.ActiveKey(h.s.Options.PathObfuscation),
 	}
 }
 
@@ -221,12 +229,19 @@ func (h connectIPAttemptDialHost) OpenH3ClientConn(ctx context.Context) (*http3.
 }
 
 func (h connectIPAttemptDialHost) DialH3WithBootstrap(ctx context.Context, clientConn *http3.ClientConn) (*connectip.Conn, error) {
-	auth := cip.DialAuthFromCredentials(h.s.Options.ServerToken, h.s.Options.ClientBasicUsername, h.s.Options.ClientBasicPassword)
+	auth := cip.DialAuthFromInput(cip.DialAuthInput{
+		ServerToken:                 h.s.Options.ServerToken,
+		ClientBasicUsername:         h.s.Options.ClientBasicUsername,
+		ClientBasicPassword:         h.s.Options.ClientBasicPassword,
+		WarpMasqueDeviceBearerToken: h.s.Options.WarpMasqueDeviceBearerToken,
+		WarpMasqueClientCert:        h.s.Options.WarpMasqueClientCert,
+	})
 	return cip.DialH3TunnelWithBootstrap(ctx, clientConn, h.s.TemplateIP, cip.H3DialParams{
 		Tag:                   h.s.Options.Tag,
 		BearerToken:           auth.BearerToken,
 		WarpConnectIPProtocol: h.s.Options.WarpConnectIPProtocol,
 		ExtraRequestHeaders:   auth.ExtraRequestHeaders,
+		PathObfuscationKey:    pathbuild.ActiveKey(h.s.Options.PathObfuscation),
 	}, h.s.connectIPBootstrapParams())
 }
 

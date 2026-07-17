@@ -47,7 +47,7 @@ func TestClassifyMalformedScopedTargetClassPair(t *testing.T) {
 	actualClass, resultClass, err := ClassifyMalformedScopedTargetClassPair(ClientOptions{
 		Server:               "example.com",
 		ServerPort:           443,
-		TemplateIP:           "https://example.com/masque/ip/{target}/{ipproto}",
+		PathIP: "/.well-known/masque/ip",
 		ConnectIPScopeTarget: "not-a-prefix",
 	}, TemplateURIHooks{})
 	if err == nil {

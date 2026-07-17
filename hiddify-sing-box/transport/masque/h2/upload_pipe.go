@@ -5,7 +5,8 @@ import (
 	"sync"
 )
 
-const connectUploadShallowPipeBuf = 256 << 10 // = bulk flush quantum; empty-pipe Flush sends full BDP batch
+// ConnectUploadShallowPipeBuf is the prod CONNECT upload pipe capacity (exported for gates).
+func ConnectUploadShallowPipeBuf() int { return DefaultUploadPipeBytes }
 
 // uploadPipe is a bounded buffer between CONNECT upload producers and http2 writeRequestBody.
 type uploadPipe struct {
@@ -21,7 +22,7 @@ type uploadPipe struct {
 
 func newUploadPipe(cap int) *uploadPipe {
 	if cap <= 0 {
-		cap = connectUploadShallowPipeBuf
+		cap = DefaultUploadPipeBytes
 	}
 	p := &uploadPipe{cap: cap}
 	p.cond.L = &p.mu
@@ -34,9 +35,15 @@ type ConnectUploadPipeWriter interface {
 	MasqueUploadWriterOpen() bool
 }
 
-// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (256 KiB).
+// NewConnectUploadPipe returns reader/writer for Extended CONNECT upload (DefaultUploadPipeBytes).
 func NewConnectUploadPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
-	p := newUploadPipe(connectUploadShallowPipeBuf)
+	return NewConnectUploadPipeSized(0)
+}
+
+// NewConnectUploadPipeSized sizes the CONNECT upload pipe. cap≤0 uses DefaultUploadPipeBytes.
+// Prefer an explicit cap from resolved h2_tuning (CONNECT-stream dial hooks).
+func NewConnectUploadPipeSized(cap int) (io.ReadCloser, ConnectUploadPipeWriter) {
+	p := newUploadPipe(cap)
 	return &uploadPipeReader{p: p}, &uploadPipeWriter{p: p}
 }
 

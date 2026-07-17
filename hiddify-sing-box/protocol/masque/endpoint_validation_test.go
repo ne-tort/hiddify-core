@@ -34,10 +34,10 @@ func TestValidateMasqueOptionsRejectsUdpTimeout(t *testing.T) {
 func TestValidateMasqueConnectUDPIPIllegal(t *testing.T) {
 	opts := option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "x", ServerPort: 443},
-		TemplateIP:    "https://x/ip",
+		PathIP:        "/.well-known/masque/ip",
 	}
 	if err := validateMasqueOptions(opts); err == nil {
-		t.Fatal("expected error for template_ip with connect_udp")
+		t.Fatal("expected error for path_ip with default mode")
 	}
 }
 
@@ -337,7 +337,7 @@ func TestValidateMasqueConnectStreamClientContract(t *testing.T) {
 func optionMasqueClient(templateTCP string) option.MasqueEndpointOptions {
 	return option.MasqueEndpointOptions{
 		ServerOptions: option.ServerOptions{Server: "masque.example", ServerPort: 443},
-		TemplateTCP:   templateTCP,
+		PathTCP: templateTCP,
 	}
 }
 

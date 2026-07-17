@@ -15,8 +15,8 @@ import (
 	strmconn "github.com/sagernet/sing-box/transport/masque/stream/conn"
 )
 
-// H2ConnectStreamProto is the :protocol header value for Extended CONNECT over HTTP/2 (RFC 8441).
-const H2ConnectStreamProto = "HTTP/2"
+// H2ConnectStreamProto is the :protocol value for Extended CONNECT TCP (draft-ietf-httpbis-connect-tcp).
+const H2ConnectStreamProto = "connect-tcp"
 
 // DialH2LogInput carries CONNECT-stream H2 attempt logging fields (no secrets).
 type DialH2LogInput struct {

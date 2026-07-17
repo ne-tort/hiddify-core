@@ -12,21 +12,21 @@ type TCPConnectHost = cstrm.Host
 
 var defaultConnectStreamHandler = cstrm.Handler{
 	Hooks: cstrm.Hooks{
-		ResolveTCPTarget:      ResolveTCPTargetForDial,
-		ResolveTCPTargetAddrs: ResolveTCPTargetAddrsForDial,
-		AllowTCPPort:          AllowTCPPort,
-		OnwardTCPDialAddr:     OnwardTCPDialAddr,
-		DialTCPTargetSerial:   DialTCPTargetSerial,
+		ResolveTCPTarget:       ResolveTCPTargetForDial,
+		ResolveTCPTargetAddrs:  ResolveTCPTargetAddrsForDial,
+		AllowTCPPort:           AllowTCPPort,
+		OnwardTCPDialAddr:      OnwardTCPDialAddr,
+		DialTCPTargetSerial:    DialTCPTargetSerial,
 		ResolveErrorHTTPStatus: ConnectStreamResolveHTTPStatus,
 	},
 }
 
-// HandleTCPConnectRequest serves RFC 8441 Extended CONNECT over the TCP template path.
+// HandleTCPConnectRequest serves Extended CONNECT (connect-tcp) over the TCP path template.
 func HandleTCPConnectRequest(host TCPConnectHost, w http.ResponseWriter, r *http.Request, tcpTemplate *uritemplate.Template, relaxedTCPAuthority bool) {
 	defaultConnectStreamHandler.HandleConnectStream(host, w, r, tcpTemplate, relaxedTCPAuthority)
 }
 
-// ParseTCPTargetFromRequest extracts target_host/target_port from a CONNECT request URI.
-func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, relaxedTCPAuthority bool, authorityMatches func(templateHost, requestHost string, relax bool) bool) (string, string, error) {
-	return cstrm.ParseTCPTargetFromRequest(r, template, relaxedTCPAuthority, authorityMatches)
+// ParseTCPTargetFromRequest extracts target host/port from a CONNECT request URI (path-only).
+func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, obfuscation bool) (string, string, error) {
+	return cstrm.ParseTCPTargetFromRequest(r, template, obfuscation)
 }

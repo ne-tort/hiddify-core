@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/quic-go/quic-go/http3"
@@ -16,17 +15,14 @@ import (
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
-	"github.com/yosida95/uritemplate/v3"
 )
 
 func (s *coreSession) streamAttemptHost() strmclient.SessionAttemptHost {
 	return strmclient.SessionAttemptHost{
-		Prepare:              s.streamAttemptPrepareLocked,
-		Dial:                 s.streamAttemptDialOnce,
-		BracketRetry:   MasqueTCPBracketRetryEligible,
-		OnBracketRetry: s.streamAttemptOnBracketAutoRetry,
-		RecordSuccess:        s.streamAttemptRecordSuccess,
-		Tag:                  func() string { return s.Options.Tag },
+		Prepare:       s.streamAttemptPrepareLocked,
+		Dial:          s.streamAttemptDialOnce,
+		RecordSuccess: s.streamAttemptRecordSuccess,
+		Tag:           func() string { return s.Options.Tag },
 	}
 }
 
@@ -34,25 +30,10 @@ func (s *coreSession) streamAttemptPrepareLocked() (strm.AttemptSnapshot, func()
 	s.Mu.Lock()
 	httpLayer := s.currentUDPHTTPLayer()
 	if s.TemplateTCP == nil {
-		port := int(s.Options.ServerPort)
-		if port <= 0 {
-			port = 443
-		}
-		auth := net.JoinHostPort(strings.TrimSpace(s.Options.Server), strconv.Itoa(port))
-		raw := ExpandMasqueHTTPSURI(s.Options.TemplateTCP, auth)
-		if raw == "" {
-			raw = "https://" + auth + "/masque/tcp/{+target_host}/{target_port}"
-		}
-		raw = NormalizeMasqueTCPUDPTemplateTargetHost(raw)
-		t, err := uritemplate.New(raw)
-		if err != nil {
-			s.Mu.Unlock()
-			return strm.AttemptSnapshot{}, nil, errors.Join(session.ErrCapability, E.Cause(err, "invalid TCP MASQUE template"))
-		}
-		s.TemplateTCP = t
+		s.Mu.Unlock()
+		return strm.AttemptSnapshot{}, nil, errors.Join(session.ErrCapability, E.New("TCP MASQUE path template not initialized"))
 	}
 	templateTCP := s.TemplateTCP
-	options := s.Options
 	if httpLayer != option.MasqueHTTPLayerH2 {
 		session.EnsureTCPHTTPTransportLockedAssumeMu(&s.CoreSession)
 	}
@@ -62,11 +43,10 @@ func (s *coreSession) streamAttemptPrepareLocked() (strm.AttemptSnapshot, func()
 	}
 	s.Mu.Unlock()
 	return strm.AttemptSnapshot{
-		HTTPLayer:          httpLayer,
-		HTTPLayerH2:        option.MasqueHTTPLayerH2,
-		TemplateTCP:        templateTCP,
-		TCPHTTP:            tcpHTTP,
-		PathBracketDefault: options.TCPIPv6PathBracket,
+		HTTPLayer:   httpLayer,
+		HTTPLayerH2: option.MasqueHTTPLayerH2,
+		TemplateTCP: templateTCP,
+		TCPHTTP:     tcpHTTP,
 	}, func() {}, nil
 }
 
@@ -76,13 +56,8 @@ func (s *coreSession) streamAttemptDialOnce(
 	destination M.Socksaddr,
 	targetHost string,
 	targetPort uint16,
-	pathBracket bool,
 ) (net.Conn, *url.URL, error) {
-	return s.dialTCPStreamOnce(ctx, snap.TemplateTCP, s.Options, destination, snap.HTTPLayer, snap.TCPHTTP, targetHost, targetPort, pathBracket)
-}
-
-func (s *coreSession) streamAttemptOnBracketAutoRetry(tag, targetHost string, tcpURL *url.URL) {
-	log.Printf("masque_tcp_ipv6_bracket_auto_retry tag=%s target_host=%s url=%s", strings.TrimSpace(tag), targetHost, MasqueTCPConnectStreamRequestURL(tcpURL))
+	return s.dialTCPStreamOnce(ctx, snap.TemplateTCP, s.Options, destination, snap.HTTPLayer, snap.TCPHTTP, targetHost, targetPort)
 }
 
 func (s *coreSession) streamAttemptRecordSuccess(snap strm.AttemptSnapshot, tcpURL *url.URL) {

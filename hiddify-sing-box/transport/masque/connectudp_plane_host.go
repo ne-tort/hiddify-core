@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 
 	qmasque "github.com/quic-go/masque-go"
 	"github.com/sagernet/sing-box/option"
 	cudpclient "github.com/sagernet/sing-box/transport/masque/connectudp/client"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/split"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/sagernet/sing-box/transport/masque/session"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/yosida95/uritemplate/v3"
@@ -63,8 +63,13 @@ func (h connectUDPPlaneHost) DialH3(ctx context.Context, client *qmasque.Client,
 	if h.s.udpDial != nil {
 		return h.s.udpDial(ctx, client, template, target)
 	}
+	key := pathbuild.ActiveKey(h.s.Options.PathObfuscation)
+	tpl, _, err := pathbuild.MaterializeHostPortTemplate(template, key, target)
+	if err != nil {
+		return nil, err
+	}
 	// Prod H3 client: masque-go bidi DialAddr (UDP-REF-H3-02).
-	return cudpclient.DialH3Production(ctx, nil, client, template, target)
+	return cudpclient.DialH3Production(ctx, nil, client, tpl, target)
 }
 
 func (h connectUDPPlaneHost) RecordHTTPLayerSuccess(layer string) {
@@ -82,8 +87,9 @@ func (h connectUDPPlaneHost) ErrTemplateNotConfigured() error {
 func (h connectUDPPlaneHost) ObservabilityInput(template *uritemplate.Template, target string) cudpclient.ObservabilityInput {
 	opts := h.s.Options
 	return cudpclient.ObservabilityInput{
-		Template: template,
-		Target:   target,
+		Template:           template,
+		Target:             target,
+		PathObfuscationKey: pathbuild.ActiveKey(opts.PathObfuscation),
 		ResolveDialAddr: func() string {
 			portNum := int(opts.ServerPort)
 			if portNum <= 0 {
@@ -211,9 +217,10 @@ func (h connectUDPPlaneHost) WrapDatagramSplit(pc net.PacketConn, writeMax int, 
 func (h connectUDPPlaneHost) NewQUICClient() *qmasque.Client {
 	return cudpclient.NewQUICClient(cudpclient.QUICClientConfig{
 		TLSClientConfig: masqueClientTLSConfig(h.s.Options),
-		QUICConfig:     masqueQUICConfigForDial(h.s.Options),
-		QUICDial:       h.s.quicDialWithPolicy("client_connect_udp"),
-		BearerToken:    strings.TrimSpace(h.s.Options.ServerToken),
+		QUICConfig:      masqueQUICConfigForDial(h.s.Options),
+		QUICDial:        h.s.quicDialWithPolicy("client_connect_udp"),
+		// Same omit-if-empty / WARP+mTLS policy as CONNECT-stream (not raw ServerToken-only).
+		BearerToken:    session.WarpConnectStreamBearerToken(h.s.Options),
 		LegacyH3Extras: h.s.Options.WarpMasqueLegacyH3Extras,
 	})
 }

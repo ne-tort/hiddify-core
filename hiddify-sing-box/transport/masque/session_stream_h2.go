@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing-box/transport/masque/httpx"
 	strmclient "github.com/sagernet/sing-box/transport/masque/stream/client"
 	M "github.com/sagernet/sing/common/metadata"
@@ -29,12 +30,18 @@ func (s *coreSession) streamH2Host() strmclient.SessionH2Host {
 }
 
 func (s *coreSession) streamH2Hooks(options ClientOptions) strmclient.H2Hooks {
+	p := h2c.Resolve(options.H2Tuning)
+	pipe := p.UploadPipeBytes
+	if pipe <= 0 {
+		pipe = p.UploadFlushBytes
+	}
 	return strmclient.NewH2Hooks(strmclient.H2Wire{
 		NewRequestContext: h2ConnectRequestContextFactory,
 		RequestURL:        MasqueTCPConnectStreamRequestURL,
 		SetAuth: func(h http.Header) {
 			setMasqueAuthorizationHeader(h, options)
 		},
+		UploadPipeBytes: pipe,
 	})
 }
 

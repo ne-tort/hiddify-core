@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -98,19 +97,16 @@ func TestMasqueConnectIPTCP_E2E_Local(t *testing.T) {
 		t.Fatalf("server bound port: got %d want %d", got, srvPort)
 	}
 
-	host := fmt.Sprintf("127.0.0.1:%d", srvPort)
-	base := "https://" + host
-
 	waitCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	session, err := (TM.CoreClientFactory{}).NewSession(waitCtx, TM.ClientOptions{
-		Server:                   "127.0.0.1",
-		ServerPort:               uint16(srvPort),
+		Server:        "127.0.0.1",
+		ServerPort:    uint16(srvPort),
 		DataplaneMode: option.MasqueDataplaneConnectIP,
-		TemplateIP:               base + "/masque/ip",
-		TemplateUDP:              base + "/masque/udp/{target_host}/{target_port}",
-		TemplateTCP:              base + "/masque/tcp/{target_host}/{target_port}",
+		PathIP:        "/.well-known/masque/ip",
+		PathUDP:       "/.well-known/masque/udp",
+		PathTCP:       "/.well-known/masque/tcp",
 		MasqueQUICCryptoTLS: &tls.Config{
 			ServerName:         "127.0.0.1",
 			InsecureSkipVerify: true,

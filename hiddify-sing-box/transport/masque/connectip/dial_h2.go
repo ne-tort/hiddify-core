@@ -14,11 +14,14 @@ type H2DialParams struct {
 	BearerToken           string
 	WarpConnectIPProtocol string
 	ExtraRequestHeaders   http.Header
+	PathObfuscationKey    []byte
 }
 
 // BuildH2DialOptions maps overlay params to connect-ip-go DialOptions for HTTP/2 Extended CONNECT.
 func BuildH2DialOptions(p H2DialParams) cip.DialOptions {
-	dopts := cip.DialOptions{}
+	dopts := cip.DialOptions{
+		PathObfuscationKey: p.PathObfuscationKey,
+	}
 	if p.ExtraRequestHeaders != nil {
 		dopts.ExtraRequestHeaders = p.ExtraRequestHeaders
 	} else if tok := strings.TrimSpace(p.BearerToken); tok != "" {

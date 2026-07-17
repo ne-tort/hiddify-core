@@ -208,7 +208,7 @@ func TestGATEH2AsymShallowPipeProdDefault(t *testing.T) {
 	if !ok {
 		t.Fatal("upload pipe reader must implement UploadPipeCap")
 	}
-	want := h2.ExportConnectUploadShallowPipeBuf()
+	want := h2.ConnectUploadShallowPipeBuf()
 	if cap := capFn.UploadPipeCap(); cap != want {
 		t.Fatalf("prod pipe cap=%d want=%d", cap, want)
 	}

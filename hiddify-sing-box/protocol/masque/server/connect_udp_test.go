@@ -80,7 +80,7 @@ func TestConnectUDPResolveDialToHTTPStatus(t *testing.T) {
 
 func TestHandleConnectUDPRejectsWrongH2Protocol(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/443", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/example.com/443/", nil)
 	req.Header.Set(":protocol", "connect-ip")
 	parsed := &cudpframe.Request{Host: "example.com", Target: "example.com:443"}
 
@@ -93,7 +93,7 @@ func TestHandleConnectUDPRejectsWrongH2Protocol(t *testing.T) {
 
 func TestHandleConnectUDPRejectsInvalidTarget(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.invalid/443", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/example.invalid/443/", nil)
 	req.Header.Set(":protocol", "connect-udp")
 	// Pass target policy; H2 ResolveUDPAddr fails with DNS → 502 + Proxy-Status.
 	parsed := &cudpframe.Request{Host: "example.invalid", Target: "example.invalid:443"}
@@ -111,7 +111,7 @@ func TestHandleConnectUDPRejectsInvalidTarget(t *testing.T) {
 func TestHandleConnectUDPRejectsPrivateTargetH2(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/127.0.0.1/53/", nil)
 	req.Header.Set(":protocol", "connect-udp")
 	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
 
@@ -125,7 +125,7 @@ func TestHandleConnectUDPRejectsPrivateTargetH2(t *testing.T) {
 func TestHandleConnectUDPRejectsBlockedPortH2(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/53", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/example.com/53/", nil)
 	req.Header.Set(":protocol", "connect-udp")
 	parsed := &cudpframe.Request{Host: "example.com", Target: "example.com:53"}
 
@@ -149,7 +149,7 @@ func (m *mockH3ConnectUDPResponse) HTTPStream() *http3.Stream {
 func TestHandleConnectUDPRejectsPrivateTargetH3(t *testing.T) {
 	t.Parallel()
 	rec := &mockH3ConnectUDPResponse{}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/127.0.0.1/53/", nil)
 	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: "127.0.0.1:53"}
 
 	HandleConnectUDP(rec, req, parsed, &cudprelay.Proxy{}, ConnectUDPTargetPolicy{})
@@ -169,7 +169,7 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/"+strconv.Itoa(port), io.NopCloser(http.NoBody))
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/127.0.0.1/"+strconv.Itoa(port)+"/", io.NopCloser(http.NoBody))
 	req.Header.Set(":protocol", "connect-udp")
 	parsed := &cudpframe.Request{Host: "127.0.0.1", Target: target}
 
@@ -194,14 +194,14 @@ func TestHandleConnectUDPH2SetsCapsuleProtocolHeader(t *testing.T) {
 }
 
 func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
-	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
+	const udpTemplate = "https://127.0.0.1:443/.well-known/masque/udp/{target_host}/{target_port}/"
 	handler, err := BuildMuxHandler(MuxHost{
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
 		Authorize: func(*http.Request) bool {
 			return false
 		},
 		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
-			return udpTemplate, "https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}", "https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+			return udpTemplate, "https://127.0.0.1:443/.well-known/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}/", "https://127.0.0.1:443/.well-known/masque/tcp/{target_host}/{target_port}/"
 		},
 		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
 		RequestForParse: func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request {
@@ -212,7 +212,7 @@ func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/example.com/443", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/example.com/443/", nil)
 	req.Host = "127.0.0.1:443"
 	req.URL.Scheme = "https"
 	req.Header.Set(":protocol", "connect-udp")
@@ -226,11 +226,11 @@ func TestBuildMuxHandlerConnectUDPAuthDenied(t *testing.T) {
 
 func TestBuildMuxHandlerConnectUDPRejectsMissingCapsuleProtocol(t *testing.T) {
 	t.Parallel()
-	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
+	const udpTemplate = "https://127.0.0.1:443/.well-known/masque/udp/{target_host}/{target_port}/"
 	handler, err := BuildMuxHandler(MuxHost{
 		Options: option.MasqueEndpointOptions{AllowPrivateTargets: true},
 		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
-			return udpTemplate, "https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}", "https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+			return udpTemplate, "https://127.0.0.1:443/.well-known/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}/", "https://127.0.0.1:443/.well-known/masque/tcp/{target_host}/{target_port}/"
 		},
 		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
 		RequestForParse: func(r *http.Request, _ *uritemplate.Template, _ bool) *http.Request {
@@ -241,7 +241,7 @@ func TestBuildMuxHandlerConnectUDPRejectsMissingCapsuleProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodConnect, "/masque/udp/127.0.0.1/53", nil)
+	req := httptest.NewRequest(http.MethodConnect, "/.well-known/masque/udp/127.0.0.1/53/", nil)
 	req.Host = "127.0.0.1:443"
 	req.URL.Scheme = "https"
 	req.Header.Set(":protocol", "connect-udp")
@@ -260,9 +260,9 @@ func TestBuildMuxHandlerRejectsInvalidConnectUDPRelayPayloadPolicy(t *testing.T)
 			ConnectUDPRelayPayloadPolicy: "jumbo",
 		},
 		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
-			return "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}",
-				"https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}",
-				"https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+			return "https://127.0.0.1:443/.well-known/masque/udp/{target_host}/{target_port}/",
+				"https://127.0.0.1:443/.well-known/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}/",
+				"https://127.0.0.1:443/.well-known/masque/tcp/{target_host}/{target_port}/"
 		},
 		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
 	}, option.MasqueTCPRelayTemplate)
@@ -273,14 +273,14 @@ func TestBuildMuxHandlerRejectsInvalidConnectUDPRelayPayloadPolicy(t *testing.T)
 
 func TestBuildMuxHandlerAppliesConnectUDPRelayPayloadPolicy(t *testing.T) {
 	t.Cleanup(func() { cudprelay.SetRelayPayloadPolicy(cudprelay.RelayPayloadProd) })
-	const udpTemplate = "https://127.0.0.1:443/masque/udp/{target_host}/{target_port}"
+	const udpTemplate = "https://127.0.0.1:443/.well-known/masque/udp/{target_host}/{target_port}/"
 	_, err := BuildMuxHandler(MuxHost{
 		Options: option.MasqueEndpointOptions{
 			AllowPrivateTargets:          true,
 			ConnectUDPRelayPayloadPolicy: cudprelay.RelayPayloadConfigRFCInterop,
 		},
 		ResolveTemplates: func(option.MasqueEndpointOptions) (string, string, string) {
-			return udpTemplate, "https://127.0.0.1:443/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}", "https://127.0.0.1:443/masque/tcp/{target_host}/{target_port}"
+			return udpTemplate, "https://127.0.0.1:443/.well-known/masque/ip/{ip_version}/{ipproto}/{target_host}/{target_port}/", "https://127.0.0.1:443/.well-known/masque/tcp/{target_host}/{target_port}/"
 		},
 		RelaxAuthority: func(option.MasqueEndpointOptions, string) bool { return false },
 	}, option.MasqueTCPRelayTemplate)

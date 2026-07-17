@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/tls"
 	"errors"
-	"github.com/sagernet/sing-box/transport/masque/session"
 	"net"
 	"strings"
 	"sync"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	T "github.com/sagernet/sing-box/transport/masque"
+	"github.com/sagernet/sing-box/transport/masque/h2"
+	"github.com/sagernet/sing-box/transport/masque/session"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 )
@@ -57,11 +58,13 @@ type RuntimeOptions struct {
 	DialPeer              string
 	ServerPort            uint16
 	DataplaneMode         string
-	TemplateUDP           string
-	TemplateIP            string
+	PathUDP               string
+	PathTCP               string
+	PathIP                string
+	PathObfuscation       bool
+	H2Tuning              h2.Tuning
 	ConnectIPScopeTarget  string
 	ConnectIPScopeIPProto uint8
-	TemplateTCP           string
 	FallbackPolicy        string
 	TCPMode               string
 	ServerToken           string
@@ -82,7 +85,6 @@ type RuntimeOptions struct {
 	WarpMasqueDeviceBearerToken string
 	ProfileLocalIPv4            string
 	ProfileLocalIPv6            string
-	TCPIPv6PathBracket          bool
 
 	TCPDial                  T.MasqueTCPDialFunc
 	MasqueEffectiveHTTPLayer string
@@ -164,11 +166,13 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			DialPeer:                    strings.TrimSpace(r.options.DialPeer),
 			ServerPort:                  r.options.ServerPort,
 			DataplaneMode:               r.options.DataplaneMode,
-			TemplateUDP:                 r.options.TemplateUDP,
-			TemplateIP:                  r.options.TemplateIP,
+			PathUDP:                     r.options.PathUDP,
+			PathTCP:                     r.options.PathTCP,
+			PathIP:                      r.options.PathIP,
+			PathObfuscation:             r.options.PathObfuscation,
+			H2Tuning:                    r.options.H2Tuning,
 			ConnectIPScopeTarget:        r.options.ConnectIPScopeTarget,
 			ConnectIPScopeIPProto:       r.options.ConnectIPScopeIPProto,
-			TemplateTCP:                 r.options.TemplateTCP,
 			FallbackPolicy:              r.options.FallbackPolicy,
 			TCPMode:                     r.options.TCPMode,
 			ServerToken:                 strings.TrimSpace(r.options.ServerToken),
@@ -191,7 +195,6 @@ func (r *runtimeImpl) Start(ctx context.Context) error {
 			WarpMasqueDeviceBearerToken: r.options.WarpMasqueDeviceBearerToken,
 			ProfileLocalIPv4:            strings.TrimSpace(r.options.ProfileLocalIPv4),
 			ProfileLocalIPv6:            strings.TrimSpace(r.options.ProfileLocalIPv6),
-			TCPIPv6PathBracket:          r.options.TCPIPv6PathBracket,
 		})
 		if err == nil {
 			break

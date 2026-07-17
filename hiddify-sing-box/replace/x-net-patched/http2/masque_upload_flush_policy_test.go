@@ -30,10 +30,10 @@ func TestMasqueFlushBeforeBlockingReadEmptyPipeAlwaysFlushes(t *testing.T) {
 
 func TestMasqueBulkFlushDeadlineHonorsMinPending(t *testing.T) {
 	at := time.Now().Add(-10 * time.Millisecond)
-	if masqueShouldBulkFlushDeadline(8<<10, at) {
+	if masqueShouldBulkFlushDeadline(8<<10, at, 0) {
 		t.Fatal("deadline must not fire below MinPending")
 	}
-	if !masqueShouldBulkFlushDeadline(masqueBulkFlushMinPending, at) {
+	if !masqueShouldBulkFlushDeadline(masqueBulkFlushMinPending, at, 0) {
 		t.Fatal("deadline must fire at MinPending after MaxDelay")
 	}
 }

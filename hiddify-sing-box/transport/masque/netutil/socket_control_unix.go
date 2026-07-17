@@ -25,6 +25,6 @@ func MasqueTCPDialerControl(network, address string, c syscall.RawConn) error {
 func setMasqueTCPSocketOptsFD(fd int) error {
 	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, MasqueSocketBufferBytes)
 	_ = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 0)
-	_ = unix.SetsockoptString(fd, unix.IPPROTO_TCP, unix.TCP_CONGESTION, "bbr")
+	setMasqueTCPCongestionFD(fd)
 	return nil
 }

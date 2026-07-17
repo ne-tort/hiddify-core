@@ -11,7 +11,7 @@ import (
 
 func TestAuthorizeMasqueRequestNilCompiledNoAuthConfigured(t *testing.T) {
 	t.Parallel()
-	req := httptest.NewRequest(http.MethodGet, "https://masque.local/masque/udp/*", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://masque.local/.well-known/masque/udp/*", nil)
 	var compiled *auth.Compiled
 	if !AuthorizeMasqueRequest(req, &compiled, option.MasqueEndpointOptions{}, false) {
 		t.Fatal("expected allow when no auth configured and endpoint not started")
@@ -38,7 +38,7 @@ func TestAuthorizeMasqueRequestLazyCompileInvalidConfigFailClosed(t *testing.T) 
 func TestAuthorizeMasqueRequestLazyCompileStoresValidAuth(t *testing.T) {
 	t.Parallel()
 	token := "lazy-token"
-	req := httptest.NewRequest(http.MethodGet, "https://masque.local/masque/udp/*", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://masque.local/.well-known/masque/udp/*", nil)
 	var compiled *auth.Compiled
 	opts := option.MasqueEndpointOptions{
 		ServerAuth: &option.MasqueServerAuthOptions{
@@ -68,7 +68,7 @@ func TestAuthorizeMasqueRequestCompiledDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile auth: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "https://masque.local/masque/udp/*", nil)
+	req := httptest.NewRequest(http.MethodGet, "https://masque.local/.well-known/masque/udp/*", nil)
 	if AuthorizeMasqueRequest(req, &compiled, option.MasqueEndpointOptions{}, true) {
 		t.Fatal("expected deny without bearer token")
 	}
