@@ -11,6 +11,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	h3t "github.com/sagernet/sing-box/transport/masque/h3"
 )
 
 // QUICTransportPacketConnTier classifies packet conn capabilities for observability.
@@ -34,15 +35,27 @@ func ValidateQUICTransportPacketConn(c net.PacketConn, path string) error {
 }
 
 // QuicDialWithPolicy wraps production or custom QUIC dial with packet conn tier recording.
+// On success, registers the conn for masque-quic-stats.json (CONNECT-UDP uses custom_quic_dial
+// and would otherwise bypass http3.Transport Dial hooks that call TrackQUICConn).
 func QuicDialWithPolicy(path string, customDial QUICDialFunc) QUICDialFunc {
 	return func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+		var (
+			conn *quic.Conn
+			err  error
+		)
 		if customDial != nil {
 			recordQUICTransportPacketConn(path, QUICTransportPacketConnTierB, "custom_quic_dial", true)
 			log.Printf("masque quic packetconn degraded mode path=%s conn_type=%s", path, "custom_quic_dial")
-			return customDial(ctx, addr, tlsCfg, cfg)
+			conn, err = customDial(ctx, addr, tlsCfg, cfg)
+		} else {
+			recordQUICTransportPacketConn(path, QUICTransportPacketConnTierA, "*net.UDPConn (quic.DialAddr)", true)
+			conn, err = quic.DialAddr(ctx, addr, tlsCfg, cfg)
 		}
-		recordQUICTransportPacketConn(path, QUICTransportPacketConnTierA, "*net.UDPConn (quic.DialAddr)", true)
-		return quic.DialAddr(ctx, addr, tlsCfg, cfg)
+		if err != nil {
+			return nil, err
+		}
+		h3t.TrackQUICConn("client", conn)
+		return conn, nil
 	}
 }
 

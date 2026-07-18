@@ -21,6 +21,8 @@ type LifecycleHost interface {
 	IncConnectIPSessionReset(reason string)
 
 	BuildHopTemplates() (udp, ip, tcp *uritemplate.Template, err error)
+	// CloseLiveConnectUDPPacketConns closes open CONNECT-UDP PacketConns (AUDIT B14 / F3.2).
+	CloseLiveConnectUDPPacketConns()
 	CloseUDPClient()
 	ResetIPH3TransportLockedAssumeMu()
 	ResetH2UDPTransportLockedAssumeMu()
@@ -38,6 +40,8 @@ func LifecycleClose(s *CoreSession, host LifecycleHost) error {
 	s.ConnectIPTCPInstallInflight.Store(0)
 	host.ClearPreTCPNetstackIngress()
 	s.IngressTCPNetstack.Store(nil)
+	// Close live CONNECT-UDP PacketConns before tearing shared UDPClient / H2 pool (AUDIT B14).
+	host.CloseLiveConnectUDPPacketConns()
 
 	var (
 		errs        []error

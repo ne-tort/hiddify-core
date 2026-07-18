@@ -165,14 +165,19 @@ func (h connectUDPPlaneHost) RewireUDPAfterFallback() (*qmasque.Client, *uritemp
 func (h connectUDPPlaneHost) RefreshUDPAfterDialFailure(prevClient *qmasque.Client) (*qmasque.Client, *uritemplate.Template) {
 	h.s.Mu.Lock()
 	defer h.s.Mu.Unlock()
+	// AUDIT B15 / TASKS F3.3: do not tear shared underlay while other CONNECT-UDP flows are live.
+	live := h.s.liveUDPPacketConnCount() > 0
 	if h.s.currentUDPHTTPLayer() != option.MasqueHTTPLayerH2 {
+		if live {
+			return h.s.UDPClient, h.s.TemplateUDP
+		}
 		if h.s.UDPClient == prevClient && h.s.UDPClient != nil {
 			_ = h.s.UDPClient.Close()
 			h.s.UDPClient = h.NewQUICClient()
 		} else if h.s.UDPClient == nil {
 			h.s.UDPClient = h.NewQUICClient()
 		}
-	} else {
+	} else if !live {
 		h.s.resetH2UDPTransportLockedAssumeMu()
 	}
 	return h.s.UDPClient, h.s.TemplateUDP
@@ -232,7 +237,11 @@ func (s *coreSession) dialUDPAddr(ctx context.Context, client *qmasque.Client, t
 }
 
 func (s *coreSession) listenPacketConnectUDP(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	return s.connectUDPPlane().ListenPacket(ctx, destination)
+	pc, err := s.connectUDPPlane().ListenPacket(ctx, destination)
+	if err != nil {
+		return nil, err
+	}
+	return s.trackUDPPacketConn(pc), nil
 }
 
 func (s *coreSession) newUDPClient() *qmasque.Client {

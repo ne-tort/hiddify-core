@@ -10,10 +10,10 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/constant"
+	boxsocks "github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/route"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing/protocol/socks"
 )
 
 type directMasqueRouter struct {
@@ -91,7 +91,8 @@ func startSocks5AssociateRelay(t *testing.T, router adapter.ConnectionRouterEx, 
 				return
 			}
 			go func(c net.Conn) {
-				_ = socks.HandleConnectionEx(
+				// RFC 1928: TCP close must tear down ASSOCIATE → CONNECT-UDP flow.
+				_ = boxsocks.HandleConnectionExTCPBound(
 					context.Background(),
 					c,
 					bufio.NewReader(c),

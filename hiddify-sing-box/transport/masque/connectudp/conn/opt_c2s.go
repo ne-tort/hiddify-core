@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/flowstats"
@@ -66,13 +67,28 @@ func (w *h3C2SWriter) shutdown() {
 const h3C2SBacklogDrainMaxSpins = h3quic.TransientPressureMaxSpins
 const h3C2STransientSendMaxSpins = h3quic.TransientPressureMaxSpins
 
+// h3C2SSendBacklogSoftLimit caps queued outgoing QUIC DATAGRAMs before WriteTo blocks.
+// quic-go hard cap is 65536 (blocks only when full); without a soft limit SOCKS ASSOCIATE
+// microbursts fill the queue and unreliable DATAGRAMs are lost under UDP underlay pressure
+// (synth: write_ok==sent, c2s_in≪write_ok, stream_q_drops=0).
+const h3C2SSendBacklogSoftLimit = 256
+
 func (w *h3C2SWriter) awaitDatagramSendDrain() {
 	if w == nil || w.backlog == nil {
 		return
 	}
-	for spin := 0; w.backlog.DatagramSendBacklog() > 0 && spin < h3C2SBacklogDrainMaxSpins; spin++ {
+	// Block until there is soft-limit room (not merely MaxSpins then enqueue anyway).
+	for spin := 0; w.backlog.DatagramSendBacklog() >= h3C2SSendBacklogSoftLimit; spin++ {
 		w.flushC2SDatagramWake()
-		runtime.Gosched()
+		if spin&63 == 63 {
+			time.Sleep(time.Microsecond)
+		} else {
+			runtime.Gosched()
+		}
+		// Bound only as a stuck-send safety; normal path returns when backlog drains.
+		if spin >= h3C2SBacklogDrainMaxSpins*64 {
+			return
+		}
 	}
 }
 

@@ -94,13 +94,19 @@ func probeConnectUDPScalingCeiling(t *testing.T, layer string, streamCounts []in
 
 	for _, streams := range streamCounts {
 		streams := streams
-		agg, perStream, sym := benchParallelConnectUDPStreams(t, layer, proxyPort, sinkAddr, streams, dur, payloadLen)
+		legDur := dur
+		if layer == "h3" && streams >= 4 {
+			legDur = 4 * time.Second
+		}
+		agg, perStream, sym := benchParallelConnectUDPStreams(t, layer, proxyPort, sinkAddr, streams, legDur, payloadLen)
 		eff := 0.0
 		if singleMbps > 0 {
 			eff = agg / (singleMbps * float64(streams))
 		}
-		t.Logf("  N=%d: agg=%.1f Mbit/s eff=%.2f sym=%.2f per=[%s]",
-			streams, agg, eff, sym, formatStreamMbps(perStream, dur))
+		class, hint := classifyConnectUDPScaleEff(streams, eff)
+		t.Logf("  N=%d: agg=%.1f Mbit/s eff=%.2f sym=%.2f class=%s per=[%s]",
+			streams, agg, eff, sym, class, formatStreamMbps(perStream, legDur))
+		t.Logf("    dig: %s", hint)
 	}
 }
 
@@ -127,6 +133,7 @@ func benchParallelConnectUDPStreams(
 		session, err = (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 			Server:              "127.0.0.1",
 			ServerPort:          uint16(proxyPort),
+			PathUDP:             connectUDPInProcessPathUDP,
 			MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 		})
 		if err != nil {
@@ -219,6 +226,7 @@ func benchParallelConnectUDPMultiSession(
 			session, err = (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 				Server:              "127.0.0.1",
 				ServerPort:          uint16(proxyPort),
+				PathUDP:             connectUDPInProcessPathUDP,
 				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 			})
 			if err != nil {

@@ -25,16 +25,27 @@ type h3C2SStream interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
+// h3C2SBatchWriter sends a batch of UDP payloads onward (prod: kernel Write/WriteBatch).
+type h3C2SBatchWriter interface {
+	writePayloadBatch(payloads [][]byte) error
+}
+
 // proxyConnSend relays HTTP/3 DATAGRAMs to onward UDP (upstream masque-go/proxy.go sync shape).
 func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SStream) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	var icmpRelay func() error
 	if sender, ok := any(str).(h3DatagramSender); ok {
 		icmpRelay = func() error { return sender.SendDatagram(frame.ContextIDZeroWire) }
 	}
-	writer := newH3C2SUDPWriter(conn, icmpRelay)
+	return proxyConnSendWith(ctx, str, newH3C2SUDPWriter(conn, icmpRelay))
+}
+
+func proxyConnSendWith(ctx context.Context, str h3C2SStream, writer h3C2SBatchWriter) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if writer == nil {
+		return errors.New("masque h3: C2S onward writer unavailable")
+	}
 	drainer, _ := str.(h3quic.TryDrainHTTPDatagrams)
 
 	statsOn := relayStatsEnabled()
@@ -78,9 +89,9 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 			diag.Logf("dropping UDP packet larger than MTU")
 			return nil
 		}
+		// c2s_in = accepted into relay batch (AUDIT A1). c2s_udp_out counted only after successful write.
 		if statsOn {
 			globalUDPRelayStats.c2sDatagramIn.Add(1)
-			globalUDPRelayStats.c2sUDPPayloadOut.Add(1)
 		}
 		// Copy before Release: QUIC receive lease must not outlive subsliced udpPayload in batch queue.
 		payloadBatch[batchCount] = append([]byte(nil), udpPayload...)
@@ -115,8 +126,12 @@ func (s *Proxy) proxyConnSend(ctx context.Context, conn *net.UDPConn, str h3C2SS
 				n = h3C2SOnwardFlushChunk
 			}
 			if err := writer.writePayloadBatch(payloadBatch[:n]); err != nil {
+				// Remaining payloads (including this chunk) never reached the wire.
+				recordRelayC2SUDPWriteDrop(batchCount)
+				batchCount = 0
 				return err
 			}
+			recordRelayC2SUDPOut(n)
 			recordRelayC2SBatchFlush()
 			if tail := batchCount - n; tail > 0 {
 				copy(payloadBatch[:tail], payloadBatch[n:batchCount])

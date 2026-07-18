@@ -81,8 +81,16 @@ func TryHTTPFallbackSwitch(s *CoreSession, host LifecycleHost, err error) bool {
 }
 
 // TryHTTPFallbackSwitchLockedAssumeMu pivots overlay when http_layer is auto. Caller holds s.Mu.
+//
+// Tears down on successful pivot (AUDIT B16): CONNECT-IP dataplane + native L3, shared H3
+// IP/TCP transports, UDPClient, and **all** H2 client transports (UDP + CONNECT-stream).
+// Refuses pivot when CONNECT-IP is already open (IPConn != nil). Live CONNECT-UDP PacketConns
+// are gated in package masque (coreSession.tryHTTPFallbackSwitch*) via flow tracking (B14/B15).
 func TryHTTPFallbackSwitchLockedAssumeMu(s *CoreSession, host LifecycleHost, err error) bool {
 	if !s.HTTPLayerAuto || err == nil || !httpx.IsLayerSwitchableFailure(err) {
+		return false
+	}
+	if s.IPConn != nil {
 		return false
 	}
 	if !s.HTTPFallbackConsumed.CompareAndSwap(false, true) {

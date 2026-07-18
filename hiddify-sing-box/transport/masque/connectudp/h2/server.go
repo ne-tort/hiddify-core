@@ -15,13 +15,18 @@ import (
 const (
 	H2ServerUDPReadBuf    = 65535
 	H2ResponseBodyBufSize = 256 * 1024
-	// H2DownlinkBulkFlushBytes batches S2C RFC9297 wire before one HTTP/2 flush (capsule.go batch + G42).
-	// Matches upload coalesce (h2UploadCoalesceBytes) and readOnwardUDPBatch wire budget.
-	H2DownlinkBulkFlushBytes = 64 * 1024
+	// H2DownlinkPendingGrow is the initial pendingWire capacity (aligned with relay
+	// h2DownlinkBatchWire). Flush policy is per-RX-batch FlushPending only (AUDIT B7 / F2.5)
+	// — Append does not auto-flush at a byte threshold.
+	H2DownlinkPendingGrow = 64 * 1024
 )
 
+// H2DownlinkBulkFlushBytes is retained as an alias for Grow / tests (not an Append auto-flush threshold).
+const H2DownlinkBulkFlushBytes = H2DownlinkPendingGrow
+
 // H2ResponseWriter writes DATAGRAM capsules on the CONNECT-UDP response body.
-// Fountain: relay UDP drain + Append* with byte threshold flush. ICMP/bidi Write: h2o 1:1 immediate.
+// Fountain: Append buffers; relay calls FlushPending after each UDP RX batch.
+// ICMP/bidi Write: h2o 1:1 immediate (drains any pending first — A4).
 type H2ResponseWriter struct {
 	http.ResponseWriter
 	mu                sync.Mutex
@@ -35,25 +40,20 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	return w.writeCapsulesImmediateLocked(udpPayload)
 }
 
-// AppendUDPPayloadAsCapsules appends RFC9297 wire; flushes at H2DownlinkBulkFlushBytes (no debounce timer).
+// AppendUDPPayloadAsCapsules appends RFC9297 wire only. Caller (fountain relay) must
+// FlushPending after each onward UDP batch — no byte-threshold auto-flush (B7).
 func (w *H2ResponseWriter) AppendUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(udpPayload) == 0 {
 		return w.writeCapsulesImmediateLocked(nil)
 	}
-	if err := w.appendCapsulesLocked(udpPayload); err != nil {
-		return err
-	}
-	if w.pendingSinceFlush >= H2DownlinkBulkFlushBytes {
-		return w.flushLocked()
-	}
-	return nil
+	return w.appendCapsulesLocked(udpPayload)
 }
 
 func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
 	if w.pendingWire.Cap() == 0 {
-		w.pendingWire.Grow(H2DownlinkBulkFlushBytes)
+		w.pendingWire.Grow(H2DownlinkPendingGrow)
 	}
 	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
 		h2c.AppendDatagramCapsuleBuffer(&w.pendingWire, udpPayload)
@@ -65,8 +65,15 @@ func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
 }
 
 func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error {
-	w.pendingSinceFlush = 0
-	w.pendingWire.Reset()
+	// Drain fountain pending first — do not Reset/drop accumulated S2C (AUDIT A4 / F2.2).
+	// Avoid flushLocked(): it always FlushResponse even when pending empty (breaks h2o flush counts).
+	if w.pendingWire.Len() > 0 {
+		if _, err := h2c.WriteAll(w.ResponseWriter, w.pendingWire.Bytes()); err != nil {
+			return err
+		}
+		w.pendingWire.Reset()
+		w.pendingSinceFlush = 0
+	}
 	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
 		return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
 	}

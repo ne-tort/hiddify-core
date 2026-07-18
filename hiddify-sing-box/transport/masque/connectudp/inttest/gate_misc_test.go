@@ -21,3 +21,11 @@ func TestGATEConnectUDPParallelScalingH2(t *testing.T) {
 func TestGATEConnectUDPParallelScalingH3(t *testing.T) {
 	masque.InttestGATEConnectUDPParallelScalingH3(t)
 }
+
+func TestGATEConnectUDPScalingMapH2(t *testing.T) {
+	masque.InttestGATEConnectUDPScalingMapH2(t)
+}
+
+func TestGATEConnectUDPScalingMapH3(t *testing.T) {
+	masque.InttestGATEConnectUDPScalingMapH3(t)
+}

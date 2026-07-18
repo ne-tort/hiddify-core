@@ -1,7 +1,9 @@
 package h2
 
 // LegProfile tags asymmetric stream role.
-// Upload: bulk threshold coalesce (64–128 KiB). DownloadFountain: S2C bulk threshold flush. Bidi: immediate C2S.
+// Upload: immediate C2S flush per WriteTo when not duplex-active (64KiB coalesce
+// threshold exists but is unreachable on this profile — AUDIT B6 / TASKS F1.3).
+// DownloadFountain: S2C bulk threshold flush. Bidi: immediate C2S.
 type LegProfile uint8
 
 const (

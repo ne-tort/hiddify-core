@@ -38,6 +38,7 @@ func (h *lifecycleOrderHost) BuildHopTemplates() (udp, ip, tcp *uritemplate.Temp
 	return nil, nil, nil, nil
 }
 func (h *lifecycleOrderHost) CloseUDPClient()                      {}
+func (h *lifecycleOrderHost) CloseLiveConnectUDPPacketConns()      {}
 func (h *lifecycleOrderHost) ResetIPH3TransportLockedAssumeMu()    {}
 func (h *lifecycleOrderHost) ResetH2UDPTransportLockedAssumeMu()   {}
 func (h *lifecycleOrderHost) CloseAllH2ClientTransports()          {}

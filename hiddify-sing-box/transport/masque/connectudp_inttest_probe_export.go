@@ -9,7 +9,7 @@ func InttestProbeConnectUDPScalingCeiling(t *testing.T) {
 	for _, layer := range []string{"h2", "h3"} {
 		layer := layer
 		t.Run(layer, func(t *testing.T) {
-			probeConnectUDPScalingCeiling(t, layer, []int{1, 2, 4})
+			probeConnectUDPScalingCeiling(t, layer, []int{1, 2, 4, 8})
 		})
 	}
 }

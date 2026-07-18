@@ -1,6 +1,7 @@
 package h2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -37,21 +38,16 @@ func (c *PacketConn) Prime() error {
 	return c.primeErr
 }
 
-// sealDownloadC2SAfterPrime closes the download-leg C2S writer after stream prime.
-func (c *PacketConn) sealDownloadC2SAfterPrime() {
-	if c == nil || c.uploadOnly || c.reqBody == nil {
-		return
-	}
-	_ = c.reqBody.Close()
-}
-
+// takeUploadPendingLocked detaches pending wire so post-Unlock Append cannot alias
+// the flush slice (AUDIT A2). Flush must run after Unlock — WriteAll can block on
+// upload-pipe backpressure; holding writeMu across Write deadlocks (F1.1 lesson).
 func (c *PacketConn) takeUploadPendingLocked() []byte {
 	if c.uploadPending.Len() == 0 {
 		return nil
 	}
-	wire := c.uploadPending.Bytes()
-	c.uploadPending.Reset()
-	return wire
+	pending := c.uploadPending
+	c.uploadPending = bytes.Buffer{}
+	return pending.Bytes()
 }
 
 func (c *PacketConn) flushUploadWire(wire []byte) error {

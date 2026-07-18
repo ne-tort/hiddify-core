@@ -20,14 +20,15 @@ func init() {
 
 // UDPRelayStatsSnapshot is a point-in-time CONNECT-UDP server relay counter set (UDP-5m1).
 type UDPRelayStatsSnapshot struct {
-	C2SDatagramIn    uint64
-	C2SUDPPayloadOut uint64
-	C2SDropMalformed uint64
-	C2SDropOversize  uint64
-	S2CUDPIn         uint64
-	S2CDatagramOut   uint64
-	S2CDropOversize  uint64
-	S2CDropSendFail  uint64
+	C2SDatagramIn     uint64
+	C2SUDPPayloadOut  uint64
+	C2SDropMalformed  uint64
+	C2SDropOversize   uint64
+	C2SDropUDPWrite   uint64 // accepted into relay batch but onward UDP write failed / abandoned
+	S2CUDPIn          uint64
+	S2CDatagramOut    uint64
+	S2CDropOversize   uint64
+	S2CDropSendFail   uint64
 	// Hotpath attribution (bench only; zero overhead when relayStatsActive=false).
 	C2SBatchFlushes uint64
 	S2CBatchReads   uint64
@@ -40,6 +41,7 @@ type udpRelayStats struct {
 	c2sUDPPayloadOut atomic.Uint64
 	c2sDropMalformed atomic.Uint64
 	c2sDropOversize  atomic.Uint64
+	c2sDropUDPWrite  atomic.Uint64
 	s2cUDPIn         atomic.Uint64
 	s2cDatagramOut   atomic.Uint64
 	s2cDropOversize  atomic.Uint64
@@ -103,6 +105,7 @@ func writeUDPRelayStatsFile(tag string) {
 		C2SUDPOut        uint64 `json:"c2s_udp_out"`
 		C2SDropMalformed uint64 `json:"c2s_drop_malformed"`
 		C2SDropOversize  uint64 `json:"c2s_drop_oversize"`
+		C2SDropUDPWrite  uint64 `json:"c2s_drop_udp_write"`
 		S2CUDPIn         uint64 `json:"s2c_udp_in"`
 		S2CDgramOut      uint64 `json:"s2c_dgram_out"`
 		S2CDropOversize  uint64 `json:"s2c_drop_oversize"`
@@ -115,6 +118,7 @@ func writeUDPRelayStatsFile(tag string) {
 		C2SUDPOut:        s.C2SUDPPayloadOut,
 		C2SDropMalformed: s.C2SDropMalformed,
 		C2SDropOversize:  s.C2SDropOversize,
+		C2SDropUDPWrite:  s.C2SDropUDPWrite,
 		S2CUDPIn:         s.S2CUDPIn,
 		S2CDgramOut:      s.S2CDatagramOut,
 		S2CDropOversize:  s.S2CDropOversize,
@@ -134,8 +138,21 @@ func BeginRelaySessionStats(tag string) func() {
 }
 
 // ResetUDPRelayStats clears process-wide relay counters (bench isolation).
+// Uses Store(0) on each atomic — safe vs concurrent Add (AUDIT B8 / TASKS F0.5).
 func ResetUDPRelayStats() {
-	globalUDPRelayStats = udpRelayStats{}
+	globalUDPRelayStats.c2sDatagramIn.Store(0)
+	globalUDPRelayStats.c2sUDPPayloadOut.Store(0)
+	globalUDPRelayStats.c2sDropMalformed.Store(0)
+	globalUDPRelayStats.c2sDropOversize.Store(0)
+	globalUDPRelayStats.c2sDropUDPWrite.Store(0)
+	globalUDPRelayStats.s2cUDPIn.Store(0)
+	globalUDPRelayStats.s2cDatagramOut.Store(0)
+	globalUDPRelayStats.s2cDropOversize.Store(0)
+	globalUDPRelayStats.s2cDropSendFail.Store(0)
+	globalUDPRelayStats.c2sBatchFlushes.Store(0)
+	globalUDPRelayStats.s2cBatchReads.Store(0)
+	globalUDPRelayStats.s2cBatchPkts.Store(0)
+	globalUDPRelayStats.s2cSendSpins.Store(0)
 }
 
 // SnapshotUDPRelayStats returns current relay counters.
@@ -145,6 +162,7 @@ func SnapshotUDPRelayStats() UDPRelayStatsSnapshot {
 		C2SUDPPayloadOut: globalUDPRelayStats.c2sUDPPayloadOut.Load(),
 		C2SDropMalformed: globalUDPRelayStats.c2sDropMalformed.Load(),
 		C2SDropOversize:  globalUDPRelayStats.c2sDropOversize.Load(),
+		C2SDropUDPWrite:  globalUDPRelayStats.c2sDropUDPWrite.Load(),
 		S2CUDPIn:         globalUDPRelayStats.s2cUDPIn.Load(),
 		S2CDatagramOut:   globalUDPRelayStats.s2cDatagramOut.Load(),
 		S2CDropOversize:  globalUDPRelayStats.s2cDropOversize.Load(),
@@ -159,6 +177,18 @@ func SnapshotUDPRelayStats() UDPRelayStatsSnapshot {
 func recordRelayC2SBatchFlush() {
 	if relayStatsEnabled() {
 		globalUDPRelayStats.c2sBatchFlushes.Add(1)
+	}
+}
+
+func recordRelayC2SUDPOut(n int) {
+	if relayStatsEnabled() && n > 0 {
+		globalUDPRelayStats.c2sUDPPayloadOut.Add(uint64(n))
+	}
+}
+
+func recordRelayC2SUDPWriteDrop(n int) {
+	if relayStatsEnabled() && n > 0 {
+		globalUDPRelayStats.c2sDropUDPWrite.Add(uint64(n))
 	}
 }
 
@@ -182,6 +212,7 @@ func (d UDPRelayStatsSnapshot) Delta(before UDPRelayStatsSnapshot) UDPRelayStats
 		C2SUDPPayloadOut: d.C2SUDPPayloadOut - before.C2SUDPPayloadOut,
 		C2SDropMalformed: d.C2SDropMalformed - before.C2SDropMalformed,
 		C2SDropOversize:  d.C2SDropOversize - before.C2SDropOversize,
+		C2SDropUDPWrite:  d.C2SDropUDPWrite - before.C2SDropUDPWrite,
 		S2CUDPIn:         d.S2CUDPIn - before.S2CUDPIn,
 		S2CDatagramOut:   d.S2CDatagramOut - before.S2CDatagramOut,
 		S2CDropOversize:  d.S2CDropOversize - before.S2CDropOversize,
@@ -200,12 +231,13 @@ func LogUDPRelayStats(tag string) {
 	}
 	s := SnapshotUDPRelayStats()
 	log.Printf(
-		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d c2s_batch_flush=%d s2c_batch_reads=%d s2c_batch_pkts=%d s2c_send_spins=%d",
+		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d c2s_drop_udp_write=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d c2s_batch_flush=%d s2c_batch_reads=%d s2c_batch_pkts=%d s2c_send_spins=%d",
 		tag,
 		s.C2SDatagramIn,
 		s.C2SUDPPayloadOut,
 		s.C2SDropMalformed,
 		s.C2SDropOversize,
+		s.C2SDropUDPWrite,
 		s.S2CUDPIn,
 		s.S2CDatagramOut,
 		s.S2CDropOversize,

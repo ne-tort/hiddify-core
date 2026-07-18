@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
@@ -100,15 +102,38 @@ func InttestLocalizeConnectUDPDockerPacedH2UploadGoodput(t *testing.T) {
 		got.mbps, got.sentPkts, got.stats.RxPkts, got.stats.LossPct, minFloor)
 }
 
-// InttestLocalizeConnectUDPDockerPacedH3At500Socks documents in-proc SOCKS associate relay ceiling.
+// InttestLocalizeConnectUDPDockerPacedH3At500Socks: in-proc H3 SOCKS @500 must not overflow
+// http3 stream_datagram_queue (F7.1 hard break was ≥500 with FlushChunk=1).
 func InttestLocalizeConnectUDPDockerPacedH3At500Socks(t *testing.T) {
 	t.Helper()
-	const target = 500.0
+	localizeConnectUDPH3PacedQueueDropGuard(t, 500.0, 1.0)
+}
+
+// InttestLocalizeConnectUDPH3Paced600SocksQueueDropGuard same at 600 (post-fix drain target).
+func InttestLocalizeConnectUDPH3Paced600SocksQueueDropGuard(t *testing.T) {
+	t.Helper()
+	localizeConnectUDPH3PacedQueueDropGuard(t, 600.0, 2.0)
+}
+
+func localizeConnectUDPH3PacedQueueDropGuard(t *testing.T, target, maxLossPct float64) {
+	t.Helper()
+	beforeQ := http3.StreamDatagramQueueDropTotal()
+	beforeRcv := quic.DatagramReceiveQueueDropTotal()
 	socks := benchConnectUDPPacedSinkGoodput(t, true, connectUDPSynthProdBenchDuration, target)
-	t.Logf("h3 in-proc socks relay @500: goodput=%.2f loss=%.2f%% rx=%d/%d (prod path: protocol/masque endpoint + docker)",
-		socks.mbps, socks.stats.LossPct, socks.stats.RxPkts, socks.sentPkts)
-	if socks.stats.LossPct < 10 {
-		assertConnectUDPProbeLoss(t, "h3 socks 500", socks.stats, connectUDPSynthMaxLossPct)
+	deltaQ := http3.StreamDatagramQueueDropTotal() - beforeQ
+	deltaRcv := quic.DatagramReceiveQueueDropTotal() - beforeRcv
+	t.Logf("RESULT_H3_PACED_QUEUE_GUARD target=%.0f goodput=%.2f loss=%.3f%% rx=%d/%d stream_dgram_queue_drops_delta=%d quic_rcv_queue_drops_delta=%d",
+		target, socks.mbps, socks.stats.LossPct, socks.stats.RxPkts, socks.sentPkts, deltaQ, deltaRcv)
+	assertConnectUDPProbeLoss(t, "h3 socks paced queue-guard", socks.stats, maxLossPct)
+	if deltaQ > 0 {
+		t.Fatalf("h3 @%.0f stream_datagram_queue_drops delta=%d — C2S drain too slow (FlushChunk/WriteBatch)", target, deltaQ)
+	}
+	if deltaRcv > 0 {
+		t.Fatalf("h3 @%.0f quic datagram_rcv_queue_drops delta=%d", target, deltaRcv)
+	}
+	minFloor := connectudp.MinPacedGoodputMbit(target) * 0.85
+	if socks.mbps < minFloor {
+		t.Fatalf("h3 socks @%.0f goodput %.2f < floor %.2f", target, socks.mbps, minFloor)
 	}
 }
 

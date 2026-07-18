@@ -50,6 +50,10 @@ type coreSession struct {
 	udpPlane               *cudpclient.Plane
 	ipPlaneOnce            sync.Once
 	ipPlane                *cipclient.Plane
+
+	// Live CONNECT-UDP PacketConns for LIFE-3 plane deselect (AUDIT B14 / F3.2).
+	udpFlowMu sync.Mutex
+	udpFlows  map[*trackedUDPPacketConn]struct{}
 }
 
 func (s *coreSession) currentUDPHTTPLayer() string {
@@ -65,10 +69,18 @@ func (s *coreSession) wireMasqueUDPClientForOverlayLocked() (*qmasque.Client, *u
 }
 
 func (s *coreSession) tryHTTPFallbackSwitch(err error) bool {
+	// AUDIT B16 / TASKS F3.4: refuse H3↔H2 pivot while CONNECT-UDP PacketConns are live
+	// (fallback closes UDPClient + all H2 transports and would orphan neighbors).
+	if s.liveUDPPacketConnCount() > 0 {
+		return false
+	}
 	return session.TryHTTPFallbackSwitch(&s.CoreSession, s.lifecycleHost(), err)
 }
 
 func (s *coreSession) tryHTTPFallbackSwitchLockedAssumeMu(err error) bool {
+	if s.liveUDPPacketConnCount() > 0 {
+		return false
+	}
 	return session.TryHTTPFallbackSwitchLockedAssumeMu(&s.CoreSession, s.lifecycleHost(), err)
 }
 
@@ -159,6 +171,10 @@ func (h lifecycleHost) BuildHopTemplates() (udp, ip, tcp *uritemplate.Template, 
 
 func (h lifecycleHost) CloseUDPClient() {
 	h.s.udpPlaneHost().CloseUDPClient()
+}
+
+func (h lifecycleHost) CloseLiveConnectUDPPacketConns() {
+	h.s.closeLiveUDPPacketConns()
 }
 
 func (h lifecycleHost) ResetIPH3TransportLockedAssumeMu() {

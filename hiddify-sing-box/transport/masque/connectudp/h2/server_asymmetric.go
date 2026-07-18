@@ -38,7 +38,6 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 	if w == nil || r == nil || conn == nil {
 		return errors.New("masque h2: asymmetric download leg: nil argument")
 	}
-	defer cudprelay.BeginRelaySessionStats("h2-download-leg")()
 	sess, downlinkW, ok := reg.lookupDownloadSession(key)
 	if !ok {
 		downlinkW = newH2DownlinkWriter(w, LegProfileDownloadFountain)
@@ -48,12 +47,13 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 			_ = conn.Close()
 			return err
 		}
+	} else {
+		// Re-entry must take a ref — defer Release pairs with Register/Attach (AUDIT C15 / F2.6).
+		reg.retainSession(key)
 	}
 	defer reg.Release(key)
 
 	var wg sync.WaitGroup
-	var closeUDP sync.Once
-	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
 	var shutdownBody sync.Once
 	shutdownRelay := func() {
 		shutdownBody.Do(func() {
@@ -65,9 +65,10 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 
 	var downErr error
 
+	// Do not Close shared onward UDP here (AUDIT A3 / F2.1): upload leg may still hold a ref.
+	// Last Release(refs==0) owns conn.Close. Context cancel only stops the H2 body/fountain.
 	go func() {
 		<-r.Context().Done()
-		closeUDPConn()
 		shutdownRelay()
 	}()
 
@@ -81,7 +82,6 @@ func serveH2DownloadLeg(w http.ResponseWriter, r *http.Request, conn *net.UDPCon
 	go func() {
 		defer wg.Done()
 		defer shutdownRelay()
-		defer closeUDPConn()
 		select {
 		case <-sess.ready:
 		case <-r.Context().Done():
@@ -99,7 +99,6 @@ func serveH2UploadLeg(w http.ResponseWriter, r *http.Request, key sessionKey, re
 	if w == nil || r == nil {
 		return errors.New("masque h2: asymmetric upload leg: nil argument")
 	}
-	defer cudprelay.BeginRelaySessionStats("h2-upload-leg")()
 	sess, err := reg.AttachUpload(key)
 	if err != nil {
 		return err

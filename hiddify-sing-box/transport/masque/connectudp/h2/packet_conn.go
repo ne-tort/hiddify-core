@@ -126,9 +126,10 @@ func (c *PacketConn) Close() error {
 		wire := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
 		if len(wire) > 0 {
-			_ = c.flushUploadWire(wire)
+			if err := c.flushUploadWire(wire); err != nil {
+				flowstats.RecordClientC2SFail()
+			}
 		}
-		c.FlushC2SWrites()
 		if c.uploadWireAck != nil {
 			if done, ok := c.uploadWireAck.(interface{ MarkUploadWriterDone() }); ok {
 				done.MarkUploadWriterDone()
@@ -161,7 +162,9 @@ func (c *PacketConn) FlushC2SWrites() {
 	wire := c.takeUploadPendingLocked()
 	c.writeMu.Unlock()
 	if len(wire) > 0 {
-		_ = c.flushUploadWire(wire)
+		if err := c.flushUploadWire(wire); err != nil {
+			flowstats.RecordClientC2SFail()
+		}
 	}
 }
 

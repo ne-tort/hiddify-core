@@ -20,7 +20,7 @@ func TestAsymmetricDownloadSessionSurvivesDialReturn(t *testing.T) {
 	reg := NewSessionRegistry()
 	proxyPort := StartInProcessConnectUDPProxy(t, h2IntegrationTestTLS, reg)
 	cfg := newH2ProdShapedIntegrationDialConfig(t, proxyPort)
-	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}/"
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

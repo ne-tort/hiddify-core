@@ -25,7 +25,7 @@ func TestAsymmetricDialNewTransportOncePerFlow(t *testing.T) {
 		news.Add(1)
 		return baseNew()
 	}
-	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}/"
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)

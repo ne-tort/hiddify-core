@@ -81,6 +81,7 @@ func newConnectUDPH3ProdListenPacketWithRegister(
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathUDP:             connectUDPInProcessPathUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -186,18 +187,25 @@ func waitInProcessMasqueUDPProxyReady(tb testing.TB, port int) {
 	tb.Fatal("in-process MASQUE UDP proxy not ready")
 }
 
+// connectUDPInProcessPathUDP matches StartInProcessConnectUDPProxy / registerMasqueUDPProxyHandler.
+// Prod default is /.well-known/masque/udp; in-process gates must set PathUDP explicitly.
+const connectUDPInProcessPathUDP = "/masque/udp"
+
 func registerMasqueUDPProxyHandler(t testing.TB, mux *http.ServeMux, proxyPort int) {
 	t.Helper()
-	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
+	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}/", proxyPort)
 	udpTemplate, err := uritemplate.New(templateRaw)
 	if err != nil {
 		t.Fatalf("udp template: %v", err)
 	}
 	var udpProxy cudprelay.Proxy
 	t.Cleanup(func() { _ = udpProxy.Close() })
-	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+	// pathbuild expands with trailing slash; register both (matches H2 StartInProcessConnectUDPProxy).
+	serve := func(w http.ResponseWriter, r *http.Request) {
 		serveConnectUDPProdHandler(w, r, udpTemplate, &udpProxy)
-	})
+	}
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", serve)
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}/", serve)
 }
 
 func startInProcessMasqueUDPProxyWithRelay(t testing.TB) int {
@@ -220,12 +228,12 @@ func startInProcessMasqueUDPProxyWithRelayPolicy(t testing.TB, policy cudprelay.
 func startInProcessMasqueUDPProxyForbidden(t testing.TB) int {
 	t.Helper()
 	return startInProcessMasqueUDPProxy(t, func(mux *http.ServeMux, proxyPort int) {
-		templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
+		templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}/", proxyPort)
 		udpTemplate, err := uritemplate.New(templateRaw)
 		if err != nil {
 			t.Fatalf("udp template: %v", err)
 		}
-		mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+		forbid := func(w http.ResponseWriter, r *http.Request) {
 			if _, err := cudpframe.ParseRequest(r, udpTemplate); err != nil {
 				if pe, ok := err.(*cudpframe.RequestParseError); ok {
 					w.WriteHeader(pe.HTTPStatus)
@@ -235,7 +243,9 @@ func startInProcessMasqueUDPProxyForbidden(t testing.TB) int {
 				return
 			}
 			w.WriteHeader(http.StatusForbidden)
-		})
+		}
+		mux.HandleFunc("/masque/udp/{target_host}/{target_port}", forbid)
+		mux.HandleFunc("/masque/udp/{target_host}/{target_port}/", forbid)
 	})
 }
 
@@ -246,6 +256,7 @@ func startConnectUDPMasqueSession(tb testing.TB, proxyPort int) ClientSession {
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathUDP:             connectUDPInProcessPathUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

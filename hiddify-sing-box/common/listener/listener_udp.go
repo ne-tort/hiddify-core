@@ -84,7 +84,13 @@ func (l *Listener) ListenPacket(listenConfig net.ListenConfig, ctx context.Conte
 		if l.listenOptions.ReuseAddr {
 			listenConfig.Control = control.Append(listenConfig.Control, control.ReuseAddr())
 		}
-		return listenConfig.ListenPacket(ctx, network, address)
+		pc, err := listenConfig.ListenPacket(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		// SOCKS/mixed ASSOCIATE path: tune at listen time (not after masque dial).
+		TuneUDPSocketBuffers(pc)
+		return pc, nil
 	})
 }
 

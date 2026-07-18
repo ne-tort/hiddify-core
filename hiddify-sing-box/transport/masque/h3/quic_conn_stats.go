@@ -9,26 +9,33 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // QUICConnStatsSnapshot aggregates always-on loss/RTT counters across tracked
 // QUIC connections (client dial / server accept). File dump: masque-quic-stats.json.
 // No-op registry when built with -tags masque_nostats.
 type QUICConnStatsSnapshot struct {
-	TrackedConns        int                     `json:"tracked_conns"`
-	BytesSent           uint64                  `json:"bytes_sent"`
-	PacketsSent         uint64                  `json:"packets_sent"`
-	BytesReceived       uint64                  `json:"bytes_received"`
-	PacketsReceived     uint64                  `json:"packets_received"`
-	BytesLost           uint64                  `json:"bytes_lost"`
-	PacketsLost         uint64                  `json:"packets_lost"`
-	SpuriousPacketsLost uint64                  `json:"spurious_packets_lost"`
+	TrackedConns        int     `json:"tracked_conns"`
+	BytesSent           uint64  `json:"bytes_sent"`
+	PacketsSent         uint64  `json:"packets_sent"`
+	BytesReceived       uint64  `json:"bytes_received"`
+	PacketsReceived     uint64  `json:"packets_received"`
+	BytesLost           uint64  `json:"bytes_lost"`
+	PacketsLost         uint64  `json:"packets_lost"`
+	SpuriousPacketsLost uint64  `json:"spurious_packets_lost"`
 	// DeclaredLostApprox ≈ PacketsLost+Spurious (quic-go PacketsLost shrinks on spurious recovery).
 	DeclaredLostApprox uint64  `json:"declared_lost_approx"`
 	LostPacketRatio    float64 `json:"lost_packet_ratio"` // PacketsLost / PacketsSent
 	MinRTTNs           int64   `json:"min_rtt_ns"`
 	SmoothedRTTNs      int64   `json:"smoothed_rtt_ns"`
-	Conns              []QUICConnSnapshot `json:"conns,omitempty"`
+	// Process-wide DATAGRAM drops *before* CONNECT-UDP relay c2s_in (AUDIT B2 / TASKS F0.4).
+	DatagramRcvQueueDrops         uint64 `json:"datagram_rcv_queue_drops"`
+	StreamDatagramQueueDrops      uint64 `json:"stream_datagram_queue_drops"`
+	StreamDatagramRecvClosedDrops uint64 `json:"stream_datagram_recv_closed_drops"`
+	UnknownStreamDatagramDrops    uint64 `json:"unknown_stream_datagram_drops"`
+	DatagramQueueDropsTotal       uint64 `json:"datagram_queue_drops_total"`
+	Conns                         []QUICConnSnapshot `json:"conns,omitempty"`
 }
 
 // QUICConnSnapshot is one tracked QUIC connection.
@@ -143,7 +150,22 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 	}
 	out.MinRTTNs = minRTT
 	out.SmoothedRTTNs = smoothRTT
+	fillQUICDatagramQueueDrops(&out)
 	return out
+}
+
+func fillQUICDatagramQueueDrops(out *QUICConnStatsSnapshot) {
+	if out == nil {
+		return
+	}
+	out.DatagramRcvQueueDrops = quic.DatagramReceiveQueueDropTotal()
+	out.StreamDatagramQueueDrops = http3.StreamDatagramQueueDropTotal()
+	out.StreamDatagramRecvClosedDrops = http3.StreamDatagramRecvClosedDropTotal()
+	out.UnknownStreamDatagramDrops = http3.UnknownStreamDatagramDropTotal()
+	out.DatagramQueueDropsTotal = out.DatagramRcvQueueDrops +
+		out.StreamDatagramQueueDrops +
+		out.StreamDatagramRecvClosedDrops +
+		out.UnknownStreamDatagramDrops
 }
 
 // EnsureQUICConnStatsFileDump writes SnapshotQUICConnStats JSON ~1 Hz while conns tracked.
@@ -159,7 +181,7 @@ func EnsureQUICConnStatsFileDump() {
 			defer t.Stop()
 			for range t.C {
 				s := SnapshotQUICConnStats()
-				if s.TrackedConns == 0 {
+				if s.TrackedConns == 0 && s.DatagramQueueDropsTotal == 0 {
 					continue
 				}
 				type dump struct {

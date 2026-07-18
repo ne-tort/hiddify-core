@@ -52,6 +52,7 @@ func gateConnectUDPMultiClientIsolation(t *testing.T, layer string) {
 			session, err = (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 				Server:              "127.0.0.1",
 				ServerPort:          uint16(proxyPort),
+				PathUDP:             connectUDPInProcessPathUDP,
 				MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 			})
 			if err != nil {

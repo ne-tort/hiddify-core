@@ -54,6 +54,14 @@ func InttestGATEConnectUDPParallelScalingH3(t *testing.T) {
 	gateConnectUDPParallelScaling(t, "h3", 4)
 }
 
+func InttestGATEConnectUDPScalingMapH2(t *testing.T) {
+	gateConnectUDPScalingMap(t, "h2")
+}
+
+func InttestGATEConnectUDPScalingMapH3(t *testing.T) {
+	gateConnectUDPScalingMap(t, "h3")
+}
+
 func InttestLocalizeConnectUDPH3ParallelScalingAttribution(t *testing.T) {
 	localizeConnectUDPH3ParallelScalingAttribution(t)
 }

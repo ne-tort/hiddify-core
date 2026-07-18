@@ -425,6 +425,12 @@ func (s *RequestStream) FlushProxiedIPDatagramSend() {
 	s.str.FlushProxiedIPDatagramSend()
 }
 
+// DatagramSendBacklog returns queued outgoing QUIC DATAGRAM frames (CONNECT-UDP C2S drain; AUDIT B1).
+// Without this, *RequestStream does not satisfy the backlog interface and awaitDatagramSendDrain is a no-op.
+func (s *RequestStream) DatagramSendBacklog() int {
+	return s.str.DatagramSendBacklog()
+}
+
 // ReceiveDatagram receives HTTP Datagrams (RFC 9297).
 //
 // It is only possible if support for HTTP Datagrams was enabled, using the EnableDatagram

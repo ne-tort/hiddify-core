@@ -46,6 +46,7 @@ func (f *overlayLifecycleHostFake) BuildHopTemplates() (*uritemplate.Template, *
 	return nil, nil, nil, nil
 }
 func (f *overlayLifecycleHostFake) CloseUDPClient() {}
+func (f *overlayLifecycleHostFake) CloseLiveConnectUDPPacketConns() {}
 func (f *overlayLifecycleHostFake) ResetIPH3TransportLockedAssumeMu()  {}
 func (f *overlayLifecycleHostFake) ResetH2UDPTransportLockedAssumeMu() {}
 func (f *overlayLifecycleHostFake) CloseAllH2ClientTransports()        { f.closeH2++ }
@@ -68,7 +69,6 @@ func TestTeardownOverlayHTTPLockedAssumeMu(t *testing.T) {
 func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 	s := &CoreSession{
 		HTTPLayerAuto: true,
-		IPConn:            connectip.NewStubIngressConn(),
 	}
 	StoreUDPHTTPLayer(s, option.MasqueHTTPLayerH3)
 	orderNS := &overlayTestNetstack{
@@ -83,9 +83,6 @@ func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 	if !switched {
 		t.Fatal("expected http layer fallback switch")
 	}
-	if s.IPConn != nil {
-		t.Fatal("expected ipConn cleared after fallback teardown")
-	}
 	if s.TCPNetstack != nil {
 		t.Fatal("expected tcpNetstack cleared after fallback teardown")
 	}
@@ -94,6 +91,27 @@ func TestOverlayFallbackSwitchTeardownOrder(t *testing.T) {
 	}
 	if host.cancelIngress != 1 || host.closeH2 != 1 {
 		t.Fatalf("unexpected host calls: %+v", host)
+	}
+}
+
+func TestOverlayFallbackRefusesWithLiveIPConn(t *testing.T) {
+	s := &CoreSession{
+		HTTPLayerAuto: true,
+		IPConn:        connectip.NewStubIngressConn(),
+	}
+	StoreUDPHTTPLayer(s, option.MasqueHTTPLayerH3)
+	host := &overlayLifecycleHostFake{}
+	s.Mu.Lock()
+	switched := TryHTTPFallbackSwitchLockedAssumeMu(s, host, errors.New("Extended CONNECT refused"))
+	s.Mu.Unlock()
+	if switched {
+		t.Fatal("expected no pivot while CONNECT-IP is open (B16)")
+	}
+	if s.IPConn == nil {
+		t.Fatal("IPConn must remain when pivot refused")
+	}
+	if CurrentUDPHTTPLayer(s) != option.MasqueHTTPLayerH3 {
+		t.Fatalf("overlay must stay h3, got %q", CurrentUDPHTTPLayer(s))
 	}
 }
 

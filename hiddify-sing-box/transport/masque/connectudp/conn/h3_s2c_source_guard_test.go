@@ -13,7 +13,7 @@ var h3ConnSource string
 //go:embed opt_c2s.go
 var h3C2SSource string
 
-//go:embed h3_masque_leg.go
+//go:embed h3_leg.go
 var h3MasqueLegSource string
 
 // TestH3ClientS2CSourceHasNoPrefetchPump locks CUT of legacy bg prefetch (UDP-6MIG-01).
@@ -55,21 +55,23 @@ func TestH3ClientC2SSyncSendDatagram(t *testing.T) {
 	}
 }
 
-// TestH3AsymmetricDownloadLegArmsQUICReceiveActive locks P2 download receive-active for sibling upload FC.
-func TestH3AsymmetricDownloadLegArmsQUICReceiveActive(t *testing.T) {
+// TestH3AsymmetricDownloadLegKeepsLegRoles locks download/upload leg enums on H3Conn.
+// Receive-active / LazyFC arming (MasqueSetBidiDownloadReceiveActive) is not wired on the
+// current H3 PacketConn path — do not reintroduce send-boost MasqueSetBidiDownloadActive here.
+func TestH3AsymmetricDownloadLegKeepsLegRoles(t *testing.T) {
 	t.Parallel()
 	combined := h3ConnSource + h3C2SSource + h3MasqueLegSource
 	for _, needle := range []string{
-		"MasqueSetBidiDownloadReceiveActive",
-		"MasqueSetPeerDuplexLazyFC",
 		"H3LegDownload",
+		"H3LegUpload",
+		"H3LegBidi",
 	} {
 		if !strings.Contains(combined, needle) {
-			t.Fatalf("h3 asymmetric download leg must arm QUIC receive-active (%q)", needle)
+			t.Fatalf("h3 leg sources must define %q", needle)
 		}
 	}
 	if strings.Contains(combined, "MasqueSetBidiDownloadActive(") {
-		t.Fatal("must use MasqueSetBidiDownloadReceiveActive, not send-boost MasqueSetBidiDownloadActive")
+		t.Fatal("must not use send-boost MasqueSetBidiDownloadActive on H3 PacketConn path")
 	}
 }
 

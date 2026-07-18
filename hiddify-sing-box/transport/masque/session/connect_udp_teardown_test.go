@@ -10,8 +10,9 @@ import (
 )
 
 type connectUDPTeardownHost struct {
-	s         *CoreSession
-	closeUDP  atomic.Bool
+	s          *CoreSession
+	closeUDP   atomic.Bool
+	closeLive  atomic.Bool
 	resetH2UDP atomic.Bool
 }
 
@@ -24,6 +25,9 @@ func (h *connectUDPTeardownHost) EmitObservabilityEvent(string) {}
 func (h *connectUDPTeardownHost) IncConnectIPSessionReset(string) {}
 func (h *connectUDPTeardownHost) BuildHopTemplates() (*uritemplate.Template, *uritemplate.Template, *uritemplate.Template, error) {
 	return nil, nil, nil, nil
+}
+func (h *connectUDPTeardownHost) CloseLiveConnectUDPPacketConns() {
+	h.closeLive.Store(true)
 }
 func (h *connectUDPTeardownHost) CloseUDPClient() {
 	h.closeUDP.Store(true)
@@ -49,6 +53,9 @@ func TestCloseConnectUDPPlaneTeardownOrder(t *testing.T) {
 
 	if s.UDPClient != nil {
 		t.Fatal("expected UDPClient cleared after plane close")
+	}
+	if !host.closeLive.Load() {
+		t.Fatal("expected CloseLiveConnectUDPPacketConns before transport teardown (B14)")
 	}
 	if !host.closeUDP.Load() {
 		t.Fatal("expected CloseUDPClient during plane close")

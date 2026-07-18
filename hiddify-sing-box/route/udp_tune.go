@@ -3,11 +3,13 @@ package route
 import (
 	"context"
 	"net"
+
+	"github.com/sagernet/sing-box/common/listener"
 )
 
-const masqueRelayUDPSocketBuf = 4 << 20
-
-// TunedPacketListener wraps SOCKS5 UDP ASSOCIATE listen with kernel 4 MiB buffers.
+// TunedPacketListener wraps SOCKS5 UDP ASSOCIATE listen with tuned kernel UDP buffers.
+// Prefer passing *listener.Listener (ListenPacket already tunes); this type remains for
+// in-process test harnesses that do not use common/listener.Listener.
 type TunedPacketListener struct{}
 
 func (TunedPacketListener) ListenPacket(
@@ -19,7 +21,7 @@ func (TunedPacketListener) ListenPacket(
 	if err != nil {
 		return nil, err
 	}
-	tuneUDPPacketConn(pc)
+	listener.TuneUDPSocketBuffers(pc)
 	return pc, nil
 }
 
@@ -33,18 +35,9 @@ func tuneUDPPacketConn(conn any) {
 		return
 	}
 	if pc, ok := conn.(net.PacketConn); ok {
-		tuneUDPConn(pc)
+		listener.TuneUDPSocketBuffers(pc)
 	}
 	if up, ok := conn.(interface{ Upstream() any }); ok {
 		tuneUDPPacketConn(up.Upstream())
 	}
-}
-
-func tuneUDPConn(pc net.PacketConn) {
-	uc, ok := pc.(*net.UDPConn)
-	if !ok {
-		return
-	}
-	_ = uc.SetReadBuffer(masqueRelayUDPSocketBuf)
-	_ = uc.SetWriteBuffer(masqueRelayUDPSocketBuf)
 }

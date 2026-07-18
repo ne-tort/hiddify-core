@@ -26,6 +26,26 @@ func TestLocalizeConnectUDPDockerPacedH3At500Socks(t *testing.T) {
 	masque.InttestLocalizeConnectUDPDockerPacedH3At500Socks(t)
 }
 
+func TestLocalizeConnectUDPH3Paced600SocksQueueDropGuard(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3Paced600SocksQueueDropGuard(t)
+}
+
+func TestLocalizeConnectUDPH3Paced500DirectVsSocksWriteGap(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3Paced500DirectVsSocksWriteGap(t)
+}
+
+func TestLocalizeConnectUDPH3Paced600DirectVsSocksWriteGap(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3Paced600DirectVsSocksWriteGap(t)
+}
+
 func TestLocalizeConnectUDPDockerPacedH2DirectVsSocks5(t *testing.T) {
 	masque.InttestLocalizeConnectUDPDockerPacedH2DirectVsSocks5(t)
+}
+
+func TestLocalizeConnectUDPH3Paced200DirectVsSocks(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3Paced200DirectVsSocks(t)
+}
+
+func TestLocalizeConnectUDPH3Paced300DirectVsSocks(t *testing.T) {
+	masque.InttestLocalizeConnectUDPH3Paced300DirectVsSocks(t)
 }

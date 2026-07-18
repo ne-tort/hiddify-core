@@ -123,28 +123,26 @@ func TestH2ResponseWriterICMPImmediateFlush(t *testing.T) {
 	}
 }
 
-func TestH2ResponseWriterFountainBulkBatchesFlush(t *testing.T) {
+func TestH2ResponseWriterFountainFlushOnlyViaFlushPending(t *testing.T) {
 	rec := &flushCountResponseWriter{}
 	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
 	payload := bytes.Repeat([]byte{'x'}, 512)
 	perWire := h2c.DatagramCapsule512WireLen
+	// Past old 64KiB threshold — must still not auto-flush (B7: per-batch only).
 	need := (H2DownlinkBulkFlushBytes / perWire) + 1
 	for i := 0; i < need; i++ {
 		if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("byte threshold flush: flushes=%d want 1", got)
-	}
-	if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
-		t.Fatal(err)
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("Append must not auto-flush: flushes=%d want 0", got)
 	}
 	if err := w.FlushPending(); err != nil {
 		t.Fatal(err)
 	}
-	if got := rec.flushes.Load(); got != 2 {
-		t.Fatalf("tail flush: flushes=%d want 2", got)
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("FlushPending: flushes=%d want 1", got)
 	}
 }
 

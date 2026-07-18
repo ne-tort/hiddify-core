@@ -45,6 +45,7 @@ func (h *teardownTestHost) BuildHopTemplates() (*uritemplate.Template, *uritempl
 	return nil, nil, nil, nil
 }
 func (h *teardownTestHost) CloseUDPClient()             {}
+func (h *teardownTestHost) CloseLiveConnectUDPPacketConns() {}
 func (h *teardownTestHost) CloseAllH2ClientTransports() {}
 func (h *teardownTestHost) CloseH2MasqueClientTransport(*http2.Transport) {
 }

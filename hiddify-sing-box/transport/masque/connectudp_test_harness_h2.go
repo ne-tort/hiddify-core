@@ -32,6 +32,7 @@ func newH2ConnectUDPSession(t *testing.T, proxyPort int, link h2TransportLink) (
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:                   "127.0.0.1",
 		ServerPort:               uint16(proxyPort),
+		PathUDP:                  connectUDPInProcessPathUDP,
 		MasqueEffectiveHTTPLayer: option.MasqueHTTPLayerH2,
 		MasqueQUICCryptoTLS:      &tls.Config{InsecureSkipVerify: true},
 		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {

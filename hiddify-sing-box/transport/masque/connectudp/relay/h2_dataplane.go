@@ -206,8 +206,8 @@ func RelayH2ConnectDownlinkImmediate(ctx context.Context, conn *net.UDPConn, rea
 	}
 }
 
-// RelayH2ConnectDownlinkFountain appends RFC9297 wire with byte-threshold flush (asymmetric S2C-only leg).
-// It keeps low-latency single-packet echo, but uses append batching for multi-packet bursts.
+// RelayH2ConnectDownlinkFountain appends RFC9297 wire and flushes once per onward UDP
+// RX batch (AUDIT B7 / F2.5). Append itself does not byte-threshold flush.
 func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, readBufSize int, downlink H2DownlinkAppender) error {
 	if downlink == nil {
 		return errors.New("masque h2 dataplane connect-udp server downlink: nil appender")
@@ -241,6 +241,7 @@ func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, read
 				return fmt.Errorf("masque h2 dataplane connect-udp server udp read: %w", err)
 			}
 		}
+		appended := 0
 		for _, payload := range payloads {
 			if relayStatsEnabled() {
 				globalUDPRelayStats.s2cUDPIn.Add(1)
@@ -257,14 +258,18 @@ func RelayH2ConnectDownlinkFountain(ctx context.Context, conn *net.UDPConn, read
 				}
 				return fmt.Errorf("masque h2 dataplane connect-udp server down capsule: %w", aErr)
 			}
-			if relayStatsEnabled() {
-				globalUDPRelayStats.s2cDatagramOut.Add(1)
-			}
+			appended++
 		}
-		// Flush each RX batch so multi-datagram echo (split upload) is not held below 64KiB threshold.
-		if len(payloads) > 0 {
+		// AUDIT A6 / TASKS F0.3: count s2c_out only after successful wire flush (not after Append).
+		if appended > 0 {
 			if fErr := downlink.FlushPending(); fErr != nil {
+				if relayStatsEnabled() {
+					globalUDPRelayStats.s2cDropSendFail.Add(uint64(appended))
+				}
 				return fmt.Errorf("masque h2 dataplane connect-udp server down flush: %w", fErr)
+			}
+			if relayStatsEnabled() {
+				globalUDPRelayStats.s2cDatagramOut.Add(uint64(appended))
 			}
 		}
 		if err != nil {

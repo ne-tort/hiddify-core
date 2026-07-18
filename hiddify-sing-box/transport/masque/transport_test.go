@@ -65,9 +65,10 @@ func (n *connectIPTeardownOrderNetstack) Close() error {
 }
 
 func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
+	// B16: pivot refuses when IPConn is already open; teardown-order check uses
+	// TCPNetstack only (CloseConnectIPDataplane still clears netstack).
 	s := newTestCoreSession(msess.CoreSession{
 		HTTPLayerAuto: true,
-		IPConn:            testStubConnectIPConn(),
 	})
 	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
 	orderNS := &connectIPTeardownOrderNetstack{
@@ -81,14 +82,31 @@ func TestHTTPFallbackSwitchConnectIPTeardownOrder(t *testing.T) {
 	if !switched {
 		t.Fatal("expected http layer fallback switch")
 	}
-	if s.IPConn != nil {
-		t.Fatal("expected ipConn cleared after fallback teardown")
-	}
 	if s.TCPNetstack != nil {
 		t.Fatal("expected tcpNetstack cleared after fallback teardown")
 	}
 	if layer, _ := s.UDPHTTPLayer.Load().(string); layer != option.MasqueHTTPLayerH2 {
 		t.Fatalf("expected overlay pivot to h2, got %q", layer)
+	}
+}
+
+func TestHTTPFallbackRefusesWithLiveIPConn(t *testing.T) {
+	s := newTestCoreSession(msess.CoreSession{
+		HTTPLayerAuto: true,
+		IPConn:        testStubConnectIPConn(),
+	})
+	s.UDPHTTPLayer.Store(option.MasqueHTTPLayerH3)
+	s.Mu.Lock()
+	switched := s.tryHTTPFallbackSwitchLockedAssumeMu(errors.New("Extended CONNECT refused"))
+	s.Mu.Unlock()
+	if switched {
+		t.Fatal("expected no overlay pivot while CONNECT-IP is open (B16)")
+	}
+	if s.IPConn == nil {
+		t.Fatal("IPConn must remain when pivot refused")
+	}
+	if layer, _ := s.UDPHTTPLayer.Load().(string); layer != option.MasqueHTTPLayerH3 {
+		t.Fatalf("overlay must stay h3, got %q", layer)
 	}
 }
 

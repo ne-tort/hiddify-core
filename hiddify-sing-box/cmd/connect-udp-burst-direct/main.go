@@ -9,13 +9,13 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sagernet/sing-box/option"
 	TM "github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing-box/transport/masque/connectudp"
 	M "github.com/sagernet/sing/common/metadata"
-	"github.com/yosida95/uritemplate/v3"
 
 	_ "github.com/sagernet/sing-box/internal/http2xconnect"
 )
@@ -58,11 +58,6 @@ func main() {
 	if v := os.Getenv("MASQUE_TLS_SERVER_NAME"); v != "" {
 		sni = v
 	}
-	tplRaw := fmt.Sprintf("https://%s:%d/masque/udp/{target_host}/{target_port}", serverHost, serverPort)
-	if _, err := uritemplate.New(tplRaw); err != nil {
-		fmt.Printf("RESULT_UDP_SEND_ERR=template: %v\n", err)
-		os.Exit(1)
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(duration*4+30)*time.Second)
 	defer cancel()
@@ -71,10 +66,19 @@ func main() {
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
+	pathUDP := "/.well-known/masque/udp"
+	if v := os.Getenv("MASQUE_PATH_UDP"); v != "" {
+		pathUDP = v
+	}
+	token := strings.TrimSpace(os.Getenv("MASQUE_SERVER_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("BENCH_TOKEN"))
+	}
 	opts := TM.ClientOptions{
 		Server:              serverHost,
 		ServerPort:          uint16(serverPort),
-		TemplateUDP:         tplRaw,
+		PathUDP:             pathUDP,
+		ServerToken:         token,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true, ServerName: sni},
 		TCPDial:             baseDial,
 	}

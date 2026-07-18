@@ -30,7 +30,8 @@ func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, session
 		tb.Fatalf("listen tcp: %v", err)
 	}
 	proxyPort := ln.Addr().(*net.TCPAddr).Port
-	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}", proxyPort)
+	// Trailing slash matches pathbuild.FullURITemplate (prod client expand).
+	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}/", proxyPort)
 	udpTemplate, err := uritemplate.New(templateRaw)
 	if err != nil {
 		tb.Fatalf("udp template: %v", err)
@@ -39,7 +40,8 @@ func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, session
 	cfg := ServeConnectUDPConfig{Sessions: sessions}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+	// pathbuild FullURITemplate expands with a trailing slash; match both shapes.
+	serve := func(w http.ResponseWriter, r *http.Request) {
 		req, err := cudpframe.ParseRequest(r, udpTemplate)
 		if err != nil {
 			if pe, ok := err.(*cudpframe.RequestParseError); ok {
@@ -50,7 +52,9 @@ func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, session
 			return
 		}
 		ServeConnectUDP(w, r, req.Target, req.Host, cfg)
-	})
+	}
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", serve)
+	mux.HandleFunc("/masque/udp/{target_host}/{target_port}/", serve)
 
 	tlsLn := tls.NewListener(ln, tlsCfg)
 	srv := &http.Server{Handler: mux}

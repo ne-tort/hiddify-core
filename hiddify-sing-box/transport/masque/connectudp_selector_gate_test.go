@@ -64,11 +64,19 @@ func TestGATEConnectUDPOutboundSelectorChangeActivePlane(t *testing.T) {
 	if cs.UDPClient != nil {
 		t.Fatal("expected UDPClient cleared after plane close on active flow")
 	}
+	if cs.liveUDPPacketConnCount() != 0 {
+		t.Fatalf("expected live UDP flows closed on plane deselect, still=%d", cs.liveUDPPacketConnCount())
+	}
 
 	select {
 	case <-readDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("blocked ReadFrom did not unblock after plane close")
+	}
+
+	_, werr := pkt.WriteTo([]byte("x"), nil)
+	if werr == nil {
+		t.Fatal("expected WriteTo error after plane deselect closed PacketConn (B14)")
 	}
 
 	// Session stays alive; plane can be re-opened on next ListenPacket.

@@ -152,7 +152,7 @@ func newH2ProdShapedIntegrationDialConfig(t *testing.T, proxyPort int) H2Overlay
 
 func dialH2IntegrationUDPWithConfig(t *testing.T, proxyPort int, cfg H2OverlayDialConfig, target string) net.PacketConn {
 	t.Helper()
-	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}"
+	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}/"
 	tpl, err := uritemplate.New(rawTpl)
 	require.NoError(t, err)
 
