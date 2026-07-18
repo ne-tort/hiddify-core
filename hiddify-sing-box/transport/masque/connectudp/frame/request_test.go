@@ -56,6 +56,27 @@ func TestParseRequestRequiresCapsuleProtocol(t *testing.T) {
 	}
 }
 
+func TestParseRequestRejectsMissingCapsuleProtocolEvenWithConnectUDPProto(t *testing.T) {
+	t.Parallel()
+	tmpl, err := uritemplate.New(testUDPTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Former D-R4 H3 waiver: Proto=connect-udp without Capsule-Protocol must now reject.
+	req := connectUDPRequest(t, false, false)
+	if req.Proto != RequestProtocol {
+		t.Fatalf("Proto=%q want %q", req.Proto, RequestProtocol)
+	}
+	_, err = ParseRequest(req, tmpl)
+	var perr *RequestParseError
+	if !errors.As(err, &perr) {
+		t.Fatalf("ParseRequest: %v want *RequestParseError", err)
+	}
+	if perr.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d", perr.HTTPStatus, http.StatusBadRequest)
+	}
+}
+
 func TestParseRequestRejectsFalseCapsuleProtocol(t *testing.T) {
 	t.Parallel()
 	tmpl, err := uritemplate.New(testUDPTemplate)
@@ -69,22 +90,6 @@ func TestParseRequestRejectsFalseCapsuleProtocol(t *testing.T) {
 	}
 	if perr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("status: got %d want %d", perr.HTTPStatus, http.StatusBadRequest)
-	}
-}
-
-func TestParseRequestAcceptsH3ConnectUDPWithoutCapsuleHeader(t *testing.T) {
-	t.Parallel()
-	tmpl, err := uritemplate.New(testUDPTemplate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := connectUDPRequest(t, false, false)
-	parsed, err := ParseRequest(req, tmpl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Target != "198.51.100.1:443" {
-		t.Fatalf("target: got %q", parsed.Target)
 	}
 }
 

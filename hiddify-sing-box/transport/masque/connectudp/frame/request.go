@@ -133,35 +133,33 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("unexpected protocol: %q", proto),
 		}
 	}
-	capsuleHeaderValues, ok := r.Header[http3.CapsuleProtocolHeader]
-	if !ok {
-		// RFC 9297 §3.4: Capsule-Protocol is SHOULD send, not MUST. H2 without the header → 400
-		// (stricter product). H3: some stacks set r.Proto=connect-udp but do not surface the
-		// header in r.Header — accept (D-R4 stack quirk); do not harden reject until surfacing.
-		if !strings.EqualFold(strings.TrimSpace(r.Proto), RequestProtocol) {
-			return nil, &RequestParseError{
-				HTTPStatus: http.StatusBadRequest,
-				Err:        fmt.Errorf("missing %s header", http3.CapsuleProtocolHeader),
-			}
+	capsuleHeaderValues := r.Header.Values(http3.CapsuleProtocolHeader)
+	if len(capsuleHeaderValues) == 0 {
+		// Product profile: require Capsule-Protocol: ?1 on CONNECT-UDP (stricter than
+		// RFC 9297 §3.4 SHOULD). Aligned with CONNECT-IP parse and our always-send clients.
+		// Handshake-only — not on the UDP/QUIC dataplane hot path. No Proto-based waiver:
+		// http3 requestFromHeaders surfaces the header when the client sent it (D-R4 closed).
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("missing %s header", http3.CapsuleProtocolHeader),
 		}
-	} else {
-		item, err := httpsfv.UnmarshalItem(capsuleHeaderValues)
-		if err != nil {
-			return nil, &RequestParseError{
-				HTTPStatus: http.StatusBadRequest,
-				Err:        fmt.Errorf("invalid capsule header value: %s", capsuleHeaderValues),
-			}
+	}
+	item, err := httpsfv.UnmarshalItem(capsuleHeaderValues)
+	if err != nil {
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("invalid capsule header value: %s", capsuleHeaderValues),
 		}
-		if v, ok := item.Value.(bool); !ok {
-			return nil, &RequestParseError{
-				HTTPStatus: http.StatusBadRequest,
-				Err:        fmt.Errorf("incorrect capsule header value type: %s", reflect.TypeOf(item.Value)),
-			}
-		} else if !v {
-			return nil, &RequestParseError{
-				HTTPStatus: http.StatusBadRequest,
-				Err:        fmt.Errorf("incorrect capsule header value: %t", item.Value),
-			}
+	}
+	if v, ok := item.Value.(bool); !ok {
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("incorrect capsule header value type: %s", reflect.TypeOf(item.Value)),
+		}
+	} else if !v {
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("incorrect capsule header value: %t", item.Value),
 		}
 	}
 	if r.Host != u.Host {
