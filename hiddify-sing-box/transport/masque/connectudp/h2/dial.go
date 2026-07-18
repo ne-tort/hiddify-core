@@ -3,7 +3,6 @@ package h2
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -21,22 +20,14 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// connectUDPNoXNetBulkPipe reports ≤64KiB cap so x/net masque_upload_bulk_flush stays off CONNECT-UDP (REF-H2-02).
-type connectUDPNoXNetBulkPipe struct {
-	io.ReadCloser
-}
-
-func (connectUDPNoXNetBulkPipe) UploadPipeCap() int { return 64 << 10 }
-
 // H2OverlayDialConfig wires production H2 CONNECT-UDP dial from package masque.
 type H2OverlayDialConfig struct {
 	Hook func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error)
 
 	EnsureTransport func(ctx context.Context) (*http2.Transport, error)
 	// NewTransport is optional lab/isolation mode: builds one dedicated TCP per UDPFlow.
-	// Prod leaves this nil and uses EnsureTransport → shared H2UDPTransport (H2-TUN-3):
-	// N× dedicated TLS under browser ASSOCIATE stole CWND from CONNECT-stream upload.
-	// When set, DialH2Overlay wraps once via dedicatedOverlayTransport (both asym legs share that TCP).
+	// Prod leaves this nil and uses EnsureTransport → shared H2UDPTransport (H2-TUN-3).
+	// When set, DialH2Overlay uses one dedicated TCP for the single RFC bidi stream.
 	NewTransport  func() (*http2.Transport, error)
 	SetAuthHeader func(h http.Header)
 
@@ -51,48 +42,15 @@ type H2OverlayDialConfig struct {
 }
 
 // DialH2Overlay performs Extended CONNECT over HTTP/2 with DATAGRAM capsules (RFC 9298).
+// One CONNECT → one H2 stream: C2S = request body, S2C = response body (approach A).
 func DialH2Overlay(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
 	if cfg.Hook != nil {
 		return cfg.Hook(ctx, template, target)
 	}
-	return dialH2OverlayAsymmetric(ctx, cfg, template, target)
+	return dialH2OverlayBidi(ctx, cfg, template, target)
 }
 
-func dialH2OverlayAsymmetric(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
-	muxKey, err := NewUDPMuxSessionKey()
-	if err != nil {
-		return nil, fmt.Errorf("masque h2: asymmetric mux key: %w", err)
-	}
-	// When NewTransport is set (lab isolation): one dedicated TCP per UDPFlow for both
-	// asymmetric legs. Prod uses shared EnsureTransport only (H2-TUN-3).
-	cfg, transportOnClose := dedicatedOverlayTransport(cfg)
-	cfg.NewTransport = nil
-
-	download, err := dialH2OverlaySingle(ctx, cfg, template, target, streamRoleDownload, muxKey)
-	if err != nil {
-		if transportOnClose != nil {
-			transportOnClose()
-		}
-		return nil, err
-	}
-	localAddr := download.LocalAddr()
-	var remoteAddr net.Addr
-	if ra, ok := download.(interface{ RemoteAddr() net.Addr }); ok {
-		remoteAddr = ra.RemoteAddr()
-	}
-
-	upload, err := dialH2OverlaySingle(ctx, cfg, template, target, streamRoleUpload, muxKey)
-	if err != nil {
-		_ = download.Close()
-		if transportOnClose != nil {
-			transportOnClose()
-		}
-		return nil, err
-	}
-	return NewAsymmetricPacketConn(download, upload, localAddr, remoteAddr, transportOnClose), nil
-}
-
-func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string, role streamRole, muxKey string) (net.PacketConn, error) {
+func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *uritemplate.Template, target string) (net.PacketConn, error) {
 	select {
 	case <-ctx.Done():
 		return nil, context.Cause(ctx)
@@ -117,26 +75,20 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 
 	tr, err := cfg.EnsureTransport(ctx)
 	if err != nil {
+		if transportOnClose != nil {
+			transportOnClose()
+		}
 		return nil, err
 	}
 
-	uploadOnly := role == streamRoleUpload
-	var pipeR io.ReadCloser
-	var pipeW h2c.ConnectUploadPipeWriter
-	var uploadBody *h2c.ExtendedConnectUploadBody
-	var reqBody io.WriteCloser
-	if uploadOnly {
-		// Shallow uploadPipe decouples C2S from writeRequestBody; END_STREAM deferred until writer half-close.
-		pipeR, pipeW = h2c.NewConnectUploadShallowPipe()
-		pipeR = connectUDPNoXNetBulkPipe{ReadCloser: pipeR}
-		uploadBody = &h2c.ExtendedConnectUploadBody{Pipe: pipeR, Writer: pipeW}
-		uploadBody.BeginUploadWriterLive()
-		reqBody = pipeW
-	}
+	// Shallow uploadPipe decouples C2S from writeRequestBody; END_STREAM deferred until writer half-close.
+	pipeR, pipeW := h2c.NewConnectUploadShallowPipe()
+	pipeR = wrapConnectUDPNoXNetBulkPipe(pipeR)
+	uploadBody := &h2c.ExtendedConnectUploadBody{Pipe: pipeR, Writer: pipeW}
+	uploadBody.BeginUploadWriterLive()
+	reqBody := pipeW
+
 	// Match CONNECT-stream dial_h2.go: do NOT defer stop(false) after stop(true).
-	// defer stop(false) after a successful Extended CONNECT cancels Request.Context and tears
-	// down the download leg Serve before the upload leg can attach → CONNECT-UDP status 503
-	// (server WaitDownloadSessionBeforeOK). See STR-P2-H2-CONNECT-UDP-503.
 	streamCtx, stopReqCtxRelay := httpx.NewH2ExtendedConnectRequestContext(ctx)
 	handshakeOK := false
 	defer func() {
@@ -144,14 +96,11 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 			stopReqCtxRelay(false)
 		}
 	}()
-	var reqBodyReader io.Reader
-	if uploadBody != nil {
-		reqBodyReader = uploadBody
-	}
-	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, reqBodyReader)
+	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, uploadBody)
 	if err != nil {
-		if pipeW != nil {
-			_ = pipeW.Close()
+		_ = pipeW.Close()
+		if transportOnClose != nil {
+			transportOnClose()
 		}
 		return nil, fmt.Errorf("masque h2: new connect-udp request: %w", err)
 	}
@@ -161,23 +110,16 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 	if cfg.SetAuthHeader != nil {
 		cfg.SetAuthHeader(req.Header)
 	}
-	if hdr := streamRoleHeader(role); hdr != "" {
-		req.Header.Set(MasqueUDPStreamRoleHeader, hdr)
-	}
-	if muxKey != "" {
-		req.Header.Set(MasqueUDPMuxKeyHeader, muxKey)
-	}
 	if u.Host != "" {
 		req.Host = u.Host
 	}
-	if uploadOnly {
-		req.ContentLength = -1
-	}
+	req.ContentLength = -1
 
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
-		if pipeW != nil {
-			_ = pipeW.Close()
+		_ = pipeW.Close()
+		if transportOnClose != nil {
+			transportOnClose()
 		}
 		proto := strings.TrimSpace(cfg.WarpConnectIPProtocol)
 		primaryHost := strings.TrimSpace(cfg.QUICDialCandidateHost)
@@ -192,17 +134,19 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 		return nil, fmt.Errorf("masque h2: roundtrip: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		if pipeW != nil {
-			_ = pipeW.Close()
-		}
+		_ = pipeW.Close()
 		_ = resp.Body.Close()
+		if transportOnClose != nil {
+			transportOnClose()
+		}
 		return nil, fmt.Errorf("masque h2: CONNECT-UDP status %d", resp.StatusCode)
 	}
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
-		if pipeW != nil {
-			_ = pipeW.Close()
-		}
+		_ = pipeW.Close()
 		_ = resp.Body.Close()
+		if transportOnClose != nil {
+			transportOnClose()
+		}
 		return nil, ctxErr
 	}
 	stopReqCtxRelay(true)
@@ -221,24 +165,18 @@ func dialH2OverlaySingle(ctx context.Context, cfg H2OverlayDialConfig, template 
 			transportOnClose()
 		}
 	}
-	profile := legProfileForStreamRole(role)
 	pc := NewPacketConn(PacketConnConfig{
 		ReqPipeR:      pipeR,
 		ReqBody:       reqBody,
 		Resp:          resp,
 		LocalAddr:     NewUDPAddr(dialAddr),
 		RemoteAddr:    raddr,
-		UploadOnly:    uploadOnly,
-		LegProfile:    profile,
 		UploadWireAck: uploadBody,
 		OnClose:       onClose,
 	})
-	if uploadOnly {
-		if err := pc.Prime(); err != nil {
-			_ = pc.Close()
-			return nil, err
-		}
-		pc.startUploadOnlyDrain()
+	if err := pc.Prime(); err != nil {
+		_ = pc.Close()
+		return nil, err
 	}
 	return pc, nil
 }

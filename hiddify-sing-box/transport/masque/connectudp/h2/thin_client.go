@@ -8,7 +8,7 @@ import (
 )
 
 // dedicatedOverlayTransport returns a per-UDPFlow EnsureTransport when NewTransport is wired
-// (one TLS/TCP shared by both asymmetric CONNECT-UDP legs).
+// (one TLS/TCP for the single RFC bidi CONNECT-UDP stream).
 func dedicatedOverlayTransport(cfg H2OverlayDialConfig) (H2OverlayDialConfig, func()) {
 	if cfg.NewTransport == nil {
 		return cfg, nil

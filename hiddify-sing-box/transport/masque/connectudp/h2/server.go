@@ -16,9 +16,7 @@ import (
 const (
 	H2ServerUDPReadBuf    = 65535
 	H2ResponseBodyBufSize = 256 * 1024
-	// H2DownlinkPendingGrow is the initial pendingWire capacity (aligned with relay
-	// h2DownlinkBatchWire). Flush policy is per-RX-batch FlushPending only (AUDIT B7 / F2.5)
-	// — Append does not auto-flush at a byte threshold.
+	// H2DownlinkPendingGrow is the initial pendingWire capacity.
 	H2DownlinkPendingGrow = 64 * 1024
 )
 
@@ -26,8 +24,8 @@ const (
 const H2DownlinkBulkFlushBytes = H2DownlinkPendingGrow
 
 // H2ResponseWriter writes DATAGRAM capsules on the CONNECT-UDP response body.
-// Fountain: Append buffers; relay calls FlushPending after each UDP RX batch.
-// ICMP/bidi Write: h2o 1:1 immediate (drains any pending first — A4).
+// Bidi (approach A): immediate Write per UDP datagram. Append/FlushPending remain for tests
+// that exercise fountain buffering; flush never holds mu across blocking http2 Write.
 type H2ResponseWriter struct {
 	http.ResponseWriter
 	mu                sync.Mutex
@@ -36,23 +34,27 @@ type H2ResponseWriter struct {
 }
 
 func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
+	if err := frame.CheckConnectUDPUDPPayload(len(udpPayload), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
+		return err
+	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.writeCapsulesImmediateLocked(udpPayload)
+	drain := w.takePendingLocked()
+	w.mu.Unlock()
+	if len(drain) > 0 {
+		if _, err := h2c.WriteAll(w.ResponseWriter, drain); err != nil {
+			return err
+		}
+	}
+	return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
 }
 
-// AppendUDPPayloadAsCapsules appends RFC9297 wire only. Caller (fountain relay) must
-// FlushPending after each onward UDP batch — no byte-threshold auto-flush (B7).
+// AppendUDPPayloadAsCapsules appends RFC9297 wire only. Caller must FlushPending after a batch.
 func (w *H2ResponseWriter) AppendUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if len(udpPayload) == 0 {
-		return w.writeCapsulesImmediateLocked(nil)
+		return nil
 	}
-	return w.appendCapsulesLocked(udpPayload)
-}
-
-func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
 	if err := frame.CheckConnectUDPUDPPayload(len(udpPayload), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
 		return err
 	}
@@ -64,49 +66,35 @@ func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
 	return nil
 }
 
-func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error {
-	// Drain fountain pending first — do not Reset/drop accumulated S2C (AUDIT A4 / F2.2).
-	// Avoid flushLocked(): it always FlushResponse even when pending empty (breaks h2o flush counts).
-	if w.pendingWire.Len() > 0 {
-		if _, err := h2c.WriteAll(w.ResponseWriter, w.pendingWire.Bytes()); err != nil {
-			return err
-		}
-		w.pendingWire.Reset()
-		w.pendingSinceFlush = 0
+func (w *H2ResponseWriter) takePendingLocked() []byte {
+	if w.pendingWire.Len() == 0 {
+		return nil
 	}
-	if err := frame.CheckConnectUDPUDPPayload(len(udpPayload), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
-		return err
-	}
-	return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
-}
-
-func (w *H2ResponseWriter) flushLocked() error {
-	if w.pendingWire.Len() > 0 {
-		if _, err := h2c.WriteAll(w.ResponseWriter, w.pendingWire.Bytes()); err != nil {
-			return err
-		}
-		w.pendingWire.Reset()
-	}
-	h2c.FlushResponse(w.ResponseWriter)
+	pending := w.pendingWire
+	w.pendingWire = bytes.Buffer{}
 	w.pendingSinceFlush = 0
-	return nil
+	return pending.Bytes()
 }
 
 func (w *H2ResponseWriter) FlushPending() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.pendingSinceFlush <= 0 {
+		w.mu.Unlock()
 		return nil
 	}
-	return w.flushLocked()
-}
-
-func newH2DownlinkWriter(w http.ResponseWriter, _ LegProfile) *H2ResponseWriter {
-	return &H2ResponseWriter{ResponseWriter: w}
+	wire := w.takePendingLocked()
+	w.mu.Unlock()
+	if len(wire) > 0 {
+		if _, err := h2c.WriteAll(w.ResponseWriter, wire); err != nil {
+			return err
+		}
+	}
+	h2c.FlushResponse(w.ResponseWriter)
+	return nil
 }
 
 func NewDownlinkResponseWriter(w http.ResponseWriter) *H2ResponseWriter {
-	return newH2DownlinkWriter(w, LegProfileDownloadFountain)
+	return &H2ResponseWriter{ResponseWriter: w}
 }
 
 // ServeH2 relays UDP over HTTP/2 CONNECT-UDP (h2o event-loop semantics: 2 goroutines).
@@ -115,7 +103,7 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		return errors.New("masque h2: connect-udp relay: nil argument")
 	}
 	defer cudprelay.BeginRelaySessionStats("h2-bidi")()
-	downlinkW := newH2DownlinkWriter(w, LegProfileBidi)
+	downlinkW := NewDownlinkResponseWriter(w)
 	var wg sync.WaitGroup
 	var closeUDP sync.Once
 	closeUDPConn := func() { closeUDP.Do(func() { _ = conn.Close() }) }
@@ -144,6 +132,8 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
+		// Only uplink closes request Body: downlink exit must not tear Body while
+		// uplink still peels already-ACKed DATA (Close/cancel race → pre_server loss).
 		defer shutdownRelay()
 		defer closeUDPConn()
 		defer cancelRelay()
@@ -151,7 +141,6 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 	}()
 	go func() {
 		defer wg.Done()
-		defer shutdownRelay()
 		defer closeUDPConn()
 		select {
 		case <-downlinkReady:

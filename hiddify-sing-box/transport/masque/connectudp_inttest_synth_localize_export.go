@@ -174,9 +174,9 @@ func InttestLocalizeConnectUDPH3DownloadFountain(t *testing.T) {
 
 
 
-// InttestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi compares prod asymmetric legs vs legacy bidi dial (UDP-AUDIT-11).
+// InttestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi was an asym-vs-bidi A/B; dual-leg CUT on this branch.
 func InttestLocalizeConnectUDPH2EchoDuplexAsymmetricVsBidi(t *testing.T) {
-	t.Skip("HP-2d: non-asymmetric H2 CONNECT-UDP dial CUT — prod is asymmetric-only")
+	t.Skip("CUT: asymmetric dual-leg removed — RFC single-stream bidi only (feat/masque-h2-bidi-stream)")
 }
 
 

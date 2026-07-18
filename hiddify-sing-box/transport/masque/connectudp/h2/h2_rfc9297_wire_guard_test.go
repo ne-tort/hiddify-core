@@ -9,6 +9,9 @@ import (
 //go:embed packet_conn.go
 var h2PacketConnProdSource string
 
+//go:embed packet_conn_upload.go
+var h2PacketConnUploadProdSource string
+
 //go:embed server.go
 var h2ServerProdSource string
 
@@ -29,9 +32,13 @@ func TestConnectUDPH2ProdUsesRFC9297DatagramCapsule(t *testing.T) {
 		body string
 	}{
 		{"packet_conn.go", h2PacketConnProdSource},
+		{"packet_conn_upload.go", h2PacketConnUploadProdSource},
 		{"server.go", h2ServerProdSource},
 	} {
-		if !strings.Contains(src.body, "WriteDatagramCapsule") && !strings.Contains(src.body, "AppendDatagramCapsuleBuffer") {
+		hasEncode := strings.Contains(src.body, "WriteDatagramCapsule") ||
+			strings.Contains(src.body, "AppendDatagramCapsuleBuffer") ||
+			strings.Contains(src.body, "writeUploadUDPPayloadUnlocked")
+		if !hasEncode {
 			t.Fatalf("%s must encode UDP via RFC 9297 DATAGRAM (WriteDatagramCapsule or AppendDatagramCapsuleBuffer batch)", src.name)
 		}
 		for _, sym := range invisvDraft03Forbidden {

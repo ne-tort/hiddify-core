@@ -86,18 +86,33 @@ func TakeSnapshot() Snapshot {
 	}
 }
 
+// Detail is Close-time wire/pipe visibility for loss attribution (write_ok can lead wire).
+type Detail struct {
+	WireSentBytes      int64
+	WireCommittedBytes int64
+	PipeBufferedBytes  int
+}
+
 // LogClientStats emits RESULT_CLIENT_UDP_STATS for bench parsers.
 func LogClientStats(tag string) {
+	LogClientStatsDetailed(tag, Detail{})
+}
+
+// LogClientStatsDetailed emits RESULT_CLIENT_UDP_STATS plus wire/pipe depth fields.
+func LogClientStatsDetailed(tag string, d Detail) {
 	if !enabled() {
 		return
 	}
 	s := TakeSnapshot()
 	log.Printf(
-		"RESULT_CLIENT_UDP_STATS tag=%s c2s_write_ok=%d c2s_write_fail=%d c2s_transient_retry=%d c2s_oversize=%d",
+		"RESULT_CLIENT_UDP_STATS tag=%s c2s_write_ok=%d c2s_write_fail=%d c2s_transient_retry=%d c2s_oversize=%d wire_sent=%d wire_committed=%d pipe_buf=%d",
 		tag,
 		s.C2SWriteOK,
 		s.C2SWriteFail,
 		s.C2STransientRetry,
 		s.C2SOversize,
+		d.WireSentBytes,
+		d.WireCommittedBytes,
+		d.PipeBufferedBytes,
 	)
 }

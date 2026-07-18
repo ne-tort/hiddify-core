@@ -10,7 +10,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
-	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 )
@@ -35,15 +34,6 @@ type Hooks struct {
 // Handler serves CONNECT-UDP over HTTP/3 (relay) or HTTP/2 (capsule relay).
 type Handler struct {
 	Hooks Hooks
-	// H2SessionRegistry scopes asymmetric H2 CONNECT-UDP sessions (nil → package default).
-	H2SessionRegistry *cudph2.SessionRegistry
-}
-
-func (h Handler) h2Sessions() *cudph2.SessionRegistry {
-	if h.H2SessionRegistry != nil {
-		return h.H2SessionRegistry
-	}
-	return cudph2.DefaultSessionRegistry
 }
 
 var errTargetPortDenied = errors.New("connect-udp: port policy denied")
@@ -103,7 +93,8 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 		return
 	}
 	if _, ok := w.(http3.HTTPStreamer); ok {
-		if cudpasym.StreamRoleFromRequest(r) != "" {
+		// Reject proprietary dual-leg headers on H3 (always single-stream).
+		if strings.TrimSpace(r.Header.Get("Masque-Udp-Stream-Role")) != "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -122,7 +113,6 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 	}
 	cudph2.ServeConnectUDP(w, r, parsed.Target, parsed.Host, cudph2.ServeConnectUDPConfig{
 		CapsuleProtocolHeaderValue: h.Hooks.CapsuleProtocolHeaderValue,
-		Sessions:                   h.h2Sessions(),
 	})
 }
 

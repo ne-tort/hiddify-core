@@ -15,7 +15,7 @@ import (
 func startInProcessH2UDPConnectProxy(t testing.TB) int {
 	t.Helper()
 	serverTLS := connectUDPTestTLS.Clone()
-	return cudph2.StartInProcessConnectUDPProxy(t, serverTLS, cudph2.NewSessionRegistry())
+	return cudph2.StartInProcessConnectUDPProxy(t, serverTLS)
 }
 
 func newH2ConnectUDPSession(t *testing.T, proxyPort int, link h2TransportLink) (ClientSession, context.Context) {

@@ -17,7 +17,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/yosida95/uritemplate/v3"
 
-	cudpasym "github.com/sagernet/sing-box/transport/masque/connectudp/asym"
 	cudpconn "github.com/sagernet/sing-box/transport/masque/connectudp/conn"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 )
@@ -69,34 +68,7 @@ func (c *Client) DialAddr(ctx context.Context, proxyTemplate *uritemplate.Templa
 	if err != nil {
 		return nil, nil, fmt.Errorf("masque: failed to expand Template: %w", err)
 	}
-	return c.dial(ctx, str, masqueAddr{target}, dialUDPStreamOpts{})
-}
-
-// DialAddrLeg opens one asymmetric CONNECT-UDP leg (download or upload) on the shared QUIC session.
-func (c *Client) DialAddrLeg(ctx context.Context, proxyTemplate *uritemplate.Template, target, streamRole, muxKey string) (net.PacketConn, *http.Response, error) {
-	if proxyTemplate == nil {
-		return nil, nil, errors.New("masque: CONNECT-UDP URI template is not configured")
-	}
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse target: %w", err)
-	}
-	str, err := proxyTemplate.Expand(uritemplate.Values{
-		uriTemplateTargetHost: uritemplate.String(host),
-		uriTemplateTargetPort: uritemplate.String(port),
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("masque: failed to expand Template: %w", err)
-	}
-	return c.dial(ctx, str, masqueAddr{target}, dialUDPStreamOpts{
-		streamRole: streamRole,
-		muxKey:     muxKey,
-	})
-}
-
-type dialUDPStreamOpts struct {
-	streamRole string
-	muxKey     string
+	return c.dial(ctx, str, masqueAddr{target})
 }
 
 // DialAddrStream opens CONNECT-UDP and returns the HTTP/3 request stream for external PacketConn wrapping.
@@ -115,7 +87,7 @@ func (c *Client) DialAddrStream(ctx context.Context, proxyTemplate *uritemplate.
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("masque: failed to expand Template: %w", err)
 	}
-	return c.dialStream(ctx, str, masqueAddr{target}, dialUDPStreamOpts{})
+	return c.dialStream(ctx, str, masqueAddr{target})
 }
 
 // Dial dials a proxied connection to a target server.
@@ -130,10 +102,10 @@ func (c *Client) Dial(ctx context.Context, proxyTemplate *uritemplate.Template, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("masque: failed to expand Template: %w", err)
 	}
-	return c.dial(ctx, str, raddr, dialUDPStreamOpts{})
+	return c.dial(ctx, str, raddr)
 }
 
-func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr net.Addr, opts dialUDPStreamOpts) (*http3.RequestStream, net.Addr, net.Addr, *http.Response, error) {
+func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr net.Addr) (*http3.RequestStream, net.Addr, net.Addr, *http.Response, error) {
 	u, err := url.Parse(expandedTemplate)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("masque: failed to parse URI: %w", err)
@@ -164,12 +136,6 @@ func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr 
 	hdr := http.Header{http3.CapsuleProtocolHeader: []string{capsuleProtocolHeaderValue}}
 	if t := strings.TrimSpace(c.BearerToken); t != "" {
 		hdr.Set("Authorization", "Bearer "+t)
-	}
-	if opts.streamRole != "" {
-		hdr.Set(cudpasym.StreamRoleHeader, opts.streamRole)
-	}
-	if opts.muxKey != "" {
-		hdr.Set(cudpasym.MuxKeyHeader, opts.muxKey)
 	}
 	if err := rstr.SendRequestHeader(&http.Request{
 		Method: http.MethodConnect,
@@ -206,13 +172,13 @@ func (c *Client) dialStream(ctx context.Context, expandedTemplate string, raddr 
 	return rstr, local, raddr, rsp, nil
 }
 
-func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Addr, opts dialUDPStreamOpts) (net.PacketConn, *http.Response, error) {
-	rstr, local, remote, rsp, err := c.dialStream(ctx, expandedTemplate, raddr, opts)
+func (c *Client) dial(ctx context.Context, expandedTemplate string, raddr net.Addr) (net.PacketConn, *http.Response, error) {
+	rstr, local, remote, rsp, err := c.dialStream(ctx, expandedTemplate, raddr)
 	if err != nil {
 		return nil, rsp, err
 	}
 	return cudpconn.NewH3ConnWithConfig(rstr, local, remote, cudpconn.H3ConnConfig{
-		LegRole: cudpconn.H3LegRoleFromStreamRole(opts.streamRole),
+		LegRole: cudpconn.H3LegBidi,
 	}), rsp, nil
 }
 

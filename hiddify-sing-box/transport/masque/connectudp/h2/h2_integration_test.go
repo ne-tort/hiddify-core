@@ -102,7 +102,7 @@ func runH2IntegrationUDPEcho(t *testing.T, addr *net.UDPAddr) *net.UDPConn {
 
 func startInProcessH2UDPConnectProxy(t *testing.T) int {
 	t.Helper()
-	return StartInProcessConnectUDPProxy(t, h2IntegrationTestTLS, NewSessionRegistry())
+	return StartInProcessConnectUDPProxy(t, h2IntegrationTestTLS)
 }
 
 func newH2IntegrationDialConfig(t *testing.T, proxyPort int) H2OverlayDialConfig {
@@ -187,9 +187,8 @@ func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
 	require.Equal(t, payload, buf[:nr])
 }
 
-// TestH2ConnectUDPEchoProdShapedNewTransport exercises asymmetric dial with NewTransport (prod core_session parity).
+// TestH2ConnectUDPEchoProdShapedNewTransport exercises bidi dial with NewTransport (prod core_session parity).
 func TestH2ConnectUDPEchoProdShapedNewTransport(t *testing.T) {
-	t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "1")
 	echo := runH2IntegrationUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	echoPort := echo.LocalAddr().(*net.UDPAddr).Port
 

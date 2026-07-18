@@ -26,13 +26,12 @@ type PacketConnConfig struct {
 	Resp          *http.Response
 	LocalAddr     net.Addr
 	RemoteAddr    net.Addr
-	UploadOnly    bool // C2S leg; drain response body (asymmetric upload pool)
-	LegProfile    LegProfile
 	UploadWireAck h2c.ConnectUploadWireAck
 	OnClose       func()
 }
 
-// PacketConn is the client CONNECT-UDP net.PacketConn over HTTP/2 DATAGRAM capsules.
+// PacketConn is the client CONNECT-UDP net.PacketConn over one HTTP/2 stream (RFC 9298).
+// WriteTo → request body DATAGRAM capsules; ReadFrom ← response body.
 type PacketConn struct {
 	reqPipeR io.Closer
 	reqBody  io.WriteCloser
@@ -47,11 +46,9 @@ type PacketConn struct {
 	// bodyReadMu serializes bufio reads on the response body.
 	bodyReadMu sync.Mutex
 
-	uploadOnly      bool
-	legProfile      LegProfile
 	downlinkReadBuf []byte
 
-	// uploadPending holds encoded RFC9297 wire bytes before batched WriteAll (asymmetric upload leg).
+	// uploadPending holds encoded RFC9297 wire bytes before flush (Close / wake).
 	uploadPending bytes.Buffer
 
 	deadlines    split.ConnDeadlines
@@ -60,22 +57,18 @@ type PacketConn struct {
 	duplexActive atomic.Bool
 	payloadWritePending atomic.Bool
 
-	writesSinceRead int
-
 	primeOnce sync.Once
 	primeErr  error
 
 	uploadWireAck       h2c.ConnectUploadWireAck
 	uploadWireCommitted atomic.Int64
 
-	uploadDrainOnce sync.Once
-
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	onClose    func()
 }
 
-// NewPacketConn builds a CONNECT-UDP packet conn (R8 thin sync downlink — UDP-6MIG-10).
+// NewPacketConn builds a CONNECT-UDP packet conn (thin sync bidi — approach A).
 func NewPacketConn(cfg PacketConnConfig) *PacketConn {
 	c := &PacketConn{
 		reqPipeR:      cfg.ReqPipeR,
@@ -83,8 +76,6 @@ func NewPacketConn(cfg PacketConnConfig) *PacketConn {
 		resp:          cfg.Resp,
 		localAddr:     cfg.LocalAddr,
 		remoteAddr:    cfg.RemoteAddr,
-		uploadOnly:    cfg.UploadOnly,
-		legProfile:    cfg.LegProfile,
 		uploadWireAck: cfg.UploadWireAck,
 		onClose:       cfg.OnClose,
 	}
@@ -118,11 +109,6 @@ func (c *PacketConn) Close() error {
 			return
 		}
 		c.closed.Store(true)
-		tag := "h2-bidi"
-		if c.uploadOnly {
-			tag = "h2-upload-leg"
-		}
-		flowstats.LogClientStats(tag)
 		c.writeMu.Lock()
 		wire := c.takeUploadPendingLocked()
 		c.writeMu.Unlock()
@@ -131,19 +117,46 @@ func (c *PacketConn) Close() error {
 				flowstats.RecordClientC2SFail()
 			}
 		}
+		// Half-close upload: mark done + close writer so http2 can drain remaining pipe
+		// bytes to TLS. Do NOT close the pipe reader here — that discards unread buf
+		// (write_ok already counted) and races writeRequestBody (ErrClosedPipe).
 		if c.uploadWireAck != nil {
 			if done, ok := c.uploadWireAck.(interface{ MarkUploadWriterDone() }); ok {
 				done.MarkUploadWriterDone()
 			}
 		}
-		// Upload half: close writer then pipe reader (Extended CONNECT duplex teardown).
+		committed := c.uploadWireCommitted.Load()
 		if c.reqBody != nil {
 			_ = c.reqBody.Close()
+			c.reqBody = nil
+		}
+		if c.uploadWireAck != nil && committed > 0 {
+			// Best-effort barrier: prefer delivering committed capsules over fast teardown.
+			_ = c.uploadWireAck.AwaitUploadWireSent(committed, 2*time.Second)
+		}
+		wireSent := int64(0)
+		pipeBuf := 0
+		if c.uploadWireAck != nil {
+			if u, ok := c.uploadWireAck.(interface{ UploadWireSent() int64 }); ok {
+				wireSent = u.UploadWireSent()
+			}
 		}
 		if c.reqPipeR != nil {
-			_ = c.reqPipeR.Close()
-			c.reqPipeR = nil
+			if u, ok := c.reqPipeR.(interface{ MasqueUploadBuffered() int }); ok {
+				pipeBuf = u.MasqueUploadBuffered()
+			}
 		}
+		flowstats.LogClientStatsDetailed("h2-bidi", flowstats.Detail{
+			WireSentBytes:      wireSent,
+			WireCommittedBytes: committed,
+			PipeBufferedBytes:  pipeBuf,
+		})
+		// Reader is owned by http2 RoundTrip; leave it for the transport. Drop our ref only.
+		c.reqPipeR = nil
+		// Peer peel barrier: do NOT read/close resp.Body yet. SOCKS keeps ReadFrom blocked on
+		// Body; closing it (or interruptBlockedBodyRead) sends RST and reintroduces pre_server
+		// loss at 400–500+ Mbit. Wait for server uplink to finish request END_STREAM, then cancel.
+		time.Sleep(uploadPeerPeelGrace(committed))
 		if c.resp != nil && c.resp.Body != nil {
 			_ = c.resp.Body.Close()
 		}
@@ -154,7 +167,35 @@ func (c *PacketConn) Close() error {
 	return nil
 }
 
-// FlushC2SWrites drains coalesced upload wire (docker probe / asymmetric echo parity).
+// uploadPeerPeelGrace is how long Close waits after upload END_STREAM before cancelling the
+// stream. Scaled by committed wire bytes at ~200 Mbit peel rate.
+//
+// Microflows (DNS-sized committed): near-zero grace — MCS slot occupancy from Close sleep is
+// not a real prod risk at MCS=1000, but 500ms min was pure teardown latency tax. Bulk keeps
+// the longer barrier that fixed pre_server loss @400–500+.
+func uploadPeerPeelGrace(committedBytes int64) time.Duration {
+	const (
+		microThreshold = 64 << 10 // 64 KiB wire — DNS / short ASSOCIATE
+		microGrace     = 20 * time.Millisecond
+		minBulkGrace   = 500 * time.Millisecond
+		maxGrace       = 3 * time.Second
+		peelBit        = 200e6 // bits/s
+	)
+	if committedBytes <= 0 || committedBytes < microThreshold {
+		return microGrace
+	}
+	ns := float64(committedBytes) * 8 / peelBit * float64(time.Second)
+	d := time.Duration(ns)
+	if d < minBulkGrace {
+		return minBulkGrace
+	}
+	if d > maxGrace {
+		return maxGrace
+	}
+	return d
+}
+
+// FlushC2SWrites drains any pending upload wire (probe / echo parity).
 func (c *PacketConn) FlushC2SWrites() {
 	if c == nil || c.closed.Load() {
 		return
@@ -194,19 +235,12 @@ func (c *PacketConn) noteUploadWireCommitted(n int) {
 }
 
 func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	if c.uploadOnly {
-		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: upload-only stream")
-	}
 	if c.resp == nil || c.resp.Body == nil {
 		return 0, nil, fmt.Errorf("masque h2 dataplane connect-udp: missing HTTP response body")
 	}
 	hadPayloadWrite := c.payloadWritePending.Load()
-	// SOCKS UDP ASSOCIATE may block in ReadFrom before any downlink; do not arm duplex coalesce yet.
 	if hadPayloadWrite {
 		c.duplexActive.Store(true)
-		c.writeMu.Lock()
-		c.writesSinceRead = 0
-		c.writeMu.Unlock()
 		if err := c.flushUploadPendingForRead(); err != nil {
 			return 0, nil, err
 		}
@@ -235,9 +269,6 @@ func (c *PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 	if n > 0 {
 		c.duplexActive.Store(true)
-		c.writeMu.Lock()
-		c.writesSinceRead = 0
-		c.writeMu.Unlock()
 	}
 	return n, c.remoteAddr, nil
 }
@@ -281,61 +312,24 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		return 0, nil
 	}
 
-	// Bidi prod entry: immediate capsule write (Invisv thin shape).
-	if !c.uploadOnly {
-		c.writeMu.Unlock()
-		if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
-			if errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
-				flowstats.RecordClientC2SOversize()
-				return 0, err
-			}
-			flowstats.RecordClientC2SFail()
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-				return 0, err
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
-				return 0, err
-			}
-			_ = c.Close()
-			return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
-		}
-		flowstats.RecordClientC2SOK()
-		if len(p) > 0 {
-			c.payloadWritePending.Store(true)
-		}
-		return len(p), nil
-	}
-
-	if err := frame.CheckConnectUDPUDPPayload(len(p), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
-		c.writeMu.Unlock()
-		flowstats.RecordClientC2SOversize()
-		return 0, err
-	}
-	h2c.AppendDatagramCapsuleBuffer(&c.uploadPending, p)
-	c.writesSinceRead++
-	var wire []byte
-	switch {
-	case c.uploadOnly && c.legProfile.uploadImmediateFlush() && !c.duplexActive.Load():
-		wire = c.takeUploadPendingLocked()
-	case c.uploadFlushInteractiveLocked():
-		wire = c.takeUploadPendingLocked()
-	case c.uploadPending.Len() >= c.uploadCoalesceThreshold():
-		wire = c.takeUploadPendingLocked()
-	}
+	// Thin sync bidi: immediate capsule write (unlock before blocking http2 Write).
 	c.writeMu.Unlock()
-	if len(wire) > 0 {
-		if err := c.flushUploadWire(wire); err != nil {
-			flowstats.RecordClientC2SFail()
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
-				return 0, err
-			}
-			_ = c.Close()
-			return 0, fmt.Errorf("masque h2 dataplane connect-udp flush body: %w", err)
+	if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
+		if errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
+			flowstats.RecordClientC2SOversize()
+			return 0, err
 		}
+		flowstats.RecordClientC2SFail()
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+			return 0, err
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return 0, err
+		}
+		_ = c.Close()
+		return 0, fmt.Errorf("masque h2 dataplane connect-udp write body: %w", err)
 	}
 	flowstats.RecordClientC2SOK()
-	if len(p) > 0 {
-		c.payloadWritePending.Store(true)
-	}
+	c.payloadWritePending.Store(true)
 	return len(p), nil
 }
