@@ -7,12 +7,13 @@ import (
 
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/conn"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// DatagramSplitOptions configures CONNECT-UDP payload splitting over QUIC/H2 datagrams.
+// DatagramSplitOptions configures CONNECT-UDP payload size gating / ICMP mapping over QUIC/H2 datagrams.
 type DatagramSplitOptions struct {
 	MaxPayload int
 	HTTPLayer  string
@@ -20,7 +21,8 @@ type DatagramSplitOptions struct {
 	MapICMP         func(addr net.Addr, err error) error
 }
 
-// DatagramSplitConn splits large application UDP payloads for CONNECT-UDP.
+// DatagramSplitConn rejects oversize app UDP payloads (RFC 9298 §5) and maps ICMP soft-errors.
+// Name retained for call-site stability; chunking was CUT (F-H3-SPLIT-01).
 type DatagramSplitConn struct {
 	net.PacketConn
 	maxPayload int
@@ -29,7 +31,7 @@ type DatagramSplitConn struct {
 	mapICMP    func(addr net.Addr, err error) error
 }
 
-// NewDatagramSplitConn wraps pc with CONNECT-UDP tunnel chunk sizing.
+// NewDatagramSplitConn wraps pc with CONNECT-UDP size reject + optional ICMP map.
 func NewDatagramSplitConn(pc net.PacketConn, opts DatagramSplitOptions) *DatagramSplitConn {
 	return &DatagramSplitConn{
 		PacketConn: pc,
@@ -89,28 +91,12 @@ func (c *DatagramSplitConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		n, err := c.PacketConn.WriteTo(p, addr)
 		return n, c.wrapDataplaneErr("write", err)
 	}
-	if len(p) <= max {
-		n, err := c.PacketConn.WriteTo(p, addr)
-		return n, c.wrapDataplaneErr("write", err)
+	// RFC 9298 §5: one unmodified UDP datagram = one HTTP Datagram. Reject oversize
+	// instead of inventing multi-datagram chunks (F-H3-SPLIT-01 / F-H2-SPLIT-01).
+	if len(p) > max {
+		return 0, c.wrapDataplaneErr("write", fmt.Errorf("%w: got %d (max %d)",
+			frame.ErrProxiedUDPPayloadTooLarge, len(p), max))
 	}
-	total := 0
-	for total < len(p) {
-		end := total + max
-		if end > len(p) {
-			end = len(p)
-		}
-		pos := total
-		for pos < end {
-			n, err := c.PacketConn.WriteTo(p[pos:end], addr)
-			pos += n
-			if err != nil {
-				return pos, c.wrapDataplaneErr("write", err)
-			}
-			if n == 0 {
-				return pos, c.wrapDataplaneErr("write", fmt.Errorf("masque: zero-length WriteTo on CONNECT-UDP split"))
-			}
-		}
-		total = pos
-	}
-	return len(p), nil
+	n, err := c.PacketConn.WriteTo(p, addr)
+	return n, c.wrapDataplaneErr("write", err)
 }

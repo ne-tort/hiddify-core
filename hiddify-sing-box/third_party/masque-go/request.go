@@ -203,6 +203,13 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 			Err:        fmt.Errorf("failed to decode target_port: %w", err),
 		}
 	}
+	// RFC 9298 §3: target_port MUST be an integer between 1 and 65535.
+	if targetPort < 1 || targetPort > 65535 {
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("target_port out of range: %d", targetPort),
+		}
+	}
 	return &Request{
 		Target: fmt.Sprintf("%s:%d", targetHost, targetPort),
 		Host:   r.Host,

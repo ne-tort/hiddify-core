@@ -41,10 +41,7 @@ func relayH2DownlinkICMP(downlink H2DownlinkCapsules) error {
 }
 
 func validateH2DownlinkPayloadLen(n int) error {
-	if n <= 0 {
-		return nil
-	}
-	return frame.ValidateProxiedUDPPayloadLen(n)
+	return frame.CheckConnectUDPUDPPayload(n, 0)
 }
 
 // DirectH2OnwardUplink implements H2UplinkOnward with h2o udp_write_core immediate send (no Linux WriteBatch).
@@ -66,6 +63,9 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 	readBuf := make([]byte, bodyBufSize)
 	var pending []byte
 	relayOnward := func(payload []byte) error {
+		if err := frame.CheckConnectUDPUDPPayload(len(payload), 0); err != nil {
+			return err
+		}
 		if relayStatsEnabled() {
 			globalUDPRelayStats.c2sDatagramIn.Add(1)
 		}

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/flowstats"
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	"github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
@@ -284,6 +285,10 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 	if !c.uploadOnly {
 		c.writeMu.Unlock()
 		if err := c.writeUploadUDPPayloadUnlocked(p); err != nil {
+			if errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
+				flowstats.RecordClientC2SOversize()
+				return 0, err
+			}
 			flowstats.RecordClientC2SFail()
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return 0, err
@@ -301,24 +306,12 @@ func (c *PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
 		return len(p), nil
 	}
 
-	var encErr error
-	if len(p) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		h2c.AppendDatagramCapsuleBuffer(&c.uploadPending, p)
-	} else {
-		encErr = h2c.AppendUDPPayloadAsDatagramCapsules(&c.uploadPending, p)
-	}
-	if encErr != nil {
+	if err := frame.CheckConnectUDPUDPPayload(len(p), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
 		c.writeMu.Unlock()
-		flowstats.RecordClientC2SFail()
-		if errors.Is(encErr, io.EOF) || errors.Is(encErr, io.ErrClosedPipe) {
-			return 0, encErr
-		}
-		if errors.Is(encErr, os.ErrDeadlineExceeded) || errors.Is(encErr, context.Canceled) {
-			return 0, encErr
-		}
-		_ = c.Close()
-		return 0, fmt.Errorf("masque h2 dataplane connect-udp encode body: %w", encErr)
+		flowstats.RecordClientC2SOversize()
+		return 0, err
 	}
+	h2c.AppendDatagramCapsuleBuffer(&c.uploadPending, p)
 	c.writesSinceRead++
 	var wire []byte
 	switch {

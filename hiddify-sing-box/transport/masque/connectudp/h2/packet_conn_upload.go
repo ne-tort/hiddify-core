@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
 
@@ -64,12 +65,12 @@ func (c *PacketConn) writeUploadUDPPayloadUnlocked(p []byte) error {
 	if c.deadlines.WriteTimeoutExceeded() {
 		return os.ErrDeadlineExceeded
 	}
+	if err := frame.CheckConnectUDPUDPPayload(len(p), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
+		return err
+	}
 	wireLen := h2c.UDPPayloadWireLen(p)
 	writeFn := func() error {
-		if len(p) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-			return h2c.WriteDatagramCapsule(c.reqBody, p)
-		}
-		return h2c.WriteUDPPayloadAsDatagramCapsules(c.reqBody, p)
+		return h2c.WriteDatagramCapsule(c.reqBody, p)
 	}
 	var err error
 	if !c.uploadWriteNeedsInterrupt() {

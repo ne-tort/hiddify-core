@@ -11,14 +11,46 @@ import (
 )
 
 // defaultMasqueListenHTTPSAuthority builds https URL authority for server path templates.
-// Wildcard listen maps to 127.0.0.1 for a stable template URL; path matching does not require
-// client :authority to equal this host (path-only parse).
-func defaultMasqueListenHTTPSAuthority(listen string, listenPort uint16) string {
-	h := normalizeListenHostForMasqueTemplate(listen)
+// Prefer configured listen host/IP; for wildcard/empty listen prefer tls.server_name (RFC 9298
+// :authority = proxy authority). Last resort: 127.0.0.1 (lab / unspecified without SNI).
+func defaultMasqueListenHTTPSAuthority(o option.MasqueEndpointOptions) string {
+	listenPort := o.ListenPort
 	if listenPort == 0 {
 		listenPort = 443
 	}
+	h := normalizeListenHostForMasqueTemplate(o.Listen)
+	if listenIsUnspecifiedForMasqueTemplate(o.Listen) {
+		if sn := masqueInboundTLSServerName(o); sn != "" {
+			h = sn
+		}
+	}
 	return net.JoinHostPort(h, strconv.Itoa(int(listenPort)))
+}
+
+func masqueInboundTLSServerName(o option.MasqueEndpointOptions) string {
+	if o.InboundTLS == nil {
+		return ""
+	}
+	return strings.TrimSpace(o.InboundTLS.ServerName)
+}
+
+func listenIsUnspecifiedForMasqueTemplate(listen string) bool {
+	h := strings.TrimSpace(listen)
+	if h == "" {
+		return true
+	}
+	hostForParse := stripIPv6BracketsForParse(h)
+	if i := strings.IndexByte(hostForParse, '%'); i >= 0 {
+		hostForParse = hostForParse[:i]
+	}
+	ip := net.ParseIP(hostForParse)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// masqueTemplateNeedsAuthorityRewrite is true only for legacy wildcard listen without
+// tls.server_name (template still uses 127.0.0.1 while clients dial via real SNI/DNS).
+func masqueTemplateNeedsAuthorityRewrite(o option.MasqueEndpointOptions) bool {
+	return listenIsUnspecifiedForMasqueTemplate(o.Listen) && masqueInboundTLSServerName(o) == ""
 }
 
 func normalizeListenHostForMasqueTemplate(listen string) string {
@@ -50,7 +82,7 @@ func stripIPv6BracketsForParse(s string) string {
 
 // resolveMasqueServerTemplateURLs returns full https URI templates for the MASQUE server mux.
 func resolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, tcp string) {
-	auth := defaultMasqueListenHTTPSAuthority(o.Listen, o.ListenPort)
+	auth := defaultMasqueListenHTTPSAuthority(o)
 	cfg := pathbuild.ConfigFromOptions(o.PathUDP, o.PathTCP, o.PathIP, o.PathObfuscation)
 	udpT, ipT, tcpT, err := pathbuild.BuildTemplates(auth, cfg, "", 0, false)
 	if err != nil {
@@ -67,7 +99,7 @@ func resolveMasqueServerPathConfig(o option.MasqueEndpointOptions) (pathbuild.Co
 }
 
 func mustResolveMasqueServerTemplateURLs(o option.MasqueEndpointOptions) (udp, ip, tcp string, err error) {
-	auth := defaultMasqueListenHTTPSAuthority(o.Listen, o.ListenPort)
+	auth := defaultMasqueListenHTTPSAuthority(o)
 	cfg, err := resolveMasqueServerPathConfig(o)
 	if err != nil {
 		return "", "", "", err

@@ -18,14 +18,19 @@ func TestDatagramCapsuleWireLenMatchesEncode(t *testing.T) {
 	}
 }
 
-func TestUDPPayloadWireLenSplitsLargeUDP(t *testing.T) {
+func TestUDPPayloadWireLenMatchesSingleCapsule(t *testing.T) {
 	t.Parallel()
-	payload := make([]byte, MaxUDPPayloadPerDatagramCapsule()*2+17)
+	payload := make([]byte, 512)
 	var buf bytes.Buffer
-	if err := AppendUDPPayloadAsDatagramCapsules(&buf, payload); err != nil {
+	if err := AppendDatagramCapsuleWire(&buf, payload); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := UDPPayloadWireLen(payload), buf.Len(); got != want {
-		t.Fatalf("split wire len got %d want %d", got, want)
+		t.Fatalf("wire len got %d want %d", got, want)
+	}
+	// Oversize is still one capsule wire-len estimate (call sites reject before encode).
+	big := make([]byte, MaxUDPPayloadPerDatagramCapsule()+17)
+	if UDPPayloadWireLen(big) != DatagramCapsuleWireLen(big) {
+		t.Fatal("UDPPayloadWireLen must equal DatagramCapsuleWireLen (no split)")
 	}
 }

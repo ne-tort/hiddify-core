@@ -107,7 +107,7 @@ func TestConnectUDPH2CapsuleEncodeCPUBudget(t *testing.T) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			pending.Reset()
-			if err := h2c.AppendUDPPayloadAsDatagramCapsules(&pending, payload); err != nil {
+			if err := h2c.AppendDatagramCapsuleWire(&pending, payload); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -118,7 +118,7 @@ func TestConnectUDPH2CapsuleEncodeCPUBudget(t *testing.T) {
 func TestConnectUDPH2CapsuleScanCPUBudget(t *testing.T) {
 	payload := make([]byte, datagramSplitBenchPayloadLen)
 	var wire bytes.Buffer
-	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+	if err := h2c.AppendDatagramCapsuleWire(&wire, payload); err != nil {
 		t.Fatal(err)
 	}
 	batch := wire.Bytes()
@@ -151,7 +151,7 @@ func TestConnectUDPH2CapsuleScanCPUBudget(t *testing.T) {
 func TestConnectUDPH2Capsule512FastScanCPUBudget(t *testing.T) {
 	payload := make([]byte, datagramSplitBenchPayloadLen)
 	var wire bytes.Buffer
-	if err := h2c.AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+	if err := h2c.AppendDatagramCapsuleWire(&wire, payload); err != nil {
 		t.Fatal(err)
 	}
 	batch := wire.Bytes()

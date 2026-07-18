@@ -37,6 +37,25 @@ func TestValidateProxiedUDPPayloadLenRFC9298(t *testing.T) {
 	}
 }
 
+func TestCheckConnectUDPUDPPayload(t *testing.T) {
+	t.Parallel()
+	if err := CheckConnectUDPUDPPayload(0, 100); err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if err := CheckConnectUDPUDPPayload(100, 100); err != nil {
+		t.Fatalf("at product max: %v", err)
+	}
+	if err := CheckConnectUDPUDPPayload(101, 100); !errors.Is(err, ErrProxiedUDPPayloadTooLarge) {
+		t.Fatalf("over product: %v", err)
+	}
+	if err := CheckConnectUDPUDPPayload(65528, 0); !errors.Is(err, ErrProxiedUDPPayloadTooLarge) {
+		t.Fatalf("over RFC: %v", err)
+	}
+	if err := CheckConnectUDPUDPPayload(65527, 0); err != nil {
+		t.Fatalf("RFC max: %v", err)
+	}
+}
+
 func TestParseHTTPDatagramUDPFastMatchesFullParse(t *testing.T) {
 	t.Parallel()
 	cases := [][]byte{

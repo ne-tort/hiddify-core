@@ -2,6 +2,7 @@ package h2
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -187,7 +188,7 @@ func (w *flushCountResponseWriter) Flush() {
 
 func TestWriteUDPPayloadAsH2DatagramCapsulesEmpty(t *testing.T) {
 	var wire bytes.Buffer
-	if err := h2c.WriteUDPPayloadAsDatagramCapsules(&wire, nil); err != nil {
+	if err := h2c.WriteDatagramCapsule(&wire, nil); err != nil {
 		t.Fatal(err)
 	}
 	ct, cr, err := h2c.ParseCapsule(quicvarint.NewReader(bytes.NewReader(wire.Bytes())))
@@ -210,41 +211,14 @@ func TestWriteUDPPayloadAsH2DatagramCapsulesEmpty(t *testing.T) {
 	}
 }
 
-func TestWriteUDPPayloadAsH2DatagramCapsulesSplitsLargePayload(t *testing.T) {
-	total := h2c.MaxUDPPayloadPerDatagramCapsule()*2 + 50
-	payload := bytes.Repeat([]byte{'z'}, total)
-	var wire bytes.Buffer
-	if err := h2c.WriteUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
-		t.Fatal(err)
+func TestH2ResponseWriterRejectsOversizeUDPPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte{'z'}, h2c.MaxUDPPayloadPerDatagramCapsule()+1)
+	w := NewDownlinkResponseWriter(&flushCountResponseWriter{})
+	if err := w.WriteUDPPayloadAsCapsules(payload); !errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
+		t.Fatalf("WriteUDPPayloadAsCapsules: %v want ErrProxiedUDPPayloadTooLarge", err)
 	}
-	r := quicvarint.NewReader(bytes.NewReader(wire.Bytes()))
-	var reassembled []byte
-	for {
-		ct, cr, err := h2c.ParseCapsule(r)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatalf("parse capsule: %v", err)
-		}
-		if ct != h2c.CapsuleTypeDatagram {
-			t.Fatalf("unexpected capsule type %v", ct)
-		}
-		raw, err := io.ReadAll(cr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		p, ok, perr := frame.ParseHTTPDatagramUDP(raw)
-		if perr != nil || !ok {
-			t.Fatalf("frame.ParseHTTPDatagramUDP: ok=%v err=%v", ok, perr)
-		}
-		reassembled = append(reassembled, p...)
-	}
-	if len(reassembled) != total {
-		t.Fatalf("reassembled len=%d want %d", len(reassembled), total)
-	}
-	if !bytes.Equal(reassembled, payload) {
-		t.Fatal("payload mismatch")
+	if err := w.AppendUDPPayloadAsCapsules(payload); !errors.Is(err, frame.ErrProxiedUDPPayloadTooLarge) {
+		t.Fatalf("AppendUDPPayloadAsCapsules: %v want ErrProxiedUDPPayloadTooLarge", err)
 	}
 }
 

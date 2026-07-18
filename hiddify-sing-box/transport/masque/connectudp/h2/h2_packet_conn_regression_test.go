@@ -129,7 +129,7 @@ func TestPacketConnClosesOnWriteBodyError(t *testing.T) {
 	_ = pr.CloseWithError(errors.New("test closed read side"))
 
 	c := NewPacketConn(PacketConnConfig{ReqBody: pw})
-	payload := bytes.Repeat([]byte{42}, testUploadCoalesceThreshold)
+	payload := []byte{42, 42, 42}
 	n, err := c.WriteTo(payload, nil)
 	require.Error(t, err)
 	require.Equal(t, 0, n)
@@ -148,7 +148,7 @@ func TestPacketConnWriteToCleanEOFWithoutClose(t *testing.T) {
 	c := NewPacketConn(PacketConnConfig{
 		ReqBody: eofWriteCloser{},
 	})
-	payload := bytes.Repeat([]byte{1, 2, 3}, testUploadCoalesceThreshold/3+1)
+	payload := []byte{1, 2, 3, 4, 5, 6}
 	n, err := c.WriteTo(payload, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.EOF)
@@ -164,7 +164,7 @@ func TestPacketConnWriteToCleanErrClosedPipeWithoutClose(t *testing.T) {
 	c := NewPacketConn(PacketConnConfig{
 		ReqBody: errClosedPipeWriteCloser{},
 	})
-	payload := bytes.Repeat([]byte{1, 2, 3}, testUploadCoalesceThreshold/3+1)
+	payload := []byte{1, 2, 3, 4, 5, 6}
 	n, err := c.WriteTo(payload, nil)
 	require.Equal(t, 0, n)
 	require.ErrorIs(t, err, io.ErrClosedPipe)
@@ -201,38 +201,19 @@ func TestPacketConnWriteToEmptyEmitCapsule(t *testing.T) {
 	require.Empty(t, payload)
 }
 
-// Regression: one WriteTo must not emit a single DATAGRAM capsule whose HTTP Datagram exceeds
-// h2c.MaxCapsulePayload() (server uplink rejects; parity with ServeH2 downlink splitter).
-func TestPacketConnWriteToSplitsLargePayloadIntoRFC9297Capsules(t *testing.T) {
-	total := h2c.MaxUDPPayloadPerDatagramCapsule()*2 + 50
+// Regression: one WriteTo must reject UDP payloads above MaxUDPPayloadPerDatagramCapsule
+// (RFC 9298 §5: one UDP = one HTTP Datagram; no multi-capsule invent).
+func TestPacketConnWriteToRejectsOversizeUDPPayload(t *testing.T) {
+	total := h2c.MaxUDPPayloadPerDatagramCapsule() + 1
 	payload := bytes.Repeat([]byte{'q'}, total)
 	capWC := &udpCapsuleCaptureWriteCloser{}
 	c := NewPacketConn(PacketConnConfig{ReqBody: capWC})
 
 	n, err := c.WriteTo(payload, nil)
-	require.NoError(t, err)
-	require.Equal(t, total, n)
-	require.NoError(t, c.Close())
-
-	r := quicvarint.NewReader(bytes.NewReader(capWC.buf.Bytes()))
-	var reassembled []byte
-	for {
-		ct, cr, cerr := h2c.ParseCapsule(r)
-		if cerr != nil {
-			if cerr == io.EOF {
-				break
-			}
-			require.NoError(t, cerr)
-		}
-		require.Equal(t, h2c.CapsuleTypeDatagram, ct)
-		raw, rerr := io.ReadAll(cr)
-		require.NoError(t, rerr)
-		pl, ok, perr := frame.ParseHTTPDatagramUDP(raw)
-		require.NoError(t, perr)
-		require.True(t, ok)
-		reassembled = append(reassembled, pl...)
-	}
-	require.Equal(t, payload, reassembled)
+	require.ErrorIs(t, err, frame.ErrProxiedUDPPayloadTooLarge)
+	require.Equal(t, 0, n)
+	require.Empty(t, capWC.buf.Bytes())
+	require.False(t, c.IsClosed())
 }
 
 func TestPacketConnRejectsOversizedNondatagramCapsule(t *testing.T) {

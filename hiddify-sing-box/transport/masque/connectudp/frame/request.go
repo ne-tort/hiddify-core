@@ -135,8 +135,9 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 	}
 	capsuleHeaderValues, ok := r.Header[http3.CapsuleProtocolHeader]
 	if !ok {
-		// HTTP/3 CONNECT-UDP uses r.Proto=connect-udp; some stacks do not surface
-		// Capsule-Protocol in r.Header even though the request is capsule-ready.
+		// RFC 9297 §3.4: Capsule-Protocol is SHOULD send, not MUST. H2 without the header → 400
+		// (stricter product). H3: some stacks set r.Proto=connect-udp but do not surface the
+		// header in r.Header — accept (D-R4 stack quirk); do not harden reject until surfacing.
 		if !strings.EqualFold(strings.TrimSpace(r.Proto), RequestProtocol) {
 			return nil, &RequestParseError{
 				HTTPStatus: http.StatusBadRequest,
@@ -218,6 +219,13 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 		return nil, &RequestParseError{
 			HTTPStatus: http.StatusBadRequest,
 			Err:        fmt.Errorf("failed to decode target_port: %w", err),
+		}
+	}
+	// RFC 9298 §3: target_port MUST be an integer between 1 and 65535.
+	if targetPort < 1 || targetPort > 65535 {
+		return nil, &RequestParseError{
+			HTTPStatus: http.StatusBadRequest,
+			Err:        fmt.Errorf("target_port out of range: %d", targetPort),
 		}
 	}
 	return &Request{

@@ -125,6 +125,17 @@ func (e *ServerEndpoint) Start(stage adapter.StartStage) error {
 }
 
 func (e *ServerEndpoint) endpointMuxFields() server.EndpointMuxFields {
+	hooks := server.TemplateAuthorityHooks{
+		ResolveTemplates: resolveMasqueServerTemplateURLs,
+		RelaxAuthority:   nil,
+		// F-AUTH-02: nil — ParseRequest enforces :authority vs template host; TCP path no longer uses this hook.
+		AuthorityMatches: nil,
+	}
+	// F-AUTH-01: rewrite only for legacy wildcard listen without tls.server_name
+	// (template still 127.0.0.1 while clients dial via real SNI/DNS).
+	if masqueTemplateNeedsAuthorityRewrite(e.options) {
+		hooks.RequestForParse = masquePathOnlyRequestForParse
+	}
 	return server.EndpointMuxFields{
 		Tag:       e.Tag(),
 		Type:      e.Type(),
@@ -133,14 +144,7 @@ func (e *ServerEndpoint) endpointMuxFields() server.EndpointMuxFields {
 		Logger:    e.logger,
 		Dialer:    e.dialer,
 		Authorize: e.authorizeRequest,
-		Hooks: server.TemplateAuthorityHooks{
-			ResolveTemplates: resolveMasqueServerTemplateURLs,
-			RelaxAuthority:   nil,
-			// Path-only: wildcard listen templates use 127.0.0.1 authority while clients dial via
-			// DNS/SNI (e.g. masque-server-core). Rewrite Host before ParseRequest so path match works.
-			RequestForParse:  masquePathOnlyRequestForParse,
-			AuthorityMatches: func(_, _ string, _ bool) bool { return true },
-		},
+		Hooks:     hooks,
 		OnUDPProxyCreated: func(p *cudprelay.Proxy) {
 			e.udpProxy = p
 		},
@@ -198,9 +202,8 @@ func (e *ServerEndpoint) handleTCPConnectRequest(w http.ResponseWriter, r *http.
 }
 
 // masquePathOnlyRequestForParse aligns :authority with the server URI template host.
-// Wildcard listen (0.0.0.0) builds templates as https://127.0.0.1:<port>/...; clients often send
-// the real SNI/DNS name. frame.ParseRequest compares Host to template host and Match() needs a
-// candidate whose authority matches the template (H3 often sends absolute RequestURI/URL).
+// Used only when masqueTemplateNeedsAuthorityRewrite (legacy wildcard → 127.0.0.1 template).
+// Prefer tls.server_name / explicit listen hostname so this rewrite is not needed (F-AUTH-01).
 func masquePathOnlyRequestForParse(r *http.Request, tpl *uritemplate.Template, _ bool) *http.Request {
 	if r == nil || tpl == nil {
 		return r

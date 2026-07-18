@@ -71,7 +71,7 @@ func TestPacketConnCloseDuringBlockedUploadWrite(t *testing.T) {
 		Resp:    &http.Response{Body: io.NopCloser(bytes.NewReader(nil))},
 	})
 
-	payload := bytes.Repeat([]byte{'u'}, testUploadCoalesceThreshold)
+	payload := bytes.Repeat([]byte{'u'}, 64)
 	writeDone := make(chan error, 1)
 	go func() {
 		_, err := c.WriteTo(payload, nil)

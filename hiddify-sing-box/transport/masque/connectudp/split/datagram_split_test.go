@@ -132,38 +132,26 @@ func TestDatagramSplitConnH2DoesNotDoubleWrapRead(t *testing.T) {
 	require.NotContains(t, err.Error(), "masque h3 dataplane connect-udp")
 }
 
-// If CONNECT-UDP app write ceiling ever exceeds RFC 9297 DATAGRAM body per capsule on HTTP/2, the split
-// layer must chop before inner h2ConnectUDPPacketConn (defense until write path always chunks).
-func TestDatagramSplitConnH2CapsTunnelChunkSize(t *testing.T) {
+// If CONNECT-UDP app write ceiling exceeds H2 capsule max, reject (RFC 9298 §5: no multi-datagram invent).
+func TestDatagramSplitConnH2RejectsOversize(t *testing.T) {
 	st := &stubPacketConn{failAfterNWrites: -1}
 	step := h2c.MaxUDPPayloadPerDatagramCapsule()
 	c := newSplitConn(st, step+999, option.MasqueHTTPLayerH2)
-	payload := make([]byte, step+step)
+	payload := make([]byte, step+1)
 	n, err := c.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 53})
-	require.NoError(t, err)
-	require.Equal(t, len(payload), n)
-	require.Equal(t, []int{step, step}, st.writeLens)
+	require.Error(t, err)
+	require.Equal(t, 0, n)
+	require.Empty(t, st.writeLens)
 }
 
-func TestDatagramSplitConnWriteToCompletesPartialFragmentWrites(t *testing.T) {
-	st := &cappedWritePacketConn{capPerCall: 180}
-	c := newSplitConn(st, 500, "")
-	payload := make([]byte, 950)
-	n, err := c.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 53})
-	require.NoError(t, err)
-	require.Equal(t, 950, n)
-	// frag1 500 B: 180+180+140; frag2 450: 180+180+90
-	require.Equal(t, []int{180, 180, 140, 180, 180, 90}, st.writeLens)
-}
-
-func TestDatagramSplitConnWriteTo(t *testing.T) {
+func TestDatagramSplitConnWriteToRejectsOversize(t *testing.T) {
 	st := &stubPacketConn{failAfterNWrites: -1}
 	c := newSplitConn(st, 800, "")
 	payload := make([]byte, 2500)
 	n, err := c.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 53})
-	require.NoError(t, err)
-	require.Equal(t, 2500, n)
-	require.Equal(t, []int{800, 800, 800, 100}, st.writeLens)
+	require.Error(t, err)
+	require.Equal(t, 0, n)
+	require.Empty(t, st.writeLens)
 }
 
 func TestDatagramSplitConnPassthroughSmall(t *testing.T) {
@@ -202,13 +190,13 @@ func TestDatagramSplitConnWriteToNonPositiveMaxPayloadNoSplit(t *testing.T) {
 	}
 }
 
-// On error at chunk N return sent prefix without losing partial progress.
-func TestDatagramSplitConnPropagatesUnderlyingErrorAfterPartialSend(t *testing.T) {
-	st := &stubPacketConn{failAfterNWrites: 2}
-	c := newSplitConn(st, 100, "")
-	payload := make([]byte, 250)
+// On oversize, reject without sending any fragment (no multi-datagram invent).
+func TestDatagramSplitConnPropagatesUnderlyingErrorOnWrite(t *testing.T) {
+	st := &stubPacketConn{failAfterNWrites: 0}
+	c := newSplitConn(st, 1000, "")
+	payload := make([]byte, 50)
 	n, err := c.WriteTo(payload, &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 53})
 	require.Error(t, err)
-	require.Equal(t, 200, n)
-	require.Equal(t, []int{100, 100}, st.writeLens)
+	require.Equal(t, 0, n)
+	require.Empty(t, st.writeLens)
 }

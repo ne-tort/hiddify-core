@@ -127,7 +127,7 @@ func TestPacketConnWriteDeadlineInterruptsBlockedBodyWrite(t *testing.T) {
 	if err := c.SetWriteDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := c.WriteTo(bytes.Repeat([]byte{'w'}, testUploadCoalesceThreshold), nil)
+	_, err := c.WriteTo(bytes.Repeat([]byte{'w'}, 64), nil)
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded after blocked write, got %v", err)
 	}

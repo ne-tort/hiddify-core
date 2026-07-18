@@ -7,20 +7,37 @@ import (
 )
 
 const (
-	// MaxProxiedUDPPayloadBytes is the RFC 9298 §4 maximum UDP proxying payload (Context ID 0).
+	// MaxProxiedUDPPayloadBytes is the RFC 9298 §5 maximum UDP proxying payload (Context ID 0).
 	MaxProxiedUDPPayloadBytes = 65527
 )
 
 // ContextIDZeroWire is the RFC 9297 HTTP Datagram Context ID 0 prefix (QUIC varint 0x00).
 var ContextIDZeroWire = []byte{0}
 
-// ErrProxiedUDPPayloadTooLarge is returned when a proxied UDP payload exceeds RFC 9298 §4.
+// ErrProxiedUDPPayloadTooLarge is returned when a proxied UDP payload exceeds RFC 9298 §5
+// or a product CONNECT-UDP datagram size limit.
 var ErrProxiedUDPPayloadTooLarge = errors.New("connect-udp: proxied UDP payload exceeds RFC 9298 maximum (65527 bytes)")
 
 // ValidateProxiedUDPPayloadLen rejects single-datagram UDP payloads longer than RFC 9298 allows.
 func ValidateProxiedUDPPayloadLen(n int) error {
 	if n > MaxProxiedUDPPayloadBytes {
 		return fmt.Errorf("%w: got %d", ErrProxiedUDPPayloadTooLarge, n)
+	}
+	return nil
+}
+
+// CheckConnectUDPUDPPayload enforces RFC 9298 §5 (≤65527) and an optional product max
+// (e.g. H2 MaxUDPPayloadPerDatagramCapsule). productMax<=0 means RFC-only.
+// Empty payloads (n<=0) are allowed (ICMP / empty ctx0 soft-signal).
+func CheckConnectUDPUDPPayload(n, productMax int) error {
+	if n <= 0 {
+		return nil
+	}
+	if err := ValidateProxiedUDPPayloadLen(n); err != nil {
+		return err
+	}
+	if productMax > 0 && n > productMax {
+		return fmt.Errorf("%w: got %d (product max %d)", ErrProxiedUDPPayloadTooLarge, n, productMax)
 	}
 	return nil
 }

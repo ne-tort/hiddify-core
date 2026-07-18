@@ -106,6 +106,54 @@ func TestParseRequestAcceptsValidConnectUDP(t *testing.T) {
 	}
 }
 
+func TestParseRequestTargetPortRange(t *testing.T) {
+	t.Parallel()
+	tmpl, err := uritemplate.New(testUDPTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(port string) *http.Request {
+		t.Helper()
+		u, err := url.Parse("https://masque.example:443/masque/udp/198.51.100.1/" + port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Request{
+			Method: http.MethodConnect,
+			Host:   "masque.example:443",
+			URL:    u,
+			Header: http.Header{
+				":protocol":                 []string{RequestProtocol},
+				http3.CapsuleProtocolHeader: []string{CapsuleProtocolHeaderValue},
+			},
+			Proto: RequestProtocol,
+		}
+	}
+	for _, port := range []string{"0", "65536", "99999"} {
+		_, err := ParseRequest(mk(port), tmpl)
+		var perr *RequestParseError
+		if !errors.As(err, &perr) || perr.HTTPStatus != http.StatusBadRequest {
+			t.Fatalf("port %s: got %v want RequestParseError 400", port, err)
+		}
+	}
+	for _, tc := range []struct {
+		port   string
+		target string
+	}{
+		{"1", "198.51.100.1:1"},
+		{"443", "198.51.100.1:443"},
+		{"65535", "198.51.100.1:65535"},
+	} {
+		parsed, err := ParseRequest(mk(tc.port), tmpl)
+		if err != nil {
+			t.Fatalf("port %s: %v", tc.port, err)
+		}
+		if parsed.Target != tc.target {
+			t.Fatalf("port %s: target got %q want %q", tc.port, parsed.Target, tc.target)
+		}
+	}
+}
+
 func TestParseRequestOpaquePath(t *testing.T) {
 	t.Parallel()
 	key := pathbuild.ActiveKey(true)

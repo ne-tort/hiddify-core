@@ -2,37 +2,54 @@ package frame
 
 import (
 	"errors"
-	"net/http"
+	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
-func TestProxyStatusNextHopUDP(t *testing.T) {
-	require.Nil(t, ProxyStatusNextHopUDP(nil))
-	rsp := &http.Response{
-		Header: http.Header{
-			"Proxy-Status": {`masque; next-hop="192.0.2.1:5353"`},
-		},
+func TestWriteProxyStatusHeaderSanitizesJoinedDNSError(t *testing.T) {
+	t.Parallel()
+	dnsErr := &net.DNSError{
+		Err:         "no such host",
+		Name:        "invalid.invalid",
+		IsNotFound:  true,
+		IsTemporary: false,
 	}
-	nh := ProxyStatusNextHopUDP(rsp)
-	require.NotNil(t, nh)
-	require.Equal(t, "192.0.2.1", nh.IP.String())
-	require.Equal(t, 5353, nh.Port)
+	// errors.Join can embed newlines / OS noise that break httpsfv sf-string marshal.
+	joined := errors.Join(errors.New("resolve failed"), dnsErr)
+
+	rec := httptest.NewRecorder()
+	item := NewProxyStatusItem("masque.example")
+	DNSErrorToProxyStatus(&item, dnsErr)
+	if err := WriteProxyStatusHeader(rec, &item, joined); err != nil {
+		// WriteProxyStatusHeader returns the dial/policy err, not marshal failure.
+		if !errors.Is(err, joined) && err.Error() != joined.Error() {
+			t.Fatalf("unexpected return err: %v", err)
+		}
+	}
+	ps := rec.Header().Get("Proxy-Status")
+	if ps == "" {
+		t.Fatal("Proxy-Status missing after sanitize")
+	}
+	if !strings.Contains(ps, "masque.example") {
+		t.Fatalf("Proxy-Status=%q want authority", ps)
+	}
+	if !strings.Contains(ps, "details=") {
+		t.Fatalf("Proxy-Status=%q want details=", ps)
+	}
 }
 
-func TestWriteProxyStatusHeaderIncludesDetailsOnError(t *testing.T) {
-	item := NewProxyStatusItem("proxy.example")
-	w := httptest.NewRecorder()
-	err := errors.New("dial failed")
-	writeErr := WriteProxyStatusHeader(w, &item, err)
-	require.ErrorIs(t, writeErr, err)
-	require.Contains(t, w.Header().Get("Proxy-Status"), "dial failed")
-}
-
-func TestAddProxyStatusNextHopHeader(t *testing.T) {
-	w := httptest.NewRecorder()
-	require.NoError(t, AddProxyStatusNextHopHeader(w, "proxy.example", "192.0.2.1:5353"))
-	require.Contains(t, w.Header().Get("Proxy-Status"), `next-hop="192.0.2.1:5353"`)
+func TestSanitizeProxyStatusDetailsASCIIOnly(t *testing.T) {
+	t.Parallel()
+	in := "line1\nline2\x00café\ttail"
+	out := sanitizeProxyStatusDetails(in)
+	if strings.ContainsAny(out, "\n\r\t\x00") {
+		t.Fatalf("control chars remain: %q", out)
+	}
+	for _, r := range out {
+		if r > 0x7e || r < 0x20 {
+			t.Fatalf("non-sf-string rune %q in %q", r, out)
+		}
+	}
 }

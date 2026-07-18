@@ -17,6 +17,9 @@ import (
 
 // StartInProcessConnectUDPProxy serves HTTPS CONNECT-UDP on an ephemeral TCP port.
 // Shared by connectudp/h2 integration tests and masque-package inttest harness (UDP-STRUCT-19).
+//
+// Lab path is /masque/udp (not IANA well-known). Prod default remains
+// pathbuild.DefaultPathUDP = "/.well-known/masque/udp" — see F-PATH-01 / D-N1.
 func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, sessions *SessionRegistry) int {
 	tb.Helper()
 	if serverTLS == nil {

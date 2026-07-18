@@ -51,11 +51,11 @@ func TestWriteDatagramCapsulePerCapsuleFlush(t *testing.T) {
 	}
 }
 
-// TestAppendUDPPayloadAsDatagramCapsulesNoFlush (G54): append path must not flush mid-batch.
-func TestAppendUDPPayloadAsDatagramCapsulesNoFlush(t *testing.T) {
+// TestAppendDatagramCapsuleWireNoFlush (G54): append path must not flush mid-batch.
+func TestAppendDatagramCapsuleWireNoFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	payload := bytes.Repeat([]byte("u"), MaxUDPPayloadPerDatagramCapsule()*2+10)
-	if err := AppendUDPPayloadAsDatagramCapsules(rec, payload); err != nil {
+	payload := bytes.Repeat([]byte("u"), 64)
+	if err := AppendDatagramCapsuleWire(rec, payload); err != nil {
 		t.Fatal(err)
 	}
 	if got := rec.flushes.Load(); got != 0 {
@@ -63,11 +63,11 @@ func TestAppendUDPPayloadAsDatagramCapsulesNoFlush(t *testing.T) {
 	}
 }
 
-// TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush (G54): batched write flushes once at end.
-func TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush(t *testing.T) {
+// TestWriteDatagramCapsuleTerminalFlush (G54): WriteDatagramCapsule flushes once.
+func TestWriteDatagramCapsuleTerminalFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	payload := bytes.Repeat([]byte("u"), MaxUDPPayloadPerDatagramCapsule()*2+10)
-	if err := WriteUDPPayloadAsDatagramCapsules(rec, payload); err != nil {
+	payload := bytes.Repeat([]byte("u"), 64)
+	if err := WriteDatagramCapsule(rec, payload); err != nil {
 		t.Fatal(err)
 	}
 	if got := rec.flushes.Load(); got != 1 {
@@ -78,7 +78,7 @@ func TestWriteUDPPayloadAsDatagramCapsulesTerminalFlush(t *testing.T) {
 func TestParseNextDatagramCapsuleWireRoundTrip(t *testing.T) {
 	var wire bytes.Buffer
 	payload := bytes.Repeat([]byte("z"), 512)
-	if err := AppendUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
+	if err := AppendDatagramCapsuleWire(&wire, payload); err != nil {
 		t.Fatal(err)
 	}
 	buf := wire.Bytes()
@@ -192,37 +192,26 @@ func TestWriteDatagramCapsuleRoundtrip(t *testing.T) {
 	}
 }
 
-func TestWriteUDPPayloadAsDatagramCapsulesSplitsLargePayload(t *testing.T) {
-	total := MaxUDPPayloadPerDatagramCapsule()*2 + 50
-	payload := bytes.Repeat([]byte{'a'}, total)
+func TestWriteDatagramCapsuleRejectsOversizeUDPPayload(t *testing.T) {
+	// CONNECT-UDP must not multi-capsule-split (RFC 9298 §5). Oversize is rejected at call sites
+	// via frame.CheckConnectUDPUDPPayload; wire helpers still encode a single capsule when asked.
+	// This test locks MaxUDPPayloadPerDatagramCapsule as the CONNECT-UDP product bound.
+	max := MaxUDPPayloadPerDatagramCapsule()
+	if max < 1 {
+		t.Fatal("empty MaxUDPPayloadPerDatagramCapsule")
+	}
+	payload := make([]byte, max+1)
 	var wire bytes.Buffer
-	if err := WriteUDPPayloadAsDatagramCapsules(&wire, payload); err != nil {
-		t.Fatal(err)
-	}
-	r := quicvarint.NewReader(bytes.NewReader(wire.Bytes()))
-	reassembled := make([]byte, 0, total)
-	for {
-		ct, cr, cerr := ParseCapsule(r)
-		if cerr == io.EOF {
-			break
+	// AppendDatagramCapsuleWire may succeed for hostile sizes if declared length fits MaxCapsulePayload;
+	// ParseNextDatagramCapsuleWire rejects declared oversize. Product reject is at CONNECT-UDP WriteTo.
+	if err := AppendDatagramCapsuleWire(&wire, payload); err == nil {
+		_, _, err = ParseNextDatagramCapsuleWire(wire.Bytes())
+		if err == nil {
+			t.Fatal("expected ErrOversizedDeclared for UDP above MaxUDPPayloadPerDatagramCapsule")
 		}
-		if cerr != nil {
-			t.Fatal(cerr)
+		if !errors.Is(err, ErrOversizedDeclared) {
+			t.Fatalf("got %v want ErrOversizedDeclared", err)
 		}
-		if ct != CapsuleTypeDatagram {
-			t.Fatalf("type=%v", ct)
-		}
-		chunk, rerr := io.ReadAll(cr)
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if len(chunk) < 1 || chunk[0] != 0 {
-			t.Fatalf("bad context id in %v", chunk)
-		}
-		reassembled = append(reassembled, chunk[1:]...)
-	}
-	if !bytes.Equal(reassembled, payload) {
-		t.Fatalf("reassembled len=%d want %d", len(reassembled), total)
 	}
 }
 

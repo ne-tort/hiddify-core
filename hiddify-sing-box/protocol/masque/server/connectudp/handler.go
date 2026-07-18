@@ -76,7 +76,8 @@ func targetPolicyHTTPStatus(err error) int {
 	if errors.As(err, &addrErr) || errors.As(err, &parseErr) {
 		return http.StatusBadRequest
 	}
-	return http.StatusBadRequest
+	// DNS / dial failures from ResolveTCPTarget share CONNECT-UDP resolve mapping (502/504).
+	return connectudp.ResolveDialToHTTPStatus(err)
 }
 
 // ResolveDialToHTTPStatus maps UDP resolve/dial failures to HTTP status codes.
@@ -91,7 +92,14 @@ func (h Handler) HandleConnectUDP(w http.ResponseWriter, r *http.Request, parsed
 		return
 	}
 	if polErr := h.checkTargetPolicy(r.Context(), parsed.Target, policy); polErr != nil {
-		w.WriteHeader(targetPolicyHTTPStatus(polErr))
+		status := targetPolicyHTTPStatus(polErr)
+		item := cudpframe.NewProxyStatusItem(parsed.Host)
+		var dnsErr *net.DNSError
+		if errors.As(polErr, &dnsErr) {
+			cudpframe.DNSErrorToProxyStatus(&item, dnsErr)
+		}
+		_ = cudpframe.WriteProxyStatusHeader(w, &item, polErr)
+		w.WriteHeader(status)
 		return
 	}
 	if _, ok := w.(http3.HTTPStreamer); ok {

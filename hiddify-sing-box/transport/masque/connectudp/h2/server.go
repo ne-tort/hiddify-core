@@ -1,13 +1,14 @@
 package h2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"net/http"
 	"sync"
-	"bytes"
 
+	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 )
@@ -52,14 +53,13 @@ func (w *H2ResponseWriter) AppendUDPPayloadAsCapsules(udpPayload []byte) error {
 }
 
 func (w *H2ResponseWriter) appendCapsulesLocked(udpPayload []byte) error {
+	if err := frame.CheckConnectUDPUDPPayload(len(udpPayload), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
+		return err
+	}
 	if w.pendingWire.Cap() == 0 {
 		w.pendingWire.Grow(H2DownlinkPendingGrow)
 	}
-	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		h2c.AppendDatagramCapsuleBuffer(&w.pendingWire, udpPayload)
-	} else {
-		h2c.AppendUDPPayloadAsDatagramCapsulesBuffer(&w.pendingWire, udpPayload)
-	}
+	h2c.AppendDatagramCapsuleBuffer(&w.pendingWire, udpPayload)
 	w.pendingSinceFlush += h2c.UDPPayloadWireLen(udpPayload)
 	return nil
 }
@@ -74,10 +74,10 @@ func (w *H2ResponseWriter) writeCapsulesImmediateLocked(udpPayload []byte) error
 		w.pendingWire.Reset()
 		w.pendingSinceFlush = 0
 	}
-	if len(udpPayload) <= h2c.MaxUDPPayloadPerDatagramCapsule() {
-		return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
+	if err := frame.CheckConnectUDPUDPPayload(len(udpPayload), h2c.MaxUDPPayloadPerDatagramCapsule()); err != nil {
+		return err
 	}
-	return h2c.WriteUDPPayloadAsDatagramCapsules(w.ResponseWriter, udpPayload)
+	return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
 }
 
 func (w *H2ResponseWriter) flushLocked() error {
