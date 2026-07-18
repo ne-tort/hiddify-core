@@ -15,8 +15,6 @@ import (
 
 const (
 	h2UploadWriteInterruptDeadline = 100 * time.Millisecond
-	// h2UploadCoalesceBytes: upload-only threshold flush (Invisv blocking body; no timer/debounce).
-	h2UploadCoalesceBytes = 64 * 1024
 )
 
 // Prime sends an empty DATAGRAM capsule at dial before first WriteTo.
@@ -133,10 +131,6 @@ func (c *PacketConn) writeDeadlineContext() (context.Context, context.CancelFunc
 	return context.Background(), func() {}
 }
 
-func (c *PacketConn) uploadCoalesceThreshold() int {
-	return h2UploadCoalesceBytes
-}
-
 func (c *PacketConn) writeUploadWireUnlocked(wire []byte) error {
 	if c == nil || c.reqBody == nil || len(wire) == 0 {
 		return nil
@@ -179,11 +173,6 @@ func (c *PacketConn) awaitWriteReqBody(ctx context.Context, writeFn func() error
 	case err := <-ch:
 		return err
 	}
-}
-
-func (c *PacketConn) uploadFlushInteractiveLocked() bool {
-	// Echo-duplex on upload leg: peer download ReadFrom active → flush each batch (no coalesce hold).
-	return c.duplexActive.Load()
 }
 
 func (c *PacketConn) flushUploadPendingForRead() error {

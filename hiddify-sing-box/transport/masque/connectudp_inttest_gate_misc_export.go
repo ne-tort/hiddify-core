@@ -8,7 +8,6 @@ import (
 )
 
 func InttestLocalizeConnectUDPH2UploadSharedTransportVsNewTransport(t *testing.T) {
-	t.Setenv("MASQUE_H2_CONNECT_UDP_ASYMMETRIC_DUPLEX", "1")
 	dur := connectUDPSynthProdBenchDuration
 	_, sharedMbps, err := benchConnectUDPH2OverlayDirectUpload(t, instantH2Link{}, dur, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {

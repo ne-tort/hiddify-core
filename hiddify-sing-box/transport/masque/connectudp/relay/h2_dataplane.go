@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
@@ -92,7 +93,9 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 	for {
 		select {
 		case <-r.Context().Done():
-			return nil
+			// Client Cancel/Close often races END_STREAM: TCP already delivered DATA but
+			// stream context dies before we peel. Drain what is already buffered / readable.
+			return drainH2UplinkAfterCancel(br, readBuf, pending, onward, signalReady, onICMP, relayOnward)
 		default:
 		}
 		for len(pending) > 0 {
@@ -158,6 +161,68 @@ func RelayH2ConnectUplink(r *http.Request, onward H2UplinkOnward, bodyBufSize in
 			return fmt.Errorf("masque h2 dataplane connect-udp server capsule: %w", err)
 		}
 	}
+}
+
+// drainH2UplinkAfterCancel peels capsules already buffered / still readable after stream cancel.
+// Client PacketConn.Close often cancels r.Context while TCP already delivered DATA; returning
+// immediately here dropped those capsules (docker paced write_ok≫c2s_in at 300+ Mbit).
+func drainH2UplinkAfterCancel(
+	br *bufio.Reader,
+	readBuf []byte,
+	pending []byte,
+	onward H2UplinkOnward,
+	signalReady func(),
+	onICMP func() error,
+	relayOnward func([]byte) error,
+) error {
+	// Fallback when client cancels before peer peel finishes; primary barrier is
+	// client uploadPeerPeelGrace before Body.Close / stream cancel.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		progress := false
+		for len(pending) > 0 {
+			if udpPayload, consumed, ok := h2c.TryConsumeDatagramCapsule512Wire(pending); ok {
+				pending = pending[consumed:]
+				progress = true
+				if err := relayOnward(udpPayload); err != nil {
+					return err
+				}
+				continue
+			}
+			inner, consumed, perr := h2c.ParseNextDatagramCapsuleWire(pending)
+			if perr != nil || consumed == 0 {
+				break
+			}
+			pending = pending[consumed:]
+			progress = true
+			if inner == nil {
+				continue
+			}
+			udpPayload, ok, uperr := frame.ParseHTTPDatagramUDP(inner)
+			if uperr != nil || !ok || len(udpPayload) == 0 {
+				if len(udpPayload) == 0 && signalReady != nil {
+					signalReady()
+				}
+				continue
+			}
+			if err := relayOnward(udpPayload); err != nil {
+				return err
+			}
+		}
+		if _, err := onward.Flush(); err != nil {
+			return err
+		}
+		nr, err := br.Read(readBuf)
+		if nr > 0 {
+			pending = append(pending, readBuf[:nr]...)
+			progress = true
+			continue
+		}
+		if err != nil || !progress {
+			return nil
+		}
+	}
+	return nil
 }
 
 // RelayH2ConnectDownlinkImmediate writes one RFC9297 capsule per onward UDP read (h2o 1:1 S2C).

@@ -20,7 +20,14 @@ import (
 //
 // Lab path is /masque/udp (not IANA well-known). Prod default remains
 // pathbuild.DefaultPathUDP = "/.well-known/masque/udp" — see F-PATH-01 / D-N1.
-func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, sessions *SessionRegistry) int {
+func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config) int {
+	tb.Helper()
+	return StartInProcessConnectUDPProxyOpts(tb, serverTLS, 0)
+}
+
+// StartInProcessConnectUDPProxyOpts is StartInProcessConnectUDPProxy with optional
+// MaxConcurrentStreams override (0 = BulkHTTP2ServerConfig default, typically 1000).
+func StartInProcessConnectUDPProxyOpts(tb testing.TB, serverTLS *tls.Config, maxConcurrentStreams uint32) int {
 	tb.Helper()
 	if serverTLS == nil {
 		tb.Fatal("StartInProcessConnectUDPProxy: serverTLS is nil")
@@ -40,7 +47,7 @@ func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, session
 		tb.Fatalf("udp template: %v", err)
 	}
 
-	cfg := ServeConnectUDPConfig{Sessions: sessions}
+	cfg := ServeConnectUDPConfig{}
 
 	mux := http.NewServeMux()
 	// pathbuild FullURITemplate expands with a trailing slash; match both shapes.
@@ -61,7 +68,11 @@ func StartInProcessConnectUDPProxy(tb testing.TB, serverTLS *tls.Config, session
 
 	tlsLn := tls.NewListener(ln, tlsCfg)
 	srv := &http.Server{Handler: mux}
-	if err := http2.ConfigureServer(srv, h2c.BulkHTTP2ServerConfig()); err != nil {
+	h2srv := h2c.BulkHTTP2ServerConfig()
+	if maxConcurrentStreams > 0 {
+		h2srv.MaxConcurrentStreams = maxConcurrentStreams
+	}
+	if err := http2.ConfigureServer(srv, h2srv); err != nil {
 		tb.Fatalf("configure http2 server: %v", err)
 	}
 	var wg sync.WaitGroup

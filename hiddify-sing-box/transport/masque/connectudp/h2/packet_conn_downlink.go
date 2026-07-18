@@ -21,31 +21,6 @@ const (
 	ResponseBodyBufSize = 256 * 1024
 )
 
-func (c *PacketConn) startUploadOnlyDrain() {
-	if c == nil || !c.uploadOnly {
-		return
-	}
-	c.uploadDrainOnce.Do(func() {
-		go c.runUploadOnlyDrain()
-	})
-}
-
-func (c *PacketConn) runUploadOnlyDrain() {
-	readBuf := c.downlinkReadScratch()
-	for {
-		if c.closed.Load() {
-			return
-		}
-		nr, err := c.readResponseBodyChunk(context.Background(), readBuf)
-		if nr > 0 {
-			continue
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
 func (c *PacketConn) downlinkReadScratch() []byte {
 	if cap(c.downlinkReadBuf) < ResponseBodyBufSize {
 		c.downlinkReadBuf = make([]byte, ResponseBodyBufSize)
@@ -66,7 +41,10 @@ func (c *PacketConn) parseOneDownlinkFromPending() (payload []byte, icmp bool, e
 		}
 		inner, consumed, perr := h2c.ParseNextDatagramCapsuleWire(pending)
 		if perr != nil {
-			_ = c.Close()
+			// Do not Close() here: caller may hold readMu; Close waits on body I/O.
+			c.closed.Store(true)
+			c.interruptBlockedBodyRead()
+			go func() { _ = c.Close() }()
 			return nil, false, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", perr)
 		}
 		if consumed == 0 {
@@ -151,7 +129,8 @@ func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (in
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if c.downlinkPending.Len() > 0 {
-					_ = c.Close()
+					c.closed.Store(true)
+					go func() { _ = c.Close() }()
 					return 0, fmt.Errorf("masque h2 dataplane connect-udp capsule: %w", io.ErrUnexpectedEOF)
 				}
 				return 0, err
@@ -159,14 +138,15 @@ func (c *PacketConn) readH2DatagramIntoLocked(p []byte, ctx context.Context) (in
 			if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.Canceled) {
 				return 0, err
 			}
-			_ = c.Close()
+			c.closed.Store(true)
+			go func() { _ = c.Close() }()
 			return 0, err
 		}
 	}
 }
 
 // interruptBlockedBodyRead closes only the response body to unblock a stuck downlink read
-// without tearing down the upload half (C4 / asymmetric CONNECT-UDP).
+// without tearing down the upload half (C4 / Extended CONNECT duplex).
 func (c *PacketConn) interruptBlockedBodyRead() {
 	if c.resp != nil && c.resp.Body != nil {
 		_ = c.resp.Body.Close()

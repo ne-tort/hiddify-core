@@ -102,7 +102,7 @@ func TestServeH2ConnectUDPGracefulEOFDoesNotReturnClosedConnError(t *testing.T) 
 
 func TestH2ResponseWriterBidiImmediateFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := newH2DownlinkWriter(rec, LegProfileBidi)
+	w := NewDownlinkResponseWriter(rec)
 	for i := 0; i < 5; i++ {
 		if err := w.WriteUDPPayloadAsCapsules([]byte("x")); err != nil {
 			t.Fatal(err)
@@ -115,7 +115,7 @@ func TestH2ResponseWriterBidiImmediateFlush(t *testing.T) {
 
 func TestH2ResponseWriterICMPImmediateFlush(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	w := NewDownlinkResponseWriter(rec)
 	if err := w.WriteUDPPayloadAsCapsules(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestH2ResponseWriterICMPImmediateFlush(t *testing.T) {
 
 func TestH2ResponseWriterFountainFlushOnlyViaFlushPending(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	w := NewDownlinkResponseWriter(rec)
 	payload := bytes.Repeat([]byte{'x'}, 512)
 	perWire := h2c.DatagramCapsule512WireLen
 	// Past old 64KiB threshold — must still not auto-flush (B7: per-batch only).
@@ -149,7 +149,7 @@ func TestH2ResponseWriterFountainFlushOnlyViaFlushPending(t *testing.T) {
 
 func TestH2ResponseWriterFountainProfileNoDebounceTimer(t *testing.T) {
 	rec := &flushCountResponseWriter{}
-	w := newH2DownlinkWriter(rec, LegProfileDownloadFountain)
+	w := NewDownlinkResponseWriter(rec)
 	payload := bytes.Repeat([]byte{'y'}, 512)
 	if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {
 		t.Fatal(err)

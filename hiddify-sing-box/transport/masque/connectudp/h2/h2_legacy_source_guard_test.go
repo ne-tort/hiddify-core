@@ -16,20 +16,14 @@ var h2PacketConnDownlinkSource string
 //go:embed packet_conn_upload.go
 var h2PacketConnUploadSource string
 
-//go:embed leg_profile.go
-var h2LegProfileSource string
-
-//go:embed asymmetric_packet_conn.go
-var h2AsymmetricPacketConnSource string
-
 //go:embed dial.go
 var h2DialSource string
 
 //go:embed server.go
 var h2ServerSource string
 
-//go:embed server_asymmetric.go
-var h2ServerAsymmetricSource string
+//go:embed handler_entry.go
+var h2HandlerEntrySource string
 
 // TestH2ServeBidiH2oImmediateRelay locks h2o 1:1 S2C + direct C2S on full-duplex ServeH2.
 func TestH2ServeBidiH2oImmediateRelay(t *testing.T) {
@@ -45,7 +39,7 @@ func TestH2ServeBidiH2oImmediateRelay(t *testing.T) {
 	}
 }
 
-// TestH2ClientProdSourceHasNoLegacyPump locks CUT of async downlink / coalesce timer / EchoBidi (UDP-6MIG-10).
+// TestH2ClientProdSourceHasNoLegacyPump locks CUT of async downlink / coalesce timer / EchoBidi / dual-leg.
 func TestH2ClientProdSourceHasNoLegacyPump(t *testing.T) {
 	t.Parallel()
 	forbidden := []string{
@@ -66,6 +60,11 @@ func TestH2ClientProdSourceHasNoLegacyPump(t *testing.T) {
 		"borrowUploadPayload",
 		"uploadPayloadPool",
 		"SendBurstViews",
+		"dialH2OverlayAsymmetric",
+		"NewAsymmetricPacketConn",
+		"SessionRegistry",
+		"Masque-Udp-Stream-Role",
+		"MasqueUDPStreamRoleHeader",
 	}
 	for _, src := range []struct {
 		name string
@@ -74,26 +73,33 @@ func TestH2ClientProdSourceHasNoLegacyPump(t *testing.T) {
 		{"packet_conn.go", h2PacketConnSource},
 		{"packet_conn_downlink.go", h2PacketConnDownlinkSource},
 		{"packet_conn_upload.go", h2PacketConnUploadSource},
-		{"leg_profile.go", h2LegProfileSource},
-		{"asymmetric_packet_conn.go", h2AsymmetricPacketConnSource},
 		{"dial.go", h2DialSource},
 		{"server.go", h2ServerSource},
 	} {
 		for _, needle := range forbidden {
 			if strings.Contains(src.body, needle) {
-				t.Fatalf("%s must not contain legacy H2 pump/timer %q", src.name, needle)
+				t.Fatalf("%s must not contain legacy H2 pump/timer/asym %q", src.name, needle)
 			}
 		}
 	}
 }
 
-// TestH2AsymmetricDownloadUsesFountainRelay locks batch S2C on download-only leg (bidi stays immediate).
-func TestH2AsymmetricDownloadUsesFountainRelay(t *testing.T) {
+// TestH2DialIsRFCBidiSingleStream locks approach A: one CONNECT, no dual-leg dial.
+func TestH2DialIsRFCBidiSingleStream(t *testing.T) {
 	t.Parallel()
-	if !strings.Contains(h2ServerAsymmetricSource, "RelayH2ConnectDownlinkFountain") {
-		t.Fatal("server_asymmetric.go: download leg must use RelayH2ConnectDownlinkFountain (fountain batch)")
+	if !strings.Contains(h2DialSource, "dialH2OverlayBidi") {
+		t.Fatal("dial.go: must dial via dialH2OverlayBidi")
 	}
-	if strings.Contains(h2ServerAsymmetricSource, "RelayH2ConnectDownlinkImmediate") {
-		t.Fatal("server_asymmetric.go: download leg must not use immediate 1:1 S2C relay")
+	if !strings.Contains(h2DialSource, "NewConnectUploadShallowPipe") {
+		t.Fatal("dial.go: bidi must use shallow upload pipe")
+	}
+	if strings.Contains(h2DialSource, "streamRoleDownload") || strings.Contains(h2DialSource, "streamRoleUpload") {
+		t.Fatal("dial.go: must not set asymmetric stream roles")
+	}
+	if !strings.Contains(h2HandlerEntrySource, "ServeH2(") {
+		t.Fatal("handler_entry.go: must call ServeH2")
+	}
+	if strings.Contains(h2HandlerEntrySource, "ServeH2FromRequest") {
+		t.Fatal("handler_entry.go: ServeH2FromRequest (asym router) must be gone")
 	}
 }

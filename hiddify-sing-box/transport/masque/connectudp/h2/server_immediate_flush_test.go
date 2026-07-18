@@ -9,7 +9,7 @@ import (
 // ICMP/immediate must not Reset pending wire without sending it.
 func TestImmediateWriteFlushesFountainPending(t *testing.T) {
 	rr := httptest.NewRecorder()
-	w := newH2DownlinkWriter(rr, LegProfileDownloadFountain)
+	w := NewDownlinkResponseWriter(rr)
 
 	payload := []byte("fountain-pkt")
 	if err := w.AppendUDPPayloadAsCapsules(payload); err != nil {

@@ -4,24 +4,24 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 
+	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
 	connectudp "github.com/sagernet/sing-box/transport/masque/connectudp"
 	cudpframe "github.com/sagernet/sing-box/transport/masque/connectudp/frame"
 	cudprelay "github.com/sagernet/sing-box/transport/masque/connectudp/relay"
 )
 
+// Proprietary dual-leg headers (CUT on this branch). Reject if present so no silent asym path remains.
+const (
+	legacyMasqueUDPStreamRoleHeader = "Masque-Udp-Stream-Role"
+	legacyMasqueUDPMuxKeyHeader     = "Masque-Udp-Mux-Key"
+)
+
 // ServeConnectUDPConfig wires HTTP/2 CONNECT-UDP server entry from protocol/masque/server/connectudp.
 type ServeConnectUDPConfig struct {
 	CapsuleProtocolHeaderValue func() string
-	Sessions                   *SessionRegistry
-}
-
-func (cfg ServeConnectUDPConfig) sessions() *SessionRegistry {
-	if cfg.Sessions != nil {
-		return cfg.Sessions
-	}
-	return DefaultSessionRegistry
 }
 
 func tuneH2OnwardUDP(conn *net.UDPConn) {
@@ -34,7 +34,20 @@ func closeH2OnwardConn(conn *net.UDPConn) {
 	}
 }
 
-// ServeConnectUDP handles the HTTP/2 CONNECT-UDP server leg (capsule relay) after ACL checks.
+func rejectLegacyAsymHeaders(w http.ResponseWriter, r *http.Request, proxyStatus *httpsfv.Item) bool {
+	if r == nil {
+		return false
+	}
+	if strings.TrimSpace(r.Header.Get(legacyMasqueUDPStreamRoleHeader)) == "" &&
+		strings.TrimSpace(r.Header.Get(legacyMasqueUDPMuxKeyHeader)) == "" {
+		return false
+	}
+	_ = cudpframe.WriteProxyStatusHeader(w, proxyStatus, errors.New("masque h2: asymmetric CONNECT-UDP headers not supported"))
+	w.WriteHeader(http.StatusBadRequest)
+	return true
+}
+
+// ServeConnectUDP handles the HTTP/2 CONNECT-UDP server (RFC single-stream capsule relay).
 func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHost string, cfg ServeConnectUDPConfig) {
 	proxyStatus := cudpframe.NewProxyStatusItem(authorityHost)
 
@@ -50,61 +63,18 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 	}
 	proxyStatus.Params.Add("next-hop", addr.String())
 
-	role := StreamRoleFromRequest(r)
-	if role != "" && role != StreamRoleDownload && role != StreamRoleUpload {
-		_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, errors.New("masque h2: unknown CONNECT-UDP stream role"))
-		w.WriteHeader(http.StatusBadRequest)
+	if rejectLegacyAsymHeaders(w, r, &proxyStatus) {
 		return
 	}
-	if role != "" {
-		_, keyErr := RequireSessionKey(r, addr.String())
-		if keyErr != nil {
-			if IsMissingMuxKey(keyErr) {
-				_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, keyErr)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, keyErr)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-	}
 
-	var conn *net.UDPConn
-	if role != StreamRoleUpload {
-		var dialErr error
-		conn, dialErr = net.DialUDP("udp", nil, addr)
-		if dialErr != nil {
-			proxyStatus.Params.Add("error", "destination_ip_unroutable")
-			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, dialErr)
-			w.WriteHeader(connectudp.ResolveDialToHTTPStatus(dialErr))
-			return
-		}
-		tuneH2OnwardUDP(conn)
+	conn, dialErr := net.DialUDP("udp", nil, addr)
+	if dialErr != nil {
+		proxyStatus.Params.Add("error", "destination_ip_unroutable")
+		_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, dialErr)
+		w.WriteHeader(connectudp.ResolveDialToHTTPStatus(dialErr))
+		return
 	}
-
-	sessions := cfg.sessions()
-	if role == StreamRoleDownload {
-		if regErr := RegisterDownloadBeforeOK(w, r, conn, addr.String(), sessions); regErr != nil {
-			closeH2OnwardConn(conn)
-			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, regErr)
-			if IsDuplicateDownloadSession(regErr) {
-				w.WriteHeader(http.StatusConflict)
-			} else if IsMissingMuxKey(regErr) {
-				w.WriteHeader(http.StatusBadRequest)
-			} else {
-				w.WriteHeader(http.StatusInternalServerError)
-			}
-			return
-		}
-	}
-	if role == StreamRoleUpload {
-		if waitErr := WaitDownloadSessionBeforeOK(r, addr.String(), sessions); waitErr != nil {
-			_ = cudpframe.WriteProxyStatusHeader(w, &proxyStatus, waitErr)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-	}
+	tuneH2OnwardUDP(conn)
 
 	if err := cudpframe.WriteProxyStatusHeader(w, &proxyStatus, nil); err != nil {
 		closeH2OnwardConn(conn)
@@ -117,25 +87,9 @@ func ServeConnectUDP(w http.ResponseWriter, r *http.Request, target, authorityHo
 		capsuleVal = cfg.CapsuleProtocolHeaderValue()
 	}
 	w.Header().Set(http3.CapsuleProtocolHeader, capsuleVal)
-	if role == StreamRoleUpload {
-		w.WriteHeader(http.StatusOK)
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
-		}
-		if err := ServeH2FromRequest(w, r, conn, addr.String(), sessions); err != nil {
-			if IsDuplicateDownloadSession(err) {
-				return
-			}
-		}
-		return
-	}
 	w.WriteHeader(http.StatusOK)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-	if err := ServeH2FromRequest(w, r, conn, addr.String(), sessions); err != nil {
-		if IsDuplicateDownloadSession(err) {
-			return
-		}
-	}
+	_ = ServeH2(w, r, conn)
 }

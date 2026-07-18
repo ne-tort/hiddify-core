@@ -177,7 +177,17 @@ func (b *ExtendedConnectUploadBody) UploadBulkArmed() bool {
 }
 
 // AwaitUploadWireSent blocks until at least n TLS upload bytes are flushed (ConnectUploadWireAck).
+// CONNECT-UDP uses a strict barrier (no 256KiB / 0.5% slack) — slack was hiding paced loss.
 func (b *ExtendedConnectUploadBody) AwaitUploadWireSent(n int64, timeout time.Duration) error {
+	return b.awaitUploadWireSent(n, timeout, true)
+}
+
+// AwaitUploadWireSentWithSlack is for CONNECT-stream teardown where a small tail slack is OK.
+func (b *ExtendedConnectUploadBody) AwaitUploadWireSentWithSlack(n int64, timeout time.Duration) error {
+	return b.awaitUploadWireSent(n, timeout, false)
+}
+
+func (b *ExtendedConnectUploadBody) awaitUploadWireSent(n int64, timeout time.Duration, strict bool) error {
 	if b == nil || n <= 0 {
 		return nil
 	}
@@ -185,7 +195,7 @@ func (b *ExtendedConnectUploadBody) AwaitUploadWireSent(n int64, timeout time.Du
 	spin := 0
 	for {
 		got := b.wireSent.Load()
-		if got >= n || uploadWireTailSatisfied(got, n) {
+		if got >= n || (!strict && uploadWireTailSatisfied(got, n)) {
 			return nil
 		}
 		if time.Now().After(deadline) {

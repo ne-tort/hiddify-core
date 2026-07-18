@@ -345,7 +345,6 @@ func TestH2PacketConnAdaptiveUploadInteractiveFlush(t *testing.T) {
 		Resp:       &http.Response{Body: io.NopCloser(bytes.NewReader(downlink.Bytes()))},
 		ReqBody:    capWC,
 		RemoteAddr: NewUDPAddr("127.0.0.1:53"),
-		LegProfile: LegProfileDownloadFountain,
 	})
 	buf := make([]byte, 8)
 	n, _, err := c.ReadFrom(buf)
