@@ -213,3 +213,18 @@ func TestProdRelaySourceHasNoLegacyS2CBackoff(t *testing.T) {
 		}
 	}
 }
+
+// TestProdRelaySourceHasNoECNSocketTweaks locks RFC 9298 §6.2 posture: onward UDP uses
+// default Not-ECT (no SetTOS / TrafficClass); we do not read or copy target ECN marks.
+func TestProdRelaySourceHasNoECNSocketTweaks(t *testing.T) {
+	t.Parallel()
+	blob := h3RelayProdSource + h3RelayC2SSource + h3RelayC2SWriterSource + h3RelayS2CSource +
+		h3RelayTuneSource + h2RelayDataplaneSource + h3RelayOnwardBatchSource
+	for _, needle := range []string{
+		"SetTOS", "TrafficClass", "IPV6_TCLASS", "IP_TOS", "IP_RECVTOS", "IPV6_RECVTCLASS",
+	} {
+		if strings.Contains(blob, needle) {
+			t.Fatalf("connectudp/relay must not tweak ECN/TOS (%q); §6.2 = Not-ECT default + ignore", needle)
+		}
+	}
+}
