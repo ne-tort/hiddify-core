@@ -135,6 +135,10 @@ func TestL3OverlayHostEgressReadRelay(t *testing.T) {
 	if w.writes.Load() != 0 {
 		t.Fatalf("writes=%d want 0 (Send no-op when host egress wired)", w.writes.Load())
 	}
+	// P2-8: host path must not fill egressCh (idle channel; LoopIn uses HostEgressReader).
+	if n := len(b.egressCh); n != 0 {
+		t.Fatalf("egressCh len=%d want 0 after host-path Send no-op", n)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

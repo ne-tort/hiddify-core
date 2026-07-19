@@ -30,6 +30,9 @@ type PacketReader interface {
 	ReadPacket(ctx context.Context, buf []byte) (int, error)
 }
 
+// l3EgressQueueDepth sizes the stack/synth Send→LoopIn queue only.
+// Prod host-kernel path (hostEgressRead set) never enqueues here — Send is no-op and
+// LoopIn reads KernelTunDevice / ReadHostEgress (P2-8 LOCK: idle ~96KiB headers, not packet double-buffer).
 const l3EgressQueueDepth = 4096
 
 // HostEgressReader reads OS kernel egress from tun (usque Device.ReadPacket parity).
