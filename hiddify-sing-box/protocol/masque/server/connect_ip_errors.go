@@ -3,8 +3,6 @@ package server
 import (
 	"errors"
 	"net"
-	"os"
-	"strings"
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
@@ -15,13 +13,8 @@ import (
 const defaultConnectIPRouteSetupTimeout = 2 * time.Second
 
 // ConnectIPRouteSetupTimeout bounds AssignAddresses + AdvertiseRoute during CONNECT-IP bootstrap.
-// Override via MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT (e.g. "5s") for slow links or docker restart.
+// Const-only (P2-6): Hooks.RouteSetupTimeout remains the typed injection point for tests.
 func ConnectIPRouteSetupTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
 	return defaultConnectIPRouteSetupTimeout
 }
 

@@ -248,24 +248,12 @@ func TestConnectIPRequestErrorStatusAndClass(t *testing.T) {
 	}
 }
 
-func TestConnectIPRouteSetupTimeoutDefault(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "")
+func TestConnectIPRouteSetupTimeoutConst(t *testing.T) {
 	if got := ConnectIPRouteSetupTimeout(); got != defaultConnectIPRouteSetupTimeout {
-		t.Fatalf("default timeout=%v want %v", got, defaultConnectIPRouteSetupTimeout)
+		t.Fatalf("timeout=%v want %v", got, defaultConnectIPRouteSetupTimeout)
 	}
-}
-
-func TestConnectIPRouteSetupTimeoutEnvOverride(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "5s")
-	if got := ConnectIPRouteSetupTimeout(); got != 5*time.Second {
-		t.Fatalf("env timeout=%v want 5s", got)
-	}
-}
-
-func TestConnectIPRouteSetupTimeoutEnvInvalidFallsBack(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_ROUTE_SETUP_TIMEOUT", "not-a-duration")
-	if got := ConnectIPRouteSetupTimeout(); got != defaultConnectIPRouteSetupTimeout {
-		t.Fatalf("invalid env timeout=%v want default %v", got, defaultConnectIPRouteSetupTimeout)
+	if defaultConnectIPRouteSetupTimeout != 2*time.Second {
+		t.Fatalf("default=%v want 2s", defaultConnectIPRouteSetupTimeout)
 	}
 }
 
