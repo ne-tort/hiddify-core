@@ -37,8 +37,9 @@ func NativeH3ClientOptions(proxyPort int) masque.ClientOptions {
 	return masque.ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathIP:              "/masque/ip", // must match StartNativeConnectIPH3Server mux
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
-		DataplaneMode: option.MasqueDataplaneConnectIP,
+		DataplaneMode:       option.MasqueDataplaneConnectIP,
 		ProfileLocalIPv4:    NativeProfileLocalIPv4,
 	}
 }

@@ -73,6 +73,14 @@ func InttestMarkConnectIPServerRecycled(sess ClientSession) {
 	}
 }
 
+// InttestConnectIPServerGenerationStale reports the explicit server-recycle latch (LIFE-1 / P1-4).
+func InttestConnectIPServerGenerationStale(sess ClientSession) bool {
+	if r, ok := sess.(interface{ ConnectIPServerGenerationStale() bool }); ok {
+		return r.ConnectIPServerGenerationStale()
+	}
+	return false
+}
+
 // InttestReopenConnectIPNativeL3Plane resets datagram plane and rebinds tun L3 bridge (W-IP-ARCH-3).
 func InttestReopenConnectIPNativeL3Plane(ctx context.Context, sess ClientSession) error {
 	if r, ok := sess.(interface {
