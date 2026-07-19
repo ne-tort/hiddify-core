@@ -344,6 +344,12 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 		_ = resp.Body.Close()
 		return nil, resp, fmt.Errorf("connect-ip: server responded with %d", resp.StatusCode)
 	}
+	if err := validateResponseCapsuleProtocol(resp.Header); err != nil {
+		_ = pr.CloseWithError(err)
+		_ = pw.Close()
+		_ = resp.Body.Close()
+		return nil, resp, err
+	}
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
 		_ = pr.CloseWithError(ctxErr)
 		_ = pw.Close()

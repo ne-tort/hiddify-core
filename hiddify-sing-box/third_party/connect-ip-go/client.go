@@ -125,6 +125,10 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
 		return nil, rsp, fmt.Errorf("connect-ip: server responded with %d", rsp.StatusCode)
 	}
+	if err := validateResponseCapsuleProtocol(rsp.Header); err != nil {
+		_ = rstr.Close()
+		return nil, rsp, err
+	}
 	if dialConnectIPH3TestAfterSuccessfulCONNECTResponse != nil {
 		dialConnectIPH3TestAfterSuccessfulCONNECTResponse(ctx)
 	}
