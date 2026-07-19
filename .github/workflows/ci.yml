@@ -51,7 +51,8 @@ jobs:
           cd hiddify-sing-box
           go test ./protocol/masque -tags with_masque -run TestEndpointRejectsConnectIPTCPTransportInTunOnlyMode
           go test ./common/masque -tags with_masque -run 'TestRuntimePolicyRejectClassAndObservabilityContract|TestRuntimeMalformedScopedFlowClassifiedAsCapability'
-          go test -C third_party/connect-ip-go -run 'TestPacketTupleRejectsAmbiguousIPv6ExtensionChain' .
+          # P2-16: full vendor package (replaces single PacketTuple -run; vacuum-safe via full .)
+          GOWORK=off go test -C third_party/connect-ip-go . -count=1 -timeout 60s
           MASQUE_EXPERIMENTAL_QUIC=1 go test ./protocol/masque ./transport/masque -tags with_masque -run 'TestEndpointRejectsQUICExperimentalWithoutEnv|TestApplyQUICExperimentalOptions'
           go test ./transport/masque -tags with_masque -run 'TestCoreClientFactoryConnectTCPCapabilityByTransport|TestConnectIPPacketSessionDatagramCeiling|TestBuildTemplatesApplyConnectIPFlowScope|TestBuildTemplatesRejectScopeWithoutTemplateVars|TestConnectIPObservabilitySnapshotPolicyReasonContract'
       - name: MASQUE CONNECT-STREAM non-auth matrix gate (pre-docker typed helper)

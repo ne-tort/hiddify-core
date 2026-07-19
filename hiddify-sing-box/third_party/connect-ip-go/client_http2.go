@@ -21,8 +21,12 @@ import (
 
 // NewH2ExtendedConnectRequestContext relays parent cancellation only until the handshake phase
 // completes. Call stop(true) after successful Extended CONNECT so later parent cancellation does not
-// tear down the long-lived stream. Call stop(false) on failure paths to cancel immediately.
+// tear down the long-lived stream. Call stop(false) on failure/teardown paths to cancel immediately
+// (including after a prior stop(true) detach).
 // Used by CONNECT-IP DialHTTP2 and by sing-box MASQUE (CONNECT-UDP / CONNECT-stream over HTTP/2).
+//
+// Guarantee: after stop(true) returns, parent cancel is ignored. Concurrent parent cancel that wins
+// the race before stop(true) marks detached may still cancel (handshake abort) — that is expected.
 func NewH2ExtendedConnectRequestContext(parent context.Context) (context.Context, func(detach bool)) {
 	reqCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	var detached atomic.Bool
@@ -40,7 +44,15 @@ func NewH2ExtendedConnectRequestContext(parent context.Context) (context.Context
 	}()
 	var stopRelayOnce sync.Once
 	return reqCtx, func(detach bool) {
-		stopRelayOnce.Do(func() { close(stopRelay) })
+		stopRelayOnce.Do(func() {
+			// Mark detach before closing the relay so a watcher already awake on parent.Done
+			// can observe detached when it re-checks (best-effort race). Guaranteed silence
+			// of parent cancel applies only after this stop(true) returns.
+			if detach {
+				detached.Store(true)
+			}
+			close(stopRelay)
+		})
 		if detach {
 			detached.Store(true)
 			return

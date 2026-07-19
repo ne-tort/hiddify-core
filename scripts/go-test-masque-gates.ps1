@@ -131,6 +131,26 @@ try {
         "-run", "ConnectIP|Localize|HybridConnectStreamH[23]Smoke",
         "-count=1", "-timeout", "120s"
     )
+    # P2-16 / F5-T8: vendor standalone (GOWORK=off skips broken integration/).
+    Write-Host "==> L3 connect-ip-go no parent import" -ForegroundColor Cyan
+    $prevGowork = $env:GOWORK
+    $env:GOWORK = "off"
+    try {
+        $imports = & go list -C ./third_party/connect-ip-go -f "{{range .Imports}}{{println .}}{{end}}" . 2>&1
+        $bad = $imports | Where-Object { $_ -match "sagernet/sing-box|/pathbuild" }
+        if ($bad) {
+            Write-Error "vendor reverse-import of parent/pathbuild:`n$($bad -join "`n")"
+            exit 1
+        }
+        Invoke-MasqueGate "L3 connect-ip-go vendor standalone" @(
+            "test", "-C", "./third_party/connect-ip-go", ".",
+            "-count=1", "-timeout", "60s"
+        )
+    }
+    finally {
+        if ($null -eq $prevGowork) { Remove-Item Env:GOWORK -ErrorAction SilentlyContinue }
+        else { $env:GOWORK = $prevGowork }
+    }
     Invoke-MasqueGate "L3 connect-ip-h2 KPI" @(
         "test", "./transport/masque/",
         "-run", "ConnectIPHybridConnectStreamH2DownloadKPI",

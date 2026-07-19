@@ -79,6 +79,17 @@ invoke_masque_gate "L3 connect-ip" test ./transport/masque/ \
   -run 'ConnectIP|Localize' \
   -count=1 -timeout 90s
 
+# P2-16 / F5-T8: vendor must compile and test without parent module (GOWORK=off skips integration/).
+echo "==> L3 connect-ip-go no parent import"
+bad_imports="$(GOWORK=off go list -C ./third_party/connect-ip-go -f '{{range .Imports}}{{println .}}{{end}}' . | grep -E 'sagernet/sing-box|/pathbuild' || true)"
+if [[ -n "${bad_imports}" ]]; then
+  echo "vendor reverse-import of parent/pathbuild:" >&2
+  echo "${bad_imports}" >&2
+  exit 1
+fi
+GOWORK=off invoke_masque_gate "L3 connect-ip-go vendor standalone" test -C ./third_party/connect-ip-go . \
+  -count=1 -timeout 60s
+
 invoke_masque_gate "L4 connect-udp" test ./transport/masque/ \
   -run 'ConnectIPUDP|ListenPacket|BuildAndParseIPv4UDP|H2ConnectUDP|ConnectUDPLocalize|Socks5' \
   -count=1 -timeout 45s

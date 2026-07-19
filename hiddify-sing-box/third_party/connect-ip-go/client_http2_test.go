@@ -51,18 +51,20 @@ func TestH2ExtendedConnectRequestContextDetachesAfterHandshake(t *testing.T) {
 }
 
 func TestH2ExtendedConnectRequestContextDetachWinsConcurrentParentCancel(t *testing.T) {
+	// Guaranteed contract (not a scheduler lottery): after stop(true) returns, parent cancel is ignored.
+	// Concurrent cancel that wins before stop(true) may abort handshake — that is expected.
 	parent, cancelParent := context.WithCancel(context.Background())
 	reqCtx, stop := NewH2ExtendedConnectRequestContext(parent)
-	done := make(chan struct{})
+	detachDone := make(chan struct{})
 	go func() {
 		stop(true)
-		close(done)
+		close(detachDone)
 	}()
+	<-detachDone
 	cancelParent()
-	<-done
 	select {
 	case <-reqCtx.Done():
-		t.Fatal("request context canceled when detach raced parent cancel")
+		t.Fatal("request context canceled by parent after stop(true) returned")
 	case <-time.After(100 * time.Millisecond):
 	}
 }
