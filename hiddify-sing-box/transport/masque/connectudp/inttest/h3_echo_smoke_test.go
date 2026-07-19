@@ -2,12 +2,17 @@ package inttest_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"testing"
 	"time"
 
 	masque "github.com/sagernet/sing-box/transport/masque"
+	cudpconn "github.com/sagernet/sing-box/transport/masque/connectudp/conn"
+	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -118,5 +123,55 @@ func TestCoreSessionConnectUDPForbiddenBeforeProxy(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected ListenPacket to fail when proxy responds 403")
+	}
+}
+
+func TestCoreSessionConnectUDPH3PortUnreachableListenPacket(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("connected UDP ICMP port-unreachable is unreliable on Windows")
+	}
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	t.Cleanup(func() { _ = tcpLn.Close() })
+	tcpPort := tcpLn.Addr().(*net.TCPAddr).Port
+
+	proxyPort := masque.InttestStartMasqueUDPProxyWithRelay(t)
+	session, waitCtx := masque.InttestNewConnectUDPH3Session(t, proxyPort)
+	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
+		Addr: netip.MustParseAddr("127.0.0.1"),
+		Port: uint16(tcpPort),
+	})
+	if err != nil {
+		t.Fatalf("listenpacket connect-udp h3: %v", err)
+	}
+	defer func() { _ = pkt.Close() }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, _, rerr := pkt.ReadFrom(buf)
+		if rerr != nil {
+			errCh <- rerr
+			return
+		}
+		if n != 0 {
+			errCh <- context.Canceled
+			return
+		}
+		errCh <- nil
+	}()
+	time.Sleep(30 * time.Millisecond)
+	if _, werr := pkt.WriteTo([]byte{0x00, 0x01, 0x02}, nil); werr != nil {
+		t.Fatalf("write: %v", werr)
+	}
+	select {
+	case rerr := <-errCh:
+		if !errors.Is(rerr, cudpconn.ErrICMPPortUnreachable) && !cudpsplit.IsPortUnreachable(rerr) {
+			t.Fatalf("expected port unreachable, got %v", rerr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadFrom blocked past upload (ICMP soft-signal timeout)")
 	}
 }
