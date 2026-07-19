@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/quic-go/quic-go/http3"
-	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -52,6 +51,9 @@ type DialOptions struct {
 	ExtraRequestHeaders http.Header
 	// PathObfuscationKey seals {opaque} path segments when path_obfuscation is enabled (baked-in key).
 	PathObfuscationKey []byte
+	// SealIPScope encrypts CONNECT-IP target+ipproto into one opaque path segment.
+	// Required when the URI template contains {opaque}; injected by the parent (pathbuild).
+	SealIPScope func(key []byte, target string, ipproto uint8) (string, error)
 }
 
 // Dial dials a proxied CONNECT-IP session. bearerToken, if non-empty after TrimSpace, is sent as Authorization: Bearer.
@@ -64,7 +66,7 @@ func DialWithOptions(ctx context.Context, conn *http3.ClientConn, template *urit
 	if err := validateFlowForwardingTemplateVars(template); err != nil {
 		return nil, nil, err
 	}
-	rawURL, err := buildConnectIPRequestURL(template, opts.PathObfuscationKey)
+	rawURL, err := buildConnectIPRequestURL(template, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,7 +158,7 @@ func applyDialInteroperability(c *Conn, opts DialOptions) {
 	}
 }
 
-func buildConnectIPRequestURL(template *uritemplate.Template, pathObfuscationKey []byte) (string, error) {
+func buildConnectIPRequestURL(template *uritemplate.Template, opts DialOptions) (string, error) {
 	if len(template.Varnames()) == 0 {
 		return template.Raw(), nil
 	}
@@ -170,7 +172,10 @@ func buildConnectIPRequestURL(template *uritemplate.Template, pathObfuscationKey
 			// "0" follows RFC wildcard semantics for all upper-layer protocols.
 			values[flowVarIPProto] = uritemplate.String("0")
 		case flowVarOpaque:
-			opaque, err := pathbuild.SealIPScope(pathObfuscationKey, "0.0.0.0/0", 0)
+			if opts.SealIPScope == nil {
+				return "", errors.New("connect-ip: opaque path requires SealIPScope")
+			}
+			opaque, err := opts.SealIPScope(opts.PathObfuscationKey, "0.0.0.0/0", 0)
 			if err != nil {
 				return "", fmt.Errorf("connect-ip: seal opaque path: %w", err)
 			}

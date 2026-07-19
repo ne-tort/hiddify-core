@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	cip "github.com/quic-go/connect-ip-go"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -21,6 +22,7 @@ type H2DialParams struct {
 func BuildH2DialOptions(p H2DialParams) cip.DialOptions {
 	dopts := cip.DialOptions{
 		PathObfuscationKey: p.PathObfuscationKey,
+		SealIPScope:        pathbuild.SealIPScope,
 	}
 	if p.ExtraRequestHeaders != nil {
 		dopts.ExtraRequestHeaders = p.ExtraRequestHeaders

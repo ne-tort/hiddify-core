@@ -9,6 +9,7 @@ import (
 
 	cip "github.com/quic-go/connect-ip-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -26,8 +27,9 @@ func BuildH3DialOptions(p H3DialParams) cip.DialOptions {
 	proto := strings.TrimSpace(p.WarpConnectIPProtocol)
 	token := strings.TrimSpace(p.BearerToken)
 	base := cip.DialOptions{
-		BearerToken:          token,
-		PathObfuscationKey:   p.PathObfuscationKey,
+		BearerToken:        token,
+		PathObfuscationKey: p.PathObfuscationKey,
+		SealIPScope:        pathbuild.SealIPScope,
 	}
 	if p.ExtraRequestHeaders != nil {
 		dopts := base

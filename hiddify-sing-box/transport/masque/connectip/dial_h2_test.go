@@ -16,6 +16,9 @@ func TestConnectIPBuildH2DialOptionsCfConnectIP(t *testing.T) {
 	if opts.BearerToken != "tok" {
 		t.Fatalf("unexpected bearer %q", opts.BearerToken)
 	}
+	if opts.SealIPScope == nil {
+		t.Fatal("SealIPScope must be injected for opaque path templates")
+	}
 }
 
 func TestConnectIPBuildH2DialOptionsBasicAuthOverridesBearer(t *testing.T) {

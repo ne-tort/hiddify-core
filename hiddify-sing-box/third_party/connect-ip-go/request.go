@@ -12,7 +12,6 @@ import (
 
 	"github.com/dunglas/httpsfv"
 	"github.com/quic-go/quic-go/http3"
-	"github.com/sagernet/sing-box/transport/masque/pathbuild"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -179,7 +178,13 @@ func ParseRequest(r *http.Request, template *uritemplate.Template) (*Request, er
 	}
 	opaqueValue := strings.TrimSpace(values.Get(flowVarOpaque).String())
 	if opaqueValue != "" {
-		targetStr, ipproto, openErr := pathbuild.OpenIPScope(pathbuild.ActiveKey(true), opaqueValue)
+		if ipScopeOpener == nil {
+			return nil, &RequestParseError{
+				HTTPStatus: http.StatusBadRequest,
+				Err:        errors.New("connect-ip: opaque path requires IPScopeOpener"),
+			}
+		}
+		targetStr, ipproto, openErr := ipScopeOpener(opaqueValue)
 		if openErr != nil {
 			return nil, &RequestParseError{
 				HTTPStatus: http.StatusBadRequest,
