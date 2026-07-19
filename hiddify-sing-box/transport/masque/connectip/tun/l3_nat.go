@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"encoding/binary"
 	"net/netip"
 
 	"github.com/sagernet/gvisor/pkg/tcpip"
@@ -66,6 +67,8 @@ func (n OverlayNAT) SNATEgressInPlace(pkt []byte) {
 }
 
 // DNATIngress rewrites IPv4 for tun inject: wire local → tun host; loopback → virt target on return.
+// Also inverse-NATs IPv4 headers quoted inside ICMP errors (PTB / DestUnreach / TimeExceeded) so
+// host PMTUD sees TunHost, not WireLocal (P1-8 / F4-03).
 func (n OverlayNAT) DNATIngress(pkt []byte) []byte {
 	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
 		return pkt
@@ -83,6 +86,7 @@ func (n OverlayNAT) DNATIngress(pkt []byte) []byte {
 			fixIPv4TransportChecksum(out)
 		}
 	}
+	n.dnatICMPQuotedIPv4InPlace(out)
 	return out
 }
 
@@ -103,6 +107,63 @@ func (n OverlayNAT) DNATIngressInPlace(pkt []byte) {
 			fixIPv4TransportChecksum(pkt)
 		}
 	}
+	n.dnatICMPQuotedIPv4InPlace(pkt)
+}
+
+// dnatICMPQuotedIPv4InPlace rewrites embedded IPv4 headers in ICMP error messages.
+// Inverse of SNATEgress: WireLocal→TunHost (src), WireTarget→VirtTarget (dst).
+func (n OverlayNAT) dnatICMPQuotedIPv4InPlace(pkt []byte) {
+	if !n.enabled() && !n.hairpinEnabled() {
+		return
+	}
+	if len(pkt) < header.IPv4MinimumSize || pkt[0]>>4 != 4 {
+		return
+	}
+	ip := header.IPv4(pkt)
+	if ip.TransportProtocol() != header.ICMPv4ProtocolNumber {
+		return
+	}
+	ihl := int(ip.HeaderLength())
+	const icmpHdrMin = 8
+	if ihl+icmpHdrMin > len(pkt) {
+		return
+	}
+	switch pkt[ihl] { // ICMPv4 type
+	case 3, 11, 12: // Dest Unreachable, Time Exceeded, Param Problem
+	default:
+		return
+	}
+	quote := pkt[ihl+icmpHdrMin:]
+	if len(quote) < header.IPv4MinimumSize || quote[0]>>4 != 4 {
+		return
+	}
+	changed := false
+	if n.enabled() {
+		if src, ok := ipv4Source(quote); ok && src == n.WireLocal {
+			rewriteIPv4SourceInPlace(quote, n.TunHost)
+			changed = true
+		}
+	}
+	if n.hairpinEnabled() {
+		if dst, ok := ipv4Destination(quote); ok && dst == n.WireTarget {
+			rewriteIPv4DestinationInPlace(quote, n.VirtTarget)
+			changed = true
+		}
+	}
+	if changed {
+		fixICMPv4Checksum(pkt, ihl)
+	}
+}
+
+func fixICMPv4Checksum(pkt []byte, ihl int) {
+	if ihl < header.IPv4MinimumSize || ihl+8 > len(pkt) {
+		return
+	}
+	body := pkt[ihl:]
+	// Zero checksum field then fold.
+	body[2], body[3] = 0, 0
+	sum := checksum.Checksum(body, 0)
+	binary.BigEndian.PutUint16(body[2:4], ^sum)
 }
 
 func fixIPv4TransportChecksum(pkt []byte) {

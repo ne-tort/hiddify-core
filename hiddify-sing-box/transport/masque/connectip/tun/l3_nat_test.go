@@ -1,9 +1,11 @@
 package tun
 
 import (
+	"encoding/binary"
 	"net/netip"
 	"testing"
 
+	connectip "github.com/quic-go/connect-ip-go"
 	fwd "github.com/sagernet/sing-box/transport/masque/forwarder"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -144,3 +146,85 @@ func TestOverlayNATEgressSNATUploadPayload(t *testing.T) {
 		t.Fatal("SNAT upload payload: invalid TCP checksum after rewrite")
 	}
 }
+
+// TestOverlayNATIngressDNATICMPQuotedPTB (P1-8): PTB composed from post-SNAT IP must expose
+// TunHost in the quoted header after DNATIngress (host PMTUD view).
+func TestOverlayNATIngressDNATICMPQuotedPTB(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wire := netip.MustParseAddr("198.18.0.1")
+	peer := netip.MustParseAddr("198.18.0.99")
+	orig := make([]byte, 40)
+	orig[0] = 0x45
+	orig[1] = 0x00
+	binary.BigEndian.PutUint16(orig[2:4], 40)
+	orig[8] = 64
+	orig[9] = 6 // TCP
+	copy(orig[12:16], tunHost.AsSlice())
+	copy(orig[16:20], peer.AsSlice())
+	// Fake TCP ports (8 bytes after IP hdr for ICMP quote).
+	binary.BigEndian.PutUint16(orig[20:22], 40000)
+	binary.BigEndian.PutUint16(orig[22:24], 5201)
+
+	nat := OverlayNAT{TunHost: tunHost, WireLocal: wire}
+	wireView := nat.SNATEgress(append([]byte(nil), orig...))
+	src, _ := ipv4Source(wireView)
+	if src != wire {
+		t.Fatalf("precondition SNAT src=%v want %v", src, wire)
+	}
+
+	ptb, err := connectip.ComposeICMPPacketTooBig(wireView, 1280)
+	if err != nil {
+		t.Fatalf("ComposeICMPPacketTooBig: %v", err)
+	}
+	// Before fix: outer DNAT only — quoted src stays WireLocal.
+	hostView := nat.DNATIngress(append([]byte(nil), ptb...))
+	outerDst, ok := ipv4Destination(hostView)
+	if !ok || outerDst != tunHost {
+		t.Fatalf("outer DNAT dst want %s got %v ok=%v", tunHost, outerDst, ok)
+	}
+	ihl := int(hostView[0]&0x0f) * 4
+	quote := hostView[ihl+8:]
+	if len(quote) < 20 {
+		t.Fatalf("quoted IP too short: %d", len(quote))
+	}
+	qSrc, ok := ipv4Source(quote)
+	if !ok || qSrc != tunHost {
+		t.Fatalf("quoted src want TunHost %s got %v ok=%v (wire=%s)", tunHost, qSrc, ok, wire)
+	}
+	qDst, _ := ipv4Destination(quote)
+	if qDst != peer {
+		t.Fatalf("quoted dst want peer %s got %s", peer, qDst)
+	}
+}
+
+func TestOverlayNATIngressDNATICMPQuotedHairpin(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wire := netip.MustParseAddr("198.18.0.1")
+	virt := netip.MustParseAddr("198.18.0.99")
+	loop := netip.MustParseAddr("127.0.0.1")
+	orig := make([]byte, 40)
+	orig[0] = 0x45
+	binary.BigEndian.PutUint16(orig[2:4], 40)
+	orig[8] = 64
+	orig[9] = 17 // UDP
+	copy(orig[12:16], tunHost.AsSlice())
+	copy(orig[16:20], virt.AsSlice())
+	binary.BigEndian.PutUint16(orig[20:22], 5000)
+	binary.BigEndian.PutUint16(orig[22:24], 5201)
+
+	nat := OverlayNAT{TunHost: tunHost, WireLocal: wire, VirtTarget: virt, WireTarget: loop}
+	wireView := nat.SNATEgress(append([]byte(nil), orig...))
+	ptb, err := connectip.ComposeICMPPacketTooBig(wireView, 1280)
+	if err != nil {
+		t.Fatalf("ComposeICMPPacketTooBig: %v", err)
+	}
+	hostView := nat.DNATIngress(ptb)
+	ihl := int(hostView[0]&0x0f) * 4
+	quote := hostView[ihl+8:]
+	qSrc, _ := ipv4Source(quote)
+	qDst, _ := ipv4Destination(quote)
+	if qSrc != tunHost || qDst != virt {
+		t.Fatalf("quoted want src=%s dst=%s got src=%s dst=%s", tunHost, virt, qSrc, qDst)
+	}
+}
+
