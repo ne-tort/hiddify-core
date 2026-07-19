@@ -63,10 +63,11 @@ func RouteConnectIPBlocked(router adapter.Router, reqCtx context.Context, packet
 		_ = packetConn.Close()
 		notify()
 	}
-	// TCP inside CONNECT-IP is raw IPv4/TCP on connectip.Conn. RoutePacketConnectionEx models UDP
-	// extracted payloads (metadata.Network=UDP) and drops TCP SYNs in ConnectIPNetPacketConn.ReadPacket,
-	// which tears down the QUIC/H3 session (bench connect-ip iperf FAIL, ingress_read_closed).
-	// Terminate IPv4/TCP in the S2 packet-plane forwarder on the live connectip.Conn instead.
+	// P1-5 LOCK: prod CONNECT-IP server dataplane = S2 terminate (TCP+UDP) via
+	// forwarder.RunConnectIPTCPPacketPlaneForwarder — not transparent L3 IP forward.
+	// RoutePacketConnectionEx is unused here: it models extracted UDP payloads and drops
+	// TCP SYNs (would tear down the session). Transparent L3 onward = optional future mode
+	// (FOCUS-04 IP-SRV-L3), not the default product path.
 	_ = router
 	_ = metadata
 	fwdCtx := DataplaneContext(reqCtx)
