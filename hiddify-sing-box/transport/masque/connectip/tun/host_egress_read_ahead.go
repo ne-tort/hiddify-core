@@ -62,6 +62,7 @@ func cloneHostEgressPkt(src []byte) []byte {
 }
 
 // WrapHostEgressReadAheadBatch returns single-pkt and batch readers sharing one background pump.
+// Prod always-on (P1-2 KEEP): OFF serializes TUN read behind LoopIn write — H2 TCP UP 314→221, H3 UP 1060→1010.
 func WrapHostEgressReadAheadBatch(parent context.Context, inner HostEgressReader) (HostEgressReader, HostEgressBatchReader) {
 	return wrapHostEgressReadAhead(parent, inner)
 }
