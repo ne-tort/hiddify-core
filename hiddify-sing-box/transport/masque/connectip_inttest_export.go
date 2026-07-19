@@ -73,6 +73,21 @@ func InttestMarkConnectIPServerRecycled(sess ClientSession) {
 	}
 }
 
+// InttestClearConnectIPServerRecycled clears the recycle latch after a deliberate fatal inject in tests.
+func InttestClearConnectIPServerRecycled(sess ClientSession) {
+	if r, ok := sess.(interface{ ClearConnectIPServerRecycled() }); ok {
+		r.ClearConnectIPServerRecycled()
+	}
+}
+
+// InttestNoteConnectIPPlaneFatal feeds a dataplane read/pump error through the LIFE-1 classifier
+// (F3-T2 composition: benign half-close must not latch under live multi-flow).
+func InttestNoteConnectIPPlaneFatal(sess ClientSession, err error) {
+	if r, ok := sess.(interface{ NoteConnectIPPlaneFatalForInttest(error) }); ok {
+		r.NoteConnectIPPlaneFatalForInttest(err)
+	}
+}
+
 // InttestConnectIPServerGenerationStale reports the explicit server-recycle latch (LIFE-1 / P1-4).
 func InttestConnectIPServerGenerationStale(sess ClientSession) bool {
 	if r, ok := sess.(interface{ ConnectIPServerGenerationStale() bool }); ok {

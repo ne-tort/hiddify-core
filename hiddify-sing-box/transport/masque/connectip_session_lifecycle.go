@@ -218,6 +218,11 @@ func (s *coreSession) noteConnectIPPlaneFatal(err error) {
 	}
 }
 
+// NoteConnectIPPlaneFatalForInttest exposes noteConnectIPPlaneFatal for F3-T2 composition gates.
+func (s *coreSession) NoteConnectIPPlaneFatalForInttest(err error) {
+	s.noteConnectIPPlaneFatal(err)
+}
+
 // noteConnectIPNativeL3IngressFatal logs pump loop exit; plane supervisor restarts (usque reconnect ADAPT).
 func (s *coreSession) noteConnectIPNativeL3IngressFatal(err error) {
 	if err == nil || errors.Is(err, context.Canceled) {

@@ -7,6 +7,7 @@
 // Sequential TCP connect/close churn: P2-12 (tcp_churn_gate).
 // Mid-session multiflow recycle restore: P2-13 (mid_session_multiflow_recycle_gate).
 // Mixed TCP+UDP many-flow: P3-3 (mixed_tcp_udp_gate).
+// Benign plane half-close under multi-flow: P3-4 (benign_halfclose_multiflow_gate).
 
 // upload synth (upload_synth_gate.go), upload localize (native_upload_localize.go).
 

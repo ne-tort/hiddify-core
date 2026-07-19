@@ -28,4 +28,16 @@ func TestIPv4TCPFinOrRst(t *testing.T) {
 	if dst.Port() != 5201 {
 		t.Fatalf("port=%d want 5201", dst.Port())
 	}
+
+	// Explicit RST (G3 / P3-5): same header layout, RST flag only.
+	rst := make([]byte, 40)
+	copy(rst, pkt)
+	rst[33] = byte(header.TCPFlagRst)
+	ok, dst = IPv4TCPFinOrRst(rst)
+	if !ok {
+		t.Fatal("expected RST")
+	}
+	if dst.Port() != 5201 {
+		t.Fatalf("RST port=%d want 5201", dst.Port())
+	}
 }

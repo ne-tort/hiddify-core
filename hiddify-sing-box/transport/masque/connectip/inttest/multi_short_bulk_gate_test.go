@@ -56,3 +56,14 @@ func TestGATEConnectIPMixedTCPUDPManyFlow(t *testing.T) {
 func TestGATEConnectIPMixedTCPUDPManyFlowH2(t *testing.T) {
 	inttest.RunGATEConnectIPMixedTCPUDPManyFlowH2(t)
 }
+
+// TestGATEConnectIPBenignHalfCloseMultiFlow is P3-4 / F3-T2:
+// sticky bulk + benign plane half-close must not latch.
+func TestGATEConnectIPBenignHalfCloseMultiFlow(t *testing.T) {
+	inttest.RunGATEConnectIPBenignHalfCloseMultiFlow(t)
+}
+
+// TestGATEConnectIPBenignHalfCloseMultiFlowH2 is P3-4 H2 smoke.
+func TestGATEConnectIPBenignHalfCloseMultiFlowH2(t *testing.T) {
+	inttest.RunGATEConnectIPBenignHalfCloseMultiFlowH2(t)
+}

@@ -1306,6 +1306,68 @@ func makeIPv4TCPFin(src, dst netip.Addr, srcPort, dstPort uint16) []byte {
 	return makeIPv4TCPPayload(src, dst, srcPort, dstPort, 0x11, nil) // FIN+ACK
 }
 
+func makeIPv4TCPRst(src, dst netip.Addr, srcPort, dstPort uint16) []byte {
+	return makeIPv4TCPPayload(src, dst, srcPort, dstPort, byte(header.TCPFlagRst), nil)
+}
+
+// TestL3BulkUploadRSTThenEgressAlive is G3/P3-5: explicit RST uses the same ShortFlowHook path as FIN.
+func TestL3BulkUploadRSTThenEgressAlive(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	server := netip.MustParseAddr("172.30.99.2")
+
+	w := &mockL3Writer{}
+	reader := &mockL3Reader{}
+	bridge := NewL3OverlayBridge(nil, w, reader, OverlayNAT{})
+	bridge.SetStackIngressInject(func([]byte) error { return nil })
+	bridge.SetPumpWakeHooks(cippump.WakeHooks{}, func() { w.FlushEgressBatch() })
+
+	var hookEgress uint64
+	bridge.SetShortFlowHook(func(_ netip.AddrPort, egressBytes uint64) {
+		hookEgress = egressBytes
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bridge.RunPump(ctx) }()
+
+	const bulkPktLen = 1200
+	for i := 0; i < (L3BulkFlowEgressThreshold/bulkPktLen)+1; i++ {
+		pkt := make([]byte, bulkPktLen)
+		pkt[0] = 0x45
+		pkt[9] = 6
+		if err := bridge.Send(pkt); err != nil {
+			t.Fatalf("bulk Send[%d]: %v", i, err)
+		}
+	}
+	rst := makeIPv4TCPRst(tunHost, server, 40000, 5201)
+	if err := bridge.Send(rst); err != nil {
+		t.Fatalf("RST Send: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for hookEgress == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if hookEgress < L3BulkFlowEgressThreshold {
+		t.Fatalf("shortFlowHook egressBytes=%d want >= %d after RST", hookEgress, L3BulkFlowEgressThreshold)
+	}
+
+	before := w.wireWrites()
+	post := makeIPv4TCPAck(tunHost, server, 40001, 5201, 0x10)
+	if err := bridge.Send(post); err != nil {
+		t.Fatalf("post-RST Send: %v", err)
+	}
+	for w.wireWrites() <= before && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if w.wireWrites() <= before {
+		t.Fatalf("post-RST egress wireWrites=%d did not increase (before=%d)", w.wireWrites(), before)
+	}
+}
+
 func TestL3OverlayIngressPureAckWake(t *testing.T) {
 	pkt := makeIPv4TCPAck(
 		netip.MustParseAddr("172.30.99.2"),
