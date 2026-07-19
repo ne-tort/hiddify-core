@@ -60,6 +60,9 @@ type h2ServerCapsuleStream struct {
 	sinceFlush uint64
 	lastFlush  int64 // unix ns; 0 = never flushed datagrams on this stream
 	idleTimer  *time.Timer
+
+	// maxDatagramPayload caps RFC9297 DATAGRAM capsule payload (ctxID||IP); 0 → h2DefaultMaxDatagramPayload.
+	maxDatagramPayload int
 }
 
 func (s *h2ServerCapsuleStream) shouldFlushNowLocked() bool {
@@ -125,6 +128,9 @@ func (s *h2ServerCapsuleStream) Write(p []byte) (int, error) {
 }
 
 func (s *h2ServerCapsuleStream) SendDatagram(payload []byte) error {
+	if err := h2DatagramTooLarge(len(payload), s.maxDatagramPayload); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, payload); err != nil {
 		return err

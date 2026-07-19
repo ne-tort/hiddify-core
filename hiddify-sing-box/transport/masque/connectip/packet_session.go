@@ -134,9 +134,14 @@ func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
 	}
 	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
-		err := errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		TrackWriteFail(err, true)
-		return nil, err
+		icmp, err := connectip.ComposeICMPPacketTooBig(buffer, ceiling)
+		if err != nil {
+			err = errors.Join(Errs.Transport, err)
+			TrackWriteFail(err, true)
+			return nil, err
+		}
+		TrackPTBRx()
+		return icmp, nil
 	}
 	icmp, err := s.conn.WritePacket(buffer)
 	if err != nil {
@@ -156,9 +161,14 @@ func (s *ClientPacketSession) WritePacketNoWake(buffer []byte) ([]byte, error) {
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
 	}
 	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
-		err := errors.Join(Errs.Transport, errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		TrackWriteFail(err, true)
-		return nil, err
+		icmp, err := connectip.ComposeICMPPacketTooBig(buffer, ceiling)
+		if err != nil {
+			err = errors.Join(Errs.Transport, err)
+			TrackWriteFail(err, true)
+			return nil, err
+		}
+		TrackPTBRx()
+		return icmp, nil
 	}
 	icmp, err := s.conn.WritePacketNoWake(buffer)
 	if err != nil {

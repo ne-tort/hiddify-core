@@ -1,6 +1,23 @@
 package egress
 
-import "errors"
+import (
+	"errors"
+
+	connectip "github.com/quic-go/connect-ip-go"
+)
+
+// ptbForCeiling returns ICMP PTB when ip exceeds soft ceiling (RFC 9484 §7.2.1 contract).
+// oversize=false means the packet is within limit and should proceed to the underlay.
+func ptbForCeiling(ip []byte, ceiling int) (icmp []byte, oversize bool, err error) {
+	if ceiling <= 0 || len(ip) <= ceiling {
+		return nil, false, nil
+	}
+	icmp, err = connectip.ComposeICMPPacketTooBig(ip, ceiling)
+	if err != nil {
+		return nil, true, joinTransport(err)
+	}
+	return icmp, true, nil
+}
 
 // FlushEgressBatch wakes QUIC send after batched WritePacketInPlaceNoWake calls.
 func FlushEgressBatch(h ClientHost) {
@@ -20,10 +37,13 @@ func writePacketDirectNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 	if conn == nil {
 		return nil, joinTransport(errors.New("connect-ip conn is nil"))
 	}
-	if ceiling := h.DatagramCeiling(); ceiling > 0 && len(buffer) > ceiling {
-		err := joinTransport(errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		trackWriteFail(err, true)
-		return nil, err
+	if icmp, over, err := ptbForCeiling(buffer, h.DatagramCeiling()); over {
+		if err != nil {
+			trackWriteFail(err, true)
+			return nil, err
+		}
+		trackPTBRx()
+		return icmp, nil
 	}
 	icmp, err := conn.WritePacketNoWake(buffer)
 	if err != nil {
@@ -39,10 +59,13 @@ func writePacketDirectNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 
 // WritePacketNoWake enqueues one datagram without transport flush (usque LoopIn batch + OnLoopInEnd flush).
 func WritePacketNoWake(h ClientHost, buffer []byte) ([]byte, error) {
-	if ceiling := h.DatagramCeiling(); ceiling > 0 && len(buffer) > ceiling {
-		err := joinTransport(errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		trackWriteFail(err, true)
-		return nil, err
+	if icmp, over, err := ptbForCeiling(buffer, h.DatagramCeiling()); over {
+		if err != nil {
+			trackWriteFail(err, true)
+			return nil, err
+		}
+		trackPTBRx()
+		return icmp, nil
 	}
 	pkt := borrowOutboundBuf(len(buffer))
 	copy(pkt, buffer)
@@ -54,10 +77,13 @@ func WritePacketNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 // WritePacket sends one owned IP datagram and flushes the transport batch (RFC9484 hot path).
 // LoopIn relies on this wake; NoWake-only callers must FlushEgressBatch explicitly.
 func WritePacket(h ClientHost, buffer []byte) ([]byte, error) {
-	if ceiling := h.DatagramCeiling(); ceiling > 0 && len(buffer) > ceiling {
-		err := joinTransport(errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		trackWriteFail(err, true)
-		return nil, err
+	if icmp, over, err := ptbForCeiling(buffer, h.DatagramCeiling()); over {
+		if err != nil {
+			trackWriteFail(err, true)
+			return nil, err
+		}
+		trackPTBRx()
+		return icmp, nil
 	}
 	pkt := borrowOutboundBuf(len(buffer))
 	copy(pkt, buffer)
@@ -76,10 +102,13 @@ func WritePacketFromNetstack(h ClientHost, outbound []byte) (retained bool, icmp
 	if conn == nil {
 		return false, nil, joinTransport(errors.New("connect-ip conn is nil"))
 	}
-	if ceiling := h.DatagramCeiling(); ceiling > 0 && len(outbound) > ceiling {
-		err := joinTransport(errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		trackWriteFail(err, true)
-		return false, nil, err
+	if icmp, over, err := ptbForCeiling(outbound, h.DatagramCeiling()); over {
+		if err != nil {
+			trackWriteFail(err, true)
+			return false, nil, err
+		}
+		trackPTBRx()
+		return false, icmp, nil
 	}
 	icmp, retained, err = conn.WritePacketInPlaceNoWake(outbound)
 	if err != nil {
@@ -103,10 +132,14 @@ func WritePacketPrefixed(h ClientHost, buffer []byte, prefixLen int) ([]byte, er
 		return nil, joinTransport(errors.New("connect-ip prefixed datagram too short"))
 	}
 	ipLen := len(buffer) - prefixLen
-	if ceiling := h.DatagramCeiling(); ceiling > 0 && ipLen > ceiling {
-		err := joinTransport(errors.New("connect-ip packet exceeds configured datagram ceiling"))
-		trackWriteFail(err, true)
-		return nil, err
+	ip := buffer[prefixLen:]
+	if icmp, over, err := ptbForCeiling(ip, h.DatagramCeiling()); over {
+		if err != nil {
+			trackWriteFail(err, true)
+			return nil, err
+		}
+		trackPTBRx()
+		return icmp, nil
 	}
 	icmp, err := conn.WritePacketPrefixed(buffer)
 	return accountWrite(h, ipLen, icmp, err)

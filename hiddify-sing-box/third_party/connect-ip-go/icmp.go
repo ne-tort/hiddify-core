@@ -10,6 +10,12 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
+// ComposeICMPPacketTooBig builds an ICMP/ICMPv6 Packet Too Big for an oversize IP packet.
+// Soft-ceiling wrappers use this so oversize yields the same (icmp, nil) contract as DatagramTooLarge.
+func ComposeICMPPacketTooBig(ipPacket []byte, ipMTU int) ([]byte, error) {
+	return composeICMPTooLargePacket(ipPacket, ipMTU)
+}
+
 func composeICMPTooLargePacket(b []byte, mtu int) ([]byte, error) {
 	if len(b) == 0 {
 		return nil, errors.New("connect-ip: empty packet")

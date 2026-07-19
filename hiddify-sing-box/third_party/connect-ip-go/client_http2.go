@@ -78,6 +78,8 @@ type h2CapsulePipeStream struct {
 	pipeW *io.PipeWriter
 	pipeR *io.PipeReader // closed from Conn.Close, not via Request.Body.Close
 	mu    sync.Mutex
+	// maxDatagramPayload caps RFC9297 DATAGRAM capsule payload (ctxID||IP); 0 → h2DefaultMaxDatagramPayload.
+	maxDatagramPayload int
 }
 
 func (s *h2CapsulePipeStream) Read(p []byte) (int, error) { return s.body.Read(p) }
@@ -89,6 +91,9 @@ func (s *h2CapsulePipeStream) Write(p []byte) (int, error) {
 }
 
 func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
+	if err := h2DatagramTooLarge(len(payload), s.maxDatagramPayload); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, payload); err != nil {
 		return err
@@ -224,6 +229,9 @@ func (s *h2LegacyDatagramStream) receiveDatagramLocked() ([]byte, error) {
 }
 
 func (s *h2LegacyDatagramStream) SendDatagram(data []byte) error {
+	if err := h2DatagramTooLarge(len(data), 0); err != nil {
+		return err
+	}
 	contextID, n, err := quicvarint.Parse(data)
 	if err != nil {
 		return fmt.Errorf("connect-ip: malformed datagram: %w", err)
