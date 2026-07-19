@@ -424,7 +424,9 @@ func (s *udpForwardSession) pumpRemoteToClient(ctx context.Context) {
 
 			}
 
-			if writeErr := s.f.writeRaw(reply); writeErr != nil {
+			// P4-3: UDP S2C is bulk DATA — use downloadCh (8192), not writeCh (512 control).
+			// writeRaw blocked pumpRemoteToClient under WAN RTT → helper sendto OK, client DOWN≪target.
+			if writeErr := s.f.enqueueDownload(reply); writeErr != nil {
 
 				return
 

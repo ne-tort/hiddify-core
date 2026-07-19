@@ -54,6 +54,13 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 		writeStopped:    make(chan struct{}),
 		downloadStopped: make(chan struct{}),
 	}
+	// Always-on queue occupancy (P4-3); nil hooks were silent no-ops in prod.
+	if f.o.WriteQueueMetrics == nil {
+		f.o.WriteQueueMetrics = &WriteQueueMetrics{}
+	}
+	if f.o.DownloadQueueMetrics == nil {
+		f.o.DownloadQueueMetrics = &DownloadQueueMetrics{}
+	}
 	if f.o.Dialer.Timeout == 0 && f.o.Dialer.Deadline.IsZero() {
 		f.o.Dialer.Timeout = 8 * time.Second
 	}

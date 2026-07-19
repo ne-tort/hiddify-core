@@ -148,8 +148,9 @@ func (f *packetForwarder) writeRaw(pkt []byte) error {
 	return f.enqueueWrite(pkt)
 }
 
-// enqueueDownload pipelines download DATA without blocking pumpRemoteToClient on WritePacket.
-// Control segments (ACK, FIN) use writeCh with coalesceQueuedAckOnly.
+// enqueueDownload pipelines remote→client bulk DATA (TCP download + UDP S2C replies).
+// Control segments (ACK, FIN) stay on writeCh via enqueueWrite / writeRaw.
+// P4-3: UDP must not share writeCh(512) with TCP control under WAN backpressure.
 func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 	if len(pkt) == 0 {
 		return nil
