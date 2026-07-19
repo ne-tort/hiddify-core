@@ -1599,7 +1599,20 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, ip))
 		return icmp, false, retErr
 	}
-	icmp, retErr := c.WritePacketNoWake(b)
+	// Already prepared in place. Do not call WritePacketNoWake → composeDatagram
+	// (that would run prepareOutgoingProxiedPacket a second time and double-decrement TTL/HL).
+	buf := datagramPool.Get().(*[]byte)
+	defer datagramPool.Put(buf)
+	prefixLen := len(contextIDZero)
+	need := prefixLen + len(b)
+	if cap(*buf) < need {
+		*buf = make([]byte, need)
+	} else {
+		*buf = (*buf)[:need]
+	}
+	copy((*buf)[:prefixLen], contextIDZero)
+	copy((*buf)[prefixLen:], b)
+	icmp, retErr := c.writePacketAfterCompose(*buf, b)
 	return icmp, false, retErr
 }
 
