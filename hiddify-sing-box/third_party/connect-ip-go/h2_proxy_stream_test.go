@@ -8,9 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
-// TestH2ServerCapsuleStreamWriteFlushesOnce verifies each downlink Write flushes exactly once (G41 parity).
+// TestH2ServerCapsuleStreamWriteFlushesOnce verifies each downlink Write flushes exactly once.
 func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
 	t.Parallel()
 	rec := &h2FlushCountResponseWriter{}
@@ -23,12 +24,8 @@ func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
 	}
 }
 
-// TestH2ServerCapsuleStreamSendDatagramFlushesOnce verifies first DATAGRAM flushes
-// (idle path: lastFlush=0 forces flush even under prod EVERY=16).
-func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "")
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_IDLE_MS", "")
+// TestH2ServerCapsuleStreamSendDatagramFirstFlushes: idle path forces flush on first PDU.
+func TestH2ServerCapsuleStreamSendDatagramFirstFlushes(t *testing.T) {
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
@@ -45,86 +42,39 @@ func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
 	if got := H2S2CFlushTotal(); got != 1 {
 		t.Fatalf("flush_total=%d want 1", got)
 	}
-	// Mock Flush is near-instant; ns may be 0 on fast hosts — only require counter path ran.
-	_ = H2S2CFlushNsTotal()
 	if got := H2S2CDatagramBytesTotal(); got != uint64(len(payload)) {
 		t.Fatalf("datagram_bytes=%d want %d", got, len(payload))
 	}
-	if got := h2S2CFlushEvery(); got != defaultH2S2CFlushEvery {
-		t.Fatalf("prod default flush_every=%d want %d", got, defaultH2S2CFlushEvery)
-	}
 }
 
-func TestH2ServerCapsuleStreamSendDatagramNoFlushProbe(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "1")
+// TestH2ServerCapsuleStreamSendDatagramCoalesce: under flood (no idle gap), flush every 16.
+func TestH2ServerCapsuleStreamSendDatagramCoalesce(t *testing.T) {
 	ResetH2S2CStats()
+	// Pretend a flush just happened so idle does not force early flushes.
+	h2S2CLastFlushUnixNs.Store(time.Now().UnixNano())
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
 	payload := append([]byte{0}, []byte("ip-pdu")...)
-	if err := str.SendDatagram(payload); err != nil {
-		t.Fatal(err)
-	}
-	if got := rec.flushes.Load(); got != 0 {
-		t.Fatalf("NO_FLUSH probe: flushes=%d want 0", got)
-	}
-	if got := H2S2CDatagramSentTotal(); got != 1 {
-		t.Fatalf("datagram_sent=%d want 1", got)
-	}
-	if got := H2S2CFlushSkipTotal(); got != 1 {
-		t.Fatalf("flush_skip=%d want 1", got)
-	}
-	if got := H2S2CFlushTotal(); got != 0 {
-		t.Fatalf("flush_total=%d want 0 under NO_FLUSH", got)
-	}
-	// Control Write still flushes (probe is datagram-only).
-	if _, err := str.Write([]byte("ctrl")); err != nil {
-		t.Fatal(err)
-	}
-	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("Write flushes=%d want 1 (control path)", got)
-	}
-}
-
-func TestH2ServerCapsuleStreamSendDatagramFlushEvery(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "4")
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_IDLE_MS", "0") // disable idle; pure count coalesce
-	ResetH2S2CStats()
-	rec := &h2FlushCountResponseWriter{}
-	str := &h2ServerCapsuleStream{w: rec}
-	payload := append([]byte{0}, []byte("ip-pdu")...)
-	for i := 0; i < 4; i++ {
+	for i := 0; i < h2S2CFlushEvery; i++ {
+		h2S2CLastFlushUnixNs.Store(time.Now().UnixNano()) // keep idle window cold
 		if err := str.SendDatagram(payload); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := rec.flushes.Load(); got != 1 {
-		t.Fatalf("FLUSH_EVERY=4: flushes=%d want 1 after 4 datagrams", got)
+		t.Fatalf("coalesce flushes=%d want 1 after %d datagrams", got, h2S2CFlushEvery)
 	}
-	if got := H2S2CDatagramSentTotal(); got != 4 {
-		t.Fatalf("datagram_sent=%d want 4", got)
+	if got := H2S2CDatagramSentTotal(); got != uint64(h2S2CFlushEvery) {
+		t.Fatalf("datagram_sent=%d want %d", got, h2S2CFlushEvery)
 	}
 	if got := H2S2CFlushTotal(); got != 1 {
 		t.Fatalf("flush_total=%d want 1", got)
 	}
-	if got := H2S2CFlushSkipTotal(); got != 3 {
-		t.Fatalf("flush_skip=%d want 3", got)
+	if got := H2S2CFlushSkipTotal(); got != uint64(h2S2CFlushEvery-1) {
+		t.Fatalf("flush_skip=%d want %d", got, h2S2CFlushEvery-1)
 	}
 }
 
-func TestH2S2CFlushEveryProdDefault(t *testing.T) {
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "")
-	if got := h2S2CFlushEvery(); got != 16 {
-		t.Fatalf("flush_every=%d want 16 prod default", got)
-	}
-	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "1")
-	if got := h2S2CFlushEvery(); got != 1 {
-		t.Fatalf("flush_every override=%d want 1", got)
-	}
-}
-
-// TestH2ServerCapsuleStreamReadUsesRequestBody verifies uplink capsules arrive via Extended CONNECT body.
 func TestH2ServerCapsuleStreamReadUsesRequestBody(t *testing.T) {
 	t.Parallel()
 	pr, pw := io.Pipe()
