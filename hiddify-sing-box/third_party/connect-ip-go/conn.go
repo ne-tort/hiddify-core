@@ -752,6 +752,73 @@ func (c *Conn) RequestAddresses(ctx context.Context, requested []RequestedAddres
 	return c.sendCapsule(ctx, &addressRequestCapsule{RequestedAddresses: slices.Clone(requested)})
 }
 
+// addressRejectPrefix returns the RFC 9484 §4.7.2 explicit-reject prefix for the
+// requested address family (all-zero IP + maximum prefix length).
+func addressRejectPrefix(preference netip.Prefix) netip.Prefix {
+	if preference.Addr().Is6() {
+		return netip.PrefixFrom(netip.IPv6Unspecified(), 128)
+	}
+	return netip.PrefixFrom(netip.IPv4Unspecified(), 32)
+}
+
+// pickPeerPrefixForRequest selects the first currently assigned peer prefix of the
+// same address family. Unscoped VPN product: preference bits are not ACL — family
+// match echoes the fixed pool (P2-1 Target/IPProto stay ignored).
+func pickPeerPrefixForRequest(peers []netip.Prefix, preference netip.Prefix) (netip.Prefix, bool) {
+	wantV6 := preference.Addr().Is6()
+	for _, p := range peers {
+		if p.Addr().Is6() == wantV6 {
+			return p, true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+// buildAddressAssignForRequest builds an ADDRESS_ASSIGN response for a non-empty
+// ADDRESS_REQUEST (RFC 9484 §4.7.2): one Assigned Address per Requested Address
+// with matching Request ID; missing family → all-zero reject.
+func buildAddressAssignForRequest(peers []netip.Prefix, requested []RequestedAddress) []AssignedAddress {
+	out := make([]AssignedAddress, 0, len(requested))
+	for _, req := range requested {
+		prefix, ok := pickPeerPrefixForRequest(peers, req.IPPrefix)
+		if !ok {
+			prefix = addressRejectPrefix(req.IPPrefix)
+		}
+		out = append(out, AssignedAddress{RequestID: req.RequestID, IPPrefix: prefix})
+	}
+	return out
+}
+
+// respondToAddressRequest sends ADDRESS_ASSIGN for a peer ADDRESS_REQUEST using
+// current peerAddresses (unprompted AssignAddresses pool). Does not mutate the pool.
+func (c *Conn) respondToAddressRequest(ctx context.Context, requested []RequestedAddress) error {
+	if c == nil || len(requested) == 0 {
+		return nil
+	}
+	c.mu.Lock()
+	peers := slices.Clone(c.peerAddresses)
+	c.mu.Unlock()
+	return c.sendCapsule(ctx, &addressAssignCapsule{
+		AssignedAddresses: buildAddressAssignForRequest(peers, requested),
+	})
+}
+
+// enqueueAddressRequestResponse answers ADDRESS_REQUEST off the read loop so a
+// blocked peer writer cannot deadlock against sendCapsule waiting on writeToStream.
+func (c *Conn) enqueueAddressRequestResponse(requested []RequestedAddress) {
+	if c == nil || len(requested) == 0 || !c.controlCapsules || c.writes == nil {
+		return
+	}
+	req := slices.Clone(requested)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := c.respondToAddressRequest(ctx, req); err != nil && masqueConnectIPDebug() {
+			log.Printf("connect-ip: ADDRESS_REQUEST response failed: %v", err)
+		}
+	}()
+}
+
 func (c *Conn) sendCapsule(ctx context.Context, capsule appendable) error {
 	if c == nil || !c.controlCapsules || c.writes == nil {
 		return ErrControlCapsulesUnsupported
@@ -972,10 +1039,9 @@ func (c *Conn) readFromStream() error {
 				}
 				return c.failClosed(ErrPeerEmptyAddressRequest)
 			}
-			// Client role does not assign peer addresses; non-empty peer REQUEST is ignored.
-			if masqueConnectIPDebug() {
-				log.Printf("connect-ip: peer ADDRESS_REQUEST capsule observed (ignored)")
-			}
+			// RFC 9484 §4.7.2: SHOULD assign + SHALL per-Request-ID ASSIGN/reject.
+			// Unscoped product echoes current peerAddresses by family (P2-2 / IP-M8).
+			c.enqueueAddressRequestResponse(capsule.RequestedAddresses)
 			continue
 		case capsuleTypeRouteAdvertisement:
 			capsule, err := parseRouteAdvertisementCapsule(cr)

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,6 +337,138 @@ func TestApplyDialInteroperabilitySetsEmptyPeerAddressRequestForCFConnectIP(t *t
 	other := newProxiedConn(&mockStream{}, false)
 	applyDialInteroperability(other, DialOptions{ExtendedConnectProtocol: "connect-ip"})
 	require.False(t, other.allowEmptyPeerAddressRequest)
+}
+
+func TestBuildAddressAssignForRequestEchoesFamilyAndRejectsMissing(t *testing.T) {
+	peers := []netip.Prefix{
+		netip.MustParsePrefix("198.18.0.1/32"),
+		netip.MustParsePrefix("fd00::1/128"),
+	}
+	got := buildAddressAssignForRequest(peers, []RequestedAddress{
+		{RequestID: 1, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+		{RequestID: 2, IPPrefix: netip.MustParsePrefix("::/128")},
+		{RequestID: 3, IPPrefix: netip.MustParsePrefix("2001:db8::/128")}, // still family match → fd00::1
+	})
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 1, IPPrefix: netip.MustParsePrefix("198.18.0.1/32")},
+		{RequestID: 2, IPPrefix: netip.MustParsePrefix("fd00::1/128")},
+		{RequestID: 3, IPPrefix: netip.MustParsePrefix("fd00::1/128")},
+	}, got)
+
+	v4Only := buildAddressAssignForRequest(
+		[]netip.Prefix{netip.MustParsePrefix("198.18.0.1/32")},
+		[]RequestedAddress{{RequestID: 9, IPPrefix: netip.MustParsePrefix("::/128")}},
+	)
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 9, IPPrefix: netip.MustParsePrefix("::/128")},
+	}, v4Only)
+
+	empty := buildAddressAssignForRequest(nil, []RequestedAddress{
+		{RequestID: 4, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	})
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 4, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	}, empty)
+}
+
+type recordingStream struct {
+	mockStream
+	mu      sync.Mutex
+	written []byte
+}
+
+func (r *recordingStream) Write(p []byte) (int, error) {
+	if r.writeErr != nil {
+		return 0, r.writeErr
+	}
+	r.mu.Lock()
+	r.written = append(r.written, p...)
+	r.mu.Unlock()
+	return len(p), nil
+}
+
+func (r *recordingStream) takeWritten() []byte {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := append([]byte(nil), r.written...)
+	r.written = nil
+	return out
+}
+
+func (r *recordingStream) writtenLen() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.written)
+}
+
+func TestRespondToAddressRequestEchoesPeerPrefixes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	rs := &recordingStream{}
+	conn := newProxiedConn(rs, false)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{
+		netip.MustParsePrefix("198.18.0.1/32"),
+		netip.MustParsePrefix("fd00::1/128"),
+	}))
+	_ = rs.takeWritten()
+
+	require.NoError(t, conn.respondToAddressRequest(ctx, []RequestedAddress{
+		{RequestID: 7, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	}))
+	got := rs.takeWritten()
+	require.NotEmpty(t, got)
+
+	ct, body, err := parseConnectIPStreamCapsule(quicvarint.NewReader(bytes.NewReader(got)))
+	require.NoError(t, err)
+	require.Equal(t, capsuleTypeAddressAssign, ct)
+	capsule, err := parseAddressAssignCapsule(body)
+	require.NoError(t, err)
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 7, IPPrefix: netip.MustParsePrefix("198.18.0.1/32")},
+	}, capsule.AssignedAddresses)
+}
+
+func addressRequestCapsuleFrame(requested []RequestedAddress) []byte {
+	return (&addressRequestCapsule{RequestedAddresses: requested}).append(nil)
+}
+
+func TestReadFromStreamRespondsToNonEmptyAddressRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	toRead := make(chan []byte, 1)
+	rs := &recordingStream{mockStream: mockStream{toRead: toRead}}
+	conn := newProxiedConn(rs, false)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.NoError(t, conn.AssignAddresses(ctx, []netip.Prefix{netip.MustParsePrefix("192.168.0.10/32")}))
+	_ = rs.takeWritten()
+
+	toRead <- addressRequestCapsuleFrame([]RequestedAddress{
+		{RequestID: 42, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rs.writtenLen() > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := rs.takeWritten()
+	require.NotEmpty(t, got, "expected ADDRESS_ASSIGN response to peer REQUEST")
+
+	ct, body, err := parseConnectIPStreamCapsule(quicvarint.NewReader(bytes.NewReader(got)))
+	require.NoError(t, err)
+	require.Equal(t, capsuleTypeAddressAssign, ct)
+	capsule, err := parseAddressAssignCapsule(body)
+	require.NoError(t, err)
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 42, IPPrefix: netip.MustParsePrefix("192.168.0.10/32")},
+	}, capsule.AssignedAddresses)
 }
 
 func httpDatagramCapsuleFrame(payload []byte) []byte {
