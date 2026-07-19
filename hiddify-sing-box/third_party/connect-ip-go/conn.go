@@ -216,12 +216,15 @@ func ptbMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
 	return mtu
 }
 
-// ptbIPMTUFromDatagramTooLarge converts QUIC HTTP DATAGRAM max payload to IPv4 total-length MTU
-// for ICMP PTB (subtract proxied-IP capsule prefix so kernel MSS tracks wire fit).
+// ptbIPMTUFromDatagramTooLarge converts QUIC HTTP DATAGRAM max payload to IP total-length MTU
+// for ICMP PTB (subtract proxied-IP capsule prefix so the advertised MTU is the largest IP
+// packet that would have fit). Do not re-floor to minMTU after subtract: advertising 1280 when
+// MaxDatagramPayloadSize is 1280 over-claims fit (IP 1280 + overhead 2 > 1280). IPv6 underlay
+// that cannot carry ≥1280-byte IP must abort the session (P2-4), not lie in PTB.
 func ptbIPMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
 	mtu := ptbMTUFromDatagramTooLarge(err) - proxiedIPDatagramMinCapsuleOverhead
-	if mtu < minMTU {
-		return minMTU
+	if mtu < 1 {
+		return 1
 	}
 	return mtu
 }
