@@ -212,7 +212,8 @@ func ptbMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
 // for ICMP PTB (subtract proxied-IP capsule prefix so the advertised MTU is the largest IP
 // packet that would have fit). Do not re-floor to minMTU after subtract: advertising 1280 when
 // MaxDatagramPayloadSize is 1280 over-claims fit (IP 1280 + overhead 2 > 1280). IPv6 underlay
-// that cannot carry ≥1280-byte IP must abort the session (P2-4), not lie in PTB.
+// that cannot carry ≥1280-byte IP must abort the H3 session (RFC 9484 §7.2) — deferred to P2-9
+// after IPv4-only contract or real IPv6 overlay (P2-4 docs lock); do not lie in PTB (P1-7).
 func ptbIPMTUFromDatagramTooLarge(err *quic.DatagramTooLargeError) int {
 	mtu := ptbMTUFromDatagramTooLarge(err) - proxiedIPDatagramMinCapsuleOverhead
 	if mtu < 1 {
