@@ -359,7 +359,7 @@ func benchConnectUDPBurstZeroLossMaxEx(
 		router := &directMasqueRouter{cm: socksCM, dialer: out}
 		socksPort := startSocks5AssociateRelay(t, router, C.TypeSOCKS)
 		dialer := socks.NewClient(N.SystemDialer, M.ParseSocksaddrHostPort("127.0.0.1", socksPort), socks.Version5, "", "")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*duration+30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), duration+connectUDPSynthGateWaitCtx)
 		t.Cleanup(cancel)
 		var err error
 		pkt, err = dialer.ListenPacket(ctx, M.ParseSocksaddrHostPort(sinkAddr.IP.String(), uint16(sinkAddr.Port)))
@@ -368,7 +368,7 @@ func benchConnectUDPBurstZeroLossMaxEx(
 		}
 		route.TuneUDPPacketConn(pkt)
 	} else {
-		waitCtx, cancel := context.WithTimeout(context.Background(), 10*duration+30*time.Second)
+		waitCtx, cancel := context.WithTimeout(context.Background(), duration+connectUDPSynthGateWaitCtx)
 		t.Cleanup(cancel)
 		var err error
 		pkt, err = session.ListenPacket(waitCtx, M.Socksaddr{
@@ -410,10 +410,10 @@ func benchConnectUDPBurstZeroLossMaxEx(
 			sendSec = duration.Seconds()
 		}
 		connectudp.FlushPacketConnWrites(pkt)
-		if err := connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout); err != nil {
+		if err := connectudp.DrainPacketConnUpload(pkt, connectUDPSynthUploadDrainTimeout); err != nil {
 			t.Fatalf("burst probe %.1f Mbit/s upload drain: %v", targetMbit, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(connectUDPSynthGateSinkDeliverWait)
 		st := seqSink.Analyze(sent, payloadLen)
 		achieved := connectudp.BurstSinkGoodputMbit(st.RxPkts, payloadLen, sendSec)
 		return connectUDPBurstProbeResult{target: targetMbit, stats: st, wallSec: sendSec, achieved: achieved}
@@ -426,7 +426,8 @@ func benchConnectUDPBurstZeroLossMaxEx(
 	lo, hi := 8.0, 500.0
 	var best connectUDPBurstProbeResult
 	var bestAchieved float64
-	for step := 0; step < 10; step++ {
+	const maxBinarySteps = 6
+	for step := 0; step < maxBinarySteps; step++ {
 		mid := (lo + hi) / 2
 		bp := probe(mid)
 		t.Logf("burst zero-loss search %d: target=%.1f achieved=%.1f Mbps loss=%.2f%% dup=%.2f%% ooo=%d rx=%d/%d excess=%d socks=%v",
@@ -476,7 +477,7 @@ func benchConnectUDPH2BurstZeroLossMaxWritePacket(t *testing.T, duration time.Du
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
 	session := startConnectUDPH2MasqueSession(t, proxyPort)
-	waitCtx, cancel := context.WithTimeout(context.Background(), 10*duration+30*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), duration+connectUDPSynthGateWaitCtx)
 	t.Cleanup(cancel)
 	raw, err := session.ListenPacket(waitCtx, M.Socksaddr{
 		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
@@ -521,10 +522,10 @@ func benchConnectUDPH2BurstZeroLossMaxWritePacket(t *testing.T, duration time.Du
 			sendSec = duration.Seconds()
 		}
 		connectudp.FlushPacketConnWrites(pkt)
-		if err := connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout); err != nil {
+		if err := connectudp.DrainPacketConnUpload(pkt, connectUDPSynthUploadDrainTimeout); err != nil {
 			t.Fatalf("burst probe %.1f Mbit/s upload drain: %v", targetMbit, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(connectUDPSynthGateSinkDeliverWait)
 		st := seqSink.Analyze(sent, payloadLen)
 		achieved := connectudp.BurstSinkGoodputMbit(st.RxPkts, payloadLen, sendSec)
 		return connectUDPBurstProbeResult{target: targetMbit, stats: st, wallSec: sendSec, achieved: achieved}
@@ -537,7 +538,8 @@ func benchConnectUDPH2BurstZeroLossMaxWritePacket(t *testing.T, duration time.Du
 	lo, hi := 8.0, 500.0
 	var best connectUDPBurstProbeResult
 	var bestAchieved float64
-	for step := 0; step < 10; step++ {
+	const maxBinarySteps = 6
+	for step := 0; step < maxBinarySteps; step++ {
 		mid := (lo + hi) / 2
 		bp := probe(mid)
 		t.Logf("h2 writepacket burst search %d: target=%.1f achieved=%.1f Mbps loss=%.2f%% rx=%d/%d",

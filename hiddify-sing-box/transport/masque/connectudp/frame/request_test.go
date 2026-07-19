@@ -111,6 +111,22 @@ func TestParseRequestAcceptsValidConnectUDP(t *testing.T) {
 	}
 }
 
+func TestParseRequestAcceptsTrailingSlashMismatch(t *testing.T) {
+	t.Parallel()
+	// pathbuild FullURITemplate ends with `/`; masque-go DialAddr templates often do not.
+	tmpl, err := uritemplate.New(testUDPTemplate + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRequest(connectUDPRequest(t, true, true), tmpl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Target != "198.51.100.1:443" {
+		t.Fatalf("target: got %q", parsed.Target)
+	}
+}
+
 func TestParseRequestTargetPortRange(t *testing.T) {
 	t.Parallel()
 	tmpl, err := uritemplate.New(testUDPTemplate)

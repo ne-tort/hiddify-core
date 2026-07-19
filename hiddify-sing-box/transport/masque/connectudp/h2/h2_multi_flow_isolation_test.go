@@ -38,7 +38,7 @@ func TestH2MultiFlowKillOneLeavesSiblingsAlive(t *testing.T) {
 	}()
 
 	proxyPort := startInProcessH2UDPConnectProxy(t)
-	cfg := newH2IntegrationDialConfig(t, proxyPort) // shared EnsureTransport, no NewTransport
+	cfg := newH2IntegrationDialConfig(t, proxyPort)
 
 	const nFlows = 4
 	pcs := make([]net.PacketConn, 0, nFlows)

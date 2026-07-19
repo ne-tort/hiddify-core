@@ -10,6 +10,7 @@ import (
 
 	masque "github.com/sagernet/sing-box/transport/masque"
 	cudpsplit "github.com/sagernet/sing-box/transport/masque/connectudp/split"
+	h2c "github.com/sagernet/sing-box/transport/masque/h2"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -49,7 +50,7 @@ func TestCoreSessionConnectUDPSplitPayloadEchoH2ListenPacketInProcess(t *testing
 	session, waitCtx := masque.InttestNewH2ConnectUDPSession(t, proxyPort)
 	pkt := listenPacketH2(t, session, waitCtx, echoAddr)
 
-	wantLen := 2500
+	wantLen := h2c.MaxUDPPayloadPerDatagramCapsule()
 	payload := make([]byte, wantLen)
 	for i := range payload {
 		payload[i] = byte(i % 251)
@@ -83,7 +84,7 @@ func TestCoreSessionConnectUDPSplitPayloadEchoH2ListenPacketInProcess(t *testing
 		got = append(got, buf[:n]...)
 	}
 	if string(got) != string(payload) {
-		t.Fatalf("split echo mismatch (len got=%d want=%d)", len(got), wantLen)
+		t.Fatalf("max-capsule echo mismatch (len got=%d want=%d)", len(got), wantLen)
 	}
 }
 

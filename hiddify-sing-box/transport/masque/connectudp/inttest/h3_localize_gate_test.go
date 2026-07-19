@@ -7,13 +7,16 @@ import (
 )
 
 func TestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH3EchoBoundedPipeline64ProdShape(t)
 }
 
 func TestLocalizeConnectUDPH3EchoDockerAbsoluteFloor(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH3EchoDockerAbsoluteFloor(t)
 }
 
 func TestLocalizeConnectUDPH3EchoDuplexGap(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH3EchoDuplexGap(t)
 }

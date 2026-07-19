@@ -95,6 +95,7 @@ func startConnectUDPProdH3UploadHandle(tb testing.TB) *connectUDPProdUploadHandl
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathUDP:             connectUDPInProcessPathUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {
@@ -179,6 +180,7 @@ func startConnectUDPProdH3DownloadHandle(tb testing.TB) *connectUDPProdDownloadH
 	session, err := (CoreClientFactory{}).NewSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathUDP:             connectUDPInProcessPathUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

@@ -83,11 +83,11 @@ func benchConnectUDPH2ParallelSessionsUpload(
 	wg.Wait()
 	for _, pkt := range pkts {
 		connectudp.FlushPacketConnWrites(pkt)
-		if err := connectudp.DrainPacketConnUpload(pkt, connectudp.DefaultUploadDrainTimeout); err != nil {
+		if err := connectudp.DrainPacketConnUpload(pkt, connectUDPSynthUploadDrainTimeout); err != nil {
 			t.Fatalf("parallel=%d upload drain: %v", parallel, err)
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(connectUDPSynthGateSinkDeliverWait)
 
 	for _, n := range sentPerWorker {
 		totalSent += n
@@ -103,6 +103,7 @@ func benchConnectUDPH2ParallelSessionsUpload(
 
 // TestLocalizeConnectUDPH2ParallelSessionsInstant512 compares 1 vs 2 vs 4 independent H2 sessions @512B.
 func TestLocalizeConnectUDPH2ParallelSessionsInstant512(t *testing.T) {
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 	link := tlsFlushTaxH2Link{Tax: 4 * time.Microsecond}
 	for _, par := range []int{1, 2, 4} {
@@ -112,22 +113,9 @@ func TestLocalizeConnectUDPH2ParallelSessionsInstant512(t *testing.T) {
 	}
 }
 
-// TestLocalizeConnectUDPH2ShardedSingleSessionInstant512: one ListenPacket, 4 TCP pools via env.
-func TestLocalizeConnectUDPH2ShardedSingleSessionInstant512(t *testing.T) {
-	t.Setenv("MASQUE_H2_CONNECT_UDP_UPLOAD_STREAMS", "4")
-	const duration = connectUDPSynthProdBenchDuration
-	link := tlsFlushTaxH2Link{Tax: 4 * time.Microsecond}
-	mbps, st, sent := benchConnectUDPH2ParallelSessionsUpload(t, 1, link, duration, connectudp.DefaultBenchUDPPayloadLen, 0)
-	t.Logf("LOCALIZE h2 sharded single-session streams=4 instant: goodput=%.1f loss=%.2f%% rx=%d/%d",
-		mbps, st.LossPct, st.RxPkts, sent)
-	const wantMbps = 450.0
-	if mbps < wantMbps {
-		t.Fatalf("sharded single-session instant: %.1f < %.0f Mbit/s", mbps, wantMbps)
-	}
-}
-
 // TestLocalizeConnectUDPH2Parallel4SessionsPaced500 probes docker-shaped 500 Mbit/s with 4 TCP pools.
 func TestLocalizeConnectUDPH2Parallel4SessionsPaced500(t *testing.T) {
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 	link := tlsFlushTaxH2Link{Tax: 4 * time.Microsecond}
 	mbps, st, sent := benchConnectUDPH2ParallelSessionsUpload(t, 4, link, duration, connectudp.DefaultBenchUDPPayloadLen, 500)

@@ -18,17 +18,17 @@ func ConnectTunnelFromResponse(ctx context.Context, resp *http.Response, targetH
 	return conn, nil
 }
 
-// ConnectRequest builds an RFC 9114 CONNECT request (nil Body = tunneled upload on the bidi stream).
+// ConnectRequest builds an RFC 9114 Extended CONNECT request for connect-tcp.
+// quic-go http3 encodes :protocol from Request.Proto; Header.Set(":protocol") is rejected.
 func ConnectRequest(ctx context.Context, url string, serverHost string, setAuth func(http.Header)) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodConnect, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Host = serverHost
-	req.Proto = "HTTP/3"
+	req.Proto = "connect-tcp"
 	req.ProtoMajor = 3
 	req.Header = make(http.Header)
-	req.Header.Set(":protocol", "connect-tcp")
 	if setAuth != nil {
 		setAuth(req.Header)
 	}

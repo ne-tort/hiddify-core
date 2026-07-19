@@ -129,27 +129,6 @@ func newH2IntegrationDialConfig(t *testing.T, proxyPort int) H2OverlayDialConfig
 	}
 }
 
-// newH2ProdShapedIntegrationDialConfig adds NewTransport like core_session.dialUDPOverHTTP2 (UDP-AUDIT-10).
-func newH2ProdShapedIntegrationDialConfig(t *testing.T, proxyPort int) H2OverlayDialConfig {
-	t.Helper()
-	cfg := newH2IntegrationDialConfig(t, proxyPort)
-	clientTLS := h2IntegrationTestTLS.Clone()
-	clientTLS.InsecureSkipVerify = true
-	clientTLS.ServerName = "127.0.0.1"
-	dialCfg := h2c.ClientDialConfig{
-		TLSConfig:          clientTLS,
-		DialHostCandidates: []string{""},
-		TCPDial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
-		},
-	}
-	cfg.NewTransport = func() (*http2.Transport, error) {
-		return h2c.NewClientTransport(dialCfg)
-	}
-	return cfg
-}
-
 func dialH2IntegrationUDPWithConfig(t *testing.T, proxyPort int, cfg H2OverlayDialConfig, target string) net.PacketConn {
 	t.Helper()
 	rawTpl := "https://127.0.0.1:" + strconv.Itoa(proxyPort) + "/masque/udp/{target_host}/{target_port}/"
@@ -177,26 +156,6 @@ func TestH2ConnectUDPEchoRoundTripInProcess(t *testing.T) {
 	pc := dialH2IntegrationUDP(t, proxyPort, net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)))
 
 	payload := []byte("ping-h2-udp-echo")
-	nw, err := pc.WriteTo(payload, nil)
-	require.NoError(t, err)
-	require.Equal(t, len(payload), nw)
-
-	buf := make([]byte, 256)
-	nr, _, err := pc.ReadFrom(buf)
-	require.NoError(t, err)
-	require.Equal(t, payload, buf[:nr])
-}
-
-// TestH2ConnectUDPEchoProdShapedNewTransport exercises bidi dial with NewTransport (prod core_session parity).
-func TestH2ConnectUDPEchoProdShapedNewTransport(t *testing.T) {
-	echo := runH2IntegrationUDPEcho(t, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	echoPort := echo.LocalAddr().(*net.UDPAddr).Port
-
-	proxyPort := startInProcessH2UDPConnectProxy(t)
-	cfg := newH2ProdShapedIntegrationDialConfig(t, proxyPort)
-	pc := dialH2IntegrationUDPWithConfig(t, proxyPort, cfg, net.JoinHostPort("127.0.0.1", strconv.Itoa(echoPort)))
-
-	payload := []byte("ping-h2-udp-echo-prod-shaped")
 	nw, err := pc.WriteTo(payload, nil)
 	require.NoError(t, err)
 	require.Equal(t, len(payload), nw)

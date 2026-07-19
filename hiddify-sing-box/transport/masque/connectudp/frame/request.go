@@ -107,6 +107,27 @@ func connectUDPTemplateMatchCandidates(r *http.Request, tmpl *url.URL) []string 
 		}
 	}
 	appendNonEmpty(requestURIWithAuthority)
+
+	// Server templates often end with a literal `/` (pathbuild FullURITemplate), while
+	// some clients (masque-go DialAddr) expand without it. Try both shapes.
+	n := len(out)
+	for i := 0; i < n; i++ {
+		s := out[i]
+		if q := strings.IndexByte(s, '?'); q >= 0 {
+			base, query := s[:q], s[q:]
+			if strings.HasSuffix(base, "/") {
+				appendNonEmpty(strings.TrimSuffix(base, "/") + query)
+			} else {
+				appendNonEmpty(base + "/" + query)
+			}
+			continue
+		}
+		if strings.HasSuffix(s, "/") {
+			appendNonEmpty(strings.TrimSuffix(s, "/"))
+		} else {
+			appendNonEmpty(s + "/")
+		}
+	}
 	return out
 }
 

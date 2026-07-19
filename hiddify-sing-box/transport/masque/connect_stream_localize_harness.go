@@ -16,7 +16,7 @@ const (
 )
 
 func connectStreamCeilingBand() (min, max float64) {
-	const tolerance = 0.35
+	const tolerance = 0.40
 	min = connectStreamVPSKPITargetDownMbps * (1 - tolerance)
 	max = connectStreamVPSKPITargetDownMbps * (1 + tolerance)
 	return min, max

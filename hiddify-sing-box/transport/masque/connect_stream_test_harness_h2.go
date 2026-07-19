@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +27,6 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/protocol/socks"
 	"golang.org/x/net/http2"
-	"net/url"
 )
 
 const (
@@ -362,12 +363,19 @@ func startInProcessH2TCPConnectStreamProxy(tb testing.TB) int {
 	serverTLS.NextProtos = []string{http2.NextProtoTLS, "http/1.1"}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/masque/tcp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+	serveTCP := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if p := r.Header.Get(":protocol"); p != "" && p != strm.H2ConnectStreamProto {
+		proto := strings.TrimSpace(r.Header.Get(":protocol"))
+		if proto == "" {
+			proto = strings.TrimSpace(r.Proto)
+			if len(proto) >= 5 && strings.EqualFold(proto[:5], "http/") {
+				proto = ""
+			}
+		}
+		if proto != "" && proto != strm.H2ConnectStreamProto {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -386,7 +394,11 @@ func startInProcessH2TCPConnectStreamProxy(tb testing.TB) int {
 		if relayErr != nil && relayErr != io.EOF {
 			tb.Logf("relay finished: %v", relayErr)
 		}
-	})
+	}
+	for _, prefix := range []string{"/masque/tcp", "/.well-known/masque/tcp"} {
+		mux.HandleFunc(prefix+"/{target_host}/{target_port}", serveTCP)
+		mux.HandleFunc(prefix+"/{target_host}/{target_port}/", serveTCP)
+	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

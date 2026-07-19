@@ -21,15 +21,12 @@ import (
 )
 
 // H2OverlayDialConfig wires production H2 CONNECT-UDP dial from package masque.
+// EnsureTransport must return the session-shared H2UDPTransport (one TCP for all CONNECT-UDP flows).
 type H2OverlayDialConfig struct {
 	Hook func(ctx context.Context, template *uritemplate.Template, target string) (net.PacketConn, error)
 
 	EnsureTransport func(ctx context.Context) (*http2.Transport, error)
-	// NewTransport is optional lab/isolation mode: builds one dedicated TCP per UDPFlow.
-	// Prod leaves this nil and uses EnsureTransport → shared H2UDPTransport (H2-TUN-3).
-	// When set, DialH2Overlay uses one dedicated TCP for the single RFC bidi stream.
-	NewTransport  func() (*http2.Transport, error)
-	SetAuthHeader func(h http.Header)
+	SetAuthHeader   func(h http.Header)
 
 	Tag                   string
 	WarpConnectIPProtocol string
@@ -56,8 +53,6 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 		return nil, context.Cause(ctx)
 	default:
 	}
-	var transportOnClose func()
-	cfg, transportOnClose = dedicatedOverlayTransport(cfg)
 	if template == nil {
 		return nil, cfg.ErrTemplateNotConfigured
 	}
@@ -75,9 +70,6 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 
 	tr, err := cfg.EnsureTransport(ctx)
 	if err != nil {
-		if transportOnClose != nil {
-			transportOnClose()
-		}
 		return nil, err
 	}
 
@@ -99,9 +91,6 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodConnect, expanded, uploadBody)
 	if err != nil {
 		_ = pipeW.Close()
-		if transportOnClose != nil {
-			transportOnClose()
-		}
 		return nil, fmt.Errorf("masque h2: new connect-udp request: %w", err)
 	}
 	req.Header = make(http.Header)
@@ -118,9 +107,6 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 	resp, err := tr.RoundTrip(req)
 	if err != nil {
 		_ = pipeW.Close()
-		if transportOnClose != nil {
-			transportOnClose()
-		}
 		proto := strings.TrimSpace(cfg.WarpConnectIPProtocol)
 		primaryHost := strings.TrimSpace(cfg.QUICDialCandidateHost)
 		altHost := ""
@@ -136,17 +122,11 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		_ = pipeW.Close()
 		_ = resp.Body.Close()
-		if transportOnClose != nil {
-			transportOnClose()
-		}
 		return nil, fmt.Errorf("masque h2: CONNECT-UDP status %d", resp.StatusCode)
 	}
 	if ctxErr := context.Cause(ctx); ctxErr != nil {
 		_ = pipeW.Close()
 		_ = resp.Body.Close()
-		if transportOnClose != nil {
-			transportOnClose()
-		}
 		return nil, ctxErr
 	}
 	stopReqCtxRelay(true)
@@ -159,12 +139,6 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 		raddr = NewUDPAddr(net.JoinHostPort(nh.IP.String(), strconv.Itoa(nh.Port)))
 	}
 
-	onClose := func() {
-		stopReqCtxRelay(false)
-		if transportOnClose != nil {
-			transportOnClose()
-		}
-	}
 	pc := NewPacketConn(PacketConnConfig{
 		ReqPipeR:      pipeR,
 		ReqBody:       reqBody,
@@ -172,7 +146,7 @@ func dialH2OverlayBidi(ctx context.Context, cfg H2OverlayDialConfig, template *u
 		LocalAddr:     NewUDPAddr(dialAddr),
 		RemoteAddr:    raddr,
 		UploadWireAck: uploadBody,
-		OnClose:       onClose,
+		OnClose:       func() { stopReqCtxRelay(false) },
 	})
 	if err := pc.Prime(); err != nil {
 		_ = pc.Close()

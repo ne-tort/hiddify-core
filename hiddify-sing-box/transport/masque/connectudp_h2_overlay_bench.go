@@ -87,13 +87,3 @@ func benchConnectUDPH2OverlayDirectDownloadFountain(
 ) (int64, float64, error) {
 	return benchConnectUDPH2SessionDirectDownloadFountain(tb, link, duration, payloadLen)
 }
-
-// benchConnectUDPH2OverlayProdShapedUpload dials via prod session (EnsureTransport + NewTransport).
-func benchConnectUDPH2OverlayProdShapedUpload(
-	tb testing.TB,
-	link h2TransportLink,
-	duration time.Duration,
-	payloadLen int,
-) (int64, float64, error) {
-	return benchConnectUDPH2SessionDirectUpload(tb, link, duration, payloadLen)
-}

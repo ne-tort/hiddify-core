@@ -70,9 +70,7 @@ func (s *coreSession) h2OverlayDialConfig() cudph2.H2OverlayDialConfig {
 	opts := s.Options
 	host := masqueQuicDialCandidateHost(opts)
 	return cudph2.H2OverlayDialConfig{
-		// Shared session H2UDPTransport for all CONNECT-UDP flows (H2-TUN-3).
-		// Do NOT set NewTransport: dedicated per-UDPFlow TLS was stealing client CWND
-		// from CONNECT-stream under browser TUN ASSOCIATE storm (upload 4–10 Mbit).
+		// One shared H2UDPTransport for all CONNECT-UDP flows on this session.
 		EnsureTransport: func(ctx context.Context) (*http2.Transport, error) {
 			return s.ensureH2UDPTransport(ctx)
 		},

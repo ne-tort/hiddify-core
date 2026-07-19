@@ -47,6 +47,7 @@ func InttestNewConnectUDPH3Session(t *testing.T, proxyPort int) (ClientSession, 
 	session, err := NewConnectUDPTestSession(waitCtx, ClientOptions{
 		Server:              "127.0.0.1",
 		ServerPort:          uint16(proxyPort),
+		PathUDP:             connectUDPInProcessPathUDP,
 		MasqueQUICCryptoTLS: &tls.Config{InsecureSkipVerify: true},
 	})
 	if err != nil {

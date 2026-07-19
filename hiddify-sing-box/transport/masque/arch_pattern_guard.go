@@ -116,25 +116,26 @@ const (
 	connectUDPSynthInstantGateSlackPct = 0.03  // 3% — Windows in-proc scheduling jitter vs 500 target
 	connectUDPSynthAsymmetryMaxRatio   = 4.0   // max(up,down)/min(up,down) on paired legs
 	connectUDPSynthParityMinRatio      = 0.75  // H3/H2 paired gate (Windows in-proc variance)
-	connectUDPSynthProdBenchDuration   = 2 * time.Second
+	// connectUDPSynthProdBenchDuration is one synth leg. Multi-leg burst binary-search is MASQUE_BENCH_LONG only.
+	connectUDPSynthProdBenchDuration = 1 * time.Second
 	// connectUDPSynthMaxLossPct matches docker BENCH_UDP_MAX_LOSS_PCT (paced probe gate).
-	connectUDPSynthMaxLossPct          = 5.0
-	// connectUDPSynthUploadWriteStall is max wait per WriteTo in stability gates (fail fast, not 60s test timeout).
-	connectUDPSynthUploadWriteStall = 750 * time.Millisecond
+	connectUDPSynthMaxLossPct = 5.0
+	// connectUDPSynthUploadWriteStall is max wait per WriteTo in stability gates (fail fast, not package timeout).
+	connectUDPSynthUploadWriteStall = 500 * time.Millisecond
 	// connectUDPSynthStabilityWallSlack is extra wall time allowed beyond bench duration for teardown.
 	connectUDPSynthStabilityWallSlack = 1 * time.Second
-	// connectUDPSynthGateWaitCtx bounds dial/session setup in synth GATE benches (was 8–30s).
-	connectUDPSynthGateWaitCtx = 5 * time.Second
-	// connectUDPSynthGateParallelWaitCtx bounds parallel-scaling handle sessions (was 30s).
-	connectUDPSynthGateParallelWaitCtx = 12 * time.Second
-	// connectUDPSynthGateSinkDeliverWait caps post-bench rx drain wait (was 2s).
-	connectUDPSynthGateSinkDeliverWait = 750 * time.Millisecond
+	// connectUDPSynthGateWaitCtx bounds dial/session setup in synth GATE benches.
+	connectUDPSynthGateWaitCtx = 3 * time.Second
+	// connectUDPSynthGateParallelWaitCtx bounds parallel-scaling handle sessions.
+	connectUDPSynthGateParallelWaitCtx = 8 * time.Second
+	// connectUDPSynthGateSinkDeliverWait caps post-bench rx drain wait.
+	connectUDPSynthGateSinkDeliverWait = 200 * time.Millisecond
 	// connectUDPSynthUploadTailSlackPkts: in-flight at half-close not counted as loss (H2 bulk TLS parity).
 	connectUDPSynthUploadTailSlackPkts = 4
 	// connectUDPSynthUploadTailSlackPktsPacedSteady: async C2S onward queue (4096) + batch 128 + paced @1000 steady MTU teardown.
 	connectUDPSynthUploadTailSlackPktsPacedSteady = 96
 	// connectUDPSynthUploadDrainTimeout bounds in-proc synth upload drain (not docker TLS 30s).
-	connectUDPSynthUploadDrainTimeout = 2 * time.Second
+	connectUDPSynthUploadDrainTimeout = 1 * time.Second
 	// connectUDPSynthPaced512ZeroLossTargetMbps is paced @512B zero-loss GATE (headroom below localize ceiling ~397).
 	connectUDPSynthPaced512ZeroLossTargetMbps = 380.0
 	// connectUDPEchoDownloadPrimeDepth: in-flight cap for unlimited bg WriteTo + prime depth (pipeline localize shape).

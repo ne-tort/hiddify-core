@@ -68,8 +68,9 @@ func (h Handler) HandleConnectStream(host Host, w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	// draft-ietf-httpbis-connect-tcp: :protocol must be exactly "connect-tcp".
-	if p := strings.TrimSpace(r.Header.Get(":protocol")); !strings.EqualFold(p, ConnectTCPProtocol) {
+	// draft-ietf-httpbis-connect-tcp: :protocol must be exactly "connect-tcp"
+	// (H2: Header; H3/quic-go: Request.Proto).
+	if p := extendedConnectProtocol(r); !strings.EqualFold(p, ConnectTCPProtocol) {
 		debugf("masque tcp connect denied status=400 error_class=bad_extended_protocol proto=%q", p)
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -256,4 +257,22 @@ func ParseTCPTargetFromRequest(r *http.Request, template *uritemplate.Template, 
 		return "", "", E.New("invalid tcp target port")
 	}
 	return host, port, nil
+}
+
+// extendedConnectProtocol reads :protocol (H2 Header) or Proto (H3/quic-go).
+func extendedConnectProtocol(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(r.Header.Get(":protocol")); v != "" {
+		return v
+	}
+	p := strings.TrimSpace(r.Proto)
+	if p == "" {
+		return ""
+	}
+	if len(p) >= 5 && strings.EqualFold(p[:5], "http/") {
+		return ""
+	}
+	return p
 }

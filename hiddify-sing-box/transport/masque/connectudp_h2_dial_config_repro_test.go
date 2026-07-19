@@ -35,7 +35,6 @@ func integrationShapedH2OverlayDialConfig(tb testing.TB, proxyPort int) cudph2.H
 	}
 	return cudph2.H2OverlayDialConfig{
 		EnsureTransport: func(context.Context) (*http2.Transport, error) { return tr, nil },
-		NewTransport:    func() (*http2.Transport, error) { return h2c.NewClientTransport(dialCfg) },
 		ResolveDialAddr: func() string {
 			return net.JoinHostPort("127.0.0.1", strconv.Itoa(proxyPort))
 		},

@@ -1,4 +1,4 @@
-﻿package inttest_test
+package inttest_test
 
 import (
 	"testing"
@@ -7,29 +7,36 @@ import (
 )
 
 func TestGATEConnectUDPSocksProbeEchoH3(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksProbeEchoH3(t)
 }
 
 func TestGATEConnectUDPSocksProbeEchoH2(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksProbeEchoH2(t)
 }
 
 func TestGATEConnectUDPSocksSequencedUploadH3(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksSequencedUploadH3(t)
 }
 
 func TestGATEConnectUDPSocksDNSMicroflowIsolationH3(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksDNSMicroflowIsolationH3(t)
 }
 
 func TestGATEConnectUDPSocksDNSMicroflowIsolationH2(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksDNSMicroflowIsolationH2(t)
 }
 
 func TestGATEConnectUDPSocksDNSMicroflowChurnH3(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksDNSMicroflowChurnH3(t)
 }
 
 func TestGATEConnectUDPSocksDNSMicroflowChurnH2(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestGATEConnectUDPSocksDNSMicroflowChurnH2(t)
 }

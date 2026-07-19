@@ -7,9 +7,11 @@ import (
 )
 
 func TestLocalizeConnectUDPH2EchoDuplexGap(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH2EchoDuplexGap(t)
 }
 
 func TestLocalizeConnectUDPH2EchoDuplexGapWithFountain(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH2EchoDuplexGapWithFountain(t)
 }

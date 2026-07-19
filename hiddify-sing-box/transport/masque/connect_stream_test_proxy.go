@@ -38,13 +38,17 @@ func startInProcessTCPConnectProxy(tb testing.TB, handler func(targetHost, targe
 	proxyPort := quicConn.LocalAddr().(*net.UDPAddr).Port
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/masque/tcp/{target_host}/{target_port}", func(w http.ResponseWriter, r *http.Request) {
+	serveTCP := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		handler(r.PathValue("target_host"), r.PathValue("target_port"), r, w)
-	})
+	}
+	for _, prefix := range []string{"/masque/tcp", "/.well-known/masque/tcp"} {
+		mux.HandleFunc(prefix+"/{target_host}/{target_port}", serveTCP)
+		mux.HandleFunc(prefix+"/{target_host}/{target_port}/", serveTCP)
+	}
 	server := http3.Server{
 		TLSConfig:       connectUDPTestTLS,
 		QUICConfig:      &quic.Config{EnableDatagrams: true},

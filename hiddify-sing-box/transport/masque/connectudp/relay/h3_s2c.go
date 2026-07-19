@@ -28,10 +28,14 @@ type h3DatagramBatchSender interface {
 
 const h3DownlinkUDPBatchWire = 32 * 1024
 
-// h3S2CSendBacklogSoftLimit matches client conn.h3C2SSendBacklogSoftLimit.
+// h3S2CSendBacklogSoftLimit matches client C2S soft backlog.
 // Without it, server S2C enqueues fountain UDP into the unreliable QUIC DATAGRAM
 // send queue faster than the path can carry → s2c_dgram_out≈s2c_udp_in but client rx≪sent.
 const h3S2CSendBacklogSoftLimit = 256
+
+func h3S2CSoftLimit() int {
+	return h3S2CSendBacklogSoftLimit
+}
 
 type h3DatagramSendBacklog interface {
 	DatagramSendBacklog() int
@@ -43,7 +47,8 @@ func awaitH3S2CSendDrain(str h3DatagramSender) {
 		return
 	}
 	batcher, _ := str.(h3DatagramBatchSender)
-	for spin := 0; b.DatagramSendBacklog() >= h3S2CSendBacklogSoftLimit; spin++ {
+	limit := h3S2CSoftLimit()
+	for spin := 0; b.DatagramSendBacklog() >= limit; spin++ {
 		if batcher != nil {
 			batcher.FlushProxiedIPDatagramSend()
 		} else {

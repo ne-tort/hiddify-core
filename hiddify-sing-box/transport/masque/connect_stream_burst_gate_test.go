@@ -320,6 +320,7 @@ func TestGATEConnectStreamSocksSoakReliability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("GATE-SOAK skipped under -short")
 	}
+	masque.SkipUnlessMasqueBenchLong(t)
 	socksPort, targetPort, ctx := setupBurstGateHarness(t)
 
 	ok, fail, buckets := runSoakGateParallel(t, socksPort, targetPort, ctx, soakGateDuration, soakGateRate, soakGateWorkers)

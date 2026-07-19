@@ -7,5 +7,6 @@ import (
 )
 
 func TestLocalizeConnectUDPH3ParallelScalingAttribution(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestLocalizeConnectUDPH3ParallelScalingAttribution(t)
 }

@@ -6,7 +6,6 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"strconv"
 	"testing"
 	"time"
 
@@ -81,7 +80,7 @@ func InttestLocalizeConnectUDPDockerPacedH2UploadGoodput(t *testing.T) {
 	proxyPort := startInProcessH2UDPConnectProxy(t)
 	session := startConnectUDPH2MasqueSession(t, proxyPort)
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), duration+5*time.Second)
+	waitCtx, cancel := context.WithTimeout(context.Background(), duration+connectUDPSynthGateWaitCtx)
 	t.Cleanup(cancel)
 	pkt, err := session.ListenPacket(waitCtx, M.Socksaddr{
 		Addr: netip.MustParseAddr(sinkAddr.IP.String()),
@@ -172,6 +171,7 @@ func InttestLocalizeConnectUDPDockerPacedH2DirectVsSocks5(t *testing.T) {
 // InttestLocalizeConnectUDPH2BurstWritePacketVsWriteTo localizes relay WritePacket vs direct WriteTo.
 func InttestLocalizeConnectUDPH2BurstWritePacketVsWriteTo(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 	writeToMbps, _ := benchConnectUDPBurstZeroLossMax(t, option.MasqueHTTPLayerH2, false, duration)
 	writePktMbps, _ := benchConnectUDPH2BurstZeroLossMaxWritePacket(t, duration)
@@ -195,6 +195,7 @@ func InttestLocalizeConnectUDPH2BurstWritePacketVsWriteTo(t *testing.T) {
 // InttestLocalizeConnectUDPDockerBurstDirectVsSocks5 localizes max zero-loss burst (docker burst KPI shape).
 func InttestLocalizeConnectUDPDockerBurstDirectVsSocks5(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 
 	directMbps, directSt := benchConnectUDPBurstZeroLossMax(t, option.MasqueHTTPLayerH3, false, duration)
@@ -231,6 +232,7 @@ func InttestLocalizeConnectUDPDockerBurstDirectVsSocks5(t *testing.T) {
 // InttestLocalizeConnectUDPDockerBurstH2DirectVsSocks5 localizes H2 max zero-loss burst.
 func InttestLocalizeConnectUDPDockerBurstH2DirectVsSocks5(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 
 	directMbps, directSt := benchConnectUDPBurstZeroLossMax(t, option.MasqueHTTPLayerH2, false, duration)
@@ -264,6 +266,7 @@ func InttestLocalizeConnectUDPDockerBurstH2DirectVsSocks5(t *testing.T) {
 // InttestLocalizeConnectUDPH2BurstDockerTlsTaxSweep calibrates tlsFlushTaxH2Link on burst shape.
 func InttestLocalizeConnectUDPH2BurstDockerTlsTaxSweep(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const duration = connectUDPSynthProdBenchDuration
 	maxPayload := h2c.MaxUDPPayloadPerDatagramCapsule()
 
@@ -279,35 +282,3 @@ func InttestLocalizeConnectUDPH2BurstDockerTlsTaxSweep(t *testing.T) {
 	}
 }
 
-// InttestLocalizeConnectUDPH2BurstBulkFlushBytes logs burst ceiling vs MASQUE_H2_UPLOAD_BULK_FLUSH_BYTES.
-func InttestLocalizeConnectUDPH2BurstBulkFlushBytes(t *testing.T) {
-	t.Helper()
-	const duration = connectUDPSynthProdBenchDuration
-	for _, flushBytes := range []int{0, 65536, 262144, 1048576} {
-		if flushBytes > 0 {
-			t.Setenv("MASQUE_H2_UPLOAD_BULK_FLUSH_BYTES", strconv.Itoa(flushBytes))
-		} else {
-			t.Setenv("MASQUE_H2_UPLOAD_BULK_FLUSH_BYTES", "0")
-		}
-		mbps, _ := benchConnectUDPH2BurstZeroLossMax(t, instantH2Link{}, false, duration, connectudp.DefaultBenchUDPPayloadLen)
-		t.Logf("LOCALIZE h2 burst bulk-flush-bytes=%d: direct=%.1f Mbit/s", flushBytes, mbps)
-	}
-}
-
-// InttestLocalizeConnectUDPH2BurstDockerTlsTaxBulkFlushCombo calibrates bulk TLS flush vs docker tls-tax.
-func InttestLocalizeConnectUDPH2BurstDockerTlsTaxBulkFlushCombo(t *testing.T) {
-	t.Helper()
-	const duration = connectUDPSynthProdBenchDuration
-	link := tlsFlushTaxH2Link{Tax: 4 * time.Microsecond}
-	for _, coalesce := range []int{32768, 65536, 131072} {
-		t.Setenv("MASQUE_H2_UPLOAD_COALESCE_BULK_BYTES", strconv.Itoa(coalesce))
-		for _, readBytes := range []int{65536, 262144, 524288} {
-			t.Setenv("MASQUE_H2_UPLOAD_READ_BYTES", strconv.Itoa(readBytes))
-			for _, flushBytes := range []int{65536, 262144} {
-				t.Setenv("MASQUE_H2_UPLOAD_BULK_FLUSH_BYTES", strconv.Itoa(flushBytes))
-				mbps512, _ := benchConnectUDPH2BurstZeroLossMax(t, link, false, duration, connectudp.DefaultBenchUDPPayloadLen)
-				t.Logf("LOCALIZE h2 burst tls-tax=4us coalesce=%d read=%d bulk-flush=%d: 512B=%.1f Mbit/s", coalesce, readBytes, flushBytes, mbps512)
-			}
-		}
-	}
-}

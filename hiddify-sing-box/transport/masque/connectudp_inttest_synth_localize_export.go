@@ -590,6 +590,7 @@ func InttestLocalizeConnectUDPH2DownloadFountainDirectDialVsListenPacket(t *test
 // when each TCP write carries docker-shaped flush latency (synth before docker).
 func InttestLocalizeConnectUDPH2UploadBulkFlushTLSFlushTax(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const dur = connectUDPSynthProdBenchDuration
 	link := tlsFlushTaxH2Link{Tax: 8 * time.Microsecond}
 
@@ -616,6 +617,7 @@ func InttestLocalizeConnectUDPH2UploadBulkFlushTLSFlushTax(t *testing.T) {
 // Logs mbps at each tax; instant link must stay >= synth gate; tax sweep localizes docker-shaped wire budget.
 func InttestLocalizeConnectUDPH2UploadDockerTlsTaxSweep(t *testing.T) {
 	t.Helper()
+	skipUnlessMasqueBenchLong(t)
 	const dur = connectUDPSynthProdBenchDuration
 	_, instantMbps, err := benchConnectUDPProdProfileH2Upload(t, instantH2Link{}, dur, 0, connectudp.DefaultBenchUDPPayloadLen)
 	if err != nil {

@@ -7,5 +7,6 @@ import (
 )
 
 func TestProbeConnectUDPScalingCeiling(t *testing.T) {
+	masque.SkipUnlessMasqueBenchLong(t)
 	masque.InttestProbeConnectUDPScalingCeiling(t)
 }

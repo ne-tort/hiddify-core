@@ -193,19 +193,19 @@ const connectUDPInProcessPathUDP = "/masque/udp"
 
 func registerMasqueUDPProxyHandler(t testing.TB, mux *http.ServeMux, proxyPort int) {
 	t.Helper()
-	templateRaw := fmt.Sprintf("https://127.0.0.1:%d/masque/udp/{target_host}/{target_port}/", proxyPort)
+	templateRaw := fmt.Sprintf("https://127.0.0.1:%d%s/{target_host}/{target_port}/", proxyPort, connectUDPInProcessPathUDP)
 	udpTemplate, err := uritemplate.New(templateRaw)
 	if err != nil {
 		t.Fatalf("udp template: %v", err)
 	}
 	var udpProxy cudprelay.Proxy
 	t.Cleanup(func() { _ = udpProxy.Close() })
-	// pathbuild expands with trailing slash; register both (matches H2 StartInProcessConnectUDPProxy).
+	// pathbuild expands with trailing slash; register both.
 	serve := func(w http.ResponseWriter, r *http.Request) {
 		serveConnectUDPProdHandler(w, r, udpTemplate, &udpProxy)
 	}
-	mux.HandleFunc("/masque/udp/{target_host}/{target_port}", serve)
-	mux.HandleFunc("/masque/udp/{target_host}/{target_port}/", serve)
+	mux.HandleFunc(connectUDPInProcessPathUDP+"/{target_host}/{target_port}", serve)
+	mux.HandleFunc(connectUDPInProcessPathUDP+"/{target_host}/{target_port}/", serve)
 }
 
 func startInProcessMasqueUDPProxyWithRelay(t testing.TB) int {
