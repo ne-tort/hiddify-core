@@ -25,7 +25,7 @@ func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
 
 // TestH2ServerCapsuleStreamSendDatagramFlushesOnce verifies DATAGRAM capsule downlink flushes once per send.
 func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
-	t.Parallel()
+	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
 	payload := append([]byte{0}, []byte("ip-pdu")...)
@@ -34,6 +34,74 @@ func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
 	}
 	if got := rec.flushes.Load(); got != 1 {
 		t.Fatalf("SendDatagram flushes=%d want 1", got)
+	}
+	if got := H2S2CDatagramSentTotal(); got != 1 {
+		t.Fatalf("datagram_sent=%d want 1", got)
+	}
+	if got := H2S2CFlushTotal(); got != 1 {
+		t.Fatalf("flush_total=%d want 1", got)
+	}
+	// Mock Flush is near-instant; ns may be 0 on fast hosts — only require counter path ran.
+	_ = H2S2CFlushNsTotal()
+	if got := H2S2CDatagramBytesTotal(); got != uint64(len(payload)) {
+		t.Fatalf("datagram_bytes=%d want %d", got, len(payload))
+	}
+}
+
+func TestH2ServerCapsuleStreamSendDatagramNoFlushProbe(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "1")
+	ResetH2S2CStats()
+	rec := &h2FlushCountResponseWriter{}
+	str := &h2ServerCapsuleStream{w: rec}
+	payload := append([]byte{0}, []byte("ip-pdu")...)
+	if err := str.SendDatagram(payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("NO_FLUSH probe: flushes=%d want 0", got)
+	}
+	if got := H2S2CDatagramSentTotal(); got != 1 {
+		t.Fatalf("datagram_sent=%d want 1", got)
+	}
+	if got := H2S2CFlushSkipTotal(); got != 1 {
+		t.Fatalf("flush_skip=%d want 1", got)
+	}
+	if got := H2S2CFlushTotal(); got != 0 {
+		t.Fatalf("flush_total=%d want 0 under NO_FLUSH", got)
+	}
+	// Control Write still flushes (probe is datagram-only).
+	if _, err := str.Write([]byte("ctrl")); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("Write flushes=%d want 1 (control path)", got)
+	}
+}
+
+func TestH2ServerCapsuleStreamSendDatagramFlushEvery(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "4")
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_IDLE_MS", "0") // disable idle; pure count coalesce
+	ResetH2S2CStats()
+	rec := &h2FlushCountResponseWriter{}
+	str := &h2ServerCapsuleStream{w: rec}
+	payload := append([]byte{0}, []byte("ip-pdu")...)
+	for i := 0; i < 4; i++ {
+		if err := str.SendDatagram(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("FLUSH_EVERY=4: flushes=%d want 1 after 4 datagrams", got)
+	}
+	if got := H2S2CDatagramSentTotal(); got != 4 {
+		t.Fatalf("datagram_sent=%d want 4", got)
+	}
+	if got := H2S2CFlushTotal(); got != 1 {
+		t.Fatalf("flush_total=%d want 1", got)
+	}
+	if got := H2S2CFlushSkipTotal(); got != 3 {
+		t.Fatalf("flush_skip=%d want 3", got)
 	}
 }
 

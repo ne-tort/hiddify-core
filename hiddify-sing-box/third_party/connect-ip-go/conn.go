@@ -428,6 +428,7 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 	}
 	if http2CapsuleDatagramDataplane {
 		c.datagramCapsuleIngress = make(chan []byte, connReadPrefetchMax)
+		ensureConnectIPIngressAttrEmitter()
 	} else {
 		c.h3UnifiedDatagramIngress = make(chan []byte, connReadPrefetchMax)
 		c.prefetchNotify = make(chan struct{}, 256)
