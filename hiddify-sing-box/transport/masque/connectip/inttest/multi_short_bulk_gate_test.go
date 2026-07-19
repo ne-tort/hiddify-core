@@ -34,3 +34,14 @@ func TestGATEConnectIPTCPConnectCloseChurn(t *testing.T) {
 func TestGATEConnectIPTCPConnectCloseChurnH2(t *testing.T) {
 	inttest.RunGATEConnectIPTCPConnectCloseChurnH2(t)
 }
+
+// TestGATEConnectIPMidSessionMultiflowRecycle is P2-13 / F3-T6:
+// ≥2 live TCP → server recycle + latch → same-session restore dials.
+func TestGATEConnectIPMidSessionMultiflowRecycle(t *testing.T) {
+	inttest.RunGATEConnectIPMidSessionMultiflowRecycle(t)
+}
+
+// TestGATEConnectIPMidSessionMultiflowRecycleH2 is P2-13 H2 smoke.
+func TestGATEConnectIPMidSessionMultiflowRecycleH2(t *testing.T) {
+	inttest.RunGATEConnectIPMidSessionMultiflowRecycleH2(t)
+}

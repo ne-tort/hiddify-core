@@ -59,7 +59,7 @@ type NativeConnectIPH2Server struct {
 func NewNativeConnectIPH2Server(tb testing.TB) *NativeConnectIPH2Server {
 	tb.Helper()
 	s := &NativeConnectIPH2Server{}
-	if err := s.launch(tb); err != nil {
+	if err := s.launch(tb, 0); err != nil {
 		tb.Fatalf("launch h2 server: %v", err)
 	}
 	tb.Cleanup(func() { _ = s.Stop() })
@@ -81,8 +81,23 @@ func (s *NativeConnectIPH2Server) Stop() error {
 	return nil
 }
 
-func (s *NativeConnectIPH2Server) launch(tb testing.TB) error {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// Restart stops and relaunches the server on the same TCP port (P2-13 mid-session recycle parity with H3).
+func (s *NativeConnectIPH2Server) Restart(tb testing.TB) {
+	tb.Helper()
+	keepPort := s.port
+	_ = s.Stop()
+	time.Sleep(50 * time.Millisecond)
+	if err := s.launch(tb, keepPort); err != nil {
+		tb.Fatalf("restart h2 server: %v", err)
+	}
+}
+
+func (s *NativeConnectIPH2Server) launch(tb testing.TB, fixedPort int) error {
+	addr := "127.0.0.1:0"
+	if fixedPort > 0 {
+		addr = fmt.Sprintf("127.0.0.1:%d", fixedPort)
+	}
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}

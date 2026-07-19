@@ -5,6 +5,7 @@
 // Smoke/GATE: native H3/H2 in-proc servers (harness.go, harness_h2.go), synth gates,
 // upload synth/localize. H2 dual-flow + short-FIN: P1-9 (multi_short_bulk_gate / dual_flow_gate).
 // Sequential TCP connect/close churn: P2-12 (tcp_churn_gate).
+// Mid-session multiflow recycle restore: P2-13 (mid_session_multiflow_recycle_gate).
 
 // upload synth (upload_synth_gate.go), upload localize (native_upload_localize.go).
 
