@@ -52,6 +52,39 @@ func TestOverlayNATEgressInPlaceSNAT(t *testing.T) {
 	}
 }
 
+// TestOverlayNATPreservesTOSByte locks P2-11 / F4-07: SNAT+DNAT rewrite addresses only;
+// IPv4 TOS (DSCP+ECN) must stay bit-identical (not S2 rebuild TOS=0).
+func TestOverlayNATPreservesTOSByte(t *testing.T) {
+	const tos = byte(0xB9) // DSCP EF (46<<2) | ECT(1)
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wire := netip.MustParseAddr("198.18.0.1")
+	pkt := []byte{
+		0x45, tos, 0x00, 0x28, 0x00, 0x00, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00,
+		172, 19, 100, 2,
+		198, 18, 0, 99,
+	}
+	nat := OverlayNAT{TunHost: tunHost, WireLocal: wire}
+
+	out := nat.SNATEgress(append([]byte(nil), pkt...))
+	if out[1] != tos {
+		t.Fatalf("SNATEgress TOS=%#02x want %#02x", out[1], tos)
+	}
+	nat.SNATEgressInPlace(pkt)
+	if pkt[1] != tos {
+		t.Fatalf("SNATEgressInPlace TOS=%#02x want %#02x", pkt[1], tos)
+	}
+
+	ingress := []byte{
+		0x45, tos, 0x00, 0x28, 0x00, 0x00, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00,
+		198, 18, 0, 2,
+		198, 18, 0, 1,
+	}
+	nat.DNATIngressInPlace(ingress)
+	if ingress[1] != tos {
+		t.Fatalf("DNATIngressInPlace TOS=%#02x want %#02x", ingress[1], tos)
+	}
+}
+
 func TestOverlayNATIngressInPlaceDNAT(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wire := netip.MustParseAddr("198.18.0.1")
