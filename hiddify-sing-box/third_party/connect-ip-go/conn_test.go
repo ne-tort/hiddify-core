@@ -299,6 +299,17 @@ func emptyAddressRequestCapsuleFrame() []byte {
 	return (&addressRequestCapsule{}).append(nil)
 }
 
+func TestReadFromStreamAbortsOnPeerEmptyAddressRequest(t *testing.T) {
+	// RFC 9484 §4.7.2 / IP-M7: empty ADDRESS_REQUEST MUST abort unless CF allowEmpty.
+	conn := &Conn{
+		str:                   &bytesStream{reader: bytes.NewReader(emptyAddressRequestCapsuleFrame())},
+		assignedAddressNotify: make(chan struct{}, 1),
+		closeChan:             make(chan struct{}),
+	}
+	err := conn.readFromStream()
+	require.ErrorIs(t, err, ErrPeerEmptyAddressRequest)
+}
+
 func TestReadFromStreamAbortsOnPeerZeroRequestID(t *testing.T) {
 	frame := addressRequestCapsuleFrame([]RequestedAddress{
 		{RequestID: 0, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
