@@ -32,9 +32,6 @@ func (e *CloseError) Is(target error) bool { return target == net.ErrClosed }
 
 type appendable interface{ append([]byte) []byte }
 
-// masqueConnectIPDebug enables verbose policy/netstack diagnostics (addresses and lengths only).
-func masqueConnectIPDebug() bool { return false }
-
 type writeCapsule struct {
 	capsule appendable
 	result  chan error
@@ -93,13 +90,8 @@ var (
 	policyDropICMPComposeFail             atomic.Uint64
 	policyDropICMPSendFail                atomic.Uint64
 	policyDropICMPByReason                sync.Map      // map[string]*atomic.Uint64
-	connectIPStreamCapsuleDebugLeft       atomic.Int32  // HIDDIFY_MASQUE_CONNECT_IP_DEBUG: log at most N stream capsule types
 	streamCapsuleDatagramIngressDropTotal atomic.Uint64 // HTTP_DATAGRAM blocked on full ingress (HoL vs ADDRESS_ASSIGN)
 )
-
-func init() {
-	connectIPStreamCapsuleDebugLeft.Store(64)
-}
 
 var ErrIPv6ExtensionChainAmbiguous = errors.New("connect-ip: IPv6 extension chain parse ambiguity")
 var ErrInvalidRouteAdvertisement = errors.New("connect-ip: invalid route advertisement")
@@ -818,9 +810,7 @@ func (c *Conn) enqueueAddressRequestResponse(requested []RequestedAddress) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := c.respondToAddressRequest(ctx, req); err != nil && masqueConnectIPDebug() {
-			log.Printf("connect-ip: ADDRESS_REQUEST response failed: %v", err)
-		}
+		_ = c.respondToAddressRequest(ctx, req)
 	}()
 }
 
@@ -956,11 +946,6 @@ func (c *Conn) readFromStream() error {
 			}
 			return wrapConnectIPStreamDataplaneErr(c, err)
 		}
-		if masqueConnectIPDebug() && t != capsuleTypeHTTPDatagram {
-			if connectIPStreamCapsuleDebugLeft.Add(-1) >= 0 {
-				log.Printf("connect-ip debug: stream capsule type=%d", uint64(t))
-			}
-		}
 		switch t {
 		case capsuleTypeHTTPDatagram:
 			payload, err := readRFC9297HTTPDatagramCapsulePayload(cr)
@@ -1001,9 +986,6 @@ func (c *Conn) readFromStream() error {
 			for _, assigned := range capsule.AssignedAddresses {
 				prefixes = append(prefixes, assigned.IPPrefix)
 			}
-			if masqueConnectIPDebug() {
-				log.Printf("connect-ip debug: ADDRESS_ASSIGN count=%d", len(prefixes))
-			}
 			c.mu.Lock()
 			c.assignedAddresses = prefixes
 			c.publishRouteViewLocked()
@@ -1037,9 +1019,6 @@ func (c *Conn) readFromStream() error {
 			}
 			if len(capsule.RequestedAddresses) == 0 {
 				if c.allowEmptyPeerAddressRequest {
-					if masqueConnectIPDebug() {
-						log.Printf("connect-ip: peer empty ADDRESS_REQUEST capsule observed (ignored, cf-connect-ip interop)")
-					}
 					continue
 				}
 				return c.failClosed(ErrPeerEmptyAddressRequest)
@@ -1457,9 +1436,6 @@ func (c *Conn) handleIncomingProxiedPacketWithViewAndVersion(data []byte, view *
 	if peerAddresses != nil {
 		if !prefixesContainAddrSameFamily(peerAddresses, src) {
 			c.emitPolicyDropICMP(data, "src_not_allowed")
-			if masqueConnectIPDebug() {
-				log.Printf("connect-ip debug: incoming policy src=%s dst=%s len=%d err=src_not_allowed", src, dst, len(data))
-			}
 			return fmt.Errorf("connect-ip: datagram source address not allowed: %s", src)
 		}
 	}
@@ -1498,9 +1474,6 @@ func (c *Conn) handleIncomingProxiedPacketWithViewAndVersion(data []byte, view *
 			reason = "proto_not_allowed"
 		}
 		c.emitPolicyDropICMP(data, reason)
-		if masqueConnectIPDebug() {
-			log.Printf("connect-ip debug: incoming policy src=%s dst=%s proto=%d len=%d reason=%s", src, dst, ipProto, len(data), reason)
-		}
 		return fmt.Errorf("connect-ip: datagram destination address / protocol not allowed: %s (protocol: %d)", dst, ipProto)
 	}
 	return nil
@@ -1602,9 +1575,6 @@ func (c *Conn) finishWritePacketSend(icmpSource []byte, err error) (icmp []byte,
 	var errDTL *quic.DatagramTooLargeError
 	if errors.As(err, &errDTL) {
 		ipMTU := ptbIPMTUFromDatagramTooLarge(errDTL)
-		if masqueConnectIPDebug() && len(icmpSource) >= 256 {
-			log.Printf("connect-ip debug: DatagramTooLarge ip_len=%d quic_max=%d ptb_mtu=%d", len(icmpSource), errDTL.MaxDatagramPayloadSize, ipMTU)
-		}
 		icmpPacket, icmpErr := composeICMPTooLargePacket(icmpSource, ipMTU)
 		if icmpErr != nil {
 			log.Printf("failed to compose ICMP too large packet: %s", icmpErr)
@@ -1837,9 +1807,6 @@ func (c *Conn) prepareOutgoingProxiedPacket(packet []byte, view *connRouteView) 
 		pktDst := netip.AddrFrom4([4]byte(packet[16:20]))
 		pktProto := packet[9]
 		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
-			if masqueConnectIPDebug() {
-				log.Printf("connect-ip debug: outgoing IPv4 policy len=%d src=%s dst=%s proto=%d err=%v", len(packet), pktSrc, pktDst, pktProto, err)
-			}
 			return err
 		}
 		return nil
@@ -1874,9 +1841,6 @@ func (c *Conn) prepareOutgoingProxiedPacket(packet []byte, view *connRouteView) 
 			pktProto = proto
 		}
 		if err := c.validateOutgoingPacketTupleWithView(pktSrc, pktDst, pktProto, pktVersion, view); err != nil {
-			if masqueConnectIPDebug() {
-				log.Printf("connect-ip debug: outgoing IPv6 policy len=%d src=%s dst=%s proto=%d err=%v", len(packet), pktSrc, pktDst, pktProto, err)
-			}
 			return err
 		}
 		return nil
