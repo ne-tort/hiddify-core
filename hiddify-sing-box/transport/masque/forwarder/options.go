@@ -12,7 +12,8 @@ const (
 	DefaultDatagramCeilingMax = cip.DefaultDatagramCeilingMax
 	// MaxIPv4WireBytes caps forwarder S2C IPv4 datagram size (H3 CONNECT-IP return path ~1372 B).
 	MaxIPv4WireBytes = cip.MaxIPv4WireBytes
-	// DatagramSlack is subtracted from the ceiling when sizing forwarder segments (H3 overhead).
+	// DatagramSlack is WireSlack (= TCPHTTP3DatagramSlack): ceiling − MaxIPv4WireBytes.
+	// Not FramingSlack (H3FramingSlack=80); see connectip P2-10 domain split.
 	DatagramSlack = DefaultDatagramCeilingMax - MaxIPv4WireBytes
 )
 

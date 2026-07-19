@@ -8,8 +8,9 @@ const UDPWriteHardCap = 1152
 // "DATAGRAM frame too large" drops without raising WAN throughput.
 const LabUDPWriteHardCap = UDPWriteHardCap
 
-// TCPHTTP3DatagramSlack is subtracted from the datagram ceiling when sizing the gVisor link MTU
-// so proxied IPv4/TCP frames fit in one QUIC HTTP DATAGRAM (context id + crypto overhead).
+// TCPHTTP3DatagramSlack (WireSlack) is subtracted from the datagram ceiling when sizing the
+// prod TCP gVisor link MTU / MaxIPv4WireBytes so proxied IPv4/TCP frames fit the practical H3
+// return-path band. Distinct from H3FramingSlack (FramingSlack=80) used for H3NetstackMTU / H2 capsules.
 const TCPHTTP3DatagramSlack = 128
 
 // SelfHosted reports whether CONNECT-IP runs without a Warp client certificate (lab/self-hosted).
