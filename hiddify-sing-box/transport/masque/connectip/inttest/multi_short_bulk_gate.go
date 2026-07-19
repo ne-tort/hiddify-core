@@ -71,18 +71,34 @@ func assertNoRecycleLatch(t *testing.T, sess masque.ClientSession, when string) 
 }
 
 // RunGATEConnectIPMultiShortTCPBulkNoRecycleLatch opens one bulk download, waits until it is live,
-// then runs N short TCP (dial/write/close) on the same OpenIPSession plane.
+// then runs N short TCP (dial/write/close) on the same OpenIPSession plane (H3).
 // Asserts: all shorts complete, bulk keeps growing, ConnectIPServerGenerationStale stays false.
 func RunGATEConnectIPMultiShortTCPBulkNoRecycleLatch(t *testing.T) {
 	t.Helper()
+	runMultiShortTCPBulkNoRecycleLatch(t, "h3", StartNativeConnectIPH3Server, NativeH3ClientOptions)
+}
+
+// RunGATEConnectIPMultiShortTCPBulkNoRecycleLatchH2 is P1-9 / F3-T4: same gate over HTTP/2 CONNECT-IP.
+func RunGATEConnectIPMultiShortTCPBulkNoRecycleLatchH2(t *testing.T) {
+	t.Helper()
+	runMultiShortTCPBulkNoRecycleLatch(t, "h2", StartNativeConnectIPH2Server, NativeH2ClientOptions)
+}
+
+func runMultiShortTCPBulkNoRecycleLatch(
+	t *testing.T,
+	layer string,
+	startServer func(testing.TB) int,
+	clientOpts func(int) masque.ClientOptions,
+) {
+	t.Helper()
 	shortTarget, shortPort := startMultiShortEchoTarget(t)
 	bulkLn := StartNativeConnectIPDownloadTarget(t)
-	proxyPort := StartNativeConnectIPH3Server(t)
+	proxyPort := startServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), multiShortBulkTimeout)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, clientOpts(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -186,8 +202,8 @@ func RunGATEConnectIPMultiShortTCPBulkNoRecycleLatch(t *testing.T) {
 	<-bulkDone
 	finalBytes := bulkTotal.Load()
 	assertNoRecycleLatch(t, sess, "after bulk window")
-	t.Logf("multi-short+bulk: shorts=%d warm=%d after_short=%d final=%d latch=false",
-		multiShortBulkN, warmBytes, afterShortBytes, finalBytes)
+	t.Logf("multi-short+bulk layer=%s: shorts=%d warm=%d after_short=%d final=%d latch=false",
+		layer, multiShortBulkN, warmBytes, afterShortBytes, finalBytes)
 	if finalBytes < multiShortBulkFinalMin {
 		t.Fatalf("bulk too small after N shorts: %d bytes want >= %d", finalBytes, multiShortBulkFinalMin)
 	}

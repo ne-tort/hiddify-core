@@ -59,17 +59,33 @@ func startDualFlowControlTarget(tb testing.TB) (*dualFlowControlTarget, uint16) 
 	return target, port
 }
 
-// RunGATEConnectIPDualFlowIperfRControl opens control + bulk TCP concurrently on one connect_ip session.
+// RunGATEConnectIPDualFlowIperfRControl opens control + bulk TCP concurrently on one connect_ip session (H3).
 func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
+	t.Helper()
+	runDualFlowIperfRControl(t, "h3", StartNativeConnectIPH3Server, NativeH3ClientOptions)
+}
+
+// RunGATEConnectIPDualFlowIperfRControlH2 is P1-9 dual-flow smoke over HTTP/2 CONNECT-IP.
+func RunGATEConnectIPDualFlowIperfRControlH2(t *testing.T) {
+	t.Helper()
+	runDualFlowIperfRControl(t, "h2", StartNativeConnectIPH2Server, NativeH2ClientOptions)
+}
+
+func runDualFlowIperfRControl(
+	t *testing.T,
+	layer string,
+	startServer func(testing.TB) int,
+	clientOpts func(int) masque.ClientOptions,
+) {
 	t.Helper()
 	controlTarget, controlPort := startDualFlowControlTarget(t)
 	bulkLn := StartNativeConnectIPDownloadTarget(t)
-	proxyPort := StartNativeConnectIPH3Server(t)
+	proxyPort := startServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, clientOpts(proxyPort))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -77,6 +93,7 @@ func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 	if _, err := sess.OpenIPSession(ctx); err != nil {
 		t.Fatalf("OpenIPSession: %v", err)
 	}
+	assertNoRecycleLatch(t, sess, "after OpenIPSession")
 
 	controlAddr := M.ParseSocksaddrHostPort("127.0.0.1", controlPort)
 	bulkPort := uint16(bulkLn.Addr().(*net.TCPAddr).Port)
@@ -92,6 +109,7 @@ func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 		_ = controlConn.Close()
 		t.Fatalf("bulk dial: %v", err)
 	}
+	masque.PrimeNativeTCPDownload(bulkConn)
 
 	controlErr := make(chan error, 1)
 	go func() {
@@ -117,7 +135,7 @@ func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 	if bulkErr != nil && bulkBytes == 0 {
 		t.Fatalf("bulk download: %v", bulkErr)
 	}
-	t.Logf("dual-flow bulk: %.1f Mbit/s (%d bytes)", bulkMbps, bulkBytes)
+	t.Logf("dual-flow layer=%s bulk: %.1f Mbit/s (%d bytes)", layer, bulkMbps, bulkBytes)
 
 	if err := <-controlErr; err != nil {
 		t.Fatalf("control leg: %v", err)
@@ -132,9 +150,10 @@ func RunGATEConnectIPDualFlowIperfRControl(t *testing.T) {
 	if !controlTarget.byteReceived.Load() {
 		t.Fatal("server never received control 1-byte (iperf -R analog)")
 	}
-	if bulkMbps < tunRecyclePreflightMin {
-		t.Fatalf("bulk dead under dual-flow: %.1f Mbit/s want >= %.1f", bulkMbps, tunRecyclePreflightMin)
+	if bulkBytes < multiShortBulkWarmMin {
+		t.Fatalf("bulk dead under dual-flow: %d bytes want >= %d (%.1f Mbit/s)", bulkBytes, multiShortBulkWarmMin, bulkMbps)
 	}
+	assertNoRecycleLatch(t, sess, "after dual-flow")
 }
 
 // RunGATEConnectIPTunCMDualFlowIperfRControl mirrors Docker TUN/CM path: dual TCP via RouteTunTCP.
