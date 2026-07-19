@@ -24,7 +24,7 @@ func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
 	}
 }
 
-// TestH2ServerCapsuleStreamSendDatagramFirstFlushes: idle path forces flush on first PDU.
+// TestH2ServerCapsuleStreamSendDatagramFirstFlushes: first PDU on a stream always flushes.
 func TestH2ServerCapsuleStreamSendDatagramFirstFlushes(t *testing.T) {
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
@@ -45,18 +45,23 @@ func TestH2ServerCapsuleStreamSendDatagramFirstFlushes(t *testing.T) {
 	if got := H2S2CDatagramBytesTotal(); got != uint64(len(payload)) {
 		t.Fatalf("datagram_bytes=%d want %d", got, len(payload))
 	}
+	_ = str.Close()
 }
 
 // TestH2ServerCapsuleStreamSendDatagramCoalesce: under flood (no idle gap), flush every 16.
 func TestH2ServerCapsuleStreamSendDatagramCoalesce(t *testing.T) {
 	ResetH2S2CStats()
-	// Pretend a flush just happened so idle does not force early flushes.
-	h2S2CLastFlushUnixNs.Store(time.Now().UnixNano())
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
+	// Seed lastFlush so first PDU does not take the "never flushed" path.
+	str.lastFlush = time.Now().UnixNano()
 	payload := append([]byte{0}, []byte("ip-pdu")...)
 	for i := 0; i < h2S2CFlushEvery; i++ {
-		h2S2CLastFlushUnixNs.Store(time.Now().UnixNano()) // keep idle window cold
+		// Keep idle cold and cancel any armed idle timer so only every-N coalesce fires.
+		str.mu.Lock()
+		str.lastFlush = time.Now().UnixNano()
+		str.stopIdleFlushLocked()
+		str.mu.Unlock()
 		if err := str.SendDatagram(payload); err != nil {
 			t.Fatal(err)
 		}
@@ -73,6 +78,42 @@ func TestH2ServerCapsuleStreamSendDatagramCoalesce(t *testing.T) {
 	if got := H2S2CFlushSkipTotal(); got != uint64(h2S2CFlushEvery-1) {
 		t.Fatalf("flush_skip=%d want %d", got, h2S2CFlushEvery-1)
 	}
+	_ = str.Close()
+}
+
+// TestH2ServerCapsuleStreamIdleTimerFlushesSparse: skipped PDU flushes after idle without next send.
+func TestH2ServerCapsuleStreamIdleTimerFlushesSparse(t *testing.T) {
+	ResetH2S2CStats()
+	rec := &h2FlushCountResponseWriter{}
+	str := &h2ServerCapsuleStream{w: rec}
+	str.lastFlush = time.Now().UnixNano()
+	payload := append([]byte{0}, []byte("sparse")...)
+	if err := str.SendDatagram(payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("immediate flushes=%d want 0 (should coalesce+arm idle)", got)
+	}
+	if got := H2S2CFlushSkipTotal(); got != 1 {
+		t.Fatalf("flush_skip=%d want 1", got)
+	}
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if rec.flushes.Load() >= 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("after idle flushes=%d want 1", got)
+	}
+	if got := H2S2CFlushTotal(); got != 1 {
+		t.Fatalf("flush_total=%d want 1", got)
+	}
+	if got := H2S2CIdleFlushTotal(); got != 1 {
+		t.Fatalf("idle_flush_total=%d want 1", got)
+	}
+	_ = str.Close()
 }
 
 func TestH2ServerCapsuleStreamReadUsesRequestBody(t *testing.T) {
