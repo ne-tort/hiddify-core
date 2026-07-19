@@ -87,6 +87,7 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 		w.WriteHeader(status)
 		return
 	}
+	// P2-1 LOCK: req.Target/IPProto ignored — product is unscoped full-tunnel (§8.1), not §4.6 ACL.
 	conn, err := sharedConnectIPProxy.Proxy(w, r, req)
 	if err != nil {
 		if host.Logger != nil {
@@ -95,6 +96,7 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 		return
 	}
 	routeCtx, cancelRoute := context.WithTimeout(r.Context(), h.Hooks.RouteSetupTimeout())
+	// Unscoped Assign + full-tunnel Advertise (RFC 9484 §8.1 VPN). Scoped Target not applied (P2-1).
 	assignErr := conn.AssignAddresses(routeCtx, []netip.Prefix{
 		netip.MustParsePrefix("198.18.0.1/32"),
 		netip.MustParsePrefix("fd00::1/128"),

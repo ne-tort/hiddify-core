@@ -15,6 +15,9 @@ type Proxy struct{}
 
 // Proxy attaches the CONNECT-IP session to writer w. parsed was produced by ParseRequest(r, ...)
 // against the configured URI template; r is needed to detect HTTP/2 vs HTTP/3 transport framing.
+//
+// Product LOCK (P2-1 / F1-T2): unscoped full-tunnel only. Target/IPProto from ParseRequest are
+// intentionally unused here — Assign/Advertise live in the server handler (§8.1 VPN shape).
 func (s *Proxy) Proxy(w http.ResponseWriter, r *http.Request, _ *Request) (*Conn, error) {
 	w.Header().Set(http3.CapsuleProtocolHeader, capsuleProtocolHeaderValue)
 	w.WriteHeader(http.StatusOK)
