@@ -3,6 +3,7 @@ package connectip
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"testing"
 
@@ -76,6 +77,30 @@ func TestWritePacketInPlacePreservesTOSByte(t *testing.T) {
 	require.GreaterOrEqual(t, len(cap.last), ipOff+20)
 	require.Equal(t, tos, cap.last[ipOff+1], "wire TOS unchanged after TTL--")
 	require.Equal(t, byte(63), cap.last[ipOff+8])
+}
+
+// TestWritePacketInPlacePreservesUDPPayload locks F4-02: TTL-- mutates IPv4 header only;
+// UDP payload bytes after the 28-byte IPv4+UDP header stay bit-identical.
+func TestWritePacketInPlacePreservesUDPPayload(t *testing.T) {
+	payload := []byte{0xca, 0xfe, 0xba, 0xbe, 9, 8, 7, 6}
+	cap := &captureDatagramStream{}
+	c := &Conn{str: cap}
+	pkt := make([]byte, 28+len(payload))
+	base := testIPv4UDPWithTOS(64, 0xb9)
+	copy(pkt, base)
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(len(pkt)))
+	binary.BigEndian.PutUint16(pkt[24:26], uint16(8+len(payload)))
+	copy(pkt[28:], payload)
+	want := append([]byte(nil), payload...)
+
+	icmp, retained, err := c.WritePacketInPlaceNoWake(pkt)
+	require.NoError(t, err)
+	require.False(t, retained)
+	require.Nil(t, icmp)
+	require.Equal(t, want, pkt[28:], "caller UDP payload unchanged after TTL--")
+	ipOff := len(contextIDZero)
+	require.GreaterOrEqual(t, len(cap.last), ipOff+28+len(payload))
+	require.Equal(t, want, cap.last[ipOff+28:ipOff+28+len(payload)], "wire UDP payload unchanged")
 }
 
 func TestFrameProxiedVsComposeShape(t *testing.T) {

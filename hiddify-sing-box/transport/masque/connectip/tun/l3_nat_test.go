@@ -1,6 +1,7 @@
 package tun
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net/netip"
 	"testing"
@@ -82,6 +83,50 @@ func TestOverlayNATPreservesTOSByte(t *testing.T) {
 	nat.DNATIngressInPlace(ingress)
 	if ingress[1] != tos {
 		t.Fatalf("DNATIngressInPlace TOS=%#02x want %#02x", ingress[1], tos)
+	}
+}
+
+// TestOverlayNATPreservesPayloadBytes locks F4-02: SNAT+DNAT may rewrite addresses/checksums;
+// bytes after the IPv4 header (L4+payload) stay bit-identical for a header-only TCP frame
+// (no L4 checksum region beyond header — use UDP with payload for full opaque check).
+func TestOverlayNATPreservesPayloadBytes(t *testing.T) {
+	tunHost := netip.MustParseAddr("172.19.100.2")
+	wire := netip.MustParseAddr("198.18.0.1")
+	payload := []byte{0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04}
+	// IPv4(20) + UDP(8) + payload
+	total := 28 + len(payload)
+	pkt := make([]byte, total)
+	pkt[0] = 0x45
+	pkt[1] = 0xb9
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(total))
+	pkt[8] = 64
+	pkt[9] = 17
+	copy(pkt[12:16], []byte{172, 19, 100, 2})
+	copy(pkt[16:20], []byte{198, 18, 0, 99})
+	binary.BigEndian.PutUint16(pkt[20:22], 40000)
+	binary.BigEndian.PutUint16(pkt[22:24], 5201)
+	binary.BigEndian.PutUint16(pkt[24:26], uint16(8+len(payload)))
+	copy(pkt[28:], payload)
+
+	wantPayload := append([]byte(nil), payload...)
+	nat := OverlayNAT{TunHost: tunHost, WireLocal: wire}
+
+	out := nat.SNATEgress(append([]byte(nil), pkt...))
+	if !bytes.Equal(out[28:], wantPayload) {
+		t.Fatalf("SNATEgress payload mutated: got %x want %x", out[28:], wantPayload)
+	}
+	nat.SNATEgressInPlace(pkt)
+	if !bytes.Equal(pkt[28:], wantPayload) {
+		t.Fatalf("SNATEgressInPlace payload mutated: got %x want %x", pkt[28:], wantPayload)
+	}
+
+	ingress := append([]byte(nil), pkt...)
+	copy(ingress[12:16], []byte{198, 18, 0, 2})
+	copy(ingress[16:20], []byte{198, 18, 0, 1})
+	copy(ingress[28:], wantPayload)
+	nat.DNATIngressInPlace(ingress)
+	if !bytes.Equal(ingress[28:], wantPayload) {
+		t.Fatalf("DNATIngressInPlace payload mutated: got %x want %x", ingress[28:], wantPayload)
 	}
 }
 
