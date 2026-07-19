@@ -96,10 +96,11 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 		return
 	}
 	routeCtx, cancelRoute := context.WithTimeout(r.Context(), h.Hooks.RouteSetupTimeout())
-	// Unscoped Assign + full-tunnel Advertise (RFC 9484 §8.1 VPN). Scoped Target not applied (P2-1).
+	// IPv4-only product LOCK (P2-9): TUN filter + OverlayNAT cannot carry IPv6.
+	// Do not ASSIGN/ROUTE fd00:: or ::/0 cosmetics (closes IP-NAT-V6; IP-M17 → N/A).
+	// Unscoped Assign + IPv4 full-tunnel Advertise (RFC 9484 §8.1 VPN). Scoped Target not applied (P2-1).
 	assignErr := conn.AssignAddresses(routeCtx, []netip.Prefix{
 		netip.MustParsePrefix("198.18.0.1/32"),
-		netip.MustParsePrefix("fd00::1/128"),
 	})
 	if assignErr != nil {
 		cancelRoute()
@@ -111,7 +112,6 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 	}
 	routeErr := conn.AdvertiseRoute(routeCtx, []connectipgo.IPRoute{
 		{StartIP: netip.IPv4Unspecified(), EndIP: netip.MustParseAddr("255.255.255.255"), IPProtocol: 0},
-		{StartIP: netip.IPv6Unspecified(), EndIP: netip.MustParseAddr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"), IPProtocol: 0},
 	})
 	cancelRoute()
 	if routeErr != nil {

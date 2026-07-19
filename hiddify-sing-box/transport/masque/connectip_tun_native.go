@@ -90,7 +90,6 @@ func ConnectIPTunNativeL3(
 		var errNS error
 		nativeNS, errNS = cip.NewNetstackForSession(ctx, egressSess, cip.NetstackOptions{
 			LocalIPv4: tunHost,
-			LocalIPv6: netip.MustParseAddr("fd00::1"),
 			MTU:       connectIPNativeL3NetstackMTU(sess),
 		})
 		if errNS != nil {

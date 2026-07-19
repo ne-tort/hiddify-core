@@ -1,8 +1,8 @@
 package netstack
 
 import (
-	_ "embed"
 	"context"
+	_ "embed"
 	"errors"
 	"net"
 	"net/netip"
@@ -27,9 +27,9 @@ import (
 )
 
 const (
-	netstackOutboundWriteBatchMax          = 256
-	linkOutboundQueueSlots                 = 65536
-	tcpNetstackNIC             tcpip.NICID = 1
+	netstackOutboundWriteBatchMax             = 256
+	linkOutboundQueueSlots                    = 65536
+	tcpNetstackNIC                tcpip.NICID = 1
 )
 
 //go:embed stack.go
@@ -124,9 +124,7 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 	if !opts.LocalIPv4.IsValid() {
 		opts.LocalIPv4 = netip.MustParseAddr("198.18.0.1")
 	}
-	if !opts.LocalIPv6.IsValid() {
-		opts.LocalIPv6 = netip.MustParseAddr("fd00::1")
-	}
+	// P2-9: do not invent fd00::1 — install IPv6 only when ASSIGN/profile provides it (WARP).
 	gStack := stack.New(stack.Options{
 		NetworkProtocols: []stack.NetworkProtocolFactory{
 			ipv4.NewProtocolWithOptions(ipv4.Options{AllowExternalLoopbackTraffic: true}),
@@ -141,42 +139,44 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 	})
 	endpoint := channel.New(linkOutboundQueueSlots, uint32(opts.MTU), "")
 	if err := gStack.CreateNIC(tcpNetstackNIC, endpoint); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	if err := addStackAddress(gStack, int(tcpNetstackNIC), opts.LocalIPv4); err != nil {
-		return nil, joinStackInit( err)
+		return nil, joinStackInit(err)
 	}
-	if err := addStackAddress(gStack, int(tcpNetstackNIC), opts.LocalIPv6); err != nil {
-		return nil, joinStackInit( err)
+	if opts.LocalIPv6.IsValid() && opts.LocalIPv6.Is6() && !opts.LocalIPv6.Is4In6() {
+		if err := addStackAddress(gStack, int(tcpNetstackNIC), opts.LocalIPv6); err != nil {
+			return nil, joinStackInit(err)
+		}
+		gStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: tcpNetstackNIC})
 	}
 	gStack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: tcpNetstackNIC})
-	gStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: tcpNetstackNIC})
 	if err := gStack.SetSpoofing(tcpNetstackNIC, true); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	if err := gStack.SetPromiscuousMode(tcpNetstackNIC, true); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	sackOpt := tcpip.TCPSACKEnabled(true)
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	modRxOpt := tcpip.TCPModerateReceiveBufferOption(true)
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &modRxOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	ccOpt := tcpip.CongestionControlOption("cubic")
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &ccOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	nodelayOpt := tcpip.TCPDelayEnabled(false)
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &nodelayOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	if runtime.GOOS == "windows" {
 		tcpRecoveryOpt := tcpip.TCPRecovery(0)
 		if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRecoveryOpt); err != nil {
-			return nil, joinStackInit( gonet.TranslateNetstackError(err))
+			return nil, joinStackInit(gonet.TranslateNetstackError(err))
 		}
 	}
 	tcpRXBufOpt := tcpip.TCPReceiveBufferSizeRangeOption{
@@ -185,7 +185,7 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 		Max:     8 << 20,
 	}
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpRXBufOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 	tcpTXBufOpt := tcpip.TCPSendBufferSizeRangeOption{
 		Min:     tcp.MinBufferSize,
@@ -193,7 +193,7 @@ func NewNetstack(_ context.Context, session PacketSession, opts NetstackOptions)
 		Max:     6 << 20,
 	}
 	if err := gStack.SetTransportProtocolOption(tcp.ProtocolNumber, &tcpTXBufOpt); err != nil {
-		return nil, joinStackInit( gonet.TranslateNetstackError(err))
+		return nil, joinStackInit(gonet.TranslateNetstackError(err))
 	}
 
 	s := &Netstack{
@@ -252,11 +252,15 @@ func (s *Netstack) ReconcileLocalFromAssignedPrefixes(prefixes []netip.Prefix) {
 		s.installedV4 = wantV4
 	}
 	if wantV6.Is6() && !wantV6.Is4In6() && wantV6 != s.installedV6 {
+		firstV6 := !s.installedV6.IsValid()
 		if err := addStackAddress(s.gStack, int(tcpNetstackNIC), wantV6); err != nil {
 			low := strings.ToLower(err.Error())
 			if !strings.Contains(low, "duplicate") && !strings.Contains(low, "already") {
 				return
 			}
+		}
+		if firstV6 {
+			s.gStack.AddRoute(tcpip.Route{Destination: header.IPv6EmptySubnet, NIC: tcpNetstackNIC})
 		}
 		if s.installedV6.Is6() && !s.installedV6.Is4In6() && s.installedV6 != wantV6 && syntheticConnectIPPlaceholder(s.installedV6) {
 			_ = s.gStack.RemoveAddress(tcpNetstackNIC, tcpip.AddrFrom16(s.installedV6.As16()))

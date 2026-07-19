@@ -30,9 +30,8 @@ func (Factory) New(ctx context.Context, session PacketSession, boot Bootstrap) (
 // NewFromBootstrap builds the live CONNECT-IP TCP netstack with optional egress hooks.
 func NewFromBootstrap(ctx context.Context, session PacketSession, boot Bootstrap, extra NetstackOptions) (*Netstack, error) {
 	defaultV4 := netip.MustParseAddr("198.18.0.1")
-	defaultV6 := netip.MustParseAddr("fd00::1")
 	localV4 := defaultV4
-	localV6 := defaultV6
+	var localV6 netip.Addr // P2-9: no synthetic fd00::1; only ASSIGN/profile v6 (WARP)
 	mtu := defaultDatagramCeilingMax()
 	ceilingMax := boot.DatagramCeilingMax
 	if ceilingMax <= 0 {
