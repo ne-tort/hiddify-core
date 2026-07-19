@@ -119,8 +119,8 @@ func (s *coreSession) connectIPIngressPlane() *cip.Ingress {
 	return s.connectIPPlane().Ingress()
 }
 
-func (s *coreSession) registerUDPIngressSubscriber() *udpIngressSubscriber {
-	sub := s.connectIPIngressPlane().RegisterUDPSubscriber()
+func (s *coreSession) registerUDPIngressSubscriber(localPort uint16) *udpIngressSubscriber {
+	sub := s.connectIPIngressPlane().RegisterUDPSubscriber(localPort)
 	s.maybeStartConnectIPIngress()
 	return sub
 }

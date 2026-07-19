@@ -12,6 +12,7 @@ var (
 
 	IPv4HeaderIndicatesFragmentation  = cipframe.IPv4HeaderIndicatesFragmentation
 	ParseIPv4UDPPacketOffsets         = cipframe.ParseIPv4UDPPacketOffsets
+	IPv4UDPBridgeDstPort              = cipframe.IPv4UDPBridgeDstPort
 	ParseIPv4UDPPacket                = cipframe.ParseIPv4UDPPacket
 	BuildIPv4UDPPacket                = cipframe.BuildIPv4UDPPacket
 	BuildIPv4UDPPacketInplace         = cipframe.BuildIPv4UDPPacketInplace

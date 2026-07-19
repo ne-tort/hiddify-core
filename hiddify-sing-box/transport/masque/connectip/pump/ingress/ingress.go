@@ -11,8 +11,10 @@ import (
 )
 
 // UDPIngressSubscriber receives cloned IPv4 UDP bridge packets from the shared ingress loop.
+// LocalPort is the demux key (IPv4 UDP destination port); 0 means legacy fan-out.
 type UDPIngressSubscriber struct {
-	Ch chan []byte
+	Ch        chan []byte
+	LocalPort uint16
 }
 
 const (
@@ -91,10 +93,12 @@ func ClassifyIPv4UDPBridgeCandidate(pkt []byte) (bridgeable bool, malformed bool
 	return true, false
 }
 
-// RegisterUDPSubscriber adds a UDP bridge consumer and starts ingress when needed.
-func (ing *Ingress) RegisterUDPSubscriber() *UDPIngressSubscriber {
+// RegisterUDPSubscriber adds a UDP bridge consumer for localPort (ephemeral bind).
+// localPort 0 keeps legacy fan-out behavior for ICMP / unmatched delivery.
+func (ing *Ingress) RegisterUDPSubscriber(localPort uint16) *UDPIngressSubscriber {
 	sub := &UDPIngressSubscriber{
-		Ch: make(chan []byte, UDPDeliverQueueDepth),
+		Ch:        make(chan []byte, UDPDeliverQueueDepth),
+		LocalPort: localPort,
 	}
 	ing.subsMu.Lock()
 	ing.subscribers = append(ing.subscribers, sub)
@@ -268,23 +272,30 @@ func (ing *Ingress) PreTCPBuffered() int {
 	return len(ing.preTCPBuf)
 }
 
-// DeliverIPv4UDPBridged clones pkt to all UDP bridge subscribers.
+// DeliverIPv4UDPBridged routes pkt to UDP bridge subscribers matching destination port.
+// Non-UDP frames (e.g. ICMP port-unreachable) fan-out to all subscribers.
 func (ing *Ingress) DeliverIPv4UDPBridged(pkt []byte) bool {
+	dstPort, hasDst := cipframe.IPv4UDPBridgeDstPort(pkt)
 	dupBase := bytes.Clone(pkt)
 	ing.subsMu.Lock()
 	defer ing.subsMu.Unlock()
 	if len(ing.subscribers) == 0 {
 		return false
 	}
+	delivered := false
 	for _, sub := range ing.subscribers {
+		if hasDst && sub.LocalPort != 0 && sub.LocalPort != dstPort {
+			continue
+		}
 		dup := bytes.Clone(dupBase)
 		select {
 		case sub.Ch <- dup:
+			delivered = true
 		default:
 			ing.host.IngressEngineDrop("ingress_udp_queue_full")
 		}
 	}
-	return true
+	return delivered
 }
 
 func (ing *Ingress) dispatchIngressFrame(pkt []byte) {

@@ -45,3 +45,14 @@ func TestGATEConnectIPMidSessionMultiflowRecycle(t *testing.T) {
 func TestGATEConnectIPMidSessionMultiflowRecycleH2(t *testing.T) {
 	inttest.RunGATEConnectIPMidSessionMultiflowRecycleH2(t)
 }
+
+// TestGATEConnectIPMixedTCPUDPManyFlow is P3-3 / F3-G2:
+// sticky TCP bulk + N UDP microflows on one plane; latch=false.
+func TestGATEConnectIPMixedTCPUDPManyFlow(t *testing.T) {
+	inttest.RunGATEConnectIPMixedTCPUDPManyFlow(t)
+}
+
+// TestGATEConnectIPMixedTCPUDPManyFlowH2 is P3-3 H2 smoke of mixed TCP+UDP.
+func TestGATEConnectIPMixedTCPUDPManyFlowH2(t *testing.T) {
+	inttest.RunGATEConnectIPMixedTCPUDPManyFlowH2(t)
+}

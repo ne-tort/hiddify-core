@@ -133,7 +133,7 @@ func testGATECMIngressSessionCloseMidBulkNoLeak(t *testing.T) {
 		IPConn:  ps.Conn(),
 	})
 	cs.ipIngressPacketReader.Store(ps)
-	sub := cs.registerUDPIngressSubscriber()
+	sub := cs.registerUDPIngressSubscriber(53000)
 	defer cs.unregisterUDPIngressSubscriber(sub)
 
 	stopBulk := make(chan struct{})

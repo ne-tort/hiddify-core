@@ -60,6 +60,10 @@ func TestConnectIPUDPPacketConnWriteTo(t *testing.T) {
 	if dstPort != 5601 {
 		t.Fatalf("unexpected destination port: %d", dstPort)
 	}
+	srcPort := binary.BigEndian.Uint16(rec.lastWrite[20:22])
+	if srcPort != uint16(conn.LocalAddr().(*net.UDPAddr).Port) {
+		t.Fatalf("src port %d != LocalAddr %d", srcPort, conn.LocalAddr().(*net.UDPAddr).Port)
+	}
 }
 
 func TestConnectIPUDPPacketConnWriteToRejectsIPv6Destination(t *testing.T) {
@@ -234,7 +238,8 @@ func TestNewUDPPacketConnPrefixInit(t *testing.T) {
 		Session: &recordingIPPacketSession{},
 		LocalV4: netip.MustParseAddr("198.18.0.42"),
 	})
-	if conn.LocalAddr().String() != "198.18.0.42:53000" {
-		t.Fatalf("unexpected local addr: %s", conn.LocalAddr())
+	la, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || la.IP.String() != "198.18.0.42" || la.Port < 49152 {
+		t.Fatalf("unexpected local addr: %s (want 198.18.0.42:ephemeral)", conn.LocalAddr())
 	}
 }

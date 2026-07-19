@@ -55,6 +55,21 @@ func ParseIPv4UDPPacketOffsets(packet []byte) (payloadOff int, payloadLen int, s
 	return udpPayloadStart, payloadEnd - udpPayloadStart, srcAddr, srcPort, nil
 }
 
+// IPv4UDPBridgeDstPort returns the UDP destination port for an IPv4/UDP frame (demux key).
+func IPv4UDPBridgeDstPort(packet []byte) (uint16, bool) {
+	if len(packet) < 28 {
+		return 0, false
+	}
+	if packet[0]>>4 != 4 || packet[9] != 17 {
+		return 0, false
+	}
+	ihl := int(packet[0]&0x0f) * 4
+	if ihl < 20 || len(packet) < ihl+4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint16(packet[ihl+2 : ihl+4]), true
+}
+
 // ParseIPv4UDPPacket extracts the UDP payload and source endpoint from a full IPv4/UDP frame.
 func ParseIPv4UDPPacket(packet []byte) (payload []byte, src netip.Addr, srcPort uint16, err error) {
 	off, ln, addr, sport, err := ParseIPv4UDPPacketOffsets(packet)

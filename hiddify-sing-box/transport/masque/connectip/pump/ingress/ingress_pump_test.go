@@ -52,7 +52,7 @@ func (h *symmetricPumpTestHost) IngressSessionReset(string)               {}
 func TestIngressMaybeStartUsesSymmetricRunTunnel(t *testing.T) {
 	host := &symmetricPumpTestHost{pktCh: make(chan []byte, 4)}
 	ing := New(host)
-	sub := ing.RegisterUDPSubscriber()
+	sub := ing.RegisterUDPSubscriber(53000)
 	defer ing.UnregisterUDPSubscriber(sub)
 
 	ing.MaybeStart(false)

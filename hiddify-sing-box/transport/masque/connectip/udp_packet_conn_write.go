@@ -24,7 +24,12 @@ func (c *UDPPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	src4 := c.localV4.As4()
 	dst4 := [4]byte{ip4[0], ip4[1], ip4[2], ip4[3]}
 	dstPort := uint16(udpAddr.Port)
-	headerTemplate := NewIPv4UDPHeaderTemplate(src4, defaultUDPSrcPort, dst4, dstPort)
+	srcPort := uint16(c.localBind.Port)
+	if srcPort == 0 {
+		srcPort = nextUDPBridgeLocalPort()
+		c.localBind.Port = int(srcPort)
+	}
+	headerTemplate := NewIPv4UDPHeaderTemplate(src4, srcPort, dst4, dstPort)
 
 	bufPtr := udpWriteBufPool.Get().(*[]byte)
 	defer func() {

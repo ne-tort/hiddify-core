@@ -13,8 +13,8 @@ type udpPacketConnHost struct {
 	s *coreSession
 }
 
-func (h udpPacketConnHost) RegisterUDPIngressSubscriber() *mcip.UDPIngressSubscriber {
-	return h.s.registerUDPIngressSubscriber()
+func (h udpPacketConnHost) RegisterUDPIngressSubscriber(localPort uint16) *mcip.UDPIngressSubscriber {
+	return h.s.registerUDPIngressSubscriber(localPort)
 }
 
 func (h udpPacketConnHost) UnregisterUDPIngressSubscriber(sub *mcip.UDPIngressSubscriber) {

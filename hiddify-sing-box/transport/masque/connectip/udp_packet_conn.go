@@ -16,9 +16,17 @@ const (
 	// DefaultUDPWriteHardCap is the max application UDP payload per IPv4 datagram before WritePacket.
 	DefaultUDPWriteHardCap = 1152
 
-	defaultUDPLocalBindPort = 53000
-	defaultUDPSrcPort       = 53000
+	udpBridgeEphemeralBase = 49152
+	udpBridgeEphemeralSpan = 16383 // 49152..65534
 )
+
+var udpBridgeEphemeralSeq atomic.Uint32
+
+// nextUDPBridgeLocalPort allocates a unique UDP source/bind port for multi-flow demux.
+func nextUDPBridgeLocalPort() uint16 {
+	n := udpBridgeEphemeralSeq.Add(1)
+	return uint16(udpBridgeEphemeralBase + int(n-1)%udpBridgeEphemeralSpan)
+}
 
 var udpWriteBufPool = sync.Pool{
 	New: func() any {
@@ -29,7 +37,7 @@ var udpWriteBufPool = sync.Pool{
 
 // UDPPacketConnHost wires CONNECT-IP ingress subscribers for bridged UDP reads.
 type UDPPacketConnHost interface {
-	RegisterUDPIngressSubscriber() *UDPIngressSubscriber
+	RegisterUDPIngressSubscriber(localPort uint16) *UDPIngressSubscriber
 	UnregisterUDPIngressSubscriber(sub *UDPIngressSubscriber)
 }
 
@@ -108,18 +116,19 @@ func NewUDPPacketConn(cfg UDPPacketConnConfig) net.PacketConn {
 	obsEffectiveUDPPayload(currentPayload, "session_init")
 	l4 := localV4.As4()
 	localIP := net.IPv4(l4[0], l4[1], l4[2], l4[3])
+	localPort := nextUDPBridgeLocalPort()
 	pc := &UDPPacketConn{
 		session:         cfg.Session,
 		host:            cfg.Host,
 		localV4:         localV4,
-		localBind:       &net.UDPAddr{IP: localIP, Port: defaultUDPLocalBindPort},
+		localBind:       &net.UDPAddr{IP: localIP, Port: int(localPort)},
 		pmtuState:       pmtuState,
 		readScratchAddr: net.UDPAddr{IP: make(net.IP, 0, 16)},
 		icmpNotify:      make(chan error, 4),
 		icmpWake:        make(chan struct{}, 1),
 	}
 	if cfg.Host != nil {
-		pc.ingressSub = cfg.Host.RegisterUDPIngressSubscriber()
+		pc.ingressSub = cfg.Host.RegisterUDPIngressSubscriber(localPort)
 	}
 	return pc
 }

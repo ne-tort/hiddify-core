@@ -14,9 +14,9 @@ func TestDeliverIPv4UDPBridgedIngress(t *testing.T) {
 	host := &ingressTestHost{}
 	ing := New(host)
 
-	sub1 := ing.RegisterUDPSubscriber()
+	sub1 := ing.RegisterUDPSubscriber(53000)
 	defer ing.UnregisterUDPSubscriber(sub1)
-	sub2 := ing.RegisterUDPSubscriber()
+	sub2 := ing.RegisterUDPSubscriber(53001)
 	defer ing.UnregisterUDPSubscriber(sub2)
 
 	src := netip.MustParseAddr("10.200.0.2")
@@ -29,15 +29,18 @@ func TestDeliverIPv4UDPBridgedIngress(t *testing.T) {
 	if ok := ing.DeliverIPv4UDPBridged(pkt); !ok {
 		t.Fatal("expected deliver with subscribers")
 	}
-	for i, sub := range []*UDPIngressSubscriber{sub1, sub2} {
-		select {
-		case got := <-sub.Ch:
-			if len(got) != len(pkt) {
-				t.Fatalf("subscriber %d: len got=%d want=%d", i, len(got), len(pkt))
-			}
-		default:
-			t.Fatalf("subscriber %d: missing packet", i)
+	select {
+	case got := <-sub1.Ch:
+		if len(got) != len(pkt) {
+			t.Fatalf("subscriber 1: len got=%d want=%d", len(got), len(pkt))
 		}
+	default:
+		t.Fatal("subscriber 1: missing packet (dst port 53000)")
+	}
+	select {
+	case <-sub2.Ch:
+		t.Fatal("subscriber 2: unexpected packet for unmatched LocalPort 53001")
+	default:
 	}
 }
 
