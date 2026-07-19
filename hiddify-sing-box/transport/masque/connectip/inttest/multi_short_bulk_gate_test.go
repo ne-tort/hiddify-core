@@ -23,3 +23,14 @@ func TestGATEConnectIPMultiShortTCPBulkNoRecycleLatchH2(t *testing.T) {
 func TestGATEConnectIPDualFlowIperfRControlH2(t *testing.T) {
 	inttest.RunGATEConnectIPDualFlowIperfRControlH2(t)
 }
+
+// TestGATEConnectIPTCPConnectCloseChurn is P2-12 / F3-T5:
+// sequential TCP dial/close generations on one plane; sticky bulk survives; latch=false.
+func TestGATEConnectIPTCPConnectCloseChurn(t *testing.T) {
+	inttest.RunGATEConnectIPTCPConnectCloseChurn(t)
+}
+
+// TestGATEConnectIPTCPConnectCloseChurnH2 is P2-12 H2 smoke of sequential TCP churn.
+func TestGATEConnectIPTCPConnectCloseChurnH2(t *testing.T) {
+	inttest.RunGATEConnectIPTCPConnectCloseChurnH2(t)
+}
