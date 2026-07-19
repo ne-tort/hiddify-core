@@ -69,7 +69,15 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	parseR := host.RequestForParse(r, ipTemplate, host.RelaxAuthority(host.Options, host.TemplateField))
+	// RequestForParse / RelaxAuthority are optional (nil on prod MuxHost); match UDP mux nil-safety.
+	parseR := r
+	if host.RequestForParse != nil {
+		relax := false
+		if host.RelaxAuthority != nil {
+			relax = host.RelaxAuthority(host.Options, host.TemplateField)
+		}
+		parseR = host.RequestForParse(r, ipTemplate, relax)
+	}
 	req, err := connectipgo.ParseRequest(parseR, ipTemplate)
 	if err != nil {
 		status := h.Hooks.RequestErrorHTTPStatus(err)
