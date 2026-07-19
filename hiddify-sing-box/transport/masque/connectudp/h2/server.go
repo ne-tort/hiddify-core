@@ -24,8 +24,9 @@ const (
 const H2DownlinkBulkFlushBytes = H2DownlinkPendingGrow
 
 // H2ResponseWriter writes DATAGRAM capsules on the CONNECT-UDP response body.
-// Bidi (approach A): immediate Write per UDP datagram. Append/FlushPending remain for tests
-// that exercise fountain buffering; flush never holds mu across blocking http2 Write.
+// Prod S2C: Append + FlushPending per onward UDP RX batch (Fountain). Immediate
+// WriteUDPPayloadAsCapsules remains for ICMP / tests. Flush never holds mu across
+// blocking http2 Write.
 type H2ResponseWriter struct {
 	http.ResponseWriter
 	mu                sync.Mutex
@@ -40,12 +41,17 @@ func (w *H2ResponseWriter) WriteUDPPayloadAsCapsules(udpPayload []byte) error {
 	w.mu.Lock()
 	drain := w.takePendingLocked()
 	w.mu.Unlock()
+	wireBytes := len(drain) + h2c.UDPPayloadWireLen(udpPayload)
 	if len(drain) > 0 {
 		if _, err := h2c.WriteAll(w.ResponseWriter, drain); err != nil {
 			return err
 		}
 	}
-	return h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload)
+	if err := h2c.WriteDatagramCapsule(w.ResponseWriter, udpPayload); err != nil {
+		return err
+	}
+	cudprelay.RecordS2CFlush(wireBytes)
+	return nil
 }
 
 // AppendUDPPayloadAsCapsules appends RFC9297 wire only. Caller must FlushPending after a batch.
@@ -90,6 +96,7 @@ func (w *H2ResponseWriter) FlushPending() error {
 		}
 	}
 	h2c.FlushResponse(w.ResponseWriter)
+	cudprelay.RecordS2CFlush(len(wire))
 	return nil
 }
 
@@ -147,8 +154,8 @@ func ServeH2(w http.ResponseWriter, r *http.Request, conn *net.UDPConn) error {
 		case <-relayCtx.Done():
 			return
 		}
-		// h2o udp_on_read: 1 UDP datagram → 1 RFC9297 capsule → flush (no S2C batch).
-		downErr = cudprelay.RelayH2ConnectDownlinkImmediate(relayCtx, conn, H2ServerUDPReadBuf, downlinkW)
+		// Encode 1 UDP → 1 RFC9297 capsule; Flush once per onward RX batch (not per MTU).
+		downErr = cudprelay.RelayH2ConnectDownlinkFountain(relayCtx, conn, H2ServerUDPReadBuf, downlinkW)
 	}()
 	wg.Wait()
 	joined := errors.Join(upErr, downErr)

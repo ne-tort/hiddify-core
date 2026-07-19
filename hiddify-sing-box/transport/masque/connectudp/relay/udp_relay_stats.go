@@ -34,6 +34,9 @@ type UDPRelayStatsSnapshot struct {
 	S2CBatchReads   uint64
 	S2CBatchPkts    uint64
 	S2CSendSpins    uint64
+	// H1 wire-policy: ResponseBody Flush count and wire bytes flushed (Immediate vs Fountain).
+	S2CFlushCount uint64
+	S2CFlushBytes uint64
 }
 
 type udpRelayStats struct {
@@ -50,6 +53,8 @@ type udpRelayStats struct {
 	s2cBatchReads    atomic.Uint64
 	s2cBatchPkts     atomic.Uint64
 	s2cSendSpins     atomic.Uint64
+	s2cFlushCount    atomic.Uint64
+	s2cFlushBytes    atomic.Uint64
 }
 
 var globalUDPRelayStats udpRelayStats
@@ -110,6 +115,8 @@ func writeUDPRelayStatsFile(tag string) {
 		S2CDgramOut      uint64 `json:"s2c_dgram_out"`
 		S2CDropOversize  uint64 `json:"s2c_drop_oversize"`
 		S2CDropSend      uint64 `json:"s2c_drop_send"`
+		S2CFlushCount    uint64 `json:"s2c_flush_count"`
+		S2CFlushBytes    uint64 `json:"s2c_flush_bytes"`
 		TsUnixMs         int64  `json:"ts_unix_ms"`
 	}
 	d := dump{
@@ -123,6 +130,8 @@ func writeUDPRelayStatsFile(tag string) {
 		S2CDgramOut:      s.S2CDatagramOut,
 		S2CDropOversize:  s.S2CDropOversize,
 		S2CDropSend:      s.S2CDropSendFail,
+		S2CFlushCount:    s.S2CFlushCount,
+		S2CFlushBytes:    s.S2CFlushBytes,
 		TsUnixMs:         time.Now().UnixMilli(),
 	}
 	raw, err := json.Marshal(d)
@@ -153,6 +162,8 @@ func ResetUDPRelayStats() {
 	globalUDPRelayStats.s2cBatchReads.Store(0)
 	globalUDPRelayStats.s2cBatchPkts.Store(0)
 	globalUDPRelayStats.s2cSendSpins.Store(0)
+	globalUDPRelayStats.s2cFlushCount.Store(0)
+	globalUDPRelayStats.s2cFlushBytes.Store(0)
 }
 
 // SnapshotUDPRelayStats returns current relay counters.
@@ -171,6 +182,19 @@ func SnapshotUDPRelayStats() UDPRelayStatsSnapshot {
 		S2CBatchReads:    globalUDPRelayStats.s2cBatchReads.Load(),
 		S2CBatchPkts:     globalUDPRelayStats.s2cBatchPkts.Load(),
 		S2CSendSpins:     globalUDPRelayStats.s2cSendSpins.Load(),
+		S2CFlushCount:    globalUDPRelayStats.s2cFlushCount.Load(),
+		S2CFlushBytes:    globalUDPRelayStats.s2cFlushBytes.Load(),
+	}
+}
+
+// RecordS2CFlush records one ResponseBody Flush and wire bytes pushed (H1 attribution).
+func RecordS2CFlush(wireBytes int) {
+	if !relayStatsEnabled() || wireBytes < 0 {
+		return
+	}
+	globalUDPRelayStats.s2cFlushCount.Add(1)
+	if wireBytes > 0 {
+		globalUDPRelayStats.s2cFlushBytes.Add(uint64(wireBytes))
 	}
 }
 
@@ -221,6 +245,8 @@ func (d UDPRelayStatsSnapshot) Delta(before UDPRelayStatsSnapshot) UDPRelayStats
 		S2CBatchReads:    d.S2CBatchReads - before.S2CBatchReads,
 		S2CBatchPkts:     d.S2CBatchPkts - before.S2CBatchPkts,
 		S2CSendSpins:     d.S2CSendSpins - before.S2CSendSpins,
+		S2CFlushCount:    d.S2CFlushCount - before.S2CFlushCount,
+		S2CFlushBytes:    d.S2CFlushBytes - before.S2CFlushBytes,
 	}
 }
 
@@ -231,7 +257,7 @@ func LogUDPRelayStats(tag string) {
 	}
 	s := SnapshotUDPRelayStats()
 	log.Printf(
-		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d c2s_drop_udp_write=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d c2s_batch_flush=%d s2c_batch_reads=%d s2c_batch_pkts=%d s2c_send_spins=%d",
+		"RESULT_RELAY_STATS tag=%s c2s_in=%d c2s_udp_out=%d c2s_drop_malformed=%d c2s_drop_oversize=%d c2s_drop_udp_write=%d s2c_udp_in=%d s2c_dgram_out=%d s2c_drop_oversize=%d s2c_drop_send=%d c2s_batch_flush=%d s2c_batch_reads=%d s2c_batch_pkts=%d s2c_send_spins=%d s2c_flush_count=%d s2c_flush_bytes=%d",
 		tag,
 		s.C2SDatagramIn,
 		s.C2SUDPPayloadOut,
@@ -246,6 +272,8 @@ func LogUDPRelayStats(tag string) {
 		s.S2CBatchReads,
 		s.S2CBatchPkts,
 		s.S2CSendSpins,
+		s.S2CFlushCount,
+		s.S2CFlushBytes,
 	)
 }
 

@@ -35,13 +35,26 @@ func TestH2DataplaneHasNoBurstSendAPI(t *testing.T) {
 	}
 }
 
-// TestProdRelaySourceHasNoServerS2CNoWakeBatch ensures server relay stays upstream-shaped.
-func TestProdRelaySourceHasNoServerS2CNoWakeBatch(t *testing.T) {
+// TestProdRelaySourceHasServerS2CNoWakeBatch locks H3 S2C NoWake+Flush batch (H2 Fountain parity).
+func TestProdRelaySourceHasServerS2CNoWakeBatch(t *testing.T) {
 	t.Parallel()
-	combined := h3RelayProdSource + h3RelayC2SSource + h3RelayS2CSource
-	for _, needle := range []string{"SendDatagramNoWake", "s2cBatchAllowed", "FlushProxiedIPDatagramSend"} {
-		if strings.Contains(combined, needle) {
-			t.Fatalf("prod connectudp/relay/h3*.go must not contain %q", needle)
+	for _, needle := range []string{"SendDatagramNoWake", "FlushProxiedIPDatagramSend"} {
+		if !strings.Contains(h3RelayS2CSource, needle) {
+			t.Fatalf("h3_s2c.go must contain %q (S2C NoWake batch)", needle)
+		}
+	}
+	// Feature-flag soup / dual prod path — still forbidden.
+	if strings.Contains(h3RelayS2CSource, "s2cBatchAllowed") {
+		t.Fatal("h3_s2c.go must not contain s2cBatchAllowed feature flag")
+	}
+}
+
+// TestProdRelaySourceHasS2CSendBacklogSoftLimit locks C2S soft-limit parity on server S2C.
+func TestProdRelaySourceHasS2CSendBacklogSoftLimit(t *testing.T) {
+	t.Parallel()
+	for _, needle := range []string{"awaitH3S2CSendDrain", "h3S2CSendBacklogSoftLimit", "DatagramSendBacklog"} {
+		if !strings.Contains(h3RelayS2CSource, needle) {
+			t.Fatalf("h3_s2c.go must contain %q (S2C backlog soft-limit)", needle)
 		}
 	}
 }

@@ -25,7 +25,7 @@ type H2DownlinkCapsules interface {
 	WriteUDPPayloadAsCapsules(udpPayload []byte) error
 }
 
-// H2DownlinkAppender batches S2C capsules before HTTP/2 flush (asymmetric download fountain; not bidi echo).
+// H2DownlinkAppender batches S2C capsules before HTTP/2 flush (prod bidi: one Flush per RX batch).
 type H2DownlinkAppender interface {
 	H2DownlinkCapsules
 	AppendUDPPayloadAsCapsules(udpPayload []byte) error

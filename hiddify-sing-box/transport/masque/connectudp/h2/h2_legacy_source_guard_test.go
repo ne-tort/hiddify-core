@@ -25,17 +25,21 @@ var h2ServerSource string
 //go:embed handler_entry.go
 var h2HandlerEntrySource string
 
-// TestH2ServeBidiH2oImmediateRelay locks h2o 1:1 S2C + direct C2S on full-duplex ServeH2.
-func TestH2ServeBidiH2oImmediateRelay(t *testing.T) {
+// TestH2ServeBidiFountainRelay locks prod S2C batch flush + direct C2S on full-duplex ServeH2.
+// Capsule encode stays 1 UDP↔1 capsule; wire Flush is per RX batch (not per-capsule).
+func TestH2ServeBidiFountainRelay(t *testing.T) {
 	t.Parallel()
-	if !strings.Contains(h2ServerSource, "RelayH2ConnectDownlinkImmediate") {
-		t.Fatal("server.go: bidi ServeH2 must use RelayH2ConnectDownlinkImmediate (h2o udp_on_read)")
+	if !strings.Contains(h2ServerSource, "RelayH2ConnectDownlinkFountain") {
+		t.Fatal("server.go: bidi ServeH2 must use RelayH2ConnectDownlinkFountain (batch Flush)")
 	}
 	if !strings.Contains(h2ServerSource, "DirectH2OnwardUplink") {
 		t.Fatal("server.go: bidi ServeH2 must use DirectH2OnwardUplink (h2o udp_write_core)")
 	}
+	if strings.Contains(h2ServerSource, "RelayH2ConnectDownlinkImmediate(") {
+		t.Fatal("server.go: bidi ServeH2 must not call RelayH2ConnectDownlinkImmediate (per-capsule Flush)")
+	}
 	if strings.Contains(h2ServerSource, "RelayH2ConnectDownlink(relayCtx") {
-		t.Fatal("server.go: bidi must not use batch S2C downlink relay")
+		t.Fatal("server.go: bidi must not use legacy batch S2C downlink relay name")
 	}
 }
 
