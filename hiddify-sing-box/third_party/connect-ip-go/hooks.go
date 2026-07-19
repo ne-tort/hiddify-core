@@ -1,6 +1,9 @@
 package connectip
 
-// ProxiedIPOutboundHeadroom must match connectip.ProxiedIPDatagramHeadroom (netstack pool layout).
+// ProxiedIPOutboundHeadroom documents the RFC9297 InPlace headroom contract for pool
+// slices (quarter-stream varint + context ID slack). Not used in the vendor dataplane;
+// must match connectip netstack/pump ProxiedIPDatagramHeadroom and
+// http3.ProxiedIPDatagramHeadroom (locked by app TestP215HeadroomEquality).
 const ProxiedIPOutboundHeadroom = 16
 
 var outboundPayloadReleaser func([]byte)

@@ -20,8 +20,11 @@ import (
 
 const maxQuarterStreamID = 1<<60 - 1
 
-// proxiedIPDatagramHeadroom matches connect-ip netstack pool layout (varint + context prefix).
-const proxiedIPDatagramHeadroom = 16
+// ProxiedIPDatagramHeadroom is reserved before each outbound IP slice so InPlace
+// enqueue can prepend RFC9297 (quarter-stream varint + context ID) without a copy.
+// Must match connectip netstack/pump ProxiedIPDatagramHeadroom and
+// connect-ip-go.ProxiedIPOutboundHeadroom (locked by TestP215HeadroomEquality).
+const ProxiedIPDatagramHeadroom = 16
 
 // invalidStreamID is a stream ID that is invalid. The first valid stream ID in QUIC is 0.
 const invalidStreamID = quic.StreamID(-1)
@@ -397,18 +400,18 @@ func (c *rawConn) sendProxiedIPDatagramMaybeWake(streamID quic.StreamID, context
 }
 
 func proxiedIPFrameFromPool(ipPacket []byte, prefixLen int) (frame []byte, ok bool) {
-	if prefixLen <= 0 || prefixLen > proxiedIPDatagramHeadroom || len(ipPacket) == 0 {
+	if prefixLen <= 0 || prefixLen > ProxiedIPDatagramHeadroom || len(ipPacket) == 0 {
 		return nil, false
 	}
-	if cap(ipPacket) < len(ipPacket)+proxiedIPDatagramHeadroom {
+	if cap(ipPacket) < len(ipPacket)+ProxiedIPDatagramHeadroom {
 		return nil, false
 	}
 	ipStart := uintptr(unsafe.Pointer(unsafe.SliceData(ipPacket)))
-	basePtr := unsafe.Pointer(ipStart - uintptr(proxiedIPDatagramHeadroom))
-	fullCap := cap(ipPacket) + proxiedIPDatagramHeadroom
+	basePtr := unsafe.Pointer(ipStart - uintptr(ProxiedIPDatagramHeadroom))
+	fullCap := cap(ipPacket) + ProxiedIPDatagramHeadroom
 	full := unsafe.Slice((*byte)(basePtr), fullCap)
-	prefixStart := proxiedIPDatagramHeadroom - prefixLen
-	end := proxiedIPDatagramHeadroom + len(ipPacket)
+	prefixStart := ProxiedIPDatagramHeadroom - prefixLen
+	end := ProxiedIPDatagramHeadroom + len(ipPacket)
 	if end > fullCap {
 		return nil, false
 	}
@@ -423,7 +426,7 @@ func (c *rawConn) sendProxiedIPDatagramInPlaceMaybeWake(streamID quic.StreamID, 
 	quarterStreamID := uint64(streamID / 4)
 	varintLen := quicvarint.Len(quarterStreamID)
 	prefixLen := varintLen + len(contextPrefix)
-	if prefixLen > proxiedIPDatagramHeadroom {
+	if prefixLen > ProxiedIPDatagramHeadroom {
 		err := c.sendProxiedIPDatagramMaybeWake(streamID, contextPrefix, ipPacket, wake)
 		if release != nil {
 			release()

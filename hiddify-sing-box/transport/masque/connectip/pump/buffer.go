@@ -8,7 +8,8 @@ import (
 // DefaultTunnelMTU is the IP frame payload capacity for RunTunnel (usque NetBuffer parity).
 const DefaultTunnelMTU = 2048
 
-// ProxiedIPDatagramHeadroom matches connectip/netstack and quic-go/http3 proxied IP pools.
+// ProxiedIPDatagramHeadroom matches netstack/vendor/http3 RFC9297 InPlace headroom
+// (locked by TestP215HeadroomEquality).
 const ProxiedIPDatagramHeadroom = 16
 
 // NetBuffer is a sync.Pool of RFC9297 headroom-backed IP payload slices (PERF-1c).

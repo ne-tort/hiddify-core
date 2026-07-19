@@ -4,7 +4,8 @@ import "unsafe"
 
 // ProxiedIPDatagramHeadroom is reserved before each outbound IP slice in the netstack pool
 // so HTTP/3 can prepend RFC9297 (quarter-stream varint + context ID) without a second copy.
-// Must match connect-ip-go.ProxiedIPOutboundHeadroom and http3 proxiedIPDatagramHeadroom.
+// Must match connect-ip-go.ProxiedIPOutboundHeadroom, pump.ProxiedIPDatagramHeadroom, and
+// http3.ProxiedIPDatagramHeadroom (locked by TestP215HeadroomEquality).
 const ProxiedIPDatagramHeadroom = 16
 
 // IsOutboundPoolSlice reports whether ip is a netstack pool slice with RFC9297 headroom.
