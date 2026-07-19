@@ -23,8 +23,12 @@ func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
 	}
 }
 
-// TestH2ServerCapsuleStreamSendDatagramFlushesOnce verifies DATAGRAM capsule downlink flushes once per send.
+// TestH2ServerCapsuleStreamSendDatagramFlushesOnce verifies first DATAGRAM flushes
+// (idle path: lastFlush=0 forces flush even under prod EVERY=16).
 func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "")
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_IDLE_MS", "")
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
@@ -45,6 +49,9 @@ func TestH2ServerCapsuleStreamSendDatagramFlushesOnce(t *testing.T) {
 	_ = H2S2CFlushNsTotal()
 	if got := H2S2CDatagramBytesTotal(); got != uint64(len(payload)) {
 		t.Fatalf("datagram_bytes=%d want %d", got, len(payload))
+	}
+	if got := h2S2CFlushEvery(); got != defaultH2S2CFlushEvery {
+		t.Fatalf("prod default flush_every=%d want %d", got, defaultH2S2CFlushEvery)
 	}
 }
 
@@ -102,6 +109,18 @@ func TestH2ServerCapsuleStreamSendDatagramFlushEvery(t *testing.T) {
 	}
 	if got := H2S2CFlushSkipTotal(); got != 3 {
 		t.Fatalf("flush_skip=%d want 3", got)
+	}
+}
+
+func TestH2S2CFlushEveryProdDefault(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_NO_FLUSH", "0")
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "")
+	if got := h2S2CFlushEvery(); got != 16 {
+		t.Fatalf("flush_every=%d want 16 prod default", got)
+	}
+	t.Setenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY", "1")
+	if got := h2S2CFlushEvery(); got != 1 {
+		t.Fatalf("flush_every override=%d want 1", got)
 	}
 }
 

@@ -54,20 +54,27 @@ func h2S2CNoFlushEnabled() bool {
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }
 
+const (
+	// Prod S2C coalesce (P0-1 VERIFIED FLUSH; P0-2 prod default).
+	// Env MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY / _IDLE_MS override for A/B/rollback.
+	defaultH2S2CFlushEvery  = 16
+	defaultH2S2CFlushIdleMs = 1
+)
+
 // h2S2CFlushEvery returns coalesce period for S2C DATAGRAM Flush.
-// 1 = flush every datagram (default prod); N>1 = flush every N datagrams (P0-1 probe);
-// 0 when NO_FLUSH probe is on. Env is re-read (measure knobs only; prod leaves unset → 1).
+// Prod default = 16 (P0-2). Env MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY overrides;
+// NO_FLUSH probe → 0. Env re-read for measure A/B.
 func h2S2CFlushEvery() int {
 	if h2S2CNoFlushEnabled() {
 		return 0
 	}
 	v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_EVERY"))
 	if v == "" {
-		return 1
+		return defaultH2S2CFlushEvery
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n < 0 {
-		return 1
+		return defaultH2S2CFlushEvery
 	}
 	return n
 }
@@ -77,11 +84,11 @@ func h2S2CFlushEvery() int {
 func h2S2CFlushIdleNs() int64 {
 	v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_H2_S2C_FLUSH_IDLE_MS"))
 	if v == "" {
-		return int64(time.Millisecond) // 1ms default when coalesce is active
+		return int64(defaultH2S2CFlushIdleMs) * int64(time.Millisecond)
 	}
 	ms, err := strconv.Atoi(v)
 	if err != nil || ms < 0 {
-		return int64(time.Millisecond)
+		return int64(defaultH2S2CFlushIdleMs) * int64(time.Millisecond)
 	}
 	return int64(ms) * int64(time.Millisecond)
 }
