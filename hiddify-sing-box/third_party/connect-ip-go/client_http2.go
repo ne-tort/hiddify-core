@@ -68,6 +68,10 @@ func (*h2ExtendedConnectDuplexBody) Close() error {
 }
 
 // h2CapsulePipeStream carries CONNECT-IP control capsules and DATAGRAM capsules on one HTTP/2 stream (RFC 8441 + RFC 9297).
+//
+// P1-1 measure (2026-07-19): implementing proxiedIPDatagramCoalescedSender (NoWake buffer +
+// Flush to pipeW) regressed local H2 TCP UP ~308→83 while UDP@200 stayed OK. Left without
+// coalesced sender so Conn keeps composeDatagram+SendDatagram; H3 NoWake unchanged.
 type h2CapsulePipeStream struct {
 	body  io.ReadCloser
 	pipeW *io.PipeWriter
