@@ -299,14 +299,28 @@ func emptyAddressRequestCapsuleFrame() []byte {
 	return (&addressRequestCapsule{}).append(nil)
 }
 
-func TestReadFromStreamAbortsOnPeerEmptyAddressRequest(t *testing.T) {
+func TestReadFromStreamAbortsOnPeerZeroRequestID(t *testing.T) {
+	frame := addressRequestCapsuleFrame([]RequestedAddress{
+		{RequestID: 0, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	})
 	conn := &Conn{
-		str:                   &bytesStream{reader: bytes.NewReader(emptyAddressRequestCapsuleFrame())},
+		str:                   &bytesStream{reader: bytes.NewReader(frame)},
 		assignedAddressNotify: make(chan struct{}, 1),
 		closeChan:             make(chan struct{}),
 	}
 	err := conn.readFromStream()
-	require.ErrorIs(t, err, ErrPeerEmptyAddressRequest)
+	require.ErrorIs(t, err, ErrZeroAddressRequestID)
+}
+
+func TestRequestAddressesRejectsZeroRequestID(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn := newProxiedConn(&mockStream{}, false)
+	t.Cleanup(func() { _ = conn.Close() })
+	err := conn.RequestAddresses(ctx, []RequestedAddress{
+		{RequestID: 0, IPPrefix: netip.MustParsePrefix("0.0.0.0/32")},
+	})
+	require.ErrorIs(t, err, ErrZeroAddressRequestID)
 }
 
 func TestReadFromStreamIgnoresPeerEmptyAddressRequestWhenAllowed(t *testing.T) {

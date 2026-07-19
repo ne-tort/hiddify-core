@@ -218,6 +218,46 @@ func TestParseAddressRequestCapsuleInvalid(t *testing.T) {
 	})
 }
 
+func TestParseAddressRequestCapsuleRejectsZeroRequestID(t *testing.T) {
+	addr := []byte{0} // Request ID 0 (single-byte varint)
+	addr = append(addr, 4)
+	addr = append(addr, netip.AddrFrom4([4]byte{0, 0, 0, 0}).AsSlice()...)
+	addr = append(addr, 32)
+
+	data := quicvarint.Append(nil, uint64(capsuleTypeAddressRequest))
+	data = quicvarint.Append(data, uint64(len(addr)))
+	data = append(data, addr...)
+
+	r := bytes.NewReader(data)
+	typ, cr, err := http3.ParseCapsule(r)
+	require.NoError(t, err)
+	require.Equal(t, capsuleTypeAddressRequest, typ)
+	_, err = parseAddressRequestCapsule(cr)
+	require.ErrorIs(t, err, ErrZeroAddressRequestID)
+}
+
+func TestParseAddressAssignCapsuleAllowsZeroRequestID(t *testing.T) {
+	// Unprompted ADDRESS_ASSIGN (§4.7.1) SHALL use Request ID 0.
+	addr := []byte{0}
+	addr = append(addr, 4)
+	addr = append(addr, netip.AddrFrom4([4]byte{198, 18, 0, 1}).AsSlice()...)
+	addr = append(addr, 32)
+
+	data := quicvarint.Append(nil, uint64(capsuleTypeAddressAssign))
+	data = quicvarint.Append(data, uint64(len(addr)))
+	data = append(data, addr...)
+
+	r := bytes.NewReader(data)
+	typ, cr, err := http3.ParseCapsule(r)
+	require.NoError(t, err)
+	require.Equal(t, capsuleTypeAddressAssign, typ)
+	capsule, err := parseAddressAssignCapsule(cr)
+	require.NoError(t, err)
+	require.Equal(t, []AssignedAddress{
+		{RequestID: 0, IPPrefix: netip.MustParsePrefix("198.18.0.1/32")},
+	}, capsule.AssignedAddresses)
+}
+
 func TestParseRouteAdvertisementCapsule(t *testing.T) {
 	iprange1 := []byte{4}                                                          // IPv4
 	iprange1 = append(iprange1, netip.AddrFrom4([4]byte{1, 1, 1, 1}).AsSlice()...) // Start IP

@@ -11,6 +11,10 @@ import (
 	"github.com/quic-go/quic-go/quicvarint"
 )
 
+// ErrZeroAddressRequestID is returned when ADDRESS_REQUEST carries Request ID 0
+// (RFC 9484 §4.7.2 MUST NOT). Unprompted ADDRESS_ASSIGN still uses Request ID 0.
+var ErrZeroAddressRequestID = errors.New("connect-ip: ADDRESS_REQUEST Request ID MUST NOT be zero")
+
 const (
 	capsuleTypeHTTPDatagram       http3.CapsuleType = 0 // RFC 9297 DATAGRAM
 	capsuleTypeAddressAssign      http3.CapsuleType = 1
@@ -184,6 +188,11 @@ func parseAddressRequestCapsule(r io.Reader) (*addressRequestCapsule, error) {
 				break
 			}
 			return nil, err
+		}
+		// RFC 9484 §4.7.2: Request IDs in ADDRESS_REQUEST MUST NOT be zero.
+		// Unprompted ADDRESS_ASSIGN still uses Request ID 0 (§4.7.1) — do not check there.
+		if requestID == 0 {
+			return nil, ErrZeroAddressRequestID
 		}
 		requestedAddresses = append(requestedAddresses, RequestedAddress{RequestID: requestID, IPPrefix: prefix})
 	}

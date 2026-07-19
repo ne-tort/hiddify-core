@@ -749,6 +749,11 @@ func (c *Conn) AssignAddresses(ctx context.Context, prefixes []netip.Prefix) err
 // addresses to this endpoint. An empty slice sends a request with no requested prefixes
 // (peer-specific semantics; used for consumer WARP cf-connect-ip bootstrap).
 func (c *Conn) RequestAddresses(ctx context.Context, requested []RequestedAddress) error {
+	for _, req := range requested {
+		if req.RequestID == 0 {
+			return ErrZeroAddressRequestID
+		}
+	}
 	return c.sendCapsule(ctx, &addressRequestCapsule{RequestedAddresses: slices.Clone(requested)})
 }
 
