@@ -1,6 +1,8 @@
 package connectip
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -349,6 +351,11 @@ type Conn struct {
 
 	closeChan chan struct{}
 	closeErr  error
+
+	// H2 CONNECT-IP ingress: bulk body read + pending capsule parse (P6-D1).
+	h2IngressBR       *bufio.Reader
+	h2IngressPending  bytes.Buffer
+	h2IngressScratch  []byte
 
 	// allowEmptyPeerAddressRequest opts into ignoring peer ADDRESS_REQUEST capsules with zero
 	// requested addresses (Cloudflare cf-connect-ip). RFC 9484 §4.7.2 requires aborting otherwise.
@@ -965,6 +972,9 @@ func (c *Conn) readFromStream() error {
 		}
 		_ = c.str.Close()
 	}()
+	if c.datagramCapsuleIngress != nil {
+		return c.readFromStreamH2Bulk()
+	}
 	r := quicvarint.NewReader(c.str)
 	for {
 		t, cr, err := parseConnectIPStreamCapsule(r)
@@ -974,120 +984,86 @@ func (c *Conn) readFromStream() error {
 			}
 			return wrapConnectIPStreamDataplaneErr(c, err)
 		}
-		switch t {
-		case capsuleTypeHTTPDatagram:
-			payload, err := readRFC9297HTTPDatagramCapsulePayload(cr)
-			if err != nil {
-				return wrapConnectIPStreamDataplaneErr(c, err)
-			}
-			if c.datagramCapsuleIngress != nil {
-				c.ensureH2CapsuleIngressPrefetchDrainer()
-				select {
-				case <-c.closeChan:
-					return c.errAfterClose()
-				case c.datagramCapsuleIngress <- slices.Clone(payload):
-				default:
-					if !c.enqueueH2CapsuleIngressWithBackpressure(slices.Clone(payload)) {
-						logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h2 capsule ingress full)")
-					}
-				}
-				continue
-			}
-			if c.h3UnifiedDatagramIngress != nil {
-				select {
-				case <-c.closeChan:
-					return c.errAfterClose()
-				case c.h3UnifiedDatagramIngress <- slices.Clone(payload):
-				default:
-					if !c.enqueueH3UnifiedIngressWithBackpressure(slices.Clone(payload)) {
-						logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h3 unified ingress full)")
-					}
-				}
-				continue
-			}
-			continue
-		case capsuleTypeAddressAssign:
-			capsule, err := parseAddressAssignCapsule(cr)
-			if err != nil {
-				return wrapConnectIPStreamDataplaneErr(c, err)
-			}
-			prefixes := make([]netip.Prefix, 0, len(capsule.AssignedAddresses))
-			for _, assigned := range capsule.AssignedAddresses {
-				prefixes = append(prefixes, assigned.IPPrefix)
-			}
-			c.mu.Lock()
-			c.assignedAddresses = prefixes
-			c.publishRouteViewLocked()
-			c.mu.Unlock()
-			c.listenerMu.Lock()
-			fn := c.assignedPrefixesListener
-			c.listenerMu.Unlock()
-			if fn != nil {
-				fn(slices.Clone(prefixes))
-			}
-			// assignedAddressNotify is buf=1: a non-blocking send can drop an update if a stale token
-			// still occupies the channel (waiter not yet scheduled). Drain then block-send.
-			select {
-			case <-c.closeChan:
-				return c.errAfterClose()
-			default:
-			}
-			select {
-			case <-c.assignedAddressNotify:
-			default:
-			}
-			select {
-			case <-c.closeChan:
-				return c.errAfterClose()
-			case c.assignedAddressNotify <- struct{}{}:
-			}
-		case capsuleTypeAddressRequest:
-			capsule, err := parseAddressRequestCapsule(cr)
-			if err != nil {
-				return wrapConnectIPStreamDataplaneErr(c, err)
-			}
-			if len(capsule.RequestedAddresses) == 0 {
-				if c.allowEmptyPeerAddressRequest {
-					continue
-				}
-				return c.failClosed(ErrPeerEmptyAddressRequest)
-			}
-			// RFC 9484 §4.7.2: SHOULD assign + SHALL per-Request-ID ASSIGN/reject.
-			// Unscoped product echoes current peerAddresses by family (P2-2 / IP-M8).
-			c.enqueueAddressRequestResponse(capsule.RequestedAddresses)
-			continue
-		case capsuleTypeRouteAdvertisement:
-			capsule, err := parseRouteAdvertisementCapsule(cr)
-			if err != nil {
-				return wrapConnectIPStreamDataplaneErr(c, err)
-			}
-			c.mu.Lock()
-			c.availableRoutes = capsule.IPAddressRanges
-			c.mu.Unlock()
-			select {
-			case <-c.closeChan:
-				return c.errAfterClose()
-			default:
-			}
-			select {
-			case <-c.availableRoutesNotify:
-			default:
-			}
-			select {
-			case <-c.closeChan:
-				return c.errAfterClose()
-			case c.availableRoutesNotify <- struct{}{}:
-			}
-		default:
-			unknownCapsuleTotal.Add(1)
-			incrementUnknownCapsuleType(t)
-			if _, copyErr := io.Copy(io.Discard, cr); copyErr != nil {
-				return wrapConnectIPStreamDataplaneErr(c, copyErr)
-			}
-			log.Printf("connect-ip: ignoring unknown capsule type=%d", t)
-			continue
+		if err := c.dispatchStreamCapsule(t, cr); err != nil {
+			return wrapConnectIPStreamDataplaneErr(c, err)
 		}
 	}
+}
+
+func (c *Conn) dispatchAddressAssignCapsule(cr io.Reader) error {
+	capsule, err := parseAddressAssignCapsule(cr)
+	if err != nil {
+		return err
+	}
+	prefixes := make([]netip.Prefix, 0, len(capsule.AssignedAddresses))
+	for _, assigned := range capsule.AssignedAddresses {
+		prefixes = append(prefixes, assigned.IPPrefix)
+	}
+	c.mu.Lock()
+	c.assignedAddresses = prefixes
+	c.publishRouteViewLocked()
+	c.mu.Unlock()
+	c.listenerMu.Lock()
+	fn := c.assignedPrefixesListener
+	c.listenerMu.Unlock()
+	if fn != nil {
+		fn(slices.Clone(prefixes))
+	}
+	select {
+	case <-c.closeChan:
+		return c.errAfterClose()
+	default:
+	}
+	select {
+	case <-c.assignedAddressNotify:
+	default:
+	}
+	select {
+	case <-c.closeChan:
+		return c.errAfterClose()
+	case c.assignedAddressNotify <- struct{}{}:
+	}
+	return nil
+}
+
+func (c *Conn) dispatchAddressRequestCapsule(cr io.Reader) error {
+	capsule, err := parseAddressRequestCapsule(cr)
+	if err != nil {
+		return err
+	}
+	if len(capsule.RequestedAddresses) == 0 {
+		if c.allowEmptyPeerAddressRequest {
+			return nil
+		}
+		return c.failClosed(ErrPeerEmptyAddressRequest)
+	}
+	c.enqueueAddressRequestResponse(capsule.RequestedAddresses)
+	return nil
+}
+
+func (c *Conn) dispatchRouteAdvertisementCapsule(cr io.Reader) error {
+	capsule, err := parseRouteAdvertisementCapsule(cr)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.availableRoutes = capsule.IPAddressRanges
+	c.mu.Unlock()
+	select {
+	case <-c.closeChan:
+		return c.errAfterClose()
+	default:
+	}
+	select {
+	case <-c.availableRoutesNotify:
+	default:
+	}
+	select {
+	case <-c.closeChan:
+		return c.errAfterClose()
+	case c.availableRoutesNotify <- struct{}{}:
+	}
+	return nil
 }
 
 func (c *Conn) writeToStream() error {
@@ -1290,7 +1266,9 @@ func (c *Conn) ReadPacketWithContext(ctx context.Context, b []byte) (n int, err 
 			flushDropCounters()
 			return 0, fmt.Errorf("connect-ip: read buffer too short (need %d bytes)", len(payload))
 		}
+		deliverStart := time.Now()
 		outN := copy(b, payload)
+		recordH2ClientReadPacketDeliver(deliverStart)
 		if !fromPrefetch || !hasBufferedPrefetch {
 			c.extendPrefetchFromTry()
 		}

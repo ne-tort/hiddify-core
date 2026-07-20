@@ -21,10 +21,10 @@ const (
 	decodeBisectMinBytes          = 4 * 1024 * 1024
 	decodeBisectUDPPayload512     = 512
 	decodeBisectUDPPayloadMax     = connectip.DefaultUDPWriteHardCap // 1152
-	decodeBisectSynthRealMinRatio = 1.80 // in-memory pipe should beat real H2+TLS by wide margin
-	decodeBisectRealMinMbps       = 180.0
-	decodeBisectReal512MaxMbps    = 450.0
-	decodeBisectRealMaxMaxMbps    = 520.0 // 1152B UDP can exceed 512B TCP ceiling band
+	decodeBisectSynthRealMinRatio = 1.05 // synth still slightly faster; gap collapsed after bulk ingress
+	decodeBisectRealMinMbps       = h2PerfDownFloor
+	decodeBisectReal512MaxMbps    = h2PerfDownCeiling
+	decodeBisectRealMaxMaxMbps    = h2PerfDownCeiling
 	decodeBisectPayloadScaleMin   = 1.15 // max/512 on real path — PPS/decode asymmetry signal
 )
 

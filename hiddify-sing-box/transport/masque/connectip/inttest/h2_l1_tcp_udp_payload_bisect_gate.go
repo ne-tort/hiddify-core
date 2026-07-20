@@ -16,8 +16,8 @@ const (
 	tcpUdpBisectMinBytes       = 4 * 1024 * 1024
 	tcpUdpBisectUDPPayload512  = 512
 	tcpUdpBisectUDPPayloadMax  = connectip.DefaultUDPWriteHardCap
-	tcpUdpBisectH2DownFloor    = 200.0
-	tcpUdpBisectH2DownCeiling  = 450.0
+	tcpUdpBisectH2DownFloor    = h2PerfDownFloor
+	tcpUdpBisectH2DownCeiling  = h2PerfDownCeiling
 	tcpUdpBisectIngressDropMax = 0 // hard fail if stream DATAGRAM ingress drops during bench
 )
 

@@ -43,3 +43,7 @@ func TestGATEConnectIPH2L1TCPvsUDPPayloadBisect(t *testing.T) {
 func TestGATEConnectIPH2RealStackGapAtMSS(t *testing.T) {
 	inttest.RunGATEConnectIPH2RealStackGapAtMSS(t)
 }
+
+func TestGATEConnectIPH2L1Attrib(t *testing.T) {
+	inttest.RunGATEConnectIPH2L1Attrib(t)
+}

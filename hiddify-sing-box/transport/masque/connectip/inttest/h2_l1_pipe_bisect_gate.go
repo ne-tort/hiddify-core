@@ -13,9 +13,10 @@ import (
 const (
 	l1BisectBenchDur          = NativeSynthBenchDur
 	l1BisectMinBytes          = 8 * 1024 * 1024
-	l1BisectNativeL1MinRatio  = 0.85 // L1 should match native session (same netstack path)
-	l1BisectH2DownBandFloor   = 250.0
-	l1BisectH2DownBandCeiling = 420.0
+	l1BisectNativeL1MinRatio  = 0.85 // L1 should not lag native session (session adds tax)
+	l1BisectNativeL1MaxRatio  = 2.50 // L1 may exceed native (minimal stack vs full session overhead)
+	l1BisectH2DownBandFloor   = h2PerfDownFloor
+	l1BisectH2DownBandCeiling = h2PerfDownCeiling
 	l1BisectL1PipeMaxNsPerB   = 45.0 // arch connectIPL1PipeDownloadMaxNsPerB
 )
 
@@ -69,9 +70,9 @@ func logAndAnalyzeL1Bisect(t *testing.T, l1, native l1BisectSample) {
 		t.Fatalf("L1/native ratio %.2f < %.2f — session layer adds unexpected tax (l1=%.1f native=%.1f)",
 			ratio, l1BisectNativeL1MinRatio, l1.Mbps, native.Mbps)
 	}
-	if ratio > 1.15 {
-		t.Fatalf("L1/native ratio %.2f > 1.15 — L1 faster than session (harness bug? l1=%.1f native=%.1f)",
-			ratio, l1.Mbps, native.Mbps)
+	if ratio > l1BisectNativeL1MaxRatio {
+		t.Fatalf("L1/native ratio %.2f > %.2f — L1 implausibly faster than session (harness bug? l1=%.1f native=%.1f)",
+			ratio, l1BisectNativeL1MaxRatio, l1.Mbps, native.Mbps)
 	}
 
 	cpuCeil := masque.SynthCPUMbpsCeiling(l1BisectL1PipeMaxNsPerB)
@@ -83,8 +84,8 @@ func logAndAnalyzeL1Bisect(t *testing.T, l1, native l1BisectSample) {
 			l1.NsPerByte, l1BisectL1PipeMaxNsPerB, cpuCeil, l1.Mbps)
 	}
 
-	if ratio >= l1BisectNativeL1MinRatio && ratio <= 1.15 {
-		t.Logf("BISECT PASS: H2 ~%.0f Mbit/s ceiling is L1-pipe layer (L1≈native), not coreSession/TUN",
-			l1.Mbps)
+	if ratio >= l1BisectNativeL1MinRatio && ratio <= l1BisectNativeL1MaxRatio {
+		t.Logf("BISECT PASS: H2 ~%.0f Mbit/s at L1-pipe (L1/native=%.2f), not coreSession/TUN tax",
+			l1.Mbps, ratio)
 	}
 }

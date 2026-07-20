@@ -15,8 +15,8 @@ const (
 	connWireBisectMinBytes       = 4 * 1024 * 1024
 	connWireL1MinRatio           = 0.70 // conn-wire should track L1 if netstack is not the tax
 	connWireL1MaxRatio           = 1.30
-	connWireH2DownBandFloor      = 250.0 // L1 TCP download band
-	connWireH2DownBandCeiling    = 420.0
+	connWireH2DownBandFloor      = h2PerfDownFloor
+	connWireH2DownBandCeiling    = h2PerfDownCeiling
 	connWireUDPFountainMinMbps   = 180.0 // UDP fountain can sit slightly below TCP L1 under host jitter
 	connWireSynthMacroRefMbps    = 980.0 // connect-ip-go macro ConnReadPacket anchor (in-memory pipe)
 	connWireSynthGapLogRatio     = 0.55  // real H2 wire << synth => server/TLS/H2 path tax vs macro

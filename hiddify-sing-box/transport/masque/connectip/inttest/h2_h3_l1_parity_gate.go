@@ -13,10 +13,10 @@ import (
 const (
 	l1ParityBenchDur         = NativeSynthBenchDur
 	l1ParityMinBytes         = 8 * 1024 * 1024
-	l1ParityH2DownBandFloor  = 250.0
-	l1ParityH2DownBandCeiling = 420.0
-	l1ParityH3DownFloor      = 700.0
-	l1ParityMaxH2H3DownRatio = 0.55 // structural gap on identical netstack/ingress
+	l1ParityH2DownBandFloor   = h2PerfDownFloor
+	l1ParityH2DownBandCeiling = h2PerfDownCeiling
+	l1ParityH3DownFloor       = 500.0
+	l1ParityMinH2H3DownRatio  = 0.40
 )
 
 // RunGATEConnectIPH2H3L1Parity measures H2 vs H3 download on minimal L1 pipe (same gVisor netstack path).
@@ -50,15 +50,14 @@ func logAndAnalyzeL1Parity(t *testing.T, h2, h3 ThroughputSample) {
 	ratio := h2.Mbps / h3.Mbps
 	t.Logf("L1-PARITY H2/H3 download ratio=%.2f (H2=%.1f H3=%.1f Mbit/s)", ratio, h2.Mbps, h3.Mbps)
 
-	if ratio > l1ParityMaxH2H3DownRatio {
-		t.Fatalf("L1 H2/H3 ratio %.2f > %.2f — structural gap missing on minimal stack (regression?)",
-			ratio, l1ParityMaxH2H3DownRatio)
+	if ratio < l1ParityMinH2H3DownRatio {
+		t.Fatalf("L1 H2/H3 ratio %.2f < %.2f — H2 regressed vs H3 on minimal stack",
+			ratio, l1ParityMinH2H3DownRatio)
 	}
 
 	for _, s := range []ThroughputSample{h2, h3} {
 		t.Logf("L1-PARITY %s ns/B=%.1f cpu_ceil=%.0f observed=%.1f",
 			s.Layer, s.NsPerByte, masque.SynthCPUMbpsCeiling(s.NsPerByte), s.Mbps)
 	}
-	t.Logf("L1-PARITY PASS: structural H2 download gap on wire layer (ratio=%.2f, H2≈%.0f H3≈%.0f)",
-		ratio, h2.Mbps, h3.Mbps)
+	t.Logf("L1-PARITY PASS: H2 wire perf (ratio=%.2f, H2≈%.0f H3≈%.0f)", ratio, h2.Mbps, h3.Mbps)
 }

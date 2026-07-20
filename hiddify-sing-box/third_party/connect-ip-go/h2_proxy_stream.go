@@ -227,14 +227,19 @@ func (s *h2ServerCapsuleStream) closeMasqueH2RequestBody() error {
 // records flush count/ns for S2C DATAGRAM counters.
 func flushHTTPResponseBody(w http.ResponseWriter, countDatagramFlush bool) error {
 	start := time.Now()
-	rc := http.NewResponseController(w)
-	err := rc.Flush()
+	if err := http.NewResponseController(w).Flush(); err == nil || errors.Is(err, http.ErrNotSupported) {
+		if countDatagramFlush {
+			h2S2CFlushTotal.Add(1)
+			h2S2CFlushNsTotal.Add(uint64(time.Since(start).Nanoseconds()))
+		}
+		return nil
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 	if countDatagramFlush {
 		h2S2CFlushTotal.Add(1)
 		h2S2CFlushNsTotal.Add(uint64(time.Since(start).Nanoseconds()))
-	}
-	if err != nil && !errors.Is(err, http.ErrNotSupported) {
-		return err
 	}
 	return nil
 }

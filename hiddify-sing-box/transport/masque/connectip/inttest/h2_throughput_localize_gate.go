@@ -17,10 +17,10 @@ import (
 const (
 	h2LocalizeBenchDur      = NativeSynthBenchDur
 	h2LocalizeMinBytes      = 8 * 1024 * 1024 // 8 MiB in 2s => ~32 Mbit/s minimum sanity
-	h2LocalizeH2DownFloor   = 250.0           // in-proc/docker H2 download band floor
-	h2LocalizeH2DownCeiling = 420.0           // in-proc/docker H2 download band ceiling
-	h2LocalizeH3DownFloor     = 500.0           // H3 in-proc should be well above H2 on same host
-	h2LocalizeMaxH2H3DownRatio = 0.55          // H2/H3 download — structural gap localize (Docker ~0.35)
+	h2LocalizeH2DownFloor     = h2PerfDownFloor
+	h2LocalizeH2DownCeiling   = h2PerfDownCeiling
+	h2LocalizeH3DownFloor     = 500.0
+	h2LocalizeMinH2H3DownRatio = 0.45 // H2 must stay plausible vs H3 after bulk ingress
 	h2LocalizeCPUNsPerBOpen   = 25.0            // ns/B above this => CPU-saturated band (~320 Mbps ceiling)
 )
 
@@ -99,14 +99,14 @@ func logAndAnalyzeH2Localize(t *testing.T, h2, h3 h2LocalizeResult) {
 	t.Logf("LOCALIZE H2/H3 ratio upload=%.2f download=%.2f (H2 up=%.1f down=%.1f | H3 up=%.1f down=%.1f)",
 		ratioUp, ratioDown, h2.Upload.Mbps, h2.Download.Mbps, h3.Upload.Mbps, h3.Download.Mbps)
 
-	// Primary localize signal: H2 download band (~280–380 Docker parity on Windows/Linux in-proc).
+	// H2 download SLO band (post P6-D1 bulk ingress + forwarder coalesce).
 	if h2.Download.Mbps < h2LocalizeH2DownFloor || h2.Download.Mbps > h2LocalizeH2DownCeiling {
-		t.Fatalf("H2 download %.1f outside localize band [%.0f, %.0f] (dead path or gap closed?)",
+		t.Fatalf("H2 download %.1f outside perf band [%.0f, %.0f]",
 			h2.Download.Mbps, h2LocalizeH2DownFloor, h2LocalizeH2DownCeiling)
 	}
-	if ratioDown > h2LocalizeMaxH2H3DownRatio {
-		t.Fatalf("H2/H3 download ratio %.2f > %.2f — structural gap not reproduced (regression?)",
-			ratioDown, h2LocalizeMaxH2H3DownRatio)
+	if ratioDown < h2LocalizeMinH2H3DownRatio {
+		t.Fatalf("H2/H3 download ratio %.2f < %.2f — H2 regressed vs H3 wire",
+			ratioDown, h2LocalizeMinH2H3DownRatio)
 	}
 	if h3.Download.Mbps < h2LocalizeH3DownFloor {
 		t.Logf("WARN: H3 download %.1f below floor %.0f — host variance; H2 band still valid",
@@ -122,6 +122,6 @@ func logAndAnalyzeH2Localize(t *testing.T, h2, h3 h2LocalizeResult) {
 				s.Layer, s.Leg, s.NsPerByte, s.Mbps)
 		}
 	}
-	t.Logf("LOCALIZE PASS: H2 download ceiling reproduced (ratio=%.2f band=[%.0f,%.0f])",
+	t.Logf("LOCALIZE PASS: H2 download SLO band met (ratio=%.2f band=[%.0f,%.0f])",
 		ratioDown, h2LocalizeH2DownFloor, h2LocalizeH2DownCeiling)
 }

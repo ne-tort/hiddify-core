@@ -14,8 +14,8 @@ const (
 	s2cBisectOnwardDirectMinMbps = 500.0 // loopback TCP bulk sanity
 	s2cBisectConnOnwardMaxRatio  = 0.55    // conn-wire should be well below onward direct
 	s2cBisectClientServerMin   = 0.75    // client IP bytes vs server proxied IP bytes (ctx stripped)
-	s2cBisectH2DownBandFloor     = 200.0
-	s2cBisectH2DownBandCeiling   = 450.0
+	s2cBisectH2DownBandFloor     = h2PerfDownFloor
+	s2cBisectH2DownBandCeiling   = h2PerfDownCeiling
 	s2cContextIDWireBytes        = 1 // quicvarint(0) prefix on proxied payload
 )
 

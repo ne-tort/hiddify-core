@@ -5,9 +5,17 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"runtime"
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+)
+
+// P6-D1: coalesce downloadCh drain before one Fountain flush.
+const (
+	downloadBatchMaxPkts      = 32
+	downloadBatchCoalesceWait = 400 * time.Microsecond
+	downloadBatchMinWireBytes = 32 * 1024
 )
 
 func (f *packetForwarder) egressStopped() bool {
@@ -82,7 +90,12 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 
 func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
 	pkts := [][]byte{first}
-	for {
+	wireBytes := len(first)
+	if downloadBatchMaxPkts <= 1 {
+		return pkts
+	}
+	deadline := time.Now().Add(downloadBatchCoalesceWait)
+	for len(pkts) < downloadBatchMaxPkts && wireBytes < downloadBatchMinWireBytes {
 		select {
 		case pkt, ok := <-f.downloadCh:
 			if !ok {
@@ -90,10 +103,15 @@ func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
 			}
 			f.o.DownloadQueueMetrics.noteDequeued()
 			pkts = append(pkts, pkt)
+			wireBytes += len(pkt)
 		default:
-			return pkts
+			if time.Now().After(deadline) {
+				return pkts
+			}
+			runtime.Gosched()
 		}
 	}
+	return pkts
 }
 
 func (f *packetForwarder) sendDownloadBatch(pkts [][]byte) error {

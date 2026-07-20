@@ -12,8 +12,8 @@ const (
 	l1BidiBenchDur           = NativeSynthBenchDur
 	l1BidiMinBytes           = 8 * 1024 * 1024
 	l1BidiContentionMinRatio = 0.75 // duplex/alone below => bulk upload kills download
-	l1BidiH2AloneBandFloor   = 250.0
-	l1BidiH2AloneBandCeiling = 420.0
+	l1BidiH2AloneBandFloor   = h2PerfDownFloor
+	l1BidiH2AloneBandCeiling = h2PerfDownCeiling
 )
 
 type l1BidiLeg struct {

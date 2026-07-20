@@ -14,16 +14,16 @@ const (
 	realStackGapMinBytes         = 4 * 1024 * 1024
 	realStackGapSynthIP512       = 540  // matches UDP 512B IP diagnostic leg
 	realStackGapSynthIPMSS       = 1500 // Ethernet MSS IP frame (20+20+1460) — TCP bulk profile
-	realStackGapSynthRealMin     = 1.75 // in-mem MSS must exceed real TCP by wide margin
-	realStackGapSynthScaleMin    = 1.15 // synth scales with IP len (no fixed-cost wall in pipe)
-	realStackGapTCPBandFloor     = 250.0
-	realStackGapTCPBandCeiling   = 420.0
-	realStackGapByteNsPerBMin    = 18.0 // byte-tax band on real H2 (~370 Mbit/s)
-	realStackGapByteNsPerBMax    = 35.0
+	realStackGapSynthRealMin     = 1.00 // synth≈real at MSS after bulk ingress; gate guards regression only
+	realStackGapSynthScaleMin    = 1.15
+	realStackGapTCPBandFloor     = h2PerfDownFloor
+	realStackGapTCPBandCeiling   = h2PerfDownCeiling
+	realStackGapByteNsPerBMin    = 3.0
+	realStackGapByteNsPerBMax    = 12.0
 	realStackGapS2CContextBytes  = 1
 )
 
-// RunGATEConnectIPH2RealStackGapAtMSS proves the ~370 Mbit/s ceiling persists at MSS with synth still fast.
+// RunGATEConnectIPH2RealStackGapAtMSS proves real L1 H2 meets SLO at MSS with synth still faster.
 func RunGATEConnectIPH2RealStackGapAtMSS(t *testing.T) {
 	t.Helper()
 	synth512 := runSyntheticH2ReadPacketSample(t, realStackGapSynthIP512, realStackGapBenchDur)
@@ -83,9 +83,5 @@ func logAndAnalyzeRealStackGap(t *testing.T, synth512, synthMSS ThroughputSample
 			synthScale, realStackGapSynthScaleMin)
 	}
 
-	t.Logf("REAL-STACK OUT: prod payload/MSS tuning — TCP already at MSS; same ~%.0f Mbit/s ceiling", tcpSample.Mbps)
-	t.Logf("REAL-STACK IN: layers synth skips — TLS, HTTP/2 transport body read, server forwarder/S2C (synthMSS/real=%.2f)",
-		synthRealMSS)
-	t.Logf("REAL-STACK PASS: byte-tax ~%.0f Mbit/s at MSS; gap to synth is real-stack-only (not ReadPacket parse at MSS)",
-		tcpSample.Mbps)
+	t.Logf("REAL-STACK PASS: real H2 ~%.0f Mbit/s at MSS (synthMSS/real=%.2f)", tcpSample.Mbps, synthRealMSS)
 }
