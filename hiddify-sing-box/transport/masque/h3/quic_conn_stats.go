@@ -28,7 +28,9 @@ type QUICConnStatsSnapshot struct {
 	DeclaredLostApprox uint64  `json:"declared_lost_approx"`
 	LostPacketRatio    float64 `json:"lost_packet_ratio"` // PacketsLost / PacketsSent
 	MinRTTNs           int64   `json:"min_rtt_ns"`
+	LatestRTTNs        int64   `json:"latest_rtt_ns"`
 	SmoothedRTTNs      int64   `json:"smoothed_rtt_ns"`
+	MeanDeviationNs    int64   `json:"mean_deviation_ns"`
 	// Process-wide DATAGRAM drops *before* CONNECT-UDP relay c2s_in (AUDIT B2 / TASKS F0.4).
 	DatagramRcvQueueDrops         uint64 `json:"datagram_rcv_queue_drops"`
 	StreamDatagramQueueDrops      uint64 `json:"stream_datagram_queue_drops"`
@@ -50,7 +52,9 @@ type QUICConnSnapshot struct {
 	SpuriousPacketsLost uint64  `json:"spurious_packets_lost"`
 	LostPacketRatio     float64 `json:"lost_packet_ratio"`
 	MinRTTNs            int64   `json:"min_rtt_ns"`
+	LatestRTTNs         int64   `json:"latest_rtt_ns"`
 	SmoothedRTTNs       int64   `json:"smoothed_rtt_ns"`
+	MeanDeviationNs     int64   `json:"mean_deviation_ns"`
 }
 
 type trackedQUICConn struct {
@@ -94,7 +98,7 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 
 	alive := quicTrackedConns[:0]
 	var out QUICConnStatsSnapshot
-	var minRTT, smoothRTT int64
+	var minRTT, latestRTT, smoothRTT, meanDev int64
 	for _, t := range quicTrackedConns {
 		if t == nil || t.conn == nil {
 			continue
@@ -127,10 +131,24 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 				minRTT = snap.MinRTTNs
 			}
 		}
+		if st.LatestRTT > 0 {
+			snap.LatestRTTNs = st.LatestRTT.Nanoseconds()
+			// Prefer the largest latest sample across conns (load path, not quiet peer).
+			if snap.LatestRTTNs > latestRTT {
+				latestRTT = snap.LatestRTTNs
+			}
+		}
 		if st.SmoothedRTT > 0 {
 			snap.SmoothedRTTNs = st.SmoothedRTT.Nanoseconds()
-			if smoothRTT == 0 || snap.SmoothedRTTNs < smoothRTT {
+			// Prefer max SRTT — min hid client inflate when aggregating.
+			if snap.SmoothedRTTNs > smoothRTT {
 				smoothRTT = snap.SmoothedRTTNs
+			}
+		}
+		if st.MeanDeviation > 0 {
+			snap.MeanDeviationNs = st.MeanDeviation.Nanoseconds()
+			if snap.MeanDeviationNs > meanDev {
+				meanDev = snap.MeanDeviationNs
 			}
 		}
 		out.Conns = append(out.Conns, snap)
@@ -149,7 +167,9 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 		out.LostPacketRatio = float64(out.PacketsLost) / float64(out.PacketsSent)
 	}
 	out.MinRTTNs = minRTT
+	out.LatestRTTNs = latestRTT
 	out.SmoothedRTTNs = smoothRTT
+	out.MeanDeviationNs = meanDev
 	fillQUICDatagramQueueDrops(&out)
 	return out
 }
