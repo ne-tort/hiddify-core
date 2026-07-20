@@ -32,7 +32,6 @@ type packetForwarder struct {
 	planeStopOnce sync.Once
 
 	sMu      sync.Mutex
-	synMu    sync.Mutex
 	sessions map[tcp4Tuple]*tcpForwardSession
 
 	uMu         sync.Mutex

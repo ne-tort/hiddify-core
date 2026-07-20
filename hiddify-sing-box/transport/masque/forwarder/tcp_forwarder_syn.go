@@ -53,9 +53,8 @@ func (f *packetForwarder) addSession(flow tcp4Tuple, s *tcpForwardSession) {
 }
 
 func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc header.TCP, flow tcp4Tuple) {
-	f.synMu.Lock()
-	defer f.synMu.Unlock()
-
+	// Single packet reader owns handleSyn; sMu protects the session map.
+	// Backend Dial is async (P6-B1) so this returns without stalling ingress.
 	f.sMu.Lock()
 	if f.sessions != nil {
 		if existing := f.sessions[flow]; existing != nil {
