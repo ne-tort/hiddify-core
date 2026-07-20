@@ -67,3 +67,13 @@ func TestGATEConnectIPBenignHalfCloseMultiFlow(t *testing.T) {
 func TestGATEConnectIPBenignHalfCloseMultiFlowH2(t *testing.T) {
 	inttest.RunGATEConnectIPBenignHalfCloseMultiFlowH2(t)
 }
+
+// TestGATEConnectIPP4PlaneControlAlive is P6-B0: 4 bulk + 1 control on one H3 plane.
+func TestGATEConnectIPP4PlaneControlAlive(t *testing.T) {
+	inttest.RunGATEConnectIPP4PlaneControlAlive(t)
+}
+
+// TestGATEConnectIPP4PlaneControlAliveH2 is P6-B0 H2 counterpart.
+func TestGATEConnectIPP4PlaneControlAliveH2(t *testing.T) {
+	inttest.RunGATEConnectIPP4PlaneControlAliveH2(t)
+}

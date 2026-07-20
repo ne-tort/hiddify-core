@@ -101,6 +101,7 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 		clientMSS: mss,
 		tsOK:      synOpts.TS,
 		tsRecent:  synOpts.TSVal,
+		s2cWake:   make(chan struct{}, 1),
 	}
 	if synOpts.WS >= 0 {
 		shift := synOpts.WS
@@ -115,23 +116,33 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 	s.synAckOpts = buildSynAckTCPOptions(synOpts, s.tsSendNext)
 
 	// Session + SYN-ACK before backend dial: client ACK must not arrive while session is absent.
+	// P6-B1: do NOT Dial under the packet read loop / synMu — parallel SYNs (iperf -P≥4)
+	// blocked ingress for the duration of each backend dial and starved sibling handshakes.
 	s.add()
 	if err := s.sendSynAck(ctx); err != nil {
 		s.close()
 		return
 	}
+	s.ensureHandshakeIdleWatchdog(ctx)
 
+	go f.dialBackendForSession(ctx, s, dialAddr, irs)
+}
+
+// dialBackendForSession completes S2 host dial off the CONNECT-IP read path.
+func (f *packetForwarder) dialBackendForSession(ctx context.Context, s *tcpForwardSession, dialAddr string, irs uint32) {
 	remote, dialErr := f.o.Dialer.DialContext(ctx, "tcp", dialAddr)
 	if dialErr != nil {
 		s.close()
-		_ = f.sendTCPRST(flow, irs+1)
+		_ = f.sendTCPRST(s.flow, irs+1)
+		return
+	}
+	if s.closed.Load() {
+		_ = remote.Close()
 		return
 	}
 	tuneRemote(remote)
-
 	s.bindRemote(remote)
 	// S2C pump starts on first C2S payload (handleSegment), not on dial — iperf -R bulk before params races params.
-	s.ensureHandshakeIdleWatchdog(ctx)
 }
 
 func (f *packetForwarder) sendTCPRST(flow tcp4Tuple, ack uint32) error {

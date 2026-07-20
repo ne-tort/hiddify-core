@@ -243,6 +243,7 @@ func (s *tcpForwardSession) bindRemote(remote net.Conn) {
 	s.remote = remote
 	s.outbound = bufio.NewWriterSize(remote, remoteWriteBuf)
 	s.mu.Unlock()
+	s.signalS2CPump() // wake pump waiting for async dial (P6-B1)
 	s.flushPendingRemote(true)
 }
 
@@ -450,6 +451,24 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 	if s.s2cWake == nil {
 		s.s2cWake = make(chan struct{}, 1)
 	}
+	// P6-B1: backend dial is async after SYN-ACK; C2S may start the pump before bindRemote.
+	for {
+		s.mu.Lock()
+		remote := s.remote
+		s.mu.Unlock()
+		if remote != nil {
+			break
+		}
+		if s.closed.Load() || ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.s2cWake:
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
 	readSz := remoteReadBuf
 	if mss := int(s.clientMSS); mss > 0 {
 		if readSz < 32*mss {
@@ -471,8 +490,23 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			data = s.preClientS2C
 			s.preClientS2C = nil
 		} else {
-			_ = s.remote.SetReadDeadline(time.Now().Add(30 * time.Second))
-			n, err := s.remote.Read(buf)
+			s.mu.Lock()
+			remote := s.remote
+			s.mu.Unlock()
+			if remote == nil {
+				if s.closed.Load() || ctx.Err() != nil {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.s2cWake:
+				case <-time.After(2 * time.Millisecond):
+				}
+				continue
+			}
+			_ = remote.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := remote.Read(buf)
 			if n > 0 {
 				data = append([]byte(nil), buf[:n]...)
 			}
