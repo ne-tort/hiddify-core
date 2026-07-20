@@ -47,3 +47,15 @@ func TestGATEConnectIPH2RealStackGapAtMSS(t *testing.T) {
 func TestGATEConnectIPH2L1Attrib(t *testing.T) {
 	inttest.RunGATEConnectIPH2L1Attrib(t)
 }
+
+func TestGATEConnectIPH3L1Attrib(t *testing.T) {
+	inttest.RunGATEConnectIPH3L1Attrib(t)
+}
+
+func TestGATEConnectIPH3RealStackGapAtMSS(t *testing.T) {
+	inttest.RunGATEConnectIPH3RealStackGapAtMSS(t)
+}
+
+func TestGATEConnectIPH3L1ServerS2CBisect(t *testing.T) {
+	inttest.RunGATEConnectIPH3L1ServerS2CBisect(t)
+}

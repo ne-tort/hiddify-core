@@ -16,6 +16,8 @@ import (
 	"time"
 
 	connectipgo "github.com/quic-go/connect-ip-go"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/transport/masque"
 	"github.com/sagernet/sing-box/transport/masque/connectip"
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
@@ -129,6 +131,66 @@ func openConnectIPH2ConnWire(tb testing.TB) *connectIPConnWireStack {
 		Conn:              rawConn,
 		ProfileLocalIPv4:  NativeProfileLocalIPv4,
 		OverlayH2:         true,
+		WakeAfterDatagram: wake,
+	})
+
+	stack := &connectIPConnWireStack{
+		raw:    rawConn,
+		conn:   pktSess,
+		wake:   wake,
+		cancel: cancel,
+	}
+	tb.Cleanup(func() { stack.Close() })
+	return stack
+}
+
+func openConnectIPH3ConnWire(tb testing.TB) *connectIPConnWireStack {
+	tb.Helper()
+	proxyPort := StartNativeConnectIPH3Server(tb)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{http3.NextProtoH3},
+		ServerName:         "127.0.0.1",
+	}
+	quicCfg := masque.MasqueHTTPServerQUICConfig()
+	tr := &http3.Transport{
+		EnableDatagrams:    true,
+		DisableCompression: true,
+		TLSClientConfig:    tlsConf,
+		Dial: func(dialCtx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
+			if cfg == nil {
+				cfg = quicCfg
+			}
+			return quic.DialAddr(dialCtx, addr, tlsCfg, cfg)
+		},
+	}
+	tb.Cleanup(func() { tr.Close() })
+	target := fmt.Sprintf("127.0.0.1:%d", proxyPort)
+	quicConn, err := tr.Dial(ctx, target, tlsConf, quicCfg)
+	if err != nil {
+		cancel()
+		tb.Fatalf("h3 quic dial: %v", err)
+	}
+	template := mustConnectIPTemplate(tb, proxyPort)
+	rawConn, err := connectip.DialH3TunnelWithBootstrap(
+		ctx,
+		tr.NewClientConn(quicConn),
+		template,
+		connectip.H3DialParams{},
+		connectip.NewSessionBootstrapParams("", "", NativeProfileLocalIPv4, ""),
+	)
+	if err != nil {
+		cancel()
+		tb.Fatalf("h3 connect-ip dial: %v", err)
+	}
+
+	wake := func() { rawConn.FlushOutgoingDatagramSend() }
+	pktSess := connectip.NewClientPacketSessionFromParams(connectip.SessionPacketParams{
+		Conn:              rawConn,
+		ProfileLocalIPv4:  NativeProfileLocalIPv4,
+		OverlayH2:         false,
 		WakeAfterDatagram: wake,
 	})
 

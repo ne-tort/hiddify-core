@@ -118,6 +118,21 @@ func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
 	return err
 }
 
+// SendProxiedIPDatagram implements proxiedIPDatagramSender (wake path).
+func (s *h2CapsulePipeStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
+	return s.SendDatagram(composeProxiedIPDatagramPayload(contextPrefix, ipPacket))
+}
+
+// SendProxiedIPDatagramNoWake writes immediately on H2 C2S.
+// DOC LOCK (P1-1 / H4 reconfirm 2026-07-20): pendingWire batch → docker TUN UP ~400→~67.
+// FlushProxiedIPDatagramSend is a no-op; CoalescedSender is satisfied for Conn type assert.
+func (s *h2CapsulePipeStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	return s.SendProxiedIPDatagram(contextPrefix, ipPacket)
+}
+
+// FlushProxiedIPDatagramSend is a no-op on H2 client C2S (see SendProxiedIPDatagramNoWake).
+func (s *h2CapsulePipeStream) FlushProxiedIPDatagramSend() {}
+
 func (s *h2CapsulePipeStream) ReceiveDatagram(context.Context) ([]byte, error) {
 	return nil, errors.New("connect-ip: HTTP/2 capsule dataplane does not use stream ReceiveDatagram")
 }
