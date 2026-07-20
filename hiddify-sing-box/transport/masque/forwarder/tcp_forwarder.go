@@ -73,8 +73,8 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 		close(f.downloadStopped)
 		f.shutdownSessions()
 		<-egressDone
-		close(f.writeCh)
-		close(f.downloadCh)
+		// Do not close writeCh/downloadCh: pumps may still RTO-retransmit (P6-B2) and
+		// select{stopped|ch<-} races into "send on closed channel" if both are ready.
 		if o.LeaveConnOpenOnCancel && errors.Is(exitErr, context.Canceled) {
 			return
 		}

@@ -123,7 +123,7 @@ func (s *Netstack) sendLinkEndpointOutboundBatch() int {
 		if obsEventsEnabled() {
 			obsWriteDequeued()
 		}
-	payload := borrowOutboundPayload(len(outbound))
+		payload := borrowOutboundPayload(len(outbound))
 		copy(payload, outbound)
 		packet.DecRef()
 		if s.closed.Load() {
@@ -152,6 +152,9 @@ func (s *Netstack) sendLinkEndpointOutboundBatch() int {
 			sent++
 		}
 	}
+	// P6-B2: batch-cap exit used to leave coalesced ACK-only frames unsent (map GC = silent drop).
+	// Under sticky control + parallel dials this starved handshake/window ACKs for one flow.
+	sent += flushAllAcks()
 	return sent
 }
 

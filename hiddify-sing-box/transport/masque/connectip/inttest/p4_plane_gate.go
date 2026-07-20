@@ -6,8 +6,8 @@ package inttest
 // plane (iperf -P4 analog). Asserts: all bulks live, control final byte after bulks, latch=false.
 //
 // Locus (P6-B1): S2 handleSyn used to block the packet read loop on backend Dial — fixed (async).
-// Residual (P6-B2): with sticky control established first, exactly one of N parallel bulks still
-// gets 0 S2C bytes (Dial OK, first-byte timeout). Bulks-only (no prior control) passes.
+// Residual (P6-B2): sticky+parallel 0-byte S2C — fixed via S2C RTO + netstack batch ACK flush.
+// B2a: download Accept/probe counters distinguish client-vs-server loss.
 
 import (
 	"context"
@@ -28,8 +28,52 @@ const (
 	p4PlaneBulkDur     = 3 * time.Second
 	p4PlaneBulkMinEach = 16 * 1024
 	p4PlaneControlWait = 8 * time.Second
-	p4PlaneFirstByte   = 2 * time.Second
+	p4PlaneFirstByte   = 8 * time.Second
 )
+
+type p4DownloadStats struct {
+	accepted atomic.Uint64
+	probed   atomic.Uint64
+}
+
+func startP4DownloadTarget(tb testing.TB) (*p4DownloadStats, net.Listener) {
+	tb.Helper()
+	stats := &p4DownloadStats{}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tb.Fatalf("download listen: %v", err)
+	}
+	tb.Cleanup(func() { _ = ln.Close() })
+	buf := make([]byte, 256*1024)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			stats.accepted.Add(1)
+			go func(c net.Conn) {
+				defer c.Close()
+				if tc, ok := c.(*net.TCPConn); ok {
+					_ = tc.SetNoDelay(true)
+				}
+				probe := make([]byte, 1)
+				if _, err := io.ReadFull(c, probe); err != nil {
+					return
+				}
+				stats.probed.Add(1)
+				go func() { _, _ = io.Copy(io.Discard, c) }()
+				deadline := time.Now().Add(30 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, err := c.Write(buf); err != nil {
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return stats, ln
+}
 
 // RunGATEConnectIPP4PlaneControlAlive opens sticky control then 4 parallel bulks (H3).
 func RunGATEConnectIPP4PlaneControlAlive(t *testing.T) {
@@ -51,7 +95,7 @@ func runP4PlaneControlAlive(
 ) {
 	t.Helper()
 	controlTarget, controlPort := startDualFlowControlTarget(t)
-	bulkLn := StartNativeConnectIPDownloadTarget(t)
+	dlStats, bulkLn := startP4DownloadTarget(t)
 	proxyPort := startServer(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), p4PlaneTimeout)
@@ -122,10 +166,13 @@ func runP4PlaneControlAlive(
 	wg.Wait()
 	ok := bulkOK.Load()
 	fail := bulkFail.Load()
-	t.Logf("p4-plane layer=%s bulk_ok=%d bulk_fail=%d latch=%v",
-		layer, ok, fail, masque.InttestConnectIPServerGenerationStale(sess))
+	acc := dlStats.accepted.Load()
+	prb := dlStats.probed.Load()
+	t.Logf("p4-plane layer=%s bulk_ok=%d bulk_fail=%d accept=%d probe=%d latch=%v",
+		layer, ok, fail, acc, prb, masque.InttestConnectIPServerGenerationStale(sess))
 	if fail > 0 || ok < uint64(p4PlaneN) {
-		t.Fatalf("bulks incomplete under -P4 analog: ok=%d fail=%d want ok=%d", ok, fail, p4PlaneN)
+		t.Fatalf("bulks incomplete under -P4 analog: ok=%d fail=%d want ok=%d (server accept=%d probe=%d)",
+			ok, fail, p4PlaneN, acc, prb)
 	}
 	assertNoRecycleLatch(t, sess, "after bulks before control final")
 

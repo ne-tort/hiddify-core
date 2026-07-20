@@ -52,11 +52,20 @@ type tcpForwardSession struct {
 	peerRwnd        uint32 // scaled receive window advertised by client
 	peerRwndValid   bool
 	clientWSScale   uint8
+
+	// P6-B2: S2 terminate synthesizes TCP over CONNECT-IP DATAGRAMs (H3 unreliable).
+	// Retain unacked S2C payload for RTO retransmit — without this, one lost DATAGRAM stalls forever.
+	s2cUnacked      []byte
+	s2cUnackedSeq   uint32
+	s2cLastProgress time.Time // last peerAck advance or successful RTO send
+	s2cRTO          time.Duration
 }
 
 const (
 	tcpForwarderHandshakeIdle     = 15 * time.Second
 	tcpForwarderSyncAckMaxPayload = 512
+	tcpForwarderS2CReto           = 200 * time.Millisecond
+	tcpForwarderS2CRetoMax        = 2 * time.Second
 )
 
 // trimPayloadAtRcvNxt accepts overlapping TCP retransmissions (RFC 793): deliver bytes at rcvNxt only.
@@ -138,12 +147,12 @@ func (s *tcpForwardSession) sendSynAck(ctx context.Context) error {
 }
 
 func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc header.TCP, ipHdrLen, tcpHdrLen int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	flags := tc.Flags()
 	ack := tc.AckNumber()
 	seq := tc.SequenceNumber()
+	payload := pkt[ipHdrLen+tcpHdrLen:]
+
+	s.mu.Lock()
 
 	if s.tsOK {
 		if po := tc.ParsedOptions(); po.TS {
@@ -160,79 +169,115 @@ func (s *tcpForwardSession) handleSegment(ctx context.Context, pkt []byte, tc he
 		}
 	}
 
-	payload := pkt[ipHdrLen+tcpHdrLen:]
+	var (
+		payCopy      []byte
+		outbound     *bufio.Writer
+		doSyncAck    bool
+		doSchedAck   bool
+		queuePending bool
+		startPump    bool
+		finClose     net.Conn
+		dropEarly    bool
+	)
+
 	if len(payload) > 0 {
 		if !s.established && !s.synAckSent {
+			s.mu.Unlock()
 			return
 		}
-		payload, ok := trimPayloadAtRcvNxt(seq, s.rcvNxt, payload)
+		trimmed, ok := trimPayloadAtRcvNxt(seq, s.rcvNxt, payload)
 		if !ok {
-			_ = s.sendAckOnly()
-			return
-		}
-		if len(payload) == 0 {
-			_ = s.sendAckOnly()
-			return
-		}
-		s.rcvNxt += uint32(len(payload))
-		// Before remote flush: stop pump pretest discard so early iperf -R bytes are not dropped.
-		s.clientPayloadSeen.Store(true)
-		s.signalS2CPump()
-		// usque order: ACK client before backend forward and before S2C pump (iperf -R params stall).
-		if len(payload) <= tcpForwarderSyncAckMaxPayload {
-			if err := s.sendAckNowSync(); err != nil {
-				go s.close()
-				return
-			}
+			doSchedAck = true
+			dropEarly = true
+		} else if len(trimmed) == 0 {
+			doSchedAck = true
+			dropEarly = true
 		} else {
-			_ = s.scheduleAckOnly()
+			payload = trimmed
+			s.rcvNxt += uint32(len(payload))
+			// Before remote flush: stop pump pretest discard so early iperf -R bytes are not dropped.
+			s.clientPayloadSeen.Store(true)
+			s.signalS2CPump()
+			// usque order: ACK client before backend forward (iperf -R params stall).
+			doSyncAck = len(payload) <= tcpForwarderSyncAckMaxPayload
+			doSchedAck = !doSyncAck
+			// Inline remote write prep: pkt is reused by the read loop after return.
+			payCopy = borrowPacket(len(payload))
+			copy(payCopy, payload)
+			if s.closed.Load() {
+				returnPacket(payCopy)
+				payCopy = nil
+				dropEarly = true
+			} else if s.outbound == nil {
+				s.pendingRemote = append(s.pendingRemote, payCopy)
+				payCopy = nil
+				queuePending = true
+				startPump = true
+			} else {
+				outbound = s.outbound
+				startPump = true
+			}
 		}
-		// Inline remote write: per-segment goroutines capped upload at ~150 Mbit/s in-proc
-		// (goroutine + copy churn at gVisor MSS PPS). pkt is reused by the read loop after return.
-		payCopy := borrowPacket(len(payload))
-		copy(payCopy, payload)
-		if s.closed.Load() {
-			returnPacket(payCopy)
+	}
+
+	if !dropEarly && len(payload) == 0 && s.established && flags&header.TCPFlagAck != 0 {
+		// Pure ACK after handshake: start S2C pump for download-only / iperf -R probes.
+		s.s2cAllowWithoutClientPayload.Store(true)
+		startPump = true
+	}
+
+	if flags&header.TCPFlagFin != 0 && s.established {
+		wirePayloadLen := len(pkt[ipHdrLen+tcpHdrLen:])
+		finSeq := seq + uint32(wirePayloadLen)
+		if finSeq != s.rcvNxt {
+			doSchedAck = true
+		} else {
+			s.rcvNxt++
+			doSchedAck = true
+			finClose = s.remote
+		}
+	}
+
+	s.mu.Unlock()
+
+	// P6-B2: never hold s.mu across sendPacketNow / host Write — async dial's bindRemote
+	// must take s.mu promptly or C2S probes stay in pendingRemote forever under SYN storms.
+	if doSyncAck {
+		if err := s.sendAckNowSync(); err != nil {
+			if payCopy != nil {
+				returnPacket(payCopy)
+			}
+			go s.close()
 			return
 		}
-		if s.outbound == nil {
-			s.pendingRemote = append(s.pendingRemote, payCopy)
-			s.ensureRemotePump(ctx)
-			return
-		}
-		if _, err := s.outbound.Write(payCopy); err != nil {
+	} else if doSchedAck {
+		_ = s.scheduleAckOnly()
+	}
+	if queuePending {
+		s.ensureRemotePump(ctx)
+		return
+	}
+	if payCopy != nil && outbound != nil {
+		if _, err := outbound.Write(payCopy); err != nil {
 			returnPacket(payCopy)
 			go s.close()
 			return
 		}
 		returnPacket(payCopy)
-		if err := s.maybeFlushRemote(len(payCopy) <= 512); err != nil {
+		s.mu.Lock()
+		flushErr := s.maybeFlushRemote(len(payload) <= 512)
+		s.mu.Unlock()
+		if flushErr != nil {
 			go s.close()
 			return
 		}
+		startPump = true
+	}
+	if startPump {
 		s.ensureRemotePump(ctx)
 	}
-
-	// Pure ACK after handshake (no C2S payload): start S2C pump for download-only / iperf -R probes.
-	// pumpRemoteToClient blocks on remote Read until backend sends; iperf params ordering preserved.
-	if len(payload) == 0 && s.established && flags&header.TCPFlagAck != 0 {
-		s.s2cAllowWithoutClientPayload.Store(true)
-		s.ensureRemotePump(ctx)
-	}
-
-	if flags&header.TCPFlagFin != 0 {
-		if !s.established {
-			return
-		}
-		wirePayloadLen := len(pkt[ipHdrLen+tcpHdrLen:])
-		finSeq := seq + uint32(wirePayloadLen)
-		if finSeq != s.rcvNxt {
-			_ = s.sendAckOnly()
-			return
-		}
-		s.rcvNxt++
-		_ = s.scheduleAckOnly()
-		if cw, ok := s.remote.(interface{ CloseWrite() error }); ok {
+	if finClose != nil {
+		if cw, ok := finClose.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
 		}
 	}
@@ -416,6 +461,9 @@ func (s *tcpForwardSession) notePeerSendWindowLocked(ack uint32, win uint16) {
 	woke := false
 	if ack > s.peerAck {
 		s.peerAck = ack
+		s.trimS2CUnackedLocked(ack)
+		s.s2cLastProgress = time.Now()
+		s.s2cRTO = tcpForwarderS2CReto
 		woke = true
 	}
 	wnd := uint32(win) << uint32(s.clientWSScale)
@@ -430,6 +478,91 @@ func (s *tcpForwardSession) notePeerSendWindowLocked(ack uint32, win uint16) {
 	if woke {
 		s.signalS2CPump()
 	}
+}
+
+func (s *tcpForwardSession) trimS2CUnackedLocked(ack uint32) {
+	if len(s.s2cUnacked) == 0 {
+		return
+	}
+	if ack <= s.s2cUnackedSeq {
+		return
+	}
+	delta := int(ack - s.s2cUnackedSeq)
+	if delta >= len(s.s2cUnacked) {
+		s.s2cUnacked = nil
+		s.s2cUnackedSeq = ack
+		return
+	}
+	s.s2cUnacked = s.s2cUnacked[delta:]
+	s.s2cUnackedSeq = ack
+}
+
+func (s *tcpForwardSession) appendS2CUnackedLocked(seq uint32, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	if len(s.s2cUnacked) == 0 {
+		s.s2cUnackedSeq = seq
+		s.s2cLastProgress = time.Now()
+		if s.s2cRTO == 0 {
+			s.s2cRTO = tcpForwarderS2CReto
+		}
+	}
+	s.s2cUnacked = append(s.s2cUnacked, payload...)
+}
+
+func (s *tcpForwardSession) s2cRTOIntervalLocked() time.Duration {
+	if s.s2cRTO == 0 {
+		return tcpForwarderS2CReto
+	}
+	return s.s2cRTO
+}
+
+func (s *tcpForwardSession) s2cRTODueLocked() bool {
+	return len(s.s2cUnacked) > 0 && !s.s2cLastProgress.IsZero() &&
+		time.Since(s.s2cLastProgress) >= s.s2cRTOIntervalLocked()
+}
+
+// retransmitS2CUnacked resends only the head MSS of unacked S2C (TCP-like RTO),
+// not the whole window — full-window flood starved parallel SYN-ACKs on H3 DATAGRAM.
+func (s *tcpForwardSession) retransmitS2CUnacked(maxSeg int) error {
+	if s.closed.Load() || s.f.egressStopped() {
+		return net.ErrClosed
+	}
+	s.mu.Lock()
+	if len(s.s2cUnacked) == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	chunk := len(s.s2cUnacked)
+	if chunk > maxSeg {
+		chunk = maxSeg
+	}
+	payload := append([]byte(nil), s.s2cUnacked[:chunk]...)
+	seq := s.s2cUnackedSeq
+	rcvNxt := s.rcvNxt
+	opts := s.buildTimestampOptionLocked()
+	s.s2cLastProgress = time.Now()
+	next := s.s2cRTOIntervalLocked() * 2
+	if next > tcpForwarderS2CRetoMax {
+		next = tcpForwarderS2CRetoMax
+	}
+	if next < tcpForwarderS2CReto {
+		next = tcpForwarderS2CReto
+	}
+	s.s2cRTO = next
+	s.mu.Unlock()
+
+	pkt := buildIPTCPPacket(
+		s.flow.dstAddr, s.flow.srcAddr,
+		s.flow.dstPort, s.flow.srcPort,
+		seq, rcvNxt,
+		header.TCPFlagPsh|header.TCPFlagAck,
+		65535,
+		payload,
+		opts,
+	)
+	return s.f.enqueueDownload(pkt)
 }
 
 func (s *tcpForwardSession) s2cSendBudgetLocked() uint32 {
@@ -491,8 +624,15 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			s.preClientS2C = nil
 		} else {
 			s.mu.Lock()
+			rtoDue := s.s2cRTODueLocked()
 			remote := s.remote
 			s.mu.Unlock()
+			if rtoDue {
+				if err := s.retransmitS2CUnacked(maxSeg); err != nil {
+					return
+				}
+				continue
+			}
 			if remote == nil {
 				if s.closed.Load() || ctx.Err() != nil {
 					return
@@ -505,7 +645,17 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 				}
 				continue
 			}
-			_ = remote.SetReadDeadline(time.Now().Add(30 * time.Second))
+			readWait := 30 * time.Second
+			s.mu.Lock()
+			if len(s.s2cUnacked) > 0 && !s.s2cLastProgress.IsZero() {
+				left := s.s2cRTOIntervalLocked() - time.Since(s.s2cLastProgress)
+				if left < time.Millisecond {
+					left = time.Millisecond
+				}
+				readWait = left
+			}
+			s.mu.Unlock()
+			_ = remote.SetReadDeadline(time.Now().Add(readWait))
 			n, err := remote.Read(buf)
 			if n > 0 {
 				data = append([]byte(nil), buf[:n]...)
@@ -519,6 +669,14 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 					if ne, ok := err.(net.Error); ok && ne.Timeout() {
 						if s.closed.Load() || ctx.Err() != nil {
 							return
+						}
+						s.mu.Lock()
+						rtoDue = s.s2cRTODueLocked()
+						s.mu.Unlock()
+						if rtoDue {
+							if err := s.retransmitS2CUnacked(maxSeg); err != nil {
+								return
+							}
 						}
 						continue
 					}
@@ -545,6 +703,15 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			if err := ctx.Err(); err != nil {
 				return
 			}
+			s.mu.Lock()
+			rtoDue := s.s2cRTODueLocked()
+			s.mu.Unlock()
+			if rtoDue {
+				if err := s.retransmitS2CUnacked(maxSeg); err != nil {
+					return
+				}
+				continue
+			}
 			chunk := len(data) - off
 			if chunk > maxSeg {
 				chunk = maxSeg
@@ -552,7 +719,15 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			for {
 				s.mu.Lock()
 				budget := s.s2cSendBudgetLocked()
+				rtoDue = s.s2cRTODueLocked()
+				rtoWait := s.s2cRTOIntervalLocked()
 				s.mu.Unlock()
+				if rtoDue {
+					if err := s.retransmitS2CUnacked(maxSeg); err != nil {
+						return
+					}
+					continue
+				}
 				if budget > 0 {
 					if uint32(chunk) > budget {
 						chunk = int(budget)
@@ -563,13 +738,17 @@ func (s *tcpForwardSession) pumpRemoteToClient(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-s.s2cWake:
-				case <-time.After(2 * time.Millisecond):
+				case <-time.After(rtoWait):
+					if err := s.retransmitS2CUnacked(maxSeg); err != nil {
+						return
+					}
 				}
 			}
 			payload := data[off : off+chunk]
 			s.mu.Lock()
 			seq := s.sndNxt
 			s.sndNxt += uint32(chunk)
+			s.appendS2CUnackedLocked(seq, payload)
 			rcvNxt := s.rcvNxt
 			opts := s.buildTimestampOptionLocked()
 			s.mu.Unlock()
