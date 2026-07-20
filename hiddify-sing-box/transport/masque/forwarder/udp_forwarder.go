@@ -20,14 +20,6 @@ const udpForwarderReadBuf = 64 * 1024
 // (e.g. dig to a TCP-only port) before the client probe times out.
 const udpForwarderICMPPoll = 400 * time.Millisecond
 
-// udpSessionIdle closes an S2 UDP session after no client→server datagrams.
-// P4-5: onward flood sinks keep pumping S2C after the client stops; without C2S idle
-// teardown the orphan pump poisons WAN multi-run on a sticky dual process.
-// Do NOT stopPlaneFromEgress on per-session idle — a short-lived flow (bench smoke)
-// must not tear down the CONNECT-IP route under a concurrent bulk session.
-// KPI measure_udp always sends C2S while measuring, so idle does not fire mid-test.
-const udpSessionIdle = 3 * time.Second
-
 type udp4Tuple struct {
 	srcAddr, dstAddr tcpip.Address
 	srcPort, dstPort uint16
@@ -39,9 +31,8 @@ type udpForwardSession struct {
 	remote  *net.UDPConn
 	origPkt []byte
 
-	closeOnce       sync.Once
-	pumpStarted     atomic.Bool
-	lastC2SUnixNano atomic.Int64
+	closeOnce   sync.Once
+	pumpStarted atomic.Bool
 }
 
 func isUDPICMPUnreachable(n int, err error) bool {
@@ -59,28 +50,9 @@ func (f *packetForwarder) dropUDPFlow(flow udp4Tuple) {
 	if s != nil {
 		delete(f.udpSessions, flow)
 	}
-	udpLeft := len(f.udpSessions)
 	f.uMu.Unlock()
 	if s != nil && s.remote != nil {
 		_ = s.remote.Close()
-	}
-	if udpLeft == 0 {
-		f.maybeStopPlaneIfNoSessions()
-	}
-}
-
-// maybeStopPlaneIfNoSessions closes the packet conn when S2 has no TCP/UDP sessions left.
-// Safe with concurrent flows: a smoke UDP idle-close while bulk UDP/TCP lives leaves udpLeft>0
-// or tcpLeft>0. After client kill, the last orphan idle-close ends the half-dead route (P4-5).
-func (f *packetForwarder) maybeStopPlaneIfNoSessions() {
-	f.sMu.Lock()
-	tcpLeft := len(f.sessions)
-	f.sMu.Unlock()
-	f.uMu.Lock()
-	udpLeft := len(f.udpSessions)
-	f.uMu.Unlock()
-	if tcpLeft == 0 && udpLeft == 0 {
-		f.stopPlaneFromEgress()
 	}
 }
 
@@ -103,51 +75,6 @@ func (s *udpForwardSession) close() {
 	s.closeOnce.Do(func() {
 		s.f.dropUDPFlow(s.flow)
 	})
-}
-
-func (s *udpForwardSession) noteC2S() {
-	s.lastC2SUnixNano.Store(time.Now().UnixNano())
-}
-
-func (s *udpForwardSession) c2sIdleExpired() bool {
-	last := s.lastC2SUnixNano.Load()
-	if last == 0 {
-		return false
-	}
-	return time.Since(time.Unix(0, last)) > udpSessionIdle
-}
-
-// enqueueDownloadRespectingIdle pipelines S2C while still honouring C2S idle and ctx cancel.
-// A plain blocking enqueueDownload lets a dead peer fill downloadCh and park the pump forever,
-// so the read loop never observes idle and the onward UDP FD stays open (P4-5 sticky dual).
-func (s *udpForwardSession) enqueueDownloadRespectingIdle(ctx context.Context, pkt []byte) error {
-	if len(pkt) == 0 {
-		return nil
-	}
-	f := s.f
-	if f.downloadCh == nil {
-		err := f.sendPacketNow(pkt)
-		returnPacket(pkt)
-		return err
-	}
-	for {
-		if s.c2sIdleExpired() {
-			returnPacket(pkt)
-			return net.ErrClosed
-		}
-		select {
-		case <-ctx.Done():
-			returnPacket(pkt)
-			return ctx.Err()
-		case <-f.downloadStopped:
-			returnPacket(pkt)
-			return net.ErrClosed
-		case f.downloadCh <- pkt:
-			f.o.DownloadQueueMetrics.noteEnqueued()
-			return nil
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
 }
 
 func (f *packetForwarder) handleUDPPacket(ctx context.Context, pkt []byte, iph header.IPv4) {
@@ -226,7 +153,6 @@ func (f *packetForwarder) handleUDPPacketAt(ctx context.Context, pkt []byte, l4O
 			remote:  udpConn,
 			origPkt: append([]byte(nil), pkt...),
 		}
-		s.noteC2S()
 		f.addUDPSession(flow, s)
 		if len(payload) > 0 {
 			if _, err := s.remote.Write(payload); err != nil {
@@ -246,7 +172,6 @@ func (f *packetForwarder) handleUDPPacketAt(ctx context.Context, pkt []byte, l4O
 	if len(payload) == 0 {
 		return
 	}
-	s.noteC2S()
 	if _, err := s.remote.Write(payload); err != nil {
 		if isUDPICMPUnreachable(0, err) {
 			_ = f.sendICMPPortUnreachable(s.origPkt)
@@ -272,35 +197,23 @@ func (s *udpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			return
 		default:
 		}
-		if s.c2sIdleExpired() {
-			return
-		}
 		readWait := 30 * time.Second
 		if firstRead {
 			readWait = udpForwarderICMPPoll
-		}
-		// Cap read wait so C2S idle is observed promptly under onward flood.
-		if readWait > udpSessionIdle {
-			readWait = udpSessionIdle
 		}
 		_ = s.remote.SetReadDeadline(time.Now().Add(readWait))
 		n, err := s.remote.Read(buf)
 		firstRead = false
 		if n > 0 {
-			if s.c2sIdleExpired() {
-				return
-			}
 			src := netipFromTCPip(s.flow.dstAddr)
 			dst := netipFromTCPip(s.flow.srcAddr)
 			reply, buildErr := buildIPUDPPacket(src, dst, s.flow.dstPort, s.flow.srcPort, buf[:n])
 			if buildErr != nil {
 				return
 			}
-			// P4-3: UDP S2C is bulk DATA — use downloadCh (8192), not writeCh (512 control).
-			// writeRaw blocked pumpRemoteToClient under WAN RTT → helper sendto OK, client DOWN≪target.
-			// P4-5: must not block forever on a full downloadCh — that skips C2S-idle checks and
-			// leaves orphan onward UDP sockets (Recv-Q fill) poisoning sticky dual WAN DOWN.
-			if writeErr := s.enqueueDownloadRespectingIdle(ctx, reply); writeErr != nil {
+			// P4-3: UDP S2C → downloadCh. P4-5: ctx-aware enqueue so a dead plane
+			// (downloadStopped after benign WritePacket stop) unblocks the pump.
+			if writeErr := s.enqueueDownloadCtx(ctx, reply); writeErr != nil {
 				return
 			}
 		}
@@ -311,12 +224,37 @@ func (s *udpForwardSession) pumpRemoteToClient(ctx context.Context) {
 			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				if s.c2sIdleExpired() {
-					return
-				}
 				continue
 			}
 			return
+		}
+	}
+}
+
+// enqueueDownloadCtx is enqueueDownload that also returns when ctx is cancelled,
+// so pumps do not sit forever on a full downloadCh after the plane is stopped.
+func (s *udpForwardSession) enqueueDownloadCtx(ctx context.Context, pkt []byte) error {
+	if len(pkt) == 0 {
+		return nil
+	}
+	f := s.f
+	if f.downloadCh == nil {
+		err := f.sendPacketNow(pkt)
+		returnPacket(pkt)
+		return err
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			returnPacket(pkt)
+			return ctx.Err()
+		case <-f.downloadStopped:
+			returnPacket(pkt)
+			return net.ErrClosed
+		case f.downloadCh <- pkt:
+			f.o.DownloadQueueMetrics.noteEnqueued()
+			return nil
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
