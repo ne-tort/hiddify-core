@@ -27,6 +27,27 @@ func TestFlushConnectIPIngressAckWakeH2PokesUpload(t *testing.T) {
 	}
 }
 
+func TestFlushConnectIPIngressAckWakePrefersPokeH2BidiDownload(t *testing.T) {
+	t.Parallel()
+	upload := &h2IngressUploadPokeStub{}
+	FlushConnectIPIngressAckWake(upload)
+	if upload.pokeCalls != 1 {
+		t.Fatalf("FlushConnectIPIngressAckWake must PokeH2BidiDownload once, got %d", upload.pokeCalls)
+	}
+	if upload.flushCalls != 0 {
+		t.Fatalf("PokeH2BidiDownload path must not FlushRequestBody, flushes=%d", upload.flushCalls)
+	}
+}
+
+type h2IngressUploadPokeStub struct {
+	h2IngressUploadFlushStub
+	pokeCalls int
+}
+
+func (s *h2IngressUploadPokeStub) PokeH2BidiDownload() {
+	s.pokeCalls++
+}
+
 func TestFlushConnectIPIngressAckWakeH2NilUploadSafe(t *testing.T) {
 	t.Parallel()
 	FlushConnectIPIngressAckWake(nil)

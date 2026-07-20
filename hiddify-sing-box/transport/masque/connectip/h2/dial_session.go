@@ -1,4 +1,4 @@
-package connectip
+package h2
 
 import (
 	"context"
@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	cip "github.com/quic-go/connect-ip-go"
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/yosida95/uritemplate/v3"
 )
 
-// H2SessionDialHost wires production CONNECT-IP HTTP/2 session dial from package masque (phase 19 bridge).
-type H2SessionDialHost interface {
+// SessionDialHost wires production CONNECT-IP HTTP/2 session dial from package masque (phase 19 bridge).
+type SessionDialHost interface {
 	Tag() string
 	WarpConnectIPProtocol() string
 	TemplateIP() *uritemplate.Template
@@ -23,13 +24,13 @@ type H2SessionDialHost interface {
 	IsExtendedConnectUnsupported(err error) bool
 	EnsureH2Transport(ctx context.Context) (http.RoundTripper, error)
 	TCPRoundTripper(defaultTransport http.RoundTripper) http.RoundTripper
-	H2DialParams() H2DialParams
-	BootstrapParams() SessionBootstrapParams
+	H2DialParams() mcip.H2DialParams
+	BootstrapParams() mcip.SessionBootstrapParams
 	OnCtxCanceled()
 }
 
-// DialH2Session opens CONNECT-IP over the session HTTP/2 transport pool (Extended CONNECT + bootstrap).
-func DialH2Session(ctx context.Context, host H2SessionDialHost) (*cip.Conn, error) {
+// DialSession opens CONNECT-IP over the session HTTP/2 transport pool (Extended CONNECT + bootstrap).
+func DialSession(ctx context.Context, host SessionDialHost) (*cip.Conn, error) {
 	dialAddr := host.OverlayDialAddr()
 	select {
 	case <-ctx.Done():
@@ -65,3 +66,11 @@ func DialH2Session(ctx context.Context, host H2SessionDialHost) (*cip.Conn, erro
 	}
 	return conn, nil
 }
+
+// DialH2Session is an alias for DialSession (legacy call sites).
+func DialH2Session(ctx context.Context, host SessionDialHost) (*cip.Conn, error) {
+	return DialSession(ctx, host)
+}
+
+// H2SessionDialHost is a legacy alias for SessionDialHost.
+type H2SessionDialHost = SessionDialHost

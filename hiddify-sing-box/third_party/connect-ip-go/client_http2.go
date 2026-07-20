@@ -80,18 +80,20 @@ func (*h2ExtendedConnectDuplexBody) Close() error {
 }
 
 // h2CapsulePipeStream carries CONNECT-IP control capsules and DATAGRAM capsules on one HTTP/2 stream (RFC 8441 + RFC 9297).
-//
-// P1-1 measure (2026-07-19): pipe-level NoWake buffer+Flush is NOT H3 wake coalesce —
-// host-kernel LoopIn batches ≤48 pkts before Flush, delaying bytes until the H2 framer
-// sees Request.Body → TCP UP Retr / 308→83. Pattern LEAVE (see RESULTS-connect-ip-h2-nowake).
-// Conn keeps composeDatagram+SendDatagram; H3 NoWake unchanged.
 type h2CapsulePipeStream struct {
 	body  io.ReadCloser
-	pipeW *io.PipeWriter
-	pipeR *io.PipeReader // closed from Conn.Close, not via Request.Body.Close
+	pipeW io.Writer
+	pipeWClose io.Closer
+	pipeR io.Closer // closed from Conn.Close, not via Request.Body.Close
+	uploadBody interface {
+		MarkUploadWriterDone()
+	}
+	onClose func()
 	mu    sync.Mutex
 	// maxDatagramPayload caps RFC9297 DATAGRAM capsule payload (ctxID||IP); 0 → h2DefaultMaxDatagramPayload.
 	maxDatagramPayload int
+	// wireEnc reuses RFC9297 DATAGRAM capsule buffer on hot C2S path.
+	wireEnc bytes.Buffer
 }
 
 func (s *h2CapsulePipeStream) Read(p []byte) (int, error) { return s.body.Read(p) }
@@ -106,13 +108,13 @@ func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
 	if err := h2DatagramTooLarge(len(payload), s.maxDatagramPayload); err != nil {
 		return err
 	}
-	var buf bytes.Buffer
-	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, payload); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := writeAllWriter(s.pipeW, buf.Bytes())
+	s.wireEnc.Reset()
+	if err := appendHTTPDatagramCapsule(&s.wireEnc, payload); err != nil {
+		return err
+	}
+	_, err := writeAllWriter(s.pipeW, s.wireEnc.Bytes())
 	return err
 }
 
@@ -132,7 +134,16 @@ func (s *h2CapsulePipeStream) Close() error {
 }
 
 func (s *h2CapsulePipeStream) closePipeWriter() error {
-	return s.pipeW.Close()
+	if s.uploadBody != nil {
+		s.uploadBody.MarkUploadWriterDone()
+	}
+	var err error
+	if s.pipeWClose != nil {
+		err = s.pipeWClose.Close()
+		s.pipeWClose = nil
+	}
+	s.pipeW = nil
+	return err
 }
 
 // H2IngressUploadWriter returns the Extended CONNECT upload half for ingress ACK wake poke.
@@ -154,9 +165,16 @@ func (s *h2CapsulePipeStream) closePipeReader() error {
 	if s.pipeR == nil {
 		return nil
 	}
-	err := s.pipeR.CloseWithError(errors.New("connect-ip: h2 CONNECT-IP tunnel closed"))
+	err := s.pipeR.Close()
 	s.pipeR = nil
 	return err
+}
+
+func (s *h2CapsulePipeStream) closeH2ExtendedConnectRelay() {
+	if s.onClose != nil {
+		s.onClose()
+		s.onClose = nil
+	}
 }
 
 // h2LegacyDatagramStream matches Cloudflare WARP's HTTP/2 cf-connect-ip behavior as used by usque:
@@ -166,6 +184,7 @@ type h2LegacyDatagramStream struct {
 	responseBody io.ReadCloser
 	readMu       sync.Mutex
 	writeMu      sync.Mutex
+	wireEnc      bytes.Buffer
 }
 
 func (s *h2LegacyDatagramStream) ReceiveDatagram(ctx context.Context) ([]byte, error) {
@@ -251,13 +270,13 @@ func (s *h2LegacyDatagramStream) SendDatagram(data []byte) error {
 	if contextID != 0 {
 		return fmt.Errorf("connect-ip: unsupported datagram context ID: %d", contextID)
 	}
-	var buf bytes.Buffer
-	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, data[n:]); err != nil {
-		return err
-	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	_, err = writeAllWriter(s.requestBody, buf.Bytes())
+	s.wireEnc.Reset()
+	if err := appendHTTPDatagramCapsule(&s.wireEnc, data[n:]); err != nil {
+		return err
+	}
+	_, err = writeAllWriter(s.requestBody, s.wireEnc.Bytes())
 	return err
 }
 
@@ -384,7 +403,7 @@ func DialHTTP2(ctx context.Context, rt http.RoundTripper, template *uritemplate.
 	stopReqCtxRelay(true)
 	handshakeOK = true
 
-	str := &h2CapsulePipeStream{body: resp.Body, pipeW: pw, pipeR: pr}
+	str := &h2CapsulePipeStream{body: resp.Body, pipeW: pw, pipeWClose: pw, pipeR: pr}
 	conn := newProxiedConn(str, true)
 	applyDialInteroperability(conn, opts)
 	return conn, resp, nil

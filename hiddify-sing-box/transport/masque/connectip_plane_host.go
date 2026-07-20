@@ -18,6 +18,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/sagernet/sing-box/option"
 	cip "github.com/sagernet/sing-box/transport/masque/connectip"
+	ciph2 "github.com/sagernet/sing-box/transport/masque/connectip/h2"
 	cipclient "github.com/sagernet/sing-box/transport/masque/connectip/client"
 	cudph2 "github.com/sagernet/sing-box/transport/masque/connectudp/h2"
 	h2c "github.com/sagernet/sing-box/transport/masque/h2"
@@ -209,7 +210,7 @@ func (h connectIPAttemptDialHost) BootstrapParams() cip.SessionBootstrapParams {
 }
 
 func (h connectIPAttemptDialHost) DialH2(ctx context.Context) (*connectip.Conn, error) {
-	return cip.DialH2Session(ctx, h)
+	return ciph2.DialH2Session(ctx, h)
 }
 
 func (h connectIPAttemptDialHost) HasTemplateIP() bool {
@@ -393,7 +394,7 @@ func (s *coreSession) openIPSessionLocked(ctx context.Context) (IPPacketSession,
 }
 
 func (s *coreSession) dialConnectIPHTTP2(ctx context.Context) (*connectip.Conn, error) {
-	return cip.DialH2Session(ctx, connectIPAttemptDialHost{s: s})
+	return ciph2.DialH2Session(ctx, connectIPAttemptDialHost{s: s})
 }
 
 func (s *coreSession) closeConnectIPDataplaneLockedAssumeMu() {

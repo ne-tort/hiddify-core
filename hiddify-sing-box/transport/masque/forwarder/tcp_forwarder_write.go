@@ -56,21 +56,67 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 
 func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	f.o.DownloadQueueMetrics.noteDequeued()
-	err := f.sendPacketNow(pkt)
+	pkts := f.collectDownloadBatch(pkt)
+	err := f.sendDownloadBatch(pkts)
 	if err != nil {
 		if mcip.IsRetryablePacketWriteError(err) {
-			select {
-			case <-f.downloadStopped:
-				returnPacket(pkt)
-			case f.downloadCh <- pkt:
+			for _, p := range pkts {
+				select {
+				case <-f.downloadStopped:
+					returnPacket(p)
+				case f.downloadCh <- p:
+				}
 			}
 			return
 		}
-		returnPacket(pkt)
+		for _, p := range pkts {
+			returnPacket(p)
+		}
 		f.stopPlaneFromEgress()
 		return
 	}
-	returnPacket(pkt)
+	for _, p := range pkts {
+		returnPacket(p)
+	}
+}
+
+func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
+	pkts := [][]byte{first}
+	for {
+		select {
+		case pkt, ok := <-f.downloadCh:
+			if !ok {
+				return pkts
+			}
+			f.o.DownloadQueueMetrics.noteDequeued()
+			pkts = append(pkts, pkt)
+		default:
+			return pkts
+		}
+	}
+}
+
+func (f *packetForwarder) sendDownloadBatch(pkts [][]byte) error {
+	if len(pkts) == 0 {
+		return nil
+	}
+	if cw, ok := f.conn.(packetPlaneCoalescedWriter); ok {
+		f.sendMu.Lock()
+		defer f.sendMu.Unlock()
+		for _, pkt := range pkts {
+			if err := f.writePacketRelayLocked(cw.WritePacketNoWake, pkt); err != nil {
+				return err
+			}
+		}
+		cw.FlushOutgoingDatagramSend()
+		return nil
+	}
+	for _, pkt := range pkts {
+		if err := f.sendPacketNow(pkt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // runEgressLoop drains writeCh (control) before downloadCh (bulk DATA). Parallel loops
@@ -216,16 +262,21 @@ func (f *packetForwarder) peerPrefixesCached() []netip.Prefix {
 func (f *packetForwarder) sendPacketNow(pkt []byte) error {
 	f.sendMu.Lock()
 	defer f.sendMu.Unlock()
+	return f.writePacketRelayLocked(f.conn.WritePacket, pkt)
+}
+
+type packetWriteFn func([]byte) ([]byte, error)
+
+func (f *packetForwarder) writePacketRelayLocked(write packetWriteFn, pkt []byte) error {
 	p := RewriteOutgoingPeerDst(pkt, f.peerPrefixesCached())
 	for i := 0; i < icmpRelayMax; i++ {
 		var icmp []byte
 		var err error
 		for attempt := 0; attempt < writePacketMaxPersist; attempt++ {
-			icmp, err = f.conn.WritePacket(p)
+			icmp, err = write(p)
 			if err == nil {
 				break
 			}
-			// P4-5: benign peer half-close must surface to egress (stop plane), not look like success.
 			if mcip.IsBenignEgressTeardownError(err) {
 				return err
 			}

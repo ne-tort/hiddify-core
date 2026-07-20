@@ -184,6 +184,11 @@ func synthCPUMbpsCeiling(nsPerByte float64) float64 {
 	return 8000.0 / nsPerByte
 }
 
+// SynthCPUMbpsCeiling exports CPU-only Mbps ceiling from measured ns/byte (inttest localize).
+func SynthCPUMbpsCeiling(nsPerByte float64) float64 {
+	return synthCPUMbpsCeiling(nsPerByte)
+}
+
 // synthKPIDiagnostic formats a FAIL message naming layer, leg, got/want Mbps, optional hint.
 func synthKPIDiagnostic(layer, leg string, gotMbps, wantMbps float64, hint string) string {
 	msg := layer + " " + leg + ": " +

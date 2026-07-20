@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 )
 
 // Single prod S2C flush policy for CONNECT-IP HTTP/2 DATAGRAM capsules:
@@ -57,9 +56,10 @@ type h2ServerCapsuleStream struct {
 	mu      sync.Mutex
 
 	// Per-stream coalesce state (not package globals — multi-session safe).
-	sinceFlush uint64
-	lastFlush  int64 // unix ns; 0 = never flushed datagrams on this stream
-	idleTimer  *time.Timer
+	sinceFlush  uint64
+	lastFlush   int64 // unix ns; 0 = never flushed datagrams on this stream
+	idleTimer   *time.Timer
+	pendingWire bytes.Buffer // P6-D1-H8: Fountain batch (NoWake path only)
 
 	// maxDatagramPayload caps RFC9297 DATAGRAM capsule payload (ctxID||IP); 0 → h2DefaultMaxDatagramPayload.
 	maxDatagramPayload int
@@ -100,6 +100,22 @@ func (s *h2ServerCapsuleStream) idleFlush() {
 	_ = s.flushDatagramLocked()
 }
 
+func (s *h2ServerCapsuleStream) flushPendingWireLocked() error {
+	if s.pendingWire.Len() == 0 {
+		return nil
+	}
+	if _, err := writeAllWriter(s.w, s.pendingWire.Bytes()); err != nil {
+		return err
+	}
+	s.pendingWire.Reset()
+	h2S2CFlushTotal.Add(1)
+	start := time.Now()
+	err := flushHTTPResponseBody(s.w, false /*countDatagramFlush*/)
+	h2S2CFlushNsTotal.Add(uint64(time.Since(start).Nanoseconds()))
+	s.lastFlush = time.Now().UnixNano()
+	return err
+}
+
 func (s *h2ServerCapsuleStream) flushDatagramLocked() error {
 	s.stopIdleFlushLocked()
 	s.sinceFlush = 0
@@ -132,7 +148,7 @@ func (s *h2ServerCapsuleStream) SendDatagram(payload []byte) error {
 		return err
 	}
 	var buf bytes.Buffer
-	if err := http3.WriteCapsule(&buf, capsuleTypeHTTPDatagram, payload); err != nil {
+	if err := appendHTTPDatagramCapsule(&buf, payload); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -149,6 +165,34 @@ func (s *h2ServerCapsuleStream) SendDatagram(payload []byte) error {
 	h2S2CFlushSkipTotal.Add(1)
 	s.armIdleFlushLocked()
 	return nil
+}
+
+// SendProxiedIPDatagram implements proxiedIPDatagramSender; wake path matches SendDatagram.
+func (s *h2ServerCapsuleStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
+	return s.SendDatagram(composeProxiedIPDatagramPayload(contextPrefix, ipPacket))
+}
+
+// SendProxiedIPDatagramNoWake buffers RFC9297 wire for one forwarder download batch (Fountain).
+func (s *h2ServerCapsuleStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	payload := composeProxiedIPDatagramPayload(contextPrefix, ipPacket)
+	if err := h2DatagramTooLarge(len(payload), s.maxDatagramPayload); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := appendHTTPDatagramCapsule(&s.pendingWire, payload); err != nil {
+		return err
+	}
+	h2S2CDatagramSentTotal.Add(1)
+	h2S2CDatagramBytesTotal.Add(uint64(len(payload)))
+	return nil
+}
+
+// FlushProxiedIPDatagramSend flushes Fountain pending wire once per downloadCh batch.
+func (s *h2ServerCapsuleStream) FlushProxiedIPDatagramSend() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.flushPendingWireLocked()
 }
 
 func (s *h2ServerCapsuleStream) ReceiveDatagram(context.Context) ([]byte, error) {
@@ -169,6 +213,7 @@ func (s *h2ServerCapsuleStream) Close() error {
 func (s *h2ServerCapsuleStream) closeMasqueH2RequestBody() error {
 	s.mu.Lock()
 	s.stopIdleFlushLocked()
+	_ = s.flushPendingWireLocked()
 	s.mu.Unlock()
 	if s.reqBody == nil {
 		return nil

@@ -88,6 +88,8 @@ func (h Handler) HandleConnectIPRequest(host Host, w http.ResponseWriter, r *htt
 		return
 	}
 	// P2-1 LOCK: req.Target/IPProto ignored — product is unscoped full-tunnel (§8.1), not §4.6 ACL.
+	// P6-D1-H10: bidi Extended CONNECT before WriteHeader inside Proxy (CONNECT-UDP parity).
+	_ = http.NewResponseController(w).EnableFullDuplex()
 	conn, err := sharedConnectIPProxy.Proxy(w, r, req)
 	if err != nil {
 		if host.Logger != nil {

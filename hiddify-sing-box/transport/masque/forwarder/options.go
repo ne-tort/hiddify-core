@@ -25,6 +25,12 @@ type PacketPlaneConn interface {
 	CurrentPeerPrefixes() []netip.Prefix
 }
 
+// packetPlaneCoalescedWriter is optional on PacketPlaneConn for Fountain S2C batching.
+type packetPlaneCoalescedWriter interface {
+	WritePacketNoWake([]byte) ([]byte, error)
+	FlushOutgoingDatagramSend()
+}
+
 // ConnectIPTCPForwarderOptions carries generic MASQUE server policy knobs reused by the
 // CONNECT-IP IPv4/TCP packet-plane forwarder (S2 path).
 type ConnectIPTCPForwarderOptions struct {

@@ -116,6 +116,34 @@ func TestH2ServerCapsuleStreamIdleTimerFlushesSparse(t *testing.T) {
 	_ = str.Close()
 }
 
+// TestH2ServerCapsuleStreamFountainBatchFlush locks prod forwarder NoWake + one Flush per batch.
+func TestH2ServerCapsuleStreamFountainBatchFlush(t *testing.T) {
+	ResetH2S2CStats()
+	rec := &h2FlushCountResponseWriter{}
+	str := &h2ServerCapsuleStream{w: rec}
+	ipPkt := bytes.Repeat([]byte("x"), 540)
+	const batch = 32
+	for i := 0; i < batch; i++ {
+		if err := str.SendProxiedIPDatagramNoWake(contextIDZero, ipPkt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rec.flushes.Load(); got != 0 {
+		t.Fatalf("NoWake pending flushes=%d want 0 before FlushProxiedIPDatagramSend", got)
+	}
+	str.FlushProxiedIPDatagramSend()
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("after FlushProxiedIPDatagramSend flushes=%d want 1", got)
+	}
+	if got := H2S2CDatagramSentTotal(); got != batch {
+		t.Fatalf("datagram_sent=%d want %d", got, batch)
+	}
+	if got := H2S2CFlushTotal(); got != 1 {
+		t.Fatalf("flush_total=%d want 1 (Fountain batch)", got)
+	}
+	_ = str.Close()
+}
+
 func TestH2ServerCapsuleStreamReadUsesRequestBody(t *testing.T) {
 	t.Parallel()
 	pr, pw := io.Pipe()

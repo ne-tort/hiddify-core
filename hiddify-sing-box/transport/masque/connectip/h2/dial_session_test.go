@@ -1,4 +1,4 @@
-package connectip
+package h2
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
 	"github.com/yosida95/uritemplate/v3"
 )
 
@@ -19,8 +20,8 @@ type dialH2SessionFakeHost struct {
 	onCtxCanceled         int
 	ensureH2              func(ctx context.Context) (http.RoundTripper, error)
 	tcpRoundTripper       func(http.RoundTripper) http.RoundTripper
-	h2DialParams          H2DialParams
-	bootstrap             SessionBootstrapParams
+	h2DialParams          mcip.H2DialParams
+	bootstrap             mcip.SessionBootstrapParams
 	warpAlternateHost     func(string) string
 	isExtendedUnsupported func(error) bool
 }
@@ -70,9 +71,9 @@ func (h *dialH2SessionFakeHost) TCPRoundTripper(defaultTransport http.RoundTripp
 	return defaultTransport
 }
 
-func (h *dialH2SessionFakeHost) H2DialParams() H2DialParams { return h.h2DialParams }
+func (h *dialH2SessionFakeHost) H2DialParams() mcip.H2DialParams { return h.h2DialParams }
 
-func (h *dialH2SessionFakeHost) BootstrapParams() SessionBootstrapParams { return h.bootstrap }
+func (h *dialH2SessionFakeHost) BootstrapParams() mcip.SessionBootstrapParams { return h.bootstrap }
 
 func (h *dialH2SessionFakeHost) OnCtxCanceled() { h.onCtxCanceled++ }
 
@@ -180,4 +181,3 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
-

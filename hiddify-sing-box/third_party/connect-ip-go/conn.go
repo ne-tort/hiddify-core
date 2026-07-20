@@ -141,6 +141,11 @@ func StreamCapsuleDatagramIngressDropTotal() uint64 {
 	return streamCapsuleDatagramIngressDropTotal.Load()
 }
 
+// ResetStreamCapsuleDatagramIngressDropTotal clears H2/H3 stream DATAGRAM ingress drop counter (tests).
+func ResetStreamCapsuleDatagramIngressDropTotal() {
+	streamCapsuleDatagramIngressDropTotal.Store(0)
+}
+
 func ValidationDropTotal() uint64 {
 	return validationDropTotal.Load()
 }
@@ -311,7 +316,8 @@ type Conn struct {
 	// HTTP_DATAGRAM capsules on the CONNECT request stream — some peers use only the latter on H3.
 	h3UnifiedDatagramIngress chan []byte
 	h3QuicPumpOnce           sync.Once
-	h3PrefetchDrainOnce      sync.Once
+	h3PrefetchDrainOnce        sync.Once
+	h2CapsulePrefetchDrainOnce sync.Once
 	prefetchNotify           chan struct{}
 	prefetchCond             *sync.Cond
 	writes                   chan writeCapsule
@@ -500,8 +506,31 @@ func (c *Conn) ensureH3UnifiedPrefetchDrainer() {
 		return
 	}
 	c.h3PrefetchDrainOnce.Do(func() {
+		c.prefetchMu.Lock()
+		if len(c.prefetchSlots) == 0 {
+			c.prefetchSlots = make([][]byte, connReadPrefetchMax)
+		}
+		c.prefetchMu.Unlock()
 		c.prefetchCond = sync.NewCond(&c.prefetchMu)
 		go c.runH3UnifiedIngressPrefetchDrainer()
+	})
+}
+
+func (c *Conn) ensureH2CapsuleIngressPrefetchDrainer() {
+	if c == nil || c.datagramCapsuleIngress == nil {
+		return
+	}
+	c.h2CapsulePrefetchDrainOnce.Do(func() {
+		if c.prefetchNotify == nil {
+			c.prefetchNotify = make(chan struct{}, 256)
+		}
+		c.prefetchMu.Lock()
+		if len(c.prefetchSlots) == 0 {
+			c.prefetchSlots = make([][]byte, connReadPrefetchMax)
+		}
+		c.prefetchMu.Unlock()
+		c.prefetchCond = sync.NewCond(&c.prefetchMu)
+		go c.runH2CapsuleIngressPrefetchDrainer()
 	})
 }
 
@@ -516,11 +545,19 @@ func (c *Conn) signalPrefetchNotify() {
 }
 
 func (c *Conn) runH3UnifiedIngressPrefetchDrainer() {
+	c.runIngressPrefetchDrainer(c.h3UnifiedDatagramIngress)
+}
+
+func (c *Conn) runH2CapsuleIngressPrefetchDrainer() {
+	c.runIngressPrefetchDrainer(c.datagramCapsuleIngress)
+}
+
+func (c *Conn) runIngressPrefetchDrainer(ingress <-chan []byte) {
 	for {
 		select {
 		case <-c.closeChan:
 			return
-		case d, ok := <-c.h3UnifiedDatagramIngress:
+		case d, ok := <-ingress:
 			if !ok {
 				return
 			}
@@ -546,7 +583,7 @@ func (c *Conn) runH3UnifiedIngressPrefetchDrainer() {
 	}
 }
 
-func (c *Conn) receiveH3UnifiedPrefetched(ctx context.Context) ([]byte, error) {
+func (c *Conn) receivePrefetchedIngress(ctx context.Context) ([]byte, error) {
 	c.ensureH3QuicDatagramPump()
 	for {
 		if raw, ok, _ := c.takePrefetchedRaw(); ok {
@@ -623,11 +660,19 @@ func (c *Conn) pumpH3QUICDatagrams() {
 }
 
 func (c *Conn) enqueueH3UnifiedIngressWithBackpressure(d []byte) bool {
+	return c.enqueueIngressWithBackpressure(c.h3UnifiedDatagramIngress, d)
+}
+
+func (c *Conn) enqueueH2CapsuleIngressWithBackpressure(d []byte) bool {
+	return c.enqueueIngressWithBackpressure(c.datagramCapsuleIngress, d)
+}
+
+func (c *Conn) enqueueIngressWithBackpressure(ingress chan []byte, d []byte) bool {
 	for {
 		select {
 		case <-c.closeChan:
 			return false
-		case c.h3UnifiedDatagramIngress <- d:
+		case ingress <- d:
 			return true
 		}
 	}
@@ -657,26 +702,8 @@ func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
 
 func (c *Conn) extendPrefetchFromTry() {
 	if c.datagramCapsuleIngress != nil {
-		if !c.prefetchGate.shouldProbe() {
-			return
-		}
-		c.prefetchMu.Lock()
-		defer c.prefetchMu.Unlock()
-		drained := 0
-	capsDrain:
-		for c.prefetchCount < connReadPrefetchMax {
-			select {
-			case raw := <-c.datagramCapsuleIngress:
-				tail := (c.prefetchHead + c.prefetchCount) & connReadPrefetchMask
-				c.prefetchSlots[tail] = raw
-				c.prefetchCount++
-				drained++
-			default:
-				break capsDrain
-			}
-		}
-		c.prefetchCountAtomic.Store(int32(c.prefetchCount))
-		c.prefetchGate.observeDrain(drained)
+		c.ensureH2CapsuleIngressPrefetchDrainer()
+		// h2 capsule ingress is drained by runH2CapsuleIngressPrefetchDrainer (FIFO).
 		return
 	}
 	if c.h3UnifiedDatagramIngress != nil {
@@ -954,14 +981,15 @@ func (c *Conn) readFromStream() error {
 				return wrapConnectIPStreamDataplaneErr(c, err)
 			}
 			if c.datagramCapsuleIngress != nil {
+				c.ensureH2CapsuleIngressPrefetchDrainer()
 				select {
 				case <-c.closeChan:
 					return c.errAfterClose()
 				case c.datagramCapsuleIngress <- slices.Clone(payload):
 				default:
-					// Never block readFromStream on a full datagram queue: control capsules (e.g.
-					// ADDRESS_ASSIGN) must still be parsed from the same stream.
-					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (ingress channel full)")
+					if !c.enqueueH2CapsuleIngressWithBackpressure(slices.Clone(payload)) {
+						logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h2 capsule ingress full)")
+					}
 				}
 				continue
 			}
@@ -1090,18 +1118,12 @@ func (c *Conn) receiveProxiedDatagram(ctx context.Context) ([]byte, error) {
 		return nil, ErrTransportUnset
 	}
 	if c.datagramCapsuleIngress != nil {
-		select {
-		case <-ctx.Done():
-			return nil, context.Cause(ctx)
-		case <-c.closeChan:
-			return nil, c.errAfterClose()
-		case d := <-c.datagramCapsuleIngress:
-			return d, nil
-		}
+		c.ensureH2CapsuleIngressPrefetchDrainer()
+		return c.receivePrefetchedIngress(ctx)
 	}
 	if c.h3UnifiedDatagramIngress != nil {
 		c.ensureH3QuicDatagramPump()
-		return c.receiveH3UnifiedPrefetched(ctx)
+		return c.receivePrefetchedIngress(ctx)
 	}
 	data, err := c.str.ReceiveDatagram(ctx)
 	if err != nil {
@@ -2114,6 +2136,7 @@ func (c *Conn) Close() error {
 		if err := h2x.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		h2x.closeH2ExtendedConnectRelay()
 		return errors.Join(errs...)
 	}
 	return c.str.Close()
