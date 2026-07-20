@@ -77,3 +77,8 @@ func TestGATEConnectIPP4PlaneControlAlive(t *testing.T) {
 func TestGATEConnectIPP4PlaneControlAliveH2(t *testing.T) {
 	inttest.RunGATEConnectIPP4PlaneControlAliveH2(t)
 }
+
+// TestGATEConnectIPP4PlaneControlAliveTunCM is P6-B2c: sticky+4 via TunCM host path.
+func TestGATEConnectIPP4PlaneControlAliveTunCM(t *testing.T) {
+	inttest.RunGATEConnectIPP4PlaneControlAliveTunCM(t)
+}

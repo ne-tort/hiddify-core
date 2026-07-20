@@ -192,3 +192,142 @@ func runP4PlaneControlAlive(
 	}
 	assertNoRecycleLatch(t, sess, "after -P4 analog")
 }
+
+// RunGATEConnectIPP4PlaneControlAliveTunCM is P6-B2c: sticky+4 via TunCM (CM/host path), not DialContext.
+func RunGATEConnectIPP4PlaneControlAliveTunCM(t *testing.T) {
+	t.Helper()
+	controlTarget, controlPort := startDualFlowControlTarget(t)
+	dlStats, bulkLn := startP4DownloadTarget(t)
+	proxyPort := StartNativeConnectIPH3Server(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), p4PlaneTimeout)
+	defer cancel()
+
+	sess, err := (masque.CoreClientFactory{}).NewSession(ctx, NativeH3ClientOptions(proxyPort))
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	defer sess.Close()
+	if _, err := sess.OpenIPSession(ctx); err != nil {
+		t.Fatalf("OpenIPSession: %v", err)
+	}
+	assertNoRecycleLatch(t, sess, "after OpenIPSession")
+	r := masque.NewConnectIPTunCMRouter(t, sess)
+
+	controlAddr := M.ParseSocksaddrHostPort("127.0.0.1", controlPort)
+	bulkAddr := M.ParseSocksaddrHostPort("127.0.0.1", uint16(bulkLn.Addr().(*net.TCPAddr).Port))
+	params := []byte(`{"cookie":"p4plane-tuncm","tcp":true,"reverse":1,"time":3}`)
+
+	controlReady := make(chan struct{})
+	controlRelease := make(chan struct{})
+	controlErr := make(chan error, 1)
+	go func() {
+		var legErr error
+		routeErr := r.RouteTunTCP(ctx, controlAddr, func(app net.Conn) {
+			if _, err := app.Write(params); err != nil {
+				legErr = err
+				return
+			}
+			state := make([]byte, 2)
+			if _, err := io.ReadFull(app, state); err != nil {
+				legErr = err
+				return
+			}
+			close(controlReady)
+			select {
+			case <-controlRelease:
+			case <-ctx.Done():
+				legErr = ctx.Err()
+				return
+			}
+			_ = app.SetDeadline(time.Now().Add(p4PlaneControlWait))
+			if _, err := app.Write([]byte{0x01}); err != nil {
+				legErr = err
+			}
+		})
+		if legErr != nil {
+			controlErr <- legErr
+			return
+		}
+		controlErr <- routeErr
+	}()
+	select {
+	case <-controlReady:
+	case err := <-controlErr:
+		t.Fatalf("tunCM control setup: %v", err)
+	case <-ctx.Done():
+		t.Fatal("tunCM control setup timeout")
+	}
+
+	var bulkOK atomic.Uint64
+	var bulkFail atomic.Uint64
+	var wg sync.WaitGroup
+	for i := 0; i < p4PlaneN; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var marked bool
+			err := r.RouteTunTCP(ctx, bulkAddr, func(app net.Conn) {
+				if _, err := app.Write([]byte{0}); err != nil {
+					t.Logf("tunCM bulk[%d] probe write: %v", idx, err)
+					bulkFail.Add(1)
+					marked = true
+					return
+				}
+				n, mbps, rerr := masque.MeasureNativeKernelDownloadReadMbps(app, p4PlaneFirstByte, p4PlaneBulkDur)
+				if rerr != nil && n < p4PlaneBulkMinEach {
+					t.Logf("tunCM bulk[%d] dead: n=%d mbps=%.1f err=%v", idx, n, mbps, rerr)
+					bulkFail.Add(1)
+					marked = true
+					return
+				}
+				if n < p4PlaneBulkMinEach {
+					t.Logf("tunCM bulk[%d] short: n=%d want>=%d mbps=%.1f", idx, n, p4PlaneBulkMinEach, mbps)
+					bulkFail.Add(1)
+					marked = true
+					return
+				}
+				t.Logf("tunCM bulk[%d] ok: n=%d mbps=%.1f", idx, n, mbps)
+				bulkOK.Add(1)
+				marked = true
+			})
+			if err != nil && !marked {
+				t.Logf("tunCM bulk[%d] route: %v", idx, err)
+				bulkFail.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	ok := bulkOK.Load()
+	fail := bulkFail.Load()
+	acc := dlStats.accepted.Load()
+	prb := dlStats.probed.Load()
+	t.Logf("p4-plane layer=h3-tuncm bulk_ok=%d bulk_fail=%d accept=%d probe=%d latch=%v",
+		ok, fail, acc, prb, masque.InttestConnectIPServerGenerationStale(sess))
+	if fail > 0 || ok < uint64(p4PlaneN) {
+		close(controlRelease)
+		t.Fatalf("tunCM bulks incomplete under -P4 analog: ok=%d fail=%d want ok=%d (server accept=%d probe=%d)",
+			ok, fail, p4PlaneN, acc, prb)
+	}
+	assertNoRecycleLatch(t, sess, "after tunCM bulks before control final")
+	close(controlRelease)
+	select {
+	case err := <-controlErr:
+		if err != nil {
+			t.Fatalf("tunCM control final write after -P4 bulks: %v", err)
+		}
+	case <-time.After(p4PlaneControlWait + 2*time.Second):
+		t.Fatal("tunCM control final timeout")
+	}
+	deadline := time.Now().Add(p4PlaneControlWait)
+	for time.Now().Before(deadline) {
+		if controlTarget.byteReceived.Load() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !controlTarget.byteReceived.Load() {
+		t.Fatal("server never received tunCM control 1-byte after -P4 bulks")
+	}
+	assertNoRecycleLatch(t, sess, "after tunCM -P4 analog")
+}
