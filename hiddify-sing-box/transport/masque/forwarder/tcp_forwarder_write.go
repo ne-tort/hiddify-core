@@ -21,15 +21,23 @@ func (f *packetForwarder) egressStopped() bool {
 	}
 }
 
+// stopPlaneFromEgress unblocks ReadPacket and ends RouteConnectIPBlocked after
+// peer half-close / closed plane. Without this, sendPacketNow used to swallow
+// IsBenignEgressTeardownError as success and orphan UDP pumps (P4-5 sticky dual).
+func (f *packetForwarder) stopPlaneFromEgress() {
+	if f == nil || f.conn == nil {
+		return
+	}
+	f.planeStopOnce.Do(func() {
+		_ = f.conn.Close()
+	})
+}
+
 func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 	f.o.WriteQueueMetrics.noteDequeued()
 	pkt = f.coalesceQueuedAckOnly(pkt)
 	err := f.sendPacketNow(pkt)
 	if err != nil {
-		if mcip.IsBenignEgressTeardownError(err) {
-			returnPacket(pkt)
-			return
-		}
 		if mcip.IsRetryablePacketWriteError(err) {
 			select {
 			case <-f.writeStopped:
@@ -38,6 +46,10 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 			}
 			return
 		}
+		// Benign teardown or hard write fault: stop the plane (do not drop forever).
+		returnPacket(pkt)
+		f.stopPlaneFromEgress()
+		return
 	}
 	returnPacket(pkt)
 }
@@ -46,10 +58,6 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	f.o.DownloadQueueMetrics.noteDequeued()
 	err := f.sendPacketNow(pkt)
 	if err != nil {
-		if mcip.IsBenignEgressTeardownError(err) {
-			returnPacket(pkt)
-			return
-		}
 		if mcip.IsRetryablePacketWriteError(err) {
 			select {
 			case <-f.downloadStopped:
@@ -58,6 +66,9 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 			}
 			return
 		}
+		returnPacket(pkt)
+		f.stopPlaneFromEgress()
+		return
 	}
 	returnPacket(pkt)
 }
@@ -214,8 +225,9 @@ func (f *packetForwarder) sendPacketNow(pkt []byte) error {
 			if err == nil {
 				break
 			}
+			// P4-5: benign peer half-close must surface to egress (stop plane), not look like success.
 			if mcip.IsBenignEgressTeardownError(err) {
-				return nil
+				return err
 			}
 			if !mcip.IsRetryablePacketWriteError(err) {
 				return err

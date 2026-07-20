@@ -28,9 +28,11 @@ type packetForwarder struct {
 	downloadStopped chan struct{}
 	sendMu          sync.Mutex // serializes WritePacket (writeCh ∥ downloadCh)
 	peerPrefixes atomic.Value // []netip.Prefix
+	// planeStopOnce closes PacketPlaneConn once on egress plane death (P4-5).
+	planeStopOnce sync.Once
 
-	sMu    sync.Mutex
-	synMu  sync.Mutex
+	sMu      sync.Mutex
+	synMu    sync.Mutex
 	sessions map[tcp4Tuple]*tcpForwardSession
 
 	uMu         sync.Mutex

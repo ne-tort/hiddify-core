@@ -81,5 +81,15 @@ func RouteConnectIPBlocked(router adapter.Router, reqCtx context.Context, packet
 		err := fwd.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, packetConn.Conn, fwdOpts)
 		onClose(err)
 	}()
+	// P4-5: DataplaneContext is WithoutCancel (Router lifetime ≠ HTTP cancel), but when the
+	// inbound CONNECT-IP request itself ends (client kill / QUIC stream teardown) we must
+	// Close the packet conn so S2 does not sit half-dead under MaxIdleTimeout=24h.
+	go func() {
+		select {
+		case <-reqCtx.Done():
+			_ = packetConn.Close()
+		case <-done:
+		}
+	}()
 	<-done
 }
