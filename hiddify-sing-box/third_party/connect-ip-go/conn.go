@@ -1629,6 +1629,7 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 		default:
 		}
 	}
+	c.awaitH3S2CSendDrain()
 	if err := c.prepareOutgoingProxiedPacket(b, c.routeView.Load()); err != nil {
 		c.maybeEmitTTLExpiredICMP(b, err)
 		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing proxied packet (%d bytes): %v", len(b), err)
@@ -1689,6 +1690,7 @@ func (c *Conn) writePacketMaybeWake(b []byte, wake bool) (icmp []byte, err error
 		default:
 		}
 	}
+	c.awaitH3S2CSendDrain()
 	if ps, ok := c.str.(proxiedIPDatagramSender); ok {
 		ip := make([]byte, len(b))
 		copy(ip, b)
