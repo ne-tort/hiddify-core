@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	"github.com/sagernet/sing-box/transport/masque/connectip/relaystats"
 )
 
 // P6-D1: coalesce downloadCh drain before one Fountain flush.
@@ -127,6 +128,7 @@ func (f *packetForwarder) sendDownloadBatch(pkts [][]byte) error {
 			}
 		}
 		cw.FlushOutgoingDatagramSend()
+		relaystats.RecordS2CBatchFlush()
 		return nil
 	}
 	for _, pkt := range pkts {
@@ -206,11 +208,19 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 	select {
 	case f.writeCh <- pkt:
 		f.o.WriteQueueMetrics.noteEnqueued()
+		relaystats.RecordS2CEnqueue()
+		if f.o.WriteQueueMetrics != nil {
+			relaystats.NoteWriteQHigh(f.o.WriteQueueMetrics.Depth.Load())
+		}
 		return nil
 	default:
 		select {
 		case f.writeCh <- pkt:
 			f.o.WriteQueueMetrics.noteEnqueued()
+			relaystats.RecordS2CEnqueue()
+			if f.o.WriteQueueMetrics != nil {
+				relaystats.NoteWriteQHigh(f.o.WriteQueueMetrics.Depth.Load())
+			}
 			return nil
 		case <-f.writeStopped:
 			returnPacket(pkt)
@@ -241,6 +251,10 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 		return net.ErrClosed
 	case f.downloadCh <- pkt:
 		f.o.DownloadQueueMetrics.noteEnqueued()
+		relaystats.RecordS2CEnqueue()
+		if f.o.DownloadQueueMetrics != nil {
+			relaystats.NoteDownloadQHigh(f.o.DownloadQueueMetrics.Depth.Load())
+		}
 		return nil
 	default:
 		select {
@@ -249,6 +263,10 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 			return net.ErrClosed
 		case f.downloadCh <- pkt:
 			f.o.DownloadQueueMetrics.noteEnqueued()
+			relaystats.RecordS2CEnqueue()
+			if f.o.DownloadQueueMetrics != nil {
+				relaystats.NoteDownloadQHigh(f.o.DownloadQueueMetrics.Depth.Load())
+			}
 			return nil
 		}
 	}
@@ -296,9 +314,11 @@ func (f *packetForwarder) writePacketRelayLocked(write packetWriteFn, pkt []byte
 				break
 			}
 			if mcip.IsBenignEgressTeardownError(err) {
+				relaystats.RecordS2CWriteFail()
 				return err
 			}
 			if !mcip.IsRetryablePacketWriteError(err) {
+				relaystats.RecordS2CWriteFail()
 				return err
 			}
 			backoff := attempt
@@ -308,12 +328,15 @@ func (f *packetForwarder) writePacketRelayLocked(write packetWriteFn, pkt []byte
 			time.Sleep(time.Duration(1+backoff) * time.Millisecond)
 		}
 		if err != nil {
+			relaystats.RecordS2CWriteFail()
 			return err
 		}
 		if len(icmp) == 0 {
+			relaystats.RecordS2COut(len(pkt))
 			return nil
 		}
 		p = icmp
 	}
+	relaystats.RecordS2CWriteFail()
 	return errors.New("masque: connect-ip forwarder: ICMP relay exceeded")
 }

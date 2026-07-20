@@ -620,9 +620,14 @@ func (c *Conn) pumpH3QUICDatagrams() {
 		case <-c.closeChan:
 			return false
 		case c.h3UnifiedDatagramIngress <- d:
+			recordCIPClientH3PrefetchIn()
 			return true
 		default:
-			return c.enqueueH3UnifiedIngressWithBackpressure(d)
+			ok := c.enqueueH3UnifiedIngressWithBackpressure(d)
+			if ok {
+				recordCIPClientH3PrefetchIn()
+			}
+			return ok
 		}
 	}
 	var tryDrain tryDrainHTTPDatagrams
@@ -704,6 +709,7 @@ func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
 	if c.prefetchCond != nil {
 		c.prefetchCond.Broadcast()
 	}
+	recordCIPClientH3PrefetchOut()
 	return d, true, c.prefetchCount > 0
 }
 
@@ -1571,8 +1577,10 @@ func (c *Conn) writePacketAfterCompose(datagram []byte, icmpSource []byte) (icmp
 
 func (c *Conn) finishWritePacketSend(icmpSource []byte, err error) (icmp []byte, retErr error) {
 	if err == nil {
+		recordCIPClientWriteOK(len(icmpSource))
 		return nil, nil
 	}
+	recordCIPClientWriteFail()
 	var errDTL *quic.DatagramTooLargeError
 	if errors.As(err, &errDTL) {
 		ipMTU := ptbIPMTUFromDatagramTooLarge(errDTL)
@@ -1635,6 +1643,7 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 			icmp, retErr := c.finishWritePacketSend(b, err)
 			return icmp, false, retErr
 		}
+		recordCIPClientWriteOK(len(b))
 		return nil, true, nil
 	}
 	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
@@ -1665,6 +1674,7 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 func (c *Conn) FlushOutgoingDatagramSend() {
 	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
 		cs.FlushProxiedIPDatagramSend()
+		recordCIPClientFlush()
 	}
 }
 

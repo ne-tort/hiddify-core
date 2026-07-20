@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	"github.com/sagernet/sing-box/transport/masque/connectip/relaystats"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/checksum"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -65,6 +66,8 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 	if f.o.Dialer.Timeout == 0 && f.o.Dialer.Deadline.IsZero() {
 		f.o.Dialer.Timeout = 8 * time.Second
 	}
+	endRelayStats := relaystats.BeginSession("cip-s2")
+	defer endRelayStats()
 	egressDone := make(chan struct{})
 	var exitErr error
 	go f.runEgressLoop(ctx, egressDone)
@@ -119,6 +122,7 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 			time.Sleep(time.Millisecond)
 			continue
 		}
+		relaystats.RecordC2SPlaneIn(n)
 		f.dispatchReadPacket(ctx, conn, buf, n)
 	}
 }
@@ -143,6 +147,7 @@ func (f *packetForwarder) dispatchReadPacket(ctx context.Context, conn PacketPla
 		if err != nil || n2 < ipPacketMinSize(buf[:n2]) {
 			break
 		}
+		relaystats.RecordC2SPlaneIn(n2)
 		f.handleReadPacket(ctx, buf[:n2])
 	}
 	batchCtx, batchCancel := context.WithTimeout(ctx, time.Millisecond)

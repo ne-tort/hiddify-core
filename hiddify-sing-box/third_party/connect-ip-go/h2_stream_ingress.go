@@ -77,7 +77,7 @@ func (c *Conn) readFromStreamH2Bulk() error {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if c.h2IngressPending.Len() > 0 {
-					return io.ErrUnexpectedEOF
+					return wrapConnectIPStreamDataplaneErr(c, io.ErrUnexpectedEOF)
 				}
 				return err
 			}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
+	"github.com/sagernet/sing-box/transport/masque/connectip/relaystats"
 )
 
 type tcpForwardSession struct {
@@ -562,6 +563,7 @@ func (s *tcpForwardSession) retransmitS2CUnacked(maxSeg int) error {
 		payload,
 		opts,
 	)
+	relaystats.RecordS2CRTORetransmit()
 	return s.f.enqueueDownload(pkt)
 }
 
