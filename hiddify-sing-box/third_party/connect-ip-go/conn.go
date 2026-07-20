@@ -152,6 +152,11 @@ func ValidationDropTotal() uint64 {
 	return validationDropTotal.Load()
 }
 
+// OutgoingComposeDropTotal counts egress packets dropped during compose/prepare (client→wire).
+func OutgoingComposeDropTotal() uint64 {
+	return outgoingComposeDropTotal.Load()
+}
+
 func PolicyDropICMPTotal() uint64 {
 	return policyDropICMPTotal.Load()
 }

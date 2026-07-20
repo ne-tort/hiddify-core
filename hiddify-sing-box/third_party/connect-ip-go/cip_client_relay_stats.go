@@ -91,9 +91,6 @@ func SnapshotCIPClientRelayStats() CIPClientRelayStatsSnapshot {
 }
 
 func recordCIPClientWriteOK(nBytes int) {
-	if !cipClientRelayStatsEnabled() {
-		return
-	}
 	globalCIPClientRelayStats.writeOK.Add(1)
 	if nBytes > 0 {
 		globalCIPClientRelayStats.writeBytes.Add(uint64(nBytes))
@@ -101,27 +98,19 @@ func recordCIPClientWriteOK(nBytes int) {
 }
 
 func recordCIPClientWriteFail() {
-	if cipClientRelayStatsEnabled() {
-		globalCIPClientRelayStats.writeFail.Add(1)
-	}
+	globalCIPClientRelayStats.writeFail.Add(1)
 }
 
 func recordCIPClientFlush() {
-	if cipClientRelayStatsEnabled() {
-		globalCIPClientRelayStats.flush.Add(1)
-	}
+	globalCIPClientRelayStats.flush.Add(1)
 }
 
 func recordCIPClientH3PrefetchIn() {
-	if cipClientRelayStatsEnabled() {
-		globalCIPClientRelayStats.h3PrefetchIn.Add(1)
-	}
+	globalCIPClientRelayStats.h3PrefetchIn.Add(1)
 }
 
 func recordCIPClientH3PrefetchOut() {
-	if cipClientRelayStatsEnabled() {
-		globalCIPClientRelayStats.h3PrefetchOut.Add(1)
-	}
+	globalCIPClientRelayStats.h3PrefetchOut.Add(1)
 }
 
 // LogCIPClientRelayStats emits RESULT_CONNECT_IP_CLIENT_STATS for field scrapers.

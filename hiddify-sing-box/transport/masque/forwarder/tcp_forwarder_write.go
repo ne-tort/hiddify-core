@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
+	"github.com/sagernet/sing-box/transport/masque/connectip/losslocus"
 	"github.com/sagernet/sing-box/transport/masque/connectip/relaystats"
 )
 
@@ -203,6 +204,7 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 	}
 	if f.writeLoopStopped() {
 		returnPacket(pkt)
+		losslocus.RecordServerS2DiscardTeardown()
 		return net.ErrClosed
 	}
 	select {
@@ -224,6 +226,7 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 			return nil
 		case <-f.writeStopped:
 			returnPacket(pkt)
+			losslocus.RecordServerS2DiscardTeardown()
 			return net.ErrClosed
 		}
 	}
@@ -248,6 +251,7 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 	select {
 	case <-f.downloadStopped:
 		returnPacket(pkt)
+		losslocus.RecordServerS2DiscardTeardown()
 		return net.ErrClosed
 	case f.downloadCh <- pkt:
 		f.o.DownloadQueueMetrics.noteEnqueued()
@@ -260,6 +264,7 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 		select {
 		case <-f.downloadStopped:
 			returnPacket(pkt)
+			losslocus.RecordServerS2DiscardTeardown()
 			return net.ErrClosed
 		case f.downloadCh <- pkt:
 			f.o.DownloadQueueMetrics.noteEnqueued()

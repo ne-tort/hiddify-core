@@ -12,6 +12,7 @@ import (
 	"time"
 
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
+	"github.com/sagernet/sing-box/transport/masque/connectip/losslocus"
 	cippump "github.com/sagernet/sing-box/transport/masque/connectip/pump"
 )
 
@@ -242,9 +243,11 @@ func (b *L3OverlayBridge) deliverIngress(out []byte) error {
 	if tunWrite != nil {
 		n, err := tunWrite(out)
 		if err != nil {
+			losslocus.RecordTunWriteFail()
 			return err
 		}
 		if n != len(out) {
+			losslocus.RecordTunWriteShort()
 			return fmt.Errorf("connect-ip native l3: tunWrite short %d/%d", n, len(out))
 		}
 		return nil
@@ -252,6 +255,7 @@ func (b *L3OverlayBridge) deliverIngress(out []byte) error {
 	if inject != nil {
 		return inject(out)
 	}
+	losslocus.RecordTunNoConsumer()
 	return nil
 }
 

@@ -275,9 +275,11 @@ func (s *Netstack) InjectInboundOwned(data []byte) {
 		return
 	}
 	if s.closed.Load() {
+		recordTunInjectClosed()
 		return
 	}
 	if err, ok := s.terminalErr.Load().(error); ok && err != nil {
+		recordTunInjectClosed()
 		return
 	}
 	packet := stack.NewPacketBuffer(stack.PacketBufferOptions{
@@ -285,19 +287,13 @@ func (s *Netstack) InjectInboundOwned(data []byte) {
 	})
 	switch data[0] >> 4 {
 	case 4:
-		if obsEventsEnabled() {
-			obsReadInject()
-		}
+		obsReadInject()
 		s.endpoint.InjectInbound(ipv4.ProtocolNumber, packet)
 	case 6:
-		if obsEventsEnabled() {
-			obsReadInject()
-		}
+		obsReadInject()
 		s.endpoint.InjectInbound(ipv6.ProtocolNumber, packet)
 	default:
-		if obsEventsEnabled() {
-			obsReadDropInvalid()
-		}
+		obsReadDropInvalid()
 		packet.DecRef()
 	}
 }

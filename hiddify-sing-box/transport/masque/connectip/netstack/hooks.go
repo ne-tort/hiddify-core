@@ -1,6 +1,10 @@
 package netstack
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/sagernet/sing-box/transport/masque/connectip/losslocus"
+)
 
 const (
 	// prodDatagramCeilingMax matches connectip.DefaultDatagramCeilingMax (import cycle break).
@@ -89,9 +93,14 @@ func obsReadInject() {
 }
 
 func obsReadDropInvalid() {
+	losslocus.RecordTunInjectInvalid()
 	if hooks.ObsReadDropInvalid != nil {
 		hooks.ObsReadDropInvalid()
 	}
+}
+
+func recordTunInjectClosed() {
+	losslocus.RecordTunInjectClosed()
 }
 
 func obsWriteDequeued() {

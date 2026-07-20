@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/sagernet/sing-box/transport/masque/connectip/losslocus"
 	cipnet "github.com/sagernet/sing-box/transport/masque/connectip/netstack"
 	cipingress "github.com/sagernet/sing-box/transport/masque/connectip/pump/ingress"
 )
@@ -35,13 +36,21 @@ func init() {
 		ObsWriteSuccess:    obsWriteSuccess,
 		ObsWriteFailReason: obsWriteFailReason,
 		ObsSessionReset:    obsSessionReset,
-		H2NetstackMTU:             H2NetstackMTU,
+		H2NetstackMTU:      H2NetstackMTU,
 	})
 	cipingress.SetHooks(cipingress.Hooks{
 		CloneInboundFrame:          cipnet.CloneInboundFrame,
 		IsRetryablePacketReadError: IsRetryablePacketReadError,
 		IncPreTCPIngressDropTotal:  IncPreTCPIngressDropTotal,
 	})
+	losslocus.EngineDropSupplier = func() uint64 {
+		v, _ := ObservabilitySnapshot()["connect_ip_engine_drop_total"].(uint64)
+		return v
+	}
+	losslocus.PreTCPIngressDropSupplier = func() uint64 {
+		v, _ := ObservabilitySnapshot()["connect_ip_pre_tcp_ingress_drop_total"].(uint64)
+		return v
+	}
 }
 
 // Root re-exports from connectip/netstack during W-IP-1 subdir migration (IP-1-PR3).
