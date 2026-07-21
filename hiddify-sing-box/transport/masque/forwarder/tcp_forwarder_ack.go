@@ -4,12 +4,16 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
 )
 
-func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) []byte {
+// coalesceQueuedAckOnly collapses same-flow ACK-only segments already queued on
+// writeCh. Returns the newest ACK and any non-matching leftover (caller must
+// send both). Does not write to the plane — mid-coalesce sendPacketNow used to
+// force a per-ACK wake and defeat writeCh NoWake batching (P6-C2 WAN).
+func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, leftover []byte) {
 	flow, ok := ackOnlyFlow(first)
 	if !ok {
-		return first
+		return first, nil
 	}
-	newest := first
+	newest = first
 	for {
 		select {
 		case next := <-f.writeCh:
@@ -19,11 +23,9 @@ func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) []byte {
 				newest = next
 				continue
 			}
-			_ = f.sendPacketNow(newest)
-			returnPacket(newest)
-			return next
+			return newest, next
 		default:
-			return newest
+			return newest, nil
 		}
 	}
 }

@@ -13,11 +13,16 @@ import (
 	"github.com/sagernet/sing-box/transport/masque/connectip/relaystats"
 )
 
-// P6-D1: coalesce downloadCh drain before one Fountain flush.
+// P6-D1 / P6-C2: coalesce downloadCh / writeCh drain before one Fountain/NoWake flush.
+//
+// downloadCh: short coalesce wait forms ~MSS×N batches (required for local L1
+// attrib; pure non-blocking micro-batches → download_q_high→3k / ~250 Mbit/s).
+// writeCh ACK/control: batch NoWake+Flush (was per-ACK wake, WAN write_q_high≈300).
 const (
 	downloadBatchMaxPkts      = 32
 	downloadBatchCoalesceWait = 400 * time.Microsecond
 	downloadBatchMinWireBytes = 32 * 1024
+	writeBatchMaxPkts         = 32
 )
 
 func (f *packetForwarder) egressStopped() bool {
@@ -45,29 +50,35 @@ func (f *packetForwarder) stopPlaneFromEgress() {
 
 func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 	f.o.WriteQueueMetrics.noteDequeued()
-	pkt = f.coalesceQueuedAckOnly(pkt)
-	err := f.sendPacketNow(pkt)
+	pkts := f.collectWriteBatch(pkt)
+	err := f.sendCoalescedBatch(pkts)
 	if err != nil {
 		if mcip.IsRetryablePacketWriteError(err) {
-			select {
-			case <-f.writeStopped:
-				returnPacket(pkt)
-			case f.writeCh <- pkt:
+			for _, p := range pkts {
+				select {
+				case <-f.writeStopped:
+					returnPacket(p)
+				case f.writeCh <- p:
+				}
 			}
 			return
 		}
 		// Benign teardown or hard write fault: stop the plane (do not drop forever).
-		returnPacket(pkt)
+		for _, p := range pkts {
+			returnPacket(p)
+		}
 		f.stopPlaneFromEgress()
 		return
 	}
-	returnPacket(pkt)
+	for _, p := range pkts {
+		returnPacket(p)
+	}
 }
 
 func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	f.o.DownloadQueueMetrics.noteDequeued()
 	pkts := f.collectDownloadBatch(pkt)
-	err := f.sendDownloadBatch(pkts)
+	err := f.sendCoalescedBatch(pkts)
 	if err != nil {
 		if mcip.IsRetryablePacketWriteError(err) {
 			for _, p := range pkts {
@@ -87,6 +98,37 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 	}
 	for _, p := range pkts {
 		returnPacket(p)
+	}
+}
+
+func (f *packetForwarder) collectWriteBatch(first []byte) [][]byte {
+	pkts := make([][]byte, 0, writeBatchMaxPkts)
+	pending := first
+	for {
+		coalesced, leftover := f.coalesceQueuedAckOnly(pending)
+		pkts = append(pkts, coalesced)
+		if leftover != nil {
+			if len(pkts) >= writeBatchMaxPkts {
+				// Preserve leftover: one over max beats silent drop / blocking put-back.
+				pkts = append(pkts, leftover)
+				return pkts
+			}
+			pending = leftover
+			continue
+		}
+		if len(pkts) >= writeBatchMaxPkts {
+			return pkts
+		}
+		select {
+		case pkt, ok := <-f.writeCh:
+			if !ok {
+				return pkts
+			}
+			f.o.WriteQueueMetrics.noteDequeued()
+			pending = pkt
+		default:
+			return pkts
+		}
 	}
 }
 
@@ -116,7 +158,7 @@ func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
 	return pkts
 }
 
-func (f *packetForwarder) sendDownloadBatch(pkts [][]byte) error {
+func (f *packetForwarder) sendCoalescedBatch(pkts [][]byte) error {
 	if len(pkts) == 0 {
 		return nil
 	}
