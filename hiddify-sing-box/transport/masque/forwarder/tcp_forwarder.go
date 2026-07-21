@@ -140,6 +140,9 @@ func (f *packetForwarder) dispatchReadPacket(ctx context.Context, conn PacketPla
 	if !ok {
 		return
 	}
+	// Non-blocking drain only. A trailing 1ms Wait (old batchCtx) added ~1ms per
+	// outer Read wake; at WAN UP burst rates that burned hundreds of ms/s in the
+	// C2S loop and delayed CIP ACK clock (~½ fair UP while DOWN≈fair).
 	tryCtx, tryCancel := context.WithTimeout(ctx, 0)
 	defer tryCancel()
 	for {
@@ -149,15 +152,6 @@ func (f *packetForwarder) dispatchReadPacket(ctx context.Context, conn PacketPla
 		}
 		relaystats.RecordC2SPlaneIn(n2)
 		f.handleReadPacket(ctx, buf[:n2])
-	}
-	batchCtx, batchCancel := context.WithTimeout(ctx, time.Millisecond)
-	defer batchCancel()
-	for {
-		n3, err := br.ReadPacketWithContext(batchCtx, buf)
-		if err != nil || n3 < ipPacketMinSize(buf[:n3]) {
-			break
-		}
-		f.handleReadPacket(ctx, buf[:n3])
 	}
 }
 
