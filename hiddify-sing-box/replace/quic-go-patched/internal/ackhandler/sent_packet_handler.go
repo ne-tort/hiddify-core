@@ -1263,3 +1263,9 @@ func (h *sentPacketHandler) MaybeNotifyAppLimited() {
 		}
 	}
 }
+
+// CongestionSnapshot exports CC state for field/bench attribution (MASQUE QUIC stats).
+func (h *sentPacketHandler) CongestionSnapshot(now monotime.Time) (cwnd, bif protocol.ByteCount, mode SendMode, slowStart, recovery bool) {
+	cc := h.getCongestionControl()
+	return cc.GetCongestionWindow(), h.bytesInFlight, h.SendMode(now), cc.InSlowStart(), cc.InRecovery()
+}

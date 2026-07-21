@@ -849,6 +849,45 @@ func (c *Conn) ConnectionStats() ConnectionStats {
 	}
 }
 
+// ConnectionCongestionStats exposes CC/pacing state for MASQUE field attribution.
+type ConnectionCongestionStats struct {
+	CongestionWindow    uint64 `json:"congestion_window"`
+	BytesInFlight       uint64 `json:"bytes_in_flight"`
+	SendMode            string `json:"send_mode"`
+	InSlowStart         bool   `json:"in_slow_start"`
+	InRecovery          bool   `json:"in_recovery"`
+	BlockMode           string `json:"block_mode"`
+	DatagramSendBacklog int    `json:"datagram_send_backlog"`
+}
+
+// ConnectionCongestionStats returns CC/pacing snapshot (zero when handler unavailable).
+func (c *Conn) ConnectionCongestionStats() ConnectionCongestionStats {
+	out := ConnectionCongestionStats{
+		DatagramSendBacklog: c.DatagramSendBacklog(),
+	}
+	switch c.blocked {
+	case blockModeCongestionLimited:
+		out.BlockMode = "congestion"
+	case blockModeHardBlocked:
+		out.BlockMode = "hard"
+	default:
+		out.BlockMode = "none"
+	}
+	type snapshotter interface {
+		CongestionSnapshot(monotime.Time) (protocol.ByteCount, protocol.ByteCount, ackhandler.SendMode, bool, bool)
+	}
+	if cs, ok := c.sentPacketHandler.(snapshotter); ok {
+		now := monotime.Now()
+		cwnd, bif, mode, slowStart, recovery := cs.CongestionSnapshot(now)
+		out.CongestionWindow = uint64(cwnd)
+		out.BytesInFlight = uint64(bif)
+		out.SendMode = mode.String()
+		out.InSlowStart = slowStart
+		out.InRecovery = recovery
+	}
+	return out
+}
+
 // Time when the connection should time out
 func (c *Conn) nextIdleTimeoutTime() monotime.Time {
 	idleTimeout := max(c.idleTimeout, c.rttStats.PTO(true)*3)

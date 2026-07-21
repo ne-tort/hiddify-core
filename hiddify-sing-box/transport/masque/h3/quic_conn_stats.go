@@ -31,6 +31,13 @@ type QUICConnStatsSnapshot struct {
 	LatestRTTNs        int64   `json:"latest_rtt_ns"`
 	SmoothedRTTNs      int64   `json:"smoothed_rtt_ns"`
 	MeanDeviationNs    int64   `json:"mean_deviation_ns"`
+	CongestionWindow   uint64  `json:"congestion_window"`
+	BytesInFlight      uint64  `json:"bytes_in_flight"`
+	SendMode           string  `json:"send_mode"`
+	InSlowStart        bool    `json:"in_slow_start"`
+	InRecovery         bool    `json:"in_recovery"`
+	BlockMode          string  `json:"block_mode"`
+	DatagramSendBacklog int    `json:"datagram_send_backlog"`
 	// Process-wide DATAGRAM drops *before* CONNECT-UDP relay c2s_in (AUDIT B2 / TASKS F0.4).
 	DatagramRcvQueueDrops         uint64 `json:"datagram_rcv_queue_drops"`
 	StreamDatagramQueueDrops      uint64 `json:"stream_datagram_queue_drops"`
@@ -55,6 +62,13 @@ type QUICConnSnapshot struct {
 	LatestRTTNs         int64   `json:"latest_rtt_ns"`
 	SmoothedRTTNs       int64   `json:"smoothed_rtt_ns"`
 	MeanDeviationNs     int64   `json:"mean_deviation_ns"`
+	CongestionWindow    uint64  `json:"congestion_window"`
+	BytesInFlight       uint64  `json:"bytes_in_flight"`
+	SendMode            string  `json:"send_mode"`
+	InSlowStart         bool    `json:"in_slow_start"`
+	InRecovery          bool    `json:"in_recovery"`
+	BlockMode           string  `json:"block_mode"`
+	DatagramSendBacklog int     `json:"datagram_send_backlog"`
 }
 
 type trackedQUICConn struct {
@@ -99,6 +113,10 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 	alive := quicTrackedConns[:0]
 	var out QUICConnStatsSnapshot
 	var minRTT, latestRTT, smoothRTT, meanDev int64
+	var maxCwnd, maxBif uint64
+	var sendMode, blockMode string
+	var dgBacklog int
+	var inSlowStart, inRecovery bool
 	for _, t := range quicTrackedConns {
 		if t == nil || t.conn == nil {
 			continue
@@ -110,6 +128,7 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 		}
 		alive = append(alive, t)
 		st := t.conn.ConnectionStats()
+		cc := t.conn.ConnectionCongestionStats()
 		ratio := 0.0
 		if st.PacketsSent > 0 {
 			ratio = float64(st.PacketsLost) / float64(st.PacketsSent)
@@ -124,6 +143,36 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 			PacketsLost:         st.PacketsLost,
 			SpuriousPacketsLost: st.SpuriousPacketsLost,
 			LostPacketRatio:     ratio,
+		}
+		snap.CongestionWindow = cc.CongestionWindow
+		snap.BytesInFlight = cc.BytesInFlight
+		snap.SendMode = cc.SendMode
+		snap.InSlowStart = cc.InSlowStart
+		snap.InRecovery = cc.InRecovery
+		snap.BlockMode = cc.BlockMode
+		snap.DatagramSendBacklog = cc.DatagramSendBacklog
+		if cc.CongestionWindow > maxCwnd {
+			maxCwnd = cc.CongestionWindow
+		}
+		if cc.BytesInFlight > maxBif {
+			maxBif = cc.BytesInFlight
+		}
+		if cc.SendMode != "" {
+			sendMode = cc.SendMode
+		}
+		if cc.BlockMode != "" && cc.BlockMode != "none" {
+			blockMode = cc.BlockMode
+		} else if blockMode == "" {
+			blockMode = cc.BlockMode
+		}
+		if cc.DatagramSendBacklog > dgBacklog {
+			dgBacklog = cc.DatagramSendBacklog
+		}
+		if cc.InSlowStart {
+			inSlowStart = true
+		}
+		if cc.InRecovery {
+			inRecovery = true
 		}
 		if st.MinRTT > 0 {
 			snap.MinRTTNs = st.MinRTT.Nanoseconds()
@@ -170,6 +219,13 @@ func SnapshotQUICConnStats() QUICConnStatsSnapshot {
 	out.LatestRTTNs = latestRTT
 	out.SmoothedRTTNs = smoothRTT
 	out.MeanDeviationNs = meanDev
+	out.CongestionWindow = maxCwnd
+	out.BytesInFlight = maxBif
+	out.SendMode = sendMode
+	out.InSlowStart = inSlowStart
+	out.InRecovery = inRecovery
+	out.BlockMode = blockMode
+	out.DatagramSendBacklog = dgBacklog
 	fillQUICDatagramQueueDrops(&out)
 	return out
 }
