@@ -492,7 +492,15 @@ func (c *rawConn) enqueuePooledHTTPDatagramMaybeWake(quarterStreamID uint64, pay
 			},
 		})
 	}
-	if err := c.conn.EnqueuePooledHTTPDatagram(bufPtr); err != nil {
+	var err error
+	if wake {
+		err = c.conn.EnqueuePooledHTTPDatagram(bufPtr)
+	} else {
+		// P6-C2: NoWake must use AddNoWake. EnqueuePooledHTTPDatagram always woke via
+		// datagramQueue.Add, defeating forwarder/client batch Flush (per-pkt scheduleSending).
+		err = c.conn.EnqueuePooledHTTPDatagramNoWake(bufPtr)
+	}
+	if err != nil {
 		quic.ReleaseHTTP3DatagramBuffer(bufPtr)
 		return err
 	}

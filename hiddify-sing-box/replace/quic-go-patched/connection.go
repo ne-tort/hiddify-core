@@ -3120,7 +3120,8 @@ func (c *Conn) SendDatagram(p []byte) error {
 	bufPtr := AcquireHTTP3DatagramBuffer()
 	*bufPtr = (*bufPtr)[:0]
 	*bufPtr = append(*bufPtr, p...)
-	if err := c.enqueuePooledOutgoingDatagramFrame(bufPtr); err != nil {
+	// AddNoWake: scheduleSending below is the sole wake (avoid double hasData).
+	if err := c.enqueuePooledOutgoingDatagramFrame(bufPtr, false); err != nil {
 		return err
 	}
 	c.scheduleSending()
@@ -3131,11 +3132,19 @@ func (c *Conn) SendDatagram(p []byte) error {
 // HTTP/3 capsule prefix (quarter-stream-ID varint + datagram bytes, RFC 9297). The *[]byte is
 // typically from AcquireHTTP3DatagramBuffer; ownership transfers on success until the QUIC
 // stack copies payload into outgoing crypto frames.
+// Schedules the send loop (same as datagramQueue.Add).
 func (c *Conn) EnqueuePooledHTTPDatagram(bufPtr *[]byte) error {
-	return c.enqueuePooledOutgoingDatagramFrame(bufPtr)
+	return c.enqueuePooledOutgoingDatagramFrame(bufPtr, true)
 }
 
-func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte) error {
+// EnqueuePooledHTTPDatagramNoWake queues like EnqueuePooledHTTPDatagram but does not
+// schedule send work. Pair with MasqueWakeConnSendDatagramCoalesced after a batch
+// (CONNECT-IP WritePacketNoWake / FlushOutgoingDatagramSend).
+func (c *Conn) EnqueuePooledHTTPDatagramNoWake(bufPtr *[]byte) error {
+	return c.enqueuePooledOutgoingDatagramFrame(bufPtr, false)
+}
+
+func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte, wake bool) error {
 	if bufPtr == nil {
 		return errors.New("datagram enqueue: nil buffer pointer")
 	}
@@ -3154,7 +3163,12 @@ func (c *Conn) enqueuePooledOutgoingDatagramFrame(bufPtr *[]byte) error {
 		attachPooledOutgoingPayload(f, bufPtr)
 	}
 
-	err := c.datagramQueue.Add(f)
+	var err error
+	if wake {
+		err = c.datagramQueue.Add(f)
+	} else {
+		err = c.datagramQueue.AddNoWake(f)
+	}
 	if err != nil {
 		if f.OutgoingPayloadRelease != nil {
 			releaseOutgoingDatagramPayload(f)
