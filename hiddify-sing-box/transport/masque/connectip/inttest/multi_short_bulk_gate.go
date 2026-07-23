@@ -180,6 +180,13 @@ func runMultiShortTCPBulkNoRecycleLatch(
 	}
 	shortWG.Wait()
 	close(shortErrs)
+	// Short FIN storm can finish within one S2C coalesce/Flush tick while bulk
+	// DATA is already in pendingWire / H2 pipe. Wait one download progress tick
+	// before declaring stall (still fails hard lockups >100ms).
+	progressDeadline := time.Now().Add(250 * time.Millisecond)
+	for bulkTotal.Load() <= warmBytes && time.Now().Before(progressDeadline) {
+		time.Sleep(time.Millisecond)
+	}
 	afterShortBytes := bulkTotal.Load()
 	assertNoRecycleLatch(t, sess, "after short FIN")
 

@@ -160,6 +160,10 @@ func masqueShouldFlushBeforeBlockingRead(body io.ReadCloser, pendingAck int) boo
 		// polled while blocked, so returning false with pendingAck>0 stalls the wire
 		// (field: armed MinPending=256 → up ~7 Mbit). Coalesce lives in bulk Now/deadline
 		// while pipe stays non-empty; empty-pipe quantum = pipe cap (256 KiB).
+		//
+		// CONNECT-IP uses this path (no BeginUploadWriterLive). A/B 2026-07-22: treating
+		// CIP like writer-live after UploadBulkArmed buried nested TCP ACKs in bw
+		// (prime ~266 + iperf timeout). Keep always-Flush on empty io.Pipe.
 		return true
 	default:
 		return buf >= masqueUploadPipeFlushMark(body)

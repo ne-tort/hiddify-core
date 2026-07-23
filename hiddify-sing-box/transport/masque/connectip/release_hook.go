@@ -6,7 +6,7 @@ import (
 )
 
 func init() {
-	cipgo.SetOutboundPayloadReleaseHook(releaseOutboundPayload, isOutboundPoolSlice)
+	// Release hook is registered once in egress_reexport.go (avoid dual init).
 	cipgo.SetIPScopeOpener(func(opaque string) (string, uint8, error) {
 		return pathbuild.OpenIPScope(pathbuild.ActiveKey(true), opaque)
 	})

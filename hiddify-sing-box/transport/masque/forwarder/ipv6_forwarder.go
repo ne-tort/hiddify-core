@@ -43,19 +43,21 @@ func (f *packetForwarder) handleIPv6TCPPacket(ctx context.Context, pkt []byte, l
 	if doff < header.TCPMinimumSize || l4Off+doff > len(pkt) {
 		return
 	}
-	tcpLen := uint16(len(pkt) - l4Off)
-	payloadLen := tcpLen - uint16(doff)
-	var payCsum uint16
-	if payloadLen > 0 {
-		payCsum = checksum.Checksum(pkt[l4Off+doff:], 0)
-	}
 	srcAddr := iph.SourceAddress()
 	dstAddr := iph.DestinationAddress()
-	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
-		repairIPv6TCPChecksum(pkt, l4Off)
-		tc = header.TCP(pkt[l4Off:])
-		if !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
-			return
+	if s2VerifyInnerTCPChecksum() {
+		tcpLen := uint16(len(pkt) - l4Off)
+		payloadLen := tcpLen - uint16(doff)
+		var payCsum uint16
+		if payloadLen > 0 {
+			payCsum = checksum.Checksum(pkt[l4Off+doff:], 0)
+		}
+		if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
+			repairIPv6TCPChecksum(pkt, l4Off)
+			tc = header.TCP(pkt[l4Off:])
+			if !tc.IsChecksumValid(srcAddr, dstAddr, payCsum, payloadLen) {
+				return
+			}
 		}
 	}
 	flow := tcp4Tuple{

@@ -4,12 +4,10 @@ import "errors"
 
 // Hooks wires connectip root helpers without import cycles (W-IP-1 PR4).
 type Hooks struct {
-	JoinTransport     func(error) error
-	TrackWriteFail    func(err error, ceiling bool)
-	TrackPacketTx     func(ipLen int)
-	TrackPTBRx        func()
-	BorrowOutboundBuf func(n int) []byte
-	ReturnOutboundBuf func(b []byte)
+	JoinTransport  func(error) error
+	TrackWriteFail func(err error, ceiling bool)
+	TrackPacketTx  func(ipLen int)
+	TrackPTBRx     func()
 }
 
 var hooks Hooks
@@ -41,19 +39,5 @@ func trackPacketTx(ipLen int) {
 func trackPTBRx() {
 	if hooks.TrackPTBRx != nil {
 		hooks.TrackPTBRx()
-	}
-}
-
-func borrowOutboundBuf(n int) []byte {
-	if hooks.BorrowOutboundBuf != nil {
-		return hooks.BorrowOutboundBuf(n)
-	}
-	b := make([]byte, n)
-	return b
-}
-
-func returnOutboundBuf(b []byte) {
-	if hooks.ReturnOutboundBuf != nil {
-		hooks.ReturnOutboundBuf(b)
 	}
 }

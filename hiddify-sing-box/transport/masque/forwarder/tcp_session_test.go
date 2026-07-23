@@ -1530,9 +1530,9 @@ func TestForwarderReadPacketBenign0x100ExitsCleanly(t *testing.T) {
 	}
 }
 
-// TestForwarderSynDialStartsRemotePumpReadOnlyDownload verifies usque parity: S2C pump starts
-// on backend dial so read-only clients (PrimeNativeTCPDownload) receive bulk without C2S payload.
-func TestForwarderSynDialStartsRemotePumpReadOnlyDownload(t *testing.T) {
+// TestForwarderPureAckThenPayloadStartsRemotePumpReadOnlyDownload verifies S2C pump starts on
+// first C2S payload after handshake (pure ACK alone does not start pump — iperf -R params path).
+func TestForwarderPureAckThenPayloadStartsRemotePumpReadOnlyDownload(t *testing.T) {
 	t.Parallel()
 	rec := &recordingPacketPlaneConn{}
 	f := newTestPacketForwarder(rec)

@@ -11,6 +11,7 @@ import (
 const nativeL3PlaneReadyPoll = 10 * time.Millisecond
 
 // nativeL3PumpReconnectDelay bounds usque-style pump restart after LoopOut/LoopIn fatal.
+// usque uses pumpShutdownGrace=2s; we use 50ms for faster plane recycle on prod TUN KPI.
 const nativeL3PumpReconnectDelay = 50 * time.Millisecond
 
 // NativeL3PlaneSession owns L3 overlay ingress lifecycle (W-IP-ARCH-3 PlaneSession).

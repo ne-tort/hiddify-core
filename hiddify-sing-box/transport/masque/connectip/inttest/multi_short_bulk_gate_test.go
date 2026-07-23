@@ -82,3 +82,23 @@ func TestGATEConnectIPP4PlaneControlAliveH2(t *testing.T) {
 func TestGATEConnectIPP4PlaneControlAliveTunCM(t *testing.T) {
 	inttest.RunGATEConnectIPP4PlaneControlAliveTunCM(t)
 }
+
+// TestGATEConnectIPP4UploadResultsAlive: N uploads + control must Read S2C results (docker -P≥3 analog).
+func TestGATEConnectIPP4UploadResultsAlive(t *testing.T) {
+	inttest.RunGATEConnectIPP4UploadResultsAlive(t)
+}
+
+// TestGATEConnectIPP4UploadResultsAliveH2 is the H2 counterpart.
+func TestGATEConnectIPP4UploadResultsAliveH2(t *testing.T) {
+	inttest.RunGATEConnectIPP4UploadResultsAliveH2(t)
+}
+
+// TestGATEConnectIPBrowserChurnNoSiblingKill: control+bulk+short+UDP; kill one bulk; siblings live.
+func TestGATEConnectIPBrowserChurnNoSiblingKill(t *testing.T) {
+	inttest.RunGATEConnectIPBrowserChurnNoSiblingKill(t)
+}
+
+// TestGATEConnectIPBrowserChurnNoSiblingKillH2 is the H2 counterpart.
+func TestGATEConnectIPBrowserChurnNoSiblingKillH2(t *testing.T) {
+	inttest.RunGATEConnectIPBrowserChurnNoSiblingKillH2(t)
+}

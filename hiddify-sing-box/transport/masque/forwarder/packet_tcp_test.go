@@ -43,3 +43,20 @@ func TestBuildIPv4TCPPacketChecksumValid(t *testing.T) {
 		t.Fatalf("invalid tcp checksum on syn-ack packet len=%d doff=%d", len(pkt), doff)
 	}
 }
+
+// TestGATEServerWSFloor: SYN-ACK must announce server WS≥10, not echo a low client shift.
+// Echo WS≤1 → rcv window 64–128KiB → ~17–34 Mbit/s ceiling on ~30ms WAN RTT.
+func TestGATEServerWSFloor(t *testing.T) {
+	t.Parallel()
+	const floor = 10
+	clientWS := 1
+	so := header.TCPSynOptions{MSS: 1460, WS: clientWS}
+	if so.WS >= 0 {
+		so.WS = floor // same mutation as tcp_forwarder_syn.go
+	}
+	raw := buildSynAckTCPOptions(so, 0)
+	parsed := header.ParseSynOptions(raw, true)
+	if parsed.WS != floor {
+		t.Fatalf("SYN-ACK WS=%d want server floor %d (client offered %d)", parsed.WS, floor, clientWS)
+	}
+}

@@ -39,6 +39,9 @@ var (
 // Server S2 teardown discards (packet returned without WritePacket).
 var serverS2DiscardTeardown atomic.Uint64
 
+// Server S2 plane stop from egress (conn.Close after fatal/benign write).
+var serverS2PlaneStopFromEgress atomic.Uint64
+
 var (
 	active atomic.Bool
 	once   atomic.Bool
@@ -84,6 +87,11 @@ func RecordServerS2DiscardTeardown() {
 	serverS2DiscardTeardown.Add(1)
 }
 
+// RecordServerS2PlaneStopFromEgress: stopPlaneFromEgress → conn.Close (plane-wide).
+func RecordServerS2PlaneStopFromEgress() {
+	serverS2PlaneStopFromEgress.Add(1)
+}
+
 // Reset clears process-local TUN/S2 discard counters (tests). Does not reset wire/quic globals.
 func Reset() {
 	tunWriteFail.Store(0)
@@ -92,6 +100,7 @@ func Reset() {
 	tunInjectClosed.Store(0)
 	tunInjectInvalid.Store(0)
 	serverS2DiscardTeardown.Store(0)
+	serverS2PlaneStopFromEgress.Store(0)
 }
 
 // Snapshot is the scrape contract: every key is a named locus counter.
@@ -133,9 +142,10 @@ func SnapshotNow(role string) Snapshot {
 		"underlay_h3_packer_oversize":      quic.DatagramPackerOversizeDropTotal(),
 
 		// Server S2
-		"server_s2_write_fail":        relaystats.SnapshotNow().S2CWriteFail,
-		"server_s2_discard_teardown":  serverS2DiscardTeardown.Load(),
-		"server_s2_rto_retransmit":    relaystats.SnapshotNow().S2CRTORetransmit,
+		"server_s2_write_fail":           relaystats.SnapshotNow().S2CWriteFail,
+		"server_s2_discard_teardown":     serverS2DiscardTeardown.Load(),
+		"server_s2_plane_stop_egress":    serverS2PlaneStopFromEgress.Load(),
+		"server_s2_rto_retransmit":       relaystats.SnapshotNow().S2CRTORetransmit,
 	}
 
 	// Optional engine drops from OBS (client ingress classification).

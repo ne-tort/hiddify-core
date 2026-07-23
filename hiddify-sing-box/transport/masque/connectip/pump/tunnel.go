@@ -28,8 +28,6 @@ type TunnelOptions struct {
 	NetBuffer *NetBuffer
 	// LoopOutUsqueImmediate skips blocking batch drain (usque: one ReadPacket → WritePacket per iteration).
 	LoopOutUsqueImmediate bool
-	// LoopInUsqueImmediate skips zero-timeout coalesce after ReadPacket (usque: one read → one wire write).
-	LoopInUsqueImmediate bool
 	// LoopOutSkipBatchDrain skips the 2ms blocking batch window (host-kernel: coalesce wire only).
 	LoopOutSkipBatchDrain bool
 	// LoopInObserver collects per-iteration read/write/flush metrics (tests/diagnostics only).
@@ -38,16 +36,15 @@ type TunnelOptions struct {
 
 // UsqueTunnelOptions returns MaintainTunnel-shaped pump defaults (one read → one write both loops).
 func UsqueTunnelOptions() TunnelOptions {
-	return TunnelOptions{
-		LoopOutUsqueImmediate: true,
-		LoopInUsqueImmediate:  true,
-	}
+	return NormalizeTunnelOptions(TunnelOptions{})
 }
 
-// NormalizeTunnelOptions applies usque immediate defaults (prod always one read → one write).
+// NormalizeTunnelOptions applies usque immediate defaults for LoopOut.
+// LoopIn is always one read → one wire write (no coalesce flag).
+// RunTunnelBatch may override LoopOutUsqueImmediate=false when LoopOutSkipBatchDrain
+// enables zero-timeout wire coalesce (ACK storms only).
 func NormalizeTunnelOptions(opts TunnelOptions) TunnelOptions {
 	opts.LoopOutUsqueImmediate = true
-	opts.LoopInUsqueImmediate = true
 	return opts
 }
 
@@ -222,6 +219,22 @@ func writeLoopInPacket(device TunnelDevice, conn PacketConnInPlaceNoWake, pkt []
 	return retained, nil
 }
 
+// drainLoopOutWireCoalesce drains queued ingress datagrams without blocking (RunTunnelBatch + LoopOutSkipBatchDrain).
+func drainLoopOutWireCoalesce(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, tryCtx context.Context, buf []byte) error {
+	if opts.LoopOutUsqueImmediate {
+		return nil
+	}
+	for {
+		n2, err2 := conn.ReadPacket(tryCtx, buf)
+		if err2 != nil || n2 <= 0 {
+			return nil
+		}
+		if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n2]); err != nil {
+			return err
+		}
+	}
+}
+
 func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer) error {
 	buf := pool.Get()
 	defer pool.Put(buf)
@@ -261,18 +274,9 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 		if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n]); err != nil {
 			return err
 		}
-		// usque LoopOut: one wire datagram → one WritePacket per iteration (no zero-timeout coalesce).
-		// Batching WriteIngress starves LoopIn ReadHostEgress → tun ENOBUFS / kernel TCP stall (iperf -R).
-		if !opts.LoopOutUsqueImmediate {
-			for {
-				n2, err2 := conn.ReadPacket(tryCtx, buf)
-				if err2 != nil || n2 <= 0 {
-					break
-				}
-				if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n2]); err != nil {
-					return err
-				}
-			}
+		// RunTunnelBatch only: zero-timeout wire coalesce (not usque 1:1; avoids tun ENOBUFS on ACK storms).
+		if err := drainLoopOutWireCoalesce(ctx, device, conn, opts, tryCtx, buf); err != nil {
+			return err
 		}
 		flushWake()
 	}

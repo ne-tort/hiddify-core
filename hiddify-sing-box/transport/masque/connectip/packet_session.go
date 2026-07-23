@@ -133,26 +133,8 @@ func (s *ClientPacketSession) WritePacket(buffer []byte) ([]byte, error) {
 	if s == nil || s.conn == nil {
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
 	}
-	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
-		icmp, err := connectip.ComposeICMPPacketTooBig(buffer, ceiling)
-		if err != nil {
-			err = errors.Join(Errs.Transport, err)
-			TrackWriteFail(err, true)
-			return nil, err
-		}
-		TrackPTBRx()
-		return icmp, nil
-	}
-	icmp, err := s.conn.WritePacket(buffer)
-	if err != nil {
-		TrackWriteFail(err, false)
-		return icmp, err
-	}
-	TrackPacketTx(len(buffer))
-	if len(icmp) > 0 {
-		TrackPTBRx()
-	}
-	return icmp, err
+	// Single egress façade (cipegress): PTB ceiling + wake flush. Avoids dual copy of Write* logic.
+	return cipegress.WritePacket(s.egressHost(), buffer)
 }
 
 // WritePacketNoWake enqueues without QUIC flush; caller must FlushEgressBatch once per pump iteration.
@@ -160,26 +142,7 @@ func (s *ClientPacketSession) WritePacketNoWake(buffer []byte) ([]byte, error) {
 	if s == nil || s.conn == nil {
 		return nil, errors.Join(Errs.Transport, errors.New("connect-ip conn is nil"))
 	}
-	if ceiling := s.datagramCeiling; ceiling > 0 && len(buffer) > ceiling {
-		icmp, err := connectip.ComposeICMPPacketTooBig(buffer, ceiling)
-		if err != nil {
-			err = errors.Join(Errs.Transport, err)
-			TrackWriteFail(err, true)
-			return nil, err
-		}
-		TrackPTBRx()
-		return icmp, nil
-	}
-	icmp, err := s.conn.WritePacketNoWake(buffer)
-	if err != nil {
-		TrackWriteFail(err, false)
-		return icmp, err
-	}
-	TrackPacketTx(len(buffer))
-	if len(icmp) > 0 {
-		TrackPTBRx()
-	}
-	return icmp, err
+	return cipegress.WritePacketNoWake(s.egressHost(), buffer)
 }
 
 // WritePacketFromNetstack sends a netstack pool buffer in-place (NoWake); caller flushes the batch.
@@ -187,26 +150,9 @@ func (s *ClientPacketSession) WritePacketFromNetstack(outbound []byte) (retained
 	return cipegress.WritePacketFromNetstack(s.egressHost(), outbound)
 }
 
-// WritePacketInPlaceNoWake enqueues a caller-owned buffer without copy (NoWake); caller flushes the batch.
-func (s *ClientPacketSession) WritePacketInPlaceNoWake(outbound []byte) (retained bool, icmp []byte, err error) {
-	return s.WritePacketFromNetstack(outbound)
-}
-
-// WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
-func (s *ClientPacketSession) WritePacketPrefixed(buffer []byte) ([]byte, error) {
-	return cipegress.WritePacketPrefixed(s.egressHost(), buffer, connectip.DatagramContextPrefixLen())
-}
-
-// FlushEgressBatch wakes QUIC/H2 send after batched WritePacketInPlaceNoWake calls.
+// FlushEgressBatch wakes QUIC/H2 send after batched WritePacketFromNetstack calls.
 func (s *ClientPacketSession) FlushEgressBatch() {
 	cipegress.FlushEgressBatch(s.egressHost())
-}
-
-// FlushEgressTransport schedules QUIC datagram send without ingress poke (LoopIn batch flush).
-func (s *ClientPacketSession) FlushEgressTransport() {
-	if s != nil && s.conn != nil {
-		s.conn.FlushOutgoingDatagramSend()
-	}
 }
 
 func (s *ClientPacketSession) Close() error {

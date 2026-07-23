@@ -33,6 +33,7 @@ func (c *Conn) DatagramSendBacklog() int {
 }
 
 func h3S2CSoftLimitEnabled() bool {
+	// Getenv each call (not OnceValue): tests use t.Setenv; DOC LOCK default OFF.
 	v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_H3_S2C_SOFT_LIMIT"))
 	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
 }

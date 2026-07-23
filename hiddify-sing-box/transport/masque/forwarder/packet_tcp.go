@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/checksum"
@@ -16,11 +17,15 @@ const (
 	remoteReadBuf         = 256 << 10
 	remoteWriteBuf        = 2 << 20
 	remoteFlushBatch      = 64 * 1024
-	writeQueueDepth       = 512
-	downloadQueueDepth    = 8192
-	writePacketMaxPersist = 128
-	kernelBuf             = 16 << 20
-	icmpRelayMax          = 8
+	// Residual C2S (iperf results JSON ~1–4KiB) sits below remoteFlushBatch and
+	// above the ≤512 immediate flush — without idle flush it never reaches the
+	// backend and host-TUN iperf -P≥3 hangs on "unable to receive results".
+	remoteIdleFlushAfter   = 1 * time.Millisecond
+	writeQueueDepth        = 2048
+	downloadQueueDepth     = 8192
+	writePacketMaxPersist  = 128
+	kernelBuf              = 16 << 20
+	icmpRelayMax           = 8
 )
 
 // MaxSegmentPayload caps one CONNECT-IP TCP segment payload (MSS minus timestamp options).
@@ -207,4 +212,81 @@ func init() {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
 	ipv4ID.Store(binary.BigEndian.Uint32(b[:]))
+}
+
+// parseAckWireMeta records patch offsets for ACK-only wire templates.
+func parseAckWireMeta(pkt []byte) ackWireMeta {
+	meta := ackWireMeta{tsValOff: -1, tsEchoOff: -1, ipv4IDOff: -1}
+	if len(pkt) >= header.IPv4MinimumSize && pkt[0]>>4 == 4 {
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < header.IPv4MinimumSize || ihl+header.TCPMinimumSize > len(pkt) {
+			return meta
+		}
+		meta.isIPv4 = true
+		meta.ipv4IDOff = 4
+		meta.tcpOff = ihl
+		ip := header.IPv4(pkt)
+		meta.srcAddr = ip.SourceAddress()
+		meta.dstAddr = ip.DestinationAddress()
+	} else if len(pkt) >= header.IPv6MinimumSize && pkt[0]>>4 == 6 {
+		meta.tcpOff = header.IPv6MinimumSize
+		if meta.tcpOff+header.TCPMinimumSize > len(pkt) {
+			return meta
+		}
+		ip := header.IPv6(pkt)
+		meta.srcAddr = ip.SourceAddress()
+		meta.dstAddr = ip.DestinationAddress()
+	} else {
+		return meta
+	}
+	tc := header.TCP(pkt[meta.tcpOff:])
+	meta.tcpLen = int(tc.DataOffset())
+	if meta.tcpOff+meta.tcpLen > len(pkt) {
+		return ackWireMeta{tsValOff: -1, tsEchoOff: -1, ipv4IDOff: -1}
+	}
+	meta.seqOff = meta.tcpOff + 4
+	meta.ackOff = meta.tcpOff + 8
+	opts := pkt[meta.tcpOff+header.TCPMinimumSize : meta.tcpOff+meta.tcpLen]
+	for i := 0; i < len(opts); {
+		switch opts[i] {
+		case header.TCPOptionEOL:
+			return meta
+		case header.TCPOptionNOP:
+			i++
+		case header.TCPOptionTS:
+			if i+1 < len(opts) && opts[i+1] == header.TCPOptionTSLength && i+10 <= len(opts) {
+				base := meta.tcpOff + header.TCPMinimumSize + i + 2
+				meta.tsValOff = base
+				meta.tsEchoOff = base + 4
+			}
+			return meta
+		default:
+			if i+1 >= len(opts) {
+				return meta
+			}
+			l := int(opts[i+1])
+			if l < 2 {
+				return meta
+			}
+			i += l
+		}
+	}
+	return meta
+}
+
+// patchAckWireChecksums refreshes IPv4 ID + L4 checksum on a cloned ACK template.
+func patchAckWireChecksums(pkt []byte, m ackWireMeta) {
+	if m.tcpOff == 0 || m.tcpLen < header.TCPMinimumSize {
+		return
+	}
+	if m.isIPv4 && m.ipv4IDOff >= 0 {
+		binary.BigEndian.PutUint16(pkt[m.ipv4IDOff:], nextIPv4PacketID())
+		iph := header.IPv4(pkt)
+		iph.SetChecksum(0)
+		iph.SetChecksum(^iph.CalculateChecksum())
+	}
+	tc := header.TCP(pkt[m.tcpOff:])
+	tc.SetChecksum(0)
+	xsum := header.PseudoHeaderChecksum(header.TCPProtocolNumber, m.srcAddr, m.dstAddr, uint16(m.tcpLen))
+	tc.SetChecksum(^tc.CalculateChecksum(xsum))
 }

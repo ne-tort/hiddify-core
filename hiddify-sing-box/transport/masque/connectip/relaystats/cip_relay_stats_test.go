@@ -12,6 +12,7 @@ func TestCIPRelayStatsRecordAndSnapshot(t *testing.T) {
 	RecordS2CWriteFail()
 	RecordS2CBatchFlush()
 	RecordS2CRTORetransmit()
+	RecordS2CAckAdmitDrop()
 	NoteDownloadQHigh(7)
 	NoteDownloadQHigh(3)
 	NoteWriteQHigh(2)
@@ -22,7 +23,7 @@ func TestCIPRelayStatsRecordAndSnapshot(t *testing.T) {
 	if s.S2CEnqueue != 1 || s.S2COut != 1 || s.S2COutBytes != 200 {
 		t.Fatalf("s2c out %+v", s)
 	}
-	if s.S2CWriteFail != 1 || s.S2CBatchFlush != 1 || s.S2CRTORetransmit != 1 {
+	if s.S2CWriteFail != 1 || s.S2CBatchFlush != 1 || s.S2CRTORetransmit != 1 || s.S2CAckAdmitDrop != 1 {
 		t.Fatalf("s2c fails %+v", s)
 	}
 	if s.DownloadQHigh != 7 || s.WriteQHigh != 2 {

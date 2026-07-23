@@ -5,7 +5,6 @@ type PacketConn interface {
 	WritePacket(buffer []byte) (icmp []byte, err error)
 	WritePacketNoWake(buffer []byte) (icmp []byte, err error)
 	WritePacketInPlaceNoWake(outbound []byte) (icmp []byte, retained bool, err error)
-	WritePacketPrefixed(buffer []byte) (icmp []byte, err error)
 	FlushOutgoingDatagramSend()
 }
 

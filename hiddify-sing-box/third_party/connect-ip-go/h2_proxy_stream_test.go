@@ -3,6 +3,7 @@ package connectip
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"net/http"
 	"sync"
@@ -10,6 +11,19 @@ import (
 	"testing"
 	"time"
 )
+
+// minimalIPv4TCP builds a checksum-free IPv4/TCP stub for flush-policy gates.
+func minimalIPv4TCP(payloadLen int) []byte {
+	const ihl, doff = 20, 20
+	total := ihl + doff + payloadLen
+	pkt := make([]byte, total)
+	pkt[0] = 0x45
+	binary.BigEndian.PutUint16(pkt[2:4], uint16(total))
+	pkt[9] = 6 // TCP
+	pkt[ihl+12] = byte(doff/4) << 4
+	pkt[ihl+13] = 0x10 // ACK
+	return pkt
+}
 
 // TestH2ServerCapsuleStreamWriteFlushesOnce verifies each downlink Write flushes exactly once.
 func TestH2ServerCapsuleStreamWriteFlushesOnce(t *testing.T) {
@@ -29,7 +43,7 @@ func TestH2ServerCapsuleStreamSendDatagramFirstFlushes(t *testing.T) {
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
-	payload := append([]byte{0}, []byte("ip-pdu")...)
+	payload := append(append([]byte{}, contextIDZero...), minimalIPv4TCP(512)...)
 	if err := str.SendDatagram(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -48,14 +62,14 @@ func TestH2ServerCapsuleStreamSendDatagramFirstFlushes(t *testing.T) {
 	_ = str.Close()
 }
 
-// TestH2ServerCapsuleStreamSendDatagramCoalesce: under flood (no idle gap), flush every 16.
+// TestH2ServerCapsuleStreamSendDatagramCoalesce: bulk TCP DATA under flood flushes every 16.
 func TestH2ServerCapsuleStreamSendDatagramCoalesce(t *testing.T) {
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
 	// Seed lastFlush so first PDU does not take the "never flushed" path.
 	str.lastFlush = time.Now().UnixNano()
-	payload := append([]byte{0}, []byte("ip-pdu")...)
+	payload := append(append([]byte{}, contextIDZero...), minimalIPv4TCP(512)...)
 	for i := 0; i < h2S2CFlushEvery; i++ {
 		// Keep idle cold and cancel any armed idle timer so only every-N coalesce fires.
 		str.mu.Lock()
@@ -81,13 +95,13 @@ func TestH2ServerCapsuleStreamSendDatagramCoalesce(t *testing.T) {
 	_ = str.Close()
 }
 
-// TestH2ServerCapsuleStreamIdleTimerFlushesSparse: skipped PDU flushes after idle without next send.
+// TestH2ServerCapsuleStreamIdleTimerFlushesSparse: skipped bulk PDU flushes after idle.
 func TestH2ServerCapsuleStreamIdleTimerFlushesSparse(t *testing.T) {
 	ResetH2S2CStats()
 	rec := &h2FlushCountResponseWriter{}
 	str := &h2ServerCapsuleStream{w: rec}
 	str.lastFlush = time.Now().UnixNano()
-	payload := append([]byte{0}, []byte("sparse")...)
+	payload := append(append([]byte{}, contextIDZero...), minimalIPv4TCP(512)...)
 	if err := str.SendDatagram(payload); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +128,42 @@ func TestH2ServerCapsuleStreamIdleTimerFlushesSparse(t *testing.T) {
 		t.Fatalf("idle_flush_total=%d want 1", got)
 	}
 	_ = str.Close()
+}
+
+// TestH2ServerCapsuleStreamACKImmediateFlush: pure ACK must Flush even mid-coalesce window.
+func TestH2ServerCapsuleStreamACKImmediateFlush(t *testing.T) {
+	ResetH2S2CStats()
+	rec := &h2FlushCountResponseWriter{}
+	str := &h2ServerCapsuleStream{w: rec}
+	str.lastFlush = time.Now().UnixNano()
+	str.sinceFlush = 1 // mid-window
+	ack := minimalIPv4TCP(0)
+	if !h2S2CImmediateFlushIP(ack) {
+		t.Fatal("pure ACK must classify as immediate flush")
+	}
+	if err := str.SendProxiedIPDatagram(contextIDZero, ack); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.flushes.Load(); got != 1 {
+		t.Fatalf("ACK flushes=%d want 1 (not EVERY/idle defer)", got)
+	}
+	if got := H2S2CFlushSkipTotal(); got != 0 {
+		t.Fatalf("ACK must not skip flush, skip=%d", got)
+	}
+	_ = str.Close()
+}
+
+// TestH2ServerCapsuleStreamBulkDATAMaySkipFlush locks coalesce eligibility for large TCP DATA.
+func TestH2ServerCapsuleStreamBulkDATAMaySkipFlush(t *testing.T) {
+	t.Parallel()
+	bulk := minimalIPv4TCP(512)
+	if h2S2CImmediateFlushIP(bulk) {
+		t.Fatal("bulk TCP DATA must allow EVERY/idle coalesce")
+	}
+	small := minimalIPv4TCP(40)
+	if !h2S2CImmediateFlushIP(small) {
+		t.Fatal("small TCP segment must immediate flush")
+	}
 }
 
 // TestH2ServerCapsuleStreamFountainBatchFlush locks prod forwarder NoWake + one Flush per batch.
@@ -158,7 +208,7 @@ func TestH2ServerCapsuleStreamReadUsesRequestBody(t *testing.T) {
 		t.Fatalf("Read: %v", err)
 	}
 	if string(buf[:n]) != "uplink-capsule" {
-		t.Fatalf("got %q want uplink-capsule", buf[:n])
+		t.Fatalf("got %q want uplink-capsule", string(buf[:n]))
 	}
 }
 

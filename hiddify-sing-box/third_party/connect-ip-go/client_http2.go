@@ -92,8 +92,28 @@ type h2CapsulePipeStream struct {
 	mu    sync.Mutex
 	// maxDatagramPayload caps RFC9297 DATAGRAM capsule payload (ctxID||IP); 0 → h2DefaultMaxDatagramPayload.
 	maxDatagramPayload int
-	// wireEnc reuses RFC9297 DATAGRAM capsule buffer on hot C2S path.
-	wireEnc bytes.Buffer
+	// pendingVis holds NoWake (+ wake staging) capsules until flush.
+	// Caps: visMaxPkts/Bytes override, else h2C2SVisMax* (see h2_coalesce_policy.go).
+	pendingVis     bytes.Buffer
+	pendingVisPkts int
+	hdrScratch     []byte
+	// Test/diag overrides (0 → prod h2C2SVisMax*).
+	visMaxPkts  int
+	visMaxBytes int
+}
+
+func (s *h2CapsulePipeStream) effectiveVisMaxPkts() int {
+	if s != nil && s.visMaxPkts > 0 {
+		return s.visMaxPkts
+	}
+	return h2C2SVisMaxPkts
+}
+
+func (s *h2CapsulePipeStream) effectiveVisMaxBytes() int {
+	if s != nil && s.visMaxBytes > 0 {
+		return s.visMaxBytes
+	}
+	return h2C2SVisMaxBytes
 }
 
 func (s *h2CapsulePipeStream) Read(p []byte) (int, error) { return s.body.Read(p) }
@@ -101,7 +121,15 @@ func (s *h2CapsulePipeStream) Read(p []byte) (int, error) { return s.body.Read(p
 func (s *h2CapsulePipeStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return writeAllWriter(s.pipeW, p)
+	return s.writePipeLocked(p)
+}
+
+func (s *h2CapsulePipeStream) writePipeLocked(p []byte) (int, error) {
+	n, err := writeAllWriter(s.pipeW, p)
+	if err == nil {
+		recordCIPClientH2PipeWrite()
+	}
+	return n, err
 }
 
 func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
@@ -110,29 +138,72 @@ func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.wireEnc.Reset()
-	if err := appendHTTPDatagramCapsule(&s.wireEnc, payload); err != nil {
+	if err := s.flushVisLocked(true); err != nil {
 		return err
 	}
-	_, err := writeAllWriter(s.pipeW, s.wireEnc.Bytes())
+	if err := appendHTTPDatagramCapsule(&s.pendingVis, payload); err != nil {
+		return err
+	}
+	s.pendingVisPkts++
+	return s.flushVisLocked(false) // wake/control: pipe write, not vis coalesce
+}
+
+// SendProxiedIPDatagram implements proxiedIPDatagramSender (wake path): flush pending then immediate write.
+func (s *h2CapsulePipeStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
+	if err := h2DatagramTooLarge(len(contextPrefix)+len(ipPacket), s.maxDatagramPayload); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.flushVisLocked(true); err != nil {
+		return err
+	}
+	if err := appendHTTPDatagramCapsuleParts(&s.pendingVis, &s.hdrScratch, contextPrefix, ipPacket); err != nil {
+		return err
+	}
+	s.pendingVisPkts++
+	return s.flushVisLocked(false)
+}
+
+// SendProxiedIPDatagramNoWake appends into visibility batch, then may pipe-write.
+// Contract: does not retain ipPacket / contextPrefix after return.
+// Wake path stays immediate; FlushProxiedIPDatagramSend drains tail (OnLoopInEnd).
+// ACK/small packets must use wake WritePacket at TUN (see hostKernelBulkEgressNoWake).
+func (s *h2CapsulePipeStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	if err := h2DatagramTooLarge(len(contextPrefix)+len(ipPacket), s.maxDatagramPayload); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := appendHTTPDatagramCapsuleParts(&s.pendingVis, &s.hdrScratch, contextPrefix, ipPacket); err != nil {
+		return err
+	}
+	s.pendingVisPkts++
+	if s.pendingVisPkts >= s.effectiveVisMaxPkts() || s.pendingVis.Len() >= s.effectiveVisMaxBytes() {
+		return s.flushVisLocked(true)
+	}
+	return nil
+}
+
+// FlushProxiedIPDatagramSend drains visibility coalesce tail (LoopIn OnLoopInEnd).
+func (s *h2CapsulePipeStream) FlushProxiedIPDatagramSend() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.flushVisLocked(true)
+}
+
+func (s *h2CapsulePipeStream) flushVisLocked(recordVis bool) error {
+	if s.pendingVis.Len() == 0 {
+		return nil
+	}
+	_, err := s.writePipeLocked(s.pendingVis.Bytes())
+	s.pendingVis.Reset()
+	s.pendingVisPkts = 0
+	if err == nil && recordVis {
+		recordCIPClientH2VisFlush()
+	}
 	return err
 }
-
-// SendProxiedIPDatagram implements proxiedIPDatagramSender (wake path).
-func (s *h2CapsulePipeStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
-	return s.SendDatagram(composeProxiedIPDatagramPayload(contextPrefix, ipPacket))
-}
-
-// SendProxiedIPDatagramNoWake writes immediately on H2 C2S.
-// DOC LOCK (P1-1 / H4 reconfirm 2026-07-20): pendingWire batch → docker TUN UP ~400→~67.
-// FlushProxiedIPDatagramSend is a no-op; CoalescedSender is satisfied for Conn type assert.
-func (s *h2CapsulePipeStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
-	return s.SendProxiedIPDatagram(contextPrefix, ipPacket)
-}
-
-// FlushProxiedIPDatagramSend is a no-op on H2 client C2S (see SendProxiedIPDatagramNoWake).
-func (s *h2CapsulePipeStream) FlushProxiedIPDatagramSend() {}
-
 func (s *h2CapsulePipeStream) ReceiveDatagram(context.Context) ([]byte, error) {
 	return nil, errors.New("connect-ip: HTTP/2 capsule dataplane does not use stream ReceiveDatagram")
 }
@@ -149,6 +220,9 @@ func (s *h2CapsulePipeStream) Close() error {
 }
 
 func (s *h2CapsulePipeStream) closePipeWriter() error {
+	s.mu.Lock()
+	_ = s.flushVisLocked(true)
+	s.mu.Unlock()
 	if s.uploadBody != nil {
 		s.uploadBody.MarkUploadWriterDone()
 	}

@@ -262,7 +262,8 @@ func TestL3HostKernelBulkSyncBulkNoWakeSingleFlushPerIter(t *testing.T) {
 	}
 }
 
-// TestL3HostKernelBulkSyncSmallPacketSyncFlush (GATE-P0-2) pure ACK uses copy NoWake + OnLoopInEnd flush.
+// TestL3HostKernelBulkSyncSmallPacketSyncFlush (GATE-P0-2): pure ACK uses wake WritePacket
+// (not NoWake) so H2 C2S pendingVis never holds control — see l3_egress_class.go KEEP.
 func TestL3HostKernelBulkSyncSmallPacketSyncFlush(t *testing.T) {
 	tunHost := netip.MustParseAddr("172.19.100.2")
 	wireLocal := netip.MustParseAddr("198.18.0.1")
@@ -291,16 +292,16 @@ func TestL3HostKernelBulkSyncSmallPacketSyncFlush(t *testing.T) {
 	go func() { _ = b.RunPump(ctx) }()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for w.noWakeWrites.Load() < 1 && time.Now().Before(deadline) {
+	for w.writes.Load() < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 
-	if w.noWakeWrites.Load() < 1 {
-		t.Fatalf("noWake=%d want >=1 for pure ACK copy NoWake", w.noWakeWrites.Load())
+	if w.writes.Load() < 1 {
+		t.Fatalf("wake writes=%d want >=1 for pure ACK (ACK wake KEEP)", w.writes.Load())
 	}
-	if w.flushes.Load() < 1 {
-		t.Fatalf("flushes=%d want >=1 via OnLoopInEnd", w.flushes.Load())
+	if w.noWakeWrites.Load() != 0 {
+		t.Fatalf("noWake=%d want 0 for pure ACK (must not park in pendingVis)", w.noWakeWrites.Load())
 	}
 }
 

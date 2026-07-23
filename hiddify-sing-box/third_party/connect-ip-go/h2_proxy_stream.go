@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/quicvarint"
 )
 
 // Single prod S2C flush policy for CONNECT-IP HTTP/2 DATAGRAM capsules:
@@ -19,6 +20,8 @@ import (
 const (
 	h2S2CFlushEvery = 16
 	h2S2CFlushIdle  = time.Millisecond
+	// Mirror client hostKernelBulkEgressMinBytes: only large TCP DATA may skip Flush.
+	h2S2CBulkMinBytes = 256
 )
 
 // Cheap always-on S2C counters (no env gates / alternate modes).
@@ -73,6 +76,41 @@ func (s *h2ServerCapsuleStream) shouldFlushNowLocked() bool {
 		return true
 	}
 	return time.Now().UnixNano()-s.lastFlush >= int64(h2S2CFlushIdle)
+}
+
+// h2S2CIPv4TCPHasPayload mirrors connectip/frame.IPv4TCPHasPayload (no sing-box import here).
+func h2S2CIPv4TCPHasPayload(pkt []byte) bool {
+	const (
+		ipv4Min = 20
+		tcpMin  = 20
+		tcpProto = 6
+	)
+	if len(pkt) < ipv4Min || pkt[0]>>4 != 4 || pkt[9] != tcpProto {
+		return false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if ihl+tcpMin > len(pkt) {
+		return false
+	}
+	doff := int(pkt[ihl+12]>>4) * 4
+	if doff < tcpMin || ihl+doff > len(pkt) {
+		return false
+	}
+	return len(pkt) > ihl+doff
+}
+
+// h2S2CImmediateFlushIP reports ACK/SYN/FIN/small/non-bulk: must Flush now so nested TCP
+// upload clock is not delayed by EVERY=16 / 1ms idle (client C2S ACK-wake mirror).
+func h2S2CImmediateFlushIP(ipPacket []byte) bool {
+	return len(ipPacket) < h2S2CBulkMinBytes || !h2S2CIPv4TCPHasPayload(ipPacket)
+}
+
+func h2S2CImmediateFlushDatagramPayload(payload []byte) bool {
+	_, n, err := quicvarint.Parse(payload)
+	if err != nil || n <= 0 || n >= len(payload) {
+		return true
+	}
+	return h2S2CImmediateFlushIP(payload[n:])
 }
 
 func (s *h2ServerCapsuleStream) stopIdleFlushLocked() {
@@ -159,7 +197,7 @@ func (s *h2ServerCapsuleStream) SendDatagram(payload []byte) error {
 	h2S2CDatagramSentTotal.Add(1)
 	h2S2CDatagramBytesTotal.Add(uint64(len(payload)))
 	s.sinceFlush++
-	if s.shouldFlushNowLocked() {
+	if h2S2CImmediateFlushDatagramPayload(payload) || s.shouldFlushNowLocked() {
 		return s.flushDatagramLocked()
 	}
 	h2S2CFlushSkipTotal.Add(1)
@@ -167,24 +205,46 @@ func (s *h2ServerCapsuleStream) SendDatagram(payload []byte) error {
 	return nil
 }
 
-// SendProxiedIPDatagram implements proxiedIPDatagramSender; wake path matches SendDatagram.
+// SendProxiedIPDatagram implements proxiedIPDatagramSender; wake path matches SendDatagram
+// (immediate write + EVERY/idle flush), without a middle compose alloc.
+// ACK/small always Flush (nested TCP UP clock); bulk TCP DATA keeps EVERY/idle coalesce.
 func (s *h2ServerCapsuleStream) SendProxiedIPDatagram(contextPrefix, ipPacket []byte) error {
-	return s.SendDatagram(composeProxiedIPDatagramPayload(contextPrefix, ipPacket))
-}
-
-// SendProxiedIPDatagramNoWake buffers RFC9297 wire for one forwarder download batch (Fountain).
-func (s *h2ServerCapsuleStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
-	payload := composeProxiedIPDatagramPayload(contextPrefix, ipPacket)
-	if err := h2DatagramTooLarge(len(payload), s.maxDatagramPayload); err != nil {
+	if err := h2DatagramTooLarge(len(contextPrefix)+len(ipPacket), s.maxDatagramPayload); err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := appendHTTPDatagramCapsuleParts(&buf, nil, contextPrefix, ipPacket); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := appendHTTPDatagramCapsule(&s.pendingWire, payload); err != nil {
+	if _, err := writeAllWriter(s.w, buf.Bytes()); err != nil {
 		return err
 	}
 	h2S2CDatagramSentTotal.Add(1)
-	h2S2CDatagramBytesTotal.Add(uint64(len(payload)))
+	h2S2CDatagramBytesTotal.Add(uint64(len(contextPrefix) + len(ipPacket)))
+	s.sinceFlush++
+	if h2S2CImmediateFlushIP(ipPacket) || s.shouldFlushNowLocked() {
+		return s.flushDatagramLocked()
+	}
+	h2S2CFlushSkipTotal.Add(1)
+	s.armIdleFlushLocked()
+	return nil
+}
+
+// SendProxiedIPDatagramNoWake buffers RFC9297 wire for one forwarder download batch (Fountain).
+// Does not retain ipPacket after return (copies into pendingWire).
+func (s *h2ServerCapsuleStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacket []byte) error {
+	if err := h2DatagramTooLarge(len(contextPrefix)+len(ipPacket), s.maxDatagramPayload); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := appendHTTPDatagramCapsuleParts(&s.pendingWire, nil, contextPrefix, ipPacket); err != nil {
+		return err
+	}
+	h2S2CDatagramSentTotal.Add(1)
+	h2S2CDatagramBytesTotal.Add(uint64(len(contextPrefix) + len(ipPacket)))
 	return nil
 }
 

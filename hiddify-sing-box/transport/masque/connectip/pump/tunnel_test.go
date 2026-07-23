@@ -173,8 +173,8 @@ func TestRunTunnelLoopInForwardsToConn(t *testing.T) {
 func TestNormalizeTunnelOptionsUsqueDefault(t *testing.T) {
 	t.Parallel()
 	opts := NormalizeTunnelOptions(TunnelOptions{})
-	if !opts.LoopOutUsqueImmediate || !opts.LoopInUsqueImmediate {
-		t.Fatalf("expected usque immediate defaults: %+v", opts)
+	if !opts.LoopOutUsqueImmediate {
+		t.Fatalf("expected LoopOutUsqueImmediate default: %+v", opts)
 	}
 }
 
@@ -342,16 +342,15 @@ func (q *queuedPacketConn) push(pkts ...[]byte) {
 	q.mu.Unlock()
 }
 
-// TestRunTunnelLoopInUsqueImmediateSingleRead verifies usque parity: no zero-timeout
-// coalesce on LoopIn after blocking ReadPacket.
-func TestRunTunnelLoopInUsqueImmediateSingleRead(t *testing.T) {
+// TestRunTunnelLoopInSingleRead verifies usque parity: one blocking ReadPacket per LoopIn iter.
+func TestRunTunnelLoopInSingleRead(t *testing.T) {
 	t.Parallel()
 	dev := &loopInCountDevice{}
 	conn := &queuedPacketConn{}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	go func() {
-		_ = RunTunnel(ctx, dev, conn, TunnelOptions{LoopInUsqueImmediate: true})
+		_ = RunTunnel(ctx, dev, conn, TunnelOptions{})
 	}()
 	deadline := time.Now().Add(150 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -445,6 +444,15 @@ func TestRunTunnelDefaultUsqueLoopOutSingleDatagram(t *testing.T) {
 	dev.mu.Unlock()
 	if n != 4 {
 		t.Fatalf("default opts written=%d want 4 (usque one datagram per LoopOut iter)", n)
+	}
+}
+
+func TestPumpRunTunnelMatchesUsqueImmediateDefaults(t *testing.T) {
+	t.Parallel()
+	for _, opts := range []TunnelOptions{UsqueTunnelOptions(), NormalizeTunnelOptions(TunnelOptions{})} {
+		if !opts.LoopOutUsqueImmediate {
+			t.Fatalf("usque defaults: LoopOutImmediate=%v want true", opts.LoopOutUsqueImmediate)
+		}
 	}
 }
 

@@ -44,3 +44,26 @@ func TestWriteHostKernelEgressWireBulkSync(t *testing.T) {
 		t.Fatalf("ack wire: writes=%d noWake=%d want sync WritePacket for pure ACK", w.writes.Load(), w.noWakeWrites.Load())
 	}
 }
+
+// InPlace LoopIn must wake pure ACK (not NoWake) — else H2 vis N=32 holds ACKs → UP~60.
+func TestWriteHostKernelEgressInPlaceACKWakes(t *testing.T) {
+	src := netip.MustParseAddr("10.0.0.1")
+	dst := netip.MustParseAddr("10.0.0.2")
+	w := &mockL3Writer{}
+	bulk := makeIPv4TCPPayload(src, dst, 1000, 80, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	ack := makeIPv4TCPAck(src, dst, 1000, 80, byte(header.TCPFlagAck))
+
+	if _, _, err := writeHostKernelEgressInPlace(w, bulk); err != nil {
+		t.Fatalf("bulk: %v", err)
+	}
+	if w.inPlace.Load()+w.noWakeWrites.Load() < 1 {
+		t.Fatalf("bulk in-place want NoWake/inPlace")
+	}
+	beforeWake := w.writes.Load()
+	if _, _, err := writeHostKernelEgressInPlace(w, ack); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if w.writes.Load() != beforeWake+1 {
+		t.Fatalf("ack in-place writes=%d want wake WritePacket (+1 from %d)", w.writes.Load(), beforeWake)
+	}
+}

@@ -11,9 +11,7 @@ import (
 func TestGATEConnectIPUploadBoundDiscriminator(t *testing.T) {
 	seg := makeUpload524BulkSeg(t)
 
-	unpaced := runHostKernelPumpMeter(t, hostEgressInfinite(seg), &mockL3Writer{}, 150*time.Millisecond, upload524PumpHarnessOpts{
-		LoopInUsqueImmediate: true,
-	})
+	unpaced := runHostKernelPumpMeter(t, hostEgressInfinite(seg), &mockL3Writer{}, 150*time.Millisecond, upload524PumpHarnessOpts{})
 	logUploadBoundMetrics(t, "unpaced", unpaced)
 	if unpaced.Bound != UploadBoundUnpaced {
 		t.Fatalf("unpaced bound=%s want %s mbps=%.1f", unpaced.Bound, UploadBoundUnpaced, unpaced.Mbps)

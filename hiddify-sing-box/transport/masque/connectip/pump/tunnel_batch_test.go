@@ -57,7 +57,6 @@ func TestRunTunnelBatchMultiPktPerIter(t *testing.T) {
 	go func() {
 		_ = RunTunnelBatch(ctx, dev, conn, TunnelOptions{
 			MTU:         DefaultTunnelMTU,
-			LoopInUsqueImmediate: true,
 			OnLoopInEnd: func() { flushes++ },
 		}, 2)
 	}()

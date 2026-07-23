@@ -45,6 +45,7 @@ func writePacketDirectNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 		trackPTBRx()
 		return icmp, nil
 	}
+	// Conn.WritePacketNoWake copies for QUIC retention.
 	icmp, err := conn.WritePacketNoWake(buffer)
 	if err != nil {
 		trackWriteFail(err, false)
@@ -59,36 +60,13 @@ func writePacketDirectNoWake(h ClientHost, buffer []byte) ([]byte, error) {
 
 // WritePacketNoWake enqueues one datagram without transport flush (usque LoopIn batch + OnLoopInEnd flush).
 func WritePacketNoWake(h ClientHost, buffer []byte) ([]byte, error) {
-	if icmp, over, err := ptbForCeiling(buffer, h.DatagramCeiling()); over {
-		if err != nil {
-			trackWriteFail(err, true)
-			return nil, err
-		}
-		trackPTBRx()
-		return icmp, nil
-	}
-	pkt := borrowOutboundBuf(len(buffer))
-	copy(pkt, buffer)
-	icmp, err := writePacketDirectNoWake(h, pkt)
-	returnOutboundBuf(pkt)
-	return icmp, err
+	return writePacketDirectNoWake(h, buffer)
 }
 
 // WritePacket sends one owned IP datagram and flushes the transport batch (RFC9484 hot path).
 // LoopIn relies on this wake; NoWake-only callers must FlushEgressBatch explicitly.
 func WritePacket(h ClientHost, buffer []byte) ([]byte, error) {
-	if icmp, over, err := ptbForCeiling(buffer, h.DatagramCeiling()); over {
-		if err != nil {
-			trackWriteFail(err, true)
-			return nil, err
-		}
-		trackPTBRx()
-		return icmp, nil
-	}
-	pkt := borrowOutboundBuf(len(buffer))
-	copy(pkt, buffer)
-	icmp, err := writePacketDirectNoWake(h, pkt)
-	returnOutboundBuf(pkt)
+	icmp, err := writePacketDirectNoWake(h, buffer)
 	if err != nil {
 		return icmp, err
 	}
@@ -120,42 +98,4 @@ func WritePacketFromNetstack(h ClientHost, outbound []byte) (retained bool, icmp
 		trackPTBRx()
 	}
 	return retained, icmp, nil
-}
-
-// WritePacketPrefixed sends a datagram buffer that already includes the RFC9297 context ID prefix.
-func WritePacketPrefixed(h ClientHost, buffer []byte, prefixLen int) ([]byte, error) {
-	conn := h.PacketConn()
-	if conn == nil {
-		return nil, joinTransport(errors.New("connect-ip conn is nil"))
-	}
-	if prefixLen <= 0 || len(buffer) <= prefixLen {
-		return nil, joinTransport(errors.New("connect-ip prefixed datagram too short"))
-	}
-	ipLen := len(buffer) - prefixLen
-	ip := buffer[prefixLen:]
-	if icmp, over, err := ptbForCeiling(ip, h.DatagramCeiling()); over {
-		if err != nil {
-			trackWriteFail(err, true)
-			return nil, err
-		}
-		trackPTBRx()
-		return icmp, nil
-	}
-	icmp, err := conn.WritePacketPrefixed(buffer)
-	return accountWrite(h, ipLen, icmp, err)
-}
-
-func accountWrite(h ClientHost, ipLen int, icmp []byte, err error) ([]byte, error) {
-	if err != nil {
-		trackWriteFail(err, false)
-		return icmp, err
-	}
-	trackPacketTx(ipLen)
-	if len(icmp) > 0 {
-		trackPTBRx()
-	}
-	if wake := h.WakeAfterDatagram(); wake != nil {
-		wake()
-	}
-	return icmp, err
 }

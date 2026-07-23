@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -193,21 +195,25 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 	}
 	tcpLen := uint16(len(pkt) - ihl)
 	payloadLen := tcpLen - uint16(doff)
-	var payCsum uint16
-	if payloadLen > 0 {
-		payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
-	}
 	flow := tcp4Tuple{
 		srcAddr: iph.SourceAddress(),
 		dstAddr: iph.DestinationAddress(),
 		srcPort: tc.SourcePort(),
 		dstPort: tc.DestinationPort(),
 	}
-	if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
-		repairIPv4TCPChecksum(pkt, ihl)
-		tc = header.TCP(pkt[ihl:])
-		if !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
-			return
+	// Trusted CIP plane: default skip inner TCP csum (WAN C2S CPU tax; overlay already rewrote L4).
+	// Opt-in integrity: MASQUE_S2_VERIFY_INNER_CSUM=1.
+	if s2VerifyInnerTCPChecksum() {
+		var payCsum uint16
+		if payloadLen > 0 {
+			payCsum = checksum.Checksum(pkt[ihl+doff:], 0)
+		}
+		if csum := tc.Checksum(); csum != 0 && !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+			repairIPv4TCPChecksum(pkt, ihl)
+			tc = header.TCP(pkt[ihl:])
+			if !tc.IsChecksumValid(iph.SourceAddress(), iph.DestinationAddress(), payCsum, payloadLen) {
+				return
+			}
 		}
 	}
 	flags := tc.Flags()
@@ -225,6 +231,16 @@ func (f *packetForwarder) handleReadPacket(ctx context.Context, pkt []byte) {
 	}
 	s.handleSegment(ctx, pkt, tc, ihl, doff)
 }
+
+// s2VerifyInnerTCPChecksum reports whether S2 should verify/repair inner TCP checksums.
+// Default false (skip) — CIP datagrams are end-to-end integrity-checked by QUIC/TLS/H2;
+// re-verify on every C2S segment was DIAG CPU tax on WAN UP.
+var s2VerifyInnerCsum = sync.OnceValue(func() bool {
+	v := strings.TrimSpace(os.Getenv("MASQUE_S2_VERIFY_INNER_CSUM"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+})
+
+func s2VerifyInnerTCPChecksum() bool { return s2VerifyInnerCsum() }
 
 func repairIPv4TCPChecksum(pkt []byte, ihl int) {
 	if len(pkt) < ihl+header.TCPMinimumSize {

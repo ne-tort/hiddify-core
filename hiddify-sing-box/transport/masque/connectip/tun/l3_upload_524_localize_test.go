@@ -12,9 +12,8 @@ import (
 )
 
 type upload524PumpHarnessOpts struct {
-	LoopInUsqueImmediate bool
-	Prod                 bool // prod usquePumpOptions via RunPump
-	NoObserver           bool // skip LoopInObserver overhead in tight budget gates
+	Prod       bool // prod usquePumpOptions via RunPump
+	NoObserver bool // skip LoopInObserver overhead in tight budget gates
 }
 
 func makeUpload524BulkSeg(t *testing.T) []byte {
@@ -46,9 +45,6 @@ func runHostKernelPumpMeter(t *testing.T, host HostEgressReader, w *mockL3Writer
 	opts := b.usquePumpOptions(onFlush)
 	if b.hostKernelRelay() {
 		opts.OnLoopInEnd = onFlush
-	}
-	if !harness.Prod {
-		opts.LoopInUsqueImmediate = harness.LoopInUsqueImmediate
 	}
 
 	loopObs := &cippump.LoopInObserver{}

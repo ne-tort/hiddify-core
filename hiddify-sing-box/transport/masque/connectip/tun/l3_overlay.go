@@ -3,10 +3,10 @@ package tun
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,40 +41,48 @@ type HostEgressReader func(ctx context.Context, buf []byte) (int, error)
 
 // L3OverlayBridge wires sing-tun L3OverlaySend/Receive to CONNECT-IP without CM TCP dial.
 type L3OverlayBridge struct {
-	mu            sync.Mutex
-	closed        bool
-	tunWrite      func([]byte) (int, error)
+	mu             sync.Mutex
+	closed         atomic.Bool
+	tunWrite       func([]byte) (int, error)
 	hostEgressRead HostEgressReader
 	hostEgressBatch HostEgressBatchReader
 	overlayPrefixes []netip.Prefix
-	stackInject   func([]byte) error
-	writer        PacketWriter
-	reader        PacketReader
-	nat           OverlayNAT
+	stackInject    func([]byte) error
+	// planeWriter/planeReader are atomic so LoopIn/LoopOut hot path avoids mu.Lock per datagram.
+	// RebindPacketPlane publishes new values; Close sets closed.
+	planeWriter atomic.Value // PacketWriter
+	planeReader atomic.Value // PacketReader
+	nat                 OverlayNAT
 	shortFlowHook       ShortFlowHook
 	flowEgressBytes     atomic.Uint64
 	ingressWakeNote     func([]byte)
 	ingressAckWakeHook  func()
 	shortHookMu         sync.Mutex
-	shortHookLast      time.Time
+	shortHookLast       time.Time
 	egressCh            chan []byte
 	egressPool          *cippump.NetBuffer
 	kernel              *KernelTunDevice
 	pumpWake            cippump.WakeHooks
 	onLoopInEnd         func()
 	outboundDrainHook   func()
+	loopInMaxBatch      int // 0 → DefaultLoopInMaxBatch; H2 host-kernel uses H2HostKernelLoopInMaxBatch
 }
 
 // NewL3OverlayBridge returns hooks for tun.StackOptions L3OverlaySend plus a receive loop starter.
+// egressCh is allocated lazily for gVisor/synth Send→LoopIn; host-kernel path never needs it (P6-S3).
 func NewL3OverlayBridge(tunWrite func([]byte) (int, error), writer PacketWriter, reader PacketReader, nat OverlayNAT) *L3OverlayBridge {
-	return &L3OverlayBridge{
+	b := &L3OverlayBridge{
 		tunWrite:   tunWrite,
-		writer:     writer,
-		reader:     reader,
 		nat:        nat,
-		egressCh:   make(chan []byte, l3EgressQueueDepth),
 		egressPool: cippump.DefaultNetBuffer(),
 	}
+	if writer != nil {
+		b.planeWriter.Store(writer)
+	}
+	if reader != nil {
+		b.planeReader.Store(reader)
+	}
+	return b
 }
 
 // SetHostEgressRead wires usque LoopIn tun read (prod Docker kernel TCP). overlayPrefixes filter wire relay dst.
@@ -87,6 +95,8 @@ func (b *L3OverlayBridge) SetHostEgressRead(read HostEgressReader, overlayPrefix
 	if len(overlayPrefixes) > 0 {
 		b.overlayPrefixes = append([]netip.Prefix(nil), overlayPrefixes...)
 	}
+	// Host-kernel LoopIn reads OS tun; drop idle egressCh (~96KiB headers) — Send is no-op here.
+	b.egressCh = nil
 	b.rebuildKernelDeviceLocked()
 	b.mu.Unlock()
 }
@@ -166,6 +176,29 @@ func (b *L3OverlayBridge) SetOutboundDrainHook(hook func()) {
 	b.mu.Unlock()
 }
 
+// SetLoopInMaxBatch overrides host-kernel RunTunnelBatch depth (0 restores DefaultLoopInMaxBatch).
+func (b *L3OverlayBridge) SetLoopInMaxBatch(n int) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.loopInMaxBatch = n
+	b.mu.Unlock()
+}
+
+func (b *L3OverlayBridge) loopInMaxBatchOrDefault() int {
+	if b == nil {
+		return cippump.DefaultLoopInMaxBatch
+	}
+	b.mu.Lock()
+	n := b.loopInMaxBatch
+	b.mu.Unlock()
+	if n > 0 {
+		return n
+	}
+	return cippump.DefaultLoopInMaxBatch
+}
+
 // SetShortFlowHook registers a callback for TCP FIN/RST egress (nc probe parity, P0 native L3).
 func (b *L3OverlayBridge) SetShortFlowHook(hook ShortFlowHook) {
 	if b == nil {
@@ -181,10 +214,30 @@ func (b *L3OverlayBridge) RebindPacketPlane(writer PacketWriter, reader PacketRe
 	if b == nil {
 		return
 	}
-	b.mu.Lock()
-	b.writer = writer
-	b.reader = reader
-	b.mu.Unlock()
+	if writer != nil {
+		b.planeWriter.Store(writer)
+	}
+	if reader != nil {
+		b.planeReader.Store(reader)
+	}
+}
+
+func (b *L3OverlayBridge) loadWriter() PacketWriter {
+	if v := b.planeWriter.Load(); v != nil {
+		if w, ok := v.(PacketWriter); ok {
+			return w
+		}
+	}
+	return nil
+}
+
+func (b *L3OverlayBridge) loadReader() PacketReader {
+	if v := b.planeReader.Load(); v != nil {
+		if r, ok := v.(PacketReader); ok {
+			return r
+		}
+	}
+	return nil
 }
 
 // Send implements sing-tun L3OverlaySend for gVisor stack egress (synth stackInject path).
@@ -192,16 +245,19 @@ func (b *L3OverlayBridge) RebindPacketPlane(writer PacketWriter, reader PacketRe
 func (b *L3OverlayBridge) Send(packet []byte) error {
 	b.mu.Lock()
 	hostEgress := b.hostEgressRead != nil
-	closed := b.closed
 	b.mu.Unlock()
 	if hostEgress {
 		return nil
 	}
-	if closed {
+	if b.closed.Load() {
 		return net.ErrClosed
 	}
 	b.mu.Lock()
 	ch := b.egressCh
+	if ch == nil && !b.closed.Load() {
+		ch = make(chan []byte, l3EgressQueueDepth)
+		b.egressCh = ch
+	}
 	pool := b.egressPool
 	b.mu.Unlock()
 	if ch == nil {
@@ -244,11 +300,17 @@ func (b *L3OverlayBridge) deliverIngress(out []byte) error {
 		n, err := tunWrite(out)
 		if err != nil {
 			losslocus.RecordTunWriteFail()
+			// Transient host TUN backpressure must not kill LoopOut / whole plane
+			// (AUD-29): drop this IP datagram; siblings keep the plane.
+			if isTransientTunWriteErr(err) {
+				return nil
+			}
 			return err
 		}
 		if n != len(out) {
 			losslocus.RecordTunWriteShort()
-			return fmt.Errorf("connect-ip native l3: tunWrite short %d/%d", n, len(out))
+			// Short write under pressure: drop, keep plane (same isolation goal).
+			return nil
 		}
 		return nil
 	}
@@ -259,16 +321,27 @@ func (b *L3OverlayBridge) deliverIngress(out []byte) error {
 	return nil
 }
 
+func isTransientTunWriteErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if ne, ok := err.(net.Error); ok && ne.Temporary() {
+		return true
+	}
+	low := strings.ToLower(err.Error())
+	return strings.Contains(low, "no buffer space") ||
+		strings.Contains(low, "enobufs") ||
+		strings.Contains(low, "resource temporarily") ||
+		strings.Contains(low, "temporar") ||
+		strings.Contains(low, "would block") ||
+		strings.Contains(low, "eagain")
+}
+
 func (b *L3OverlayBridge) ingressReader() PacketReader {
-	if b == nil {
+	if b == nil || b.closed.Load() {
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed {
-		return nil
-	}
-	return b.reader
+	return b.loadReader()
 }
 
 func (b *L3OverlayBridge) noteIngressWake(out []byte) {
@@ -336,13 +409,12 @@ func (b *L3OverlayBridge) rebuildKernelDeviceLocked() {
 }
 
 func (b *L3OverlayBridge) tunnelDevice() cippump.TunnelDevice {
-	b.mu.Lock()
-	kernel := b.kernel
-	closed := b.closed
-	b.mu.Unlock()
-	if closed {
+	if b.closed.Load() {
 		return nil
 	}
+	b.mu.Lock()
+	kernel := b.kernel
+	b.mu.Unlock()
 	if kernel != nil {
 		return kernel
 	}
@@ -351,14 +423,13 @@ func (b *L3OverlayBridge) tunnelDevice() cippump.TunnelDevice {
 
 // ReadPacket implements RunTunnel LoopIn (delegates to KernelTunDevice when host-kernel wired).
 func (b *L3OverlayBridge) ReadPacket(ctx context.Context, buf []byte) (int, error) {
-	b.mu.Lock()
-	kernel := b.kernel
-	closed := b.closed
-	ch := b.egressCh
-	b.mu.Unlock()
-	if closed {
+	if b.closed.Load() {
 		return 0, net.ErrClosed
 	}
+	b.mu.Lock()
+	kernel := b.kernel
+	ch := b.egressCh
+	b.mu.Unlock()
 	if kernel != nil {
 		return kernel.ReadPacket(ctx, buf)
 	}
@@ -439,7 +510,7 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 			b.flushIngressAckWake()
 		}
 	}
-	// host-kernel: usque MaintainTunnel — sync ReadPacket→WritePacket, no flush/wake hooks.
+	// host-kernel prod: RunTunnelBatch + LoopOut AckWake/OnLoopInEnd flush (upload batch extension over usque).
 	device := b.tunnelDevice()
 	if device == nil {
 		return net.ErrClosed
@@ -455,7 +526,7 @@ func (b *L3OverlayBridge) RunPump(ctx context.Context) error {
 		batchOpts.OnLoopOutEnd = func(_ cippump.TunnelDevice) {
 			b.flushIngressAckWake()
 		}
-		return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, cippump.DefaultLoopInMaxBatch)
+		return cippump.RunTunnelBatch(ctx, batchDev, conn, batchOpts, b.loopInMaxBatchOrDefault())
 	}
 	return cippump.RunTunnel(ctx, device, conn, opts)
 }
@@ -464,21 +535,21 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 	hostKernel := b.hostKernelRelay()
 	pc := &NativePumpPacketConn{
 		Read: func(ctx context.Context, buf []byte) (int, error) {
-			b.mu.Lock()
-			closed := b.closed
-			reader := b.reader
-			b.mu.Unlock()
-			if closed || reader == nil {
+			if b.closed.Load() {
+				return 0, net.ErrClosed
+			}
+			reader := b.loadReader()
+			if reader == nil {
 				return 0, net.ErrClosed
 			}
 			return reader.ReadPacket(ctx, buf)
 		},
 		Write: func(p []byte) ([]byte, error) {
-			b.mu.Lock()
-			closed := b.closed
-			writer := b.writer
-			b.mu.Unlock()
-			if closed || writer == nil {
+			if b.closed.Load() {
+				return nil, net.ErrClosed
+			}
+			writer := b.loadWriter()
+			if writer == nil {
 				return nil, net.ErrClosed
 			}
 			if hostKernel {
@@ -489,22 +560,22 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 	}
 	if hostKernel {
 		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
-			b.mu.Lock()
-			closed := b.closed
-			writer := b.writer
-			b.mu.Unlock()
-			if closed || writer == nil {
+			if b.closed.Load() {
+				return false, nil, net.ErrClosed
+			}
+			writer := b.loadWriter()
+			if writer == nil {
 				return false, nil, net.ErrClosed
 			}
 			return writeHostKernelEgressInPlace(writer, p)
 		}
 	} else {
 		pc.WriteInPlace = func(p []byte) (bool, []byte, error) {
-			b.mu.Lock()
-			closed := b.closed
-			writer := b.writer
-			b.mu.Unlock()
-			if closed || writer == nil {
+			if b.closed.Load() {
+				return false, nil, net.ErrClosed
+			}
+			writer := b.loadWriter()
+			if writer == nil {
 				return false, nil, net.ErrClosed
 			}
 			return writeWirePacketInPlaceNoWake(writer, p)
@@ -515,8 +586,8 @@ func (b *L3OverlayBridge) packetConn() *NativePumpPacketConn {
 
 // Close stops L3 overlay bridge.
 func (b *L3OverlayBridge) Close() error {
+	b.closed.Store(true)
 	b.mu.Lock()
-	b.closed = true
 	ch := b.egressCh
 	pool := b.egressPool
 	b.egressCh = nil

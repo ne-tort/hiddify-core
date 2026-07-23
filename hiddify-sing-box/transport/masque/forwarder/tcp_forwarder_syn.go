@@ -97,17 +97,25 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 		iss:       iss,
 		rcvNxt:    irs + 1,
 		sndNxt:    iss + 1,
+		peerAck:   iss + 1, // SYN-ACK consumes iss; avoid inflight=sndNxt-0 wrap before first ACK
 		clientMSS: mss,
 		tsOK:      synOpts.TS,
 		tsRecent:  synOpts.TSVal,
 		s2cWake:   make(chan struct{}, 1),
 	}
 	if synOpts.WS >= 0 {
-		shift := synOpts.WS
-		if shift > 14 {
-			shift = 14
+		// Server scale is independent of the client's offer (RFC 7323). Echoing a
+		// low client shift (WS≤1) caps advertised rcv window at ~64–128KiB →
+		// ~17–34 Mbit/s on a 30ms path — matches WAN CIP TCP UP vs UDP≈fair.
+		// Floor at 10 (65535<<10 ≈ 64MiB) so nested UP is not window-limited.
+		const serverWSFloor = 10
+		clientShift := synOpts.WS
+		if clientShift > 14 {
+			clientShift = 14
 		}
-		s.clientWSScale = byte(shift)
+		s.clientWSScale = byte(clientShift)
+		s.serverWSScale = serverWSFloor
+		synOpts.WS = serverWSFloor
 	}
 	if synOpts.TS {
 		s.tsSendNext = newForwarderSendTimestamp()

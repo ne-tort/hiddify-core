@@ -17,8 +17,7 @@ func (c *flushRecordingConn) WritePacket([]byte) ([]byte, error)       { return 
 func (c *flushRecordingConn) WritePacketInPlaceNoWake([]byte) ([]byte, bool, error) {
 	return nil, false, nil
 }
-func (c *flushRecordingConn) WritePacketPrefixed([]byte) ([]byte, error) { return nil, nil }
-func (c *flushRecordingConn) FlushOutgoingDatagramSend()                   { c.flushCount++ }
+func (c *flushRecordingConn) FlushOutgoingDatagramSend() { c.flushCount++ }
 
 func (h *flushRecordingHost) PacketConn() PacketConn { return h.conn }
 func (h *flushRecordingHost) DatagramCeiling() int   { return 1500 }

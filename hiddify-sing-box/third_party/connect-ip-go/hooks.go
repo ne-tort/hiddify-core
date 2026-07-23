@@ -26,8 +26,3 @@ func SetOutboundPayloadReleaseHook(release func([]byte), isPoolSlice func([]byte
 	outboundPayloadReleaser = release
 	outboundPoolSlice = isPoolSlice
 }
-
-// SetOutboundPayloadReleaser is deprecated; use SetOutboundPayloadReleaseHook.
-func SetOutboundPayloadReleaser(fn func([]byte)) {
-	outboundPayloadReleaser = fn
-}

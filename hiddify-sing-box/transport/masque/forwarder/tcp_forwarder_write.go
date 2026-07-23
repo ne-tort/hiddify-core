@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"runtime"
 	"time"
 
 	mcip "github.com/sagernet/sing-box/transport/masque/connectip"
@@ -25,6 +24,18 @@ const (
 	downloadBatchMaxPkts      = 32
 	downloadBatchCoalesceWait = 400 * time.Microsecond
 	downloadBatchMinWireBytes = 32 * 1024
+	// Mid-batch writeCh drain every N DATA under sendMu. 0 = disabled mid-batch
+	// (only bounded drainWriteChLocked after Flush) — mid-batch Flush starved H2
+	// MultiShort under short-storm ACK floods.
+	ackInterleaveEvery = 0
+	// Max ACK/control segments drained per mid-batch interleave (when enabled).
+	writeChDrainMax = 2
+	// Max writeCh packets drained before each select. Unbounded prefer starved
+	// MultiShort bulk; 0 breaks control-before-download unit gate.
+	writeChPreferMax = 2
+	// Soft ACK admission: when writeCh is this deep, drop pure ACKs (cumulative
+	// supersede). Avoids demux HOL / results bury under iperf -P≥3 upload ACK storm.
+	writeChAckAdmitHigh = 512
 )
 
 func (f *packetForwarder) egressStopped() bool {
@@ -46,8 +57,21 @@ func (f *packetForwarder) stopPlaneFromEgress() {
 		return
 	}
 	f.planeStopOnce.Do(func() {
+		losslocus.RecordServerS2PlaneStopFromEgress()
 		_ = f.conn.Close()
 	})
+}
+
+// egressWriteKillsPlane: only benign teardown or structured plane-fatal may
+// stop the whole CONNECT-IP plane. Transient write fails drop the segment.
+func egressWriteKillsPlane(err error) bool {
+	if err == nil {
+		return false
+	}
+	if mcip.IsBenignEgressTeardownError(err) {
+		return true
+	}
+	return mcip.IsConnectIPPlaneFatalForRecycle(err)
 }
 
 func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
@@ -81,7 +105,11 @@ func (f *packetForwarder) sendWriteChDequeued(pkt []byte) {
 		if leftover != nil {
 			returnPacket(leftover)
 		}
-		f.stopPlaneFromEgress()
+		if egressWriteKillsPlane(err) {
+			f.stopPlaneFromEgress()
+		} else {
+			relaystats.RecordS2CWriteFail()
+		}
 		return
 	}
 	returnPacket(coalesced)
@@ -108,7 +136,11 @@ func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
 		for _, p := range pkts {
 			returnPacket(p)
 		}
-		f.stopPlaneFromEgress()
+		if egressWriteKillsPlane(err) {
+			f.stopPlaneFromEgress()
+		} else {
+			relaystats.RecordS2CWriteFail()
+		}
 		return
 	}
 	for _, p := range pkts {
@@ -122,7 +154,16 @@ func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
 	if downloadBatchMaxPkts <= 1 {
 		return pkts
 	}
-	deadline := time.Now().Add(downloadBatchCoalesceWait)
+	// Small S2C (iperf results / control JSON): no coalesce wait — deliver ASAP
+	// under upload ACK storms that otherwise bury downloadCh for 400µs×N.
+	if pl := wireTCPPayloadLen(first); pl > 0 && pl <= 256 {
+		return pkts
+	}
+	// Timer select (not Gosched spin): wait up to coalesce window for more DATA.
+	// Do not drain writeCh here — that starves downloadCh under short-storm ACK
+	// floods (MultiShort). Control ACK still drains in runEgressLoop + after Flush.
+	timer := time.NewTimer(downloadBatchCoalesceWait)
+	defer timer.Stop()
 	for len(pkts) < downloadBatchMaxPkts && wireBytes < downloadBatchMinWireBytes {
 		select {
 		case pkt, ok := <-f.downloadCh:
@@ -132,30 +173,86 @@ func (f *packetForwarder) collectDownloadBatch(first []byte) [][]byte {
 			f.o.DownloadQueueMetrics.noteDequeued()
 			pkts = append(pkts, pkt)
 			wireBytes += len(pkt)
-		default:
-			if time.Now().After(deadline) {
-				return pkts
-			}
-			runtime.Gosched()
+		case <-timer.C:
+			return pkts
 		}
 	}
 	return pkts
+}
+
+func (f *packetForwarder) writeChHasPending() bool {
+	if f == nil || f.writeCh == nil {
+		return false
+	}
+	if f.o.WriteQueueMetrics != nil && f.o.WriteQueueMetrics.Depth.Load() > 0 {
+		return true
+	}
+	return len(f.writeCh) > 0
+}
+
+// drainWriteChLocked drains up to writeChDrainMax ACK/control while holding sendMu.
+func (f *packetForwarder) drainWriteChLocked() {
+	for n := 0; n < writeChDrainMax; n++ {
+		select {
+		case pkt, ok := <-f.writeCh:
+			if !ok {
+				return
+			}
+			f.o.WriteQueueMetrics.noteDequeued()
+			coalesced, leftover := f.coalesceQueuedAckOnly(pkt)
+			err := f.writePacketRelayLocked(f.conn.WritePacket, coalesced)
+			returnPacket(coalesced)
+			if leftover != nil {
+				if err == nil {
+					err = f.writePacketRelayLocked(f.conn.WritePacket, leftover)
+				}
+				returnPacket(leftover)
+			}
+			if err != nil {
+				if mcip.IsRetryablePacketWriteError(err) {
+					return
+				}
+				if egressWriteKillsPlane(err) {
+					f.stopPlaneFromEgress()
+				} else {
+					relaystats.RecordS2CWriteFail()
+				}
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 func (f *packetForwarder) sendCoalescedBatch(pkts [][]byte) error {
 	if len(pkts) == 0 {
 		return nil
 	}
+	// Single small control/results segment: wake WritePacket (not NoWake batch).
+	if len(pkts) == 1 {
+		if pl := wireTCPPayloadLen(pkts[0]); pl > 0 && pl <= 256 {
+			return f.sendPacketNow(pkts[0])
+		}
+	}
 	if cw, ok := f.conn.(packetPlaneCoalescedWriter); ok {
 		f.sendMu.Lock()
 		defer f.sendMu.Unlock()
-		for _, pkt := range pkts {
+		for i, pkt := range pkts {
 			if err := f.writePacketRelayLocked(cw.WritePacketNoWake, pkt); err != nil {
 				return err
+			}
+			// Mid-batch interleave: every N DATA Flush+drain. N=0 disables (MultiShort).
+			if n := ackInterleaveEvery; n > 0 && (i+1)%n == 0 && f.writeChHasPending() {
+				cw.FlushOutgoingDatagramSend()
+				relaystats.RecordS2CBatchFlush()
+				f.drainWriteChLocked()
 			}
 		}
 		cw.FlushOutgoingDatagramSend()
 		relaystats.RecordS2CBatchFlush()
+		// Bounded drain: nested bulk ACKs under sendMu without Flush×storm.
+		f.drainWriteChLocked()
 		return nil
 	}
 	for _, pkt := range pkts {
@@ -166,15 +263,31 @@ func (f *packetForwarder) sendCoalescedBatch(pkts [][]byte) error {
 	return nil
 }
 
-// runEgressLoop drains writeCh (control) before downloadCh (bulk DATA). Parallel loops
-// previously raced on sendMu and could deliver iperf -R bulk before params ACK on wire.
+// runEgressLoop: bounded writeCh prefer, then forced downloadCh turn when bulk
+// pending (iperf results / S2C DATA must not lose every select to ACK flood).
 func (f *packetForwarder) runEgressLoop(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	for {
 		if f.egressStopped() {
 			return
 		}
-		for f.tryDrainWriteCh() {
+		for i := 0; i < writeChPreferMax && f.tryDrainWriteCh(); i++ {
+		}
+		if len(f.downloadCh) > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-f.writeStopped:
+				return
+			case <-f.downloadStopped:
+				return
+			case pkt, ok := <-f.downloadCh:
+				if !ok {
+					return
+				}
+				f.sendDownloadChPkt(pkt)
+			}
+			continue
 		}
 		select {
 		case <-ctx.Done():
@@ -233,6 +346,21 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 		losslocus.RecordServerS2DiscardTeardown()
 		return net.ErrClosed
 	}
+	// Soft admission: deep writeCh under upload -P≥3 — drop pure ACK (next seg
+	// brings a newer cumulative). Never block demux waiting for queue space.
+	if _, isACK := ackOnlyFlow(pkt); isACK {
+		depth := len(f.writeCh)
+		if f.o.WriteQueueMetrics != nil {
+			if d := int(f.o.WriteQueueMetrics.Depth.Load()); d > depth {
+				depth = d
+			}
+		}
+		if depth >= writeChAckAdmitHigh {
+			returnPacket(pkt)
+			relaystats.RecordS2CAckAdmitDrop()
+			return nil
+		}
+	}
 	select {
 	case f.writeCh <- pkt:
 		f.o.WriteQueueMetrics.noteEnqueued()
@@ -242,6 +370,18 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 		}
 		return nil
 	default:
+		// writeCh full: never park demux on sendMu or channel wait.
+		if _, ok := ackOnlyFlow(pkt); ok {
+			if f.sendMu.TryLock() {
+				err := f.writePacketRelayLocked(f.conn.WritePacket, pkt)
+				f.sendMu.Unlock()
+				returnPacket(pkt)
+				return err
+			}
+			returnPacket(pkt)
+			relaystats.RecordS2CAckAdmitDrop()
+			return nil
+		}
 		select {
 		case f.writeCh <- pkt:
 			f.o.WriteQueueMetrics.noteEnqueued()
@@ -263,8 +403,12 @@ func (f *packetForwarder) writeRaw(pkt []byte) error {
 }
 
 // enqueueDownload pipelines remote→client bulk DATA (TCP download + UDP S2C replies).
-// Control segments (ACK, FIN) stay on writeCh via enqueueWrite / writeRaw.
-// P4-3: UDP must not share writeCh(512) with TCP control under WAN backpressure.
+// FIN also uses downloadCh (not writeCh) so it cannot overtake queued S2C DATA.
+// Interactive/control S2C (iperf results) is routed to writeCh from the S2C pump
+// after a quiet gap — see pumpRemoteToClient — so small results are not buried
+// behind elephant downloadCh FIFO under host-TUN iperf -P≥3.
+// Control ACKs stay on writeCh via enqueueWrite / writeRaw.
+// P4-3: UDP must not share writeCh with TCP control under WAN backpressure.
 func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 	if len(pkt) == 0 {
 		return nil
@@ -274,30 +418,43 @@ func (f *packetForwarder) enqueueDownload(pkt []byte) error {
 		returnPacket(pkt)
 		return err
 	}
-	select {
-	case <-f.downloadStopped:
+	if f.egressStopped() {
 		returnPacket(pkt)
 		losslocus.RecordServerS2DiscardTeardown()
 		return net.ErrClosed
-	case f.downloadCh <- pkt:
-		f.o.DownloadQueueMetrics.noteEnqueued()
-		relaystats.RecordS2CEnqueue()
-		if f.o.DownloadQueueMetrics != nil {
-			relaystats.NoteDownloadQHigh(f.o.DownloadQueueMetrics.Depth.Load())
+	}
+	if err := f.tryEnqueueDownload(pkt); err != nil {
+		returnPacket(pkt)
+		if errors.Is(err, net.ErrClosed) {
+			losslocus.RecordServerS2DiscardTeardown()
 		}
+		return err
+	}
+	f.o.DownloadQueueMetrics.noteEnqueued()
+	relaystats.RecordS2CEnqueue()
+	if f.o.DownloadQueueMetrics != nil {
+		relaystats.NoteDownloadQHigh(f.o.DownloadQueueMetrics.Depth.Load())
+	}
+	return nil
+}
+
+// tryEnqueueDownload sends to downloadCh; recovers send-on-closed (test teardown race).
+func (f *packetForwarder) tryEnqueueDownload(pkt []byte) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = net.ErrClosed
+		}
+	}()
+	select {
+	case <-f.downloadStopped:
+		return net.ErrClosed
+	case f.downloadCh <- pkt:
 		return nil
 	default:
 		select {
 		case <-f.downloadStopped:
-			returnPacket(pkt)
-			losslocus.RecordServerS2DiscardTeardown()
 			return net.ErrClosed
 		case f.downloadCh <- pkt:
-			f.o.DownloadQueueMetrics.noteEnqueued()
-			relaystats.RecordS2CEnqueue()
-			if f.o.DownloadQueueMetrics != nil {
-				relaystats.NoteDownloadQHigh(f.o.DownloadQueueMetrics.Depth.Load())
-			}
 			return nil
 		}
 	}

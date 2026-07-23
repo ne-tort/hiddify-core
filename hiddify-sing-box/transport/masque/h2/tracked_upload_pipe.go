@@ -6,6 +6,7 @@ import (
 )
 
 // trackedPipeReader wraps io.PipeReader with MasqueUploadWriterOpen (connect-ip-go bidi parity).
+// Depth is not exposed: io.Pipe matches Write→Read, so MasqueUploadBuffered after Read is always 0.
 type trackedPipeReader struct {
 	io.ReadCloser
 	writerOpen *atomic.Bool
@@ -34,6 +35,7 @@ func (w *trackedPipeWriter) Close() error {
 }
 
 // NewTrackedUploadPipe is Invisv io.Pipe + writer-open discriminator for http2 END_STREAM deferral.
+// Elastic/shallow depth-aware pipes regress CONNECT-IP C2S (~54 Mbit, H9): buffered DATA buries ACKs.
 func NewTrackedUploadPipe() (io.ReadCloser, ConnectUploadPipeWriter) {
 	pr, pw := io.Pipe()
 	open := atomic.Bool{}

@@ -30,6 +30,7 @@ type Snapshot struct {
 	S2CWriteFail     uint64
 	S2CBatchFlush    uint64
 	S2CRTORetransmit uint64
+	S2CAckAdmitDrop  uint64 // pure ACK dropped under writeCh pressure (cumulative supersede)
 	DownloadQHigh    uint64 // peak downloadCh depth observed
 	WriteQHigh       uint64 // peak writeCh depth observed
 }
@@ -43,6 +44,7 @@ type stats struct {
 	s2cWriteFail     atomic.Uint64
 	s2cBatchFlush    atomic.Uint64
 	s2cRTORetransmit atomic.Uint64
+	s2cAckAdmitDrop  atomic.Uint64
 	downloadQHigh    atomic.Uint64
 	writeQHigh       atomic.Uint64
 }
@@ -65,6 +67,7 @@ func Reset() {
 	global.s2cWriteFail.Store(0)
 	global.s2cBatchFlush.Store(0)
 	global.s2cRTORetransmit.Store(0)
+	global.s2cAckAdmitDrop.Store(0)
 	global.downloadQHigh.Store(0)
 	global.writeQHigh.Store(0)
 }
@@ -80,6 +83,7 @@ func SnapshotNow() Snapshot {
 		S2CWriteFail:     global.s2cWriteFail.Load(),
 		S2CBatchFlush:    global.s2cBatchFlush.Load(),
 		S2CRTORetransmit: global.s2cRTORetransmit.Load(),
+		S2CAckAdmitDrop:  global.s2cAckAdmitDrop.Load(),
 		DownloadQHigh:    global.downloadQHigh.Load(),
 		WriteQHigh:       global.writeQHigh.Load(),
 	}
@@ -127,6 +131,7 @@ func writeFile(tag string) {
 		S2CWriteFail     uint64 `json:"s2c_write_fail"`
 		S2CBatchFlush    uint64 `json:"s2c_batch_flush"`
 		S2CRTORetransmit uint64 `json:"s2c_rto_retransmit"`
+		S2CAckAdmitDrop  uint64 `json:"s2c_ack_admit_drop"`
 		DownloadQHigh    uint64 `json:"download_q_high"`
 		WriteQHigh       uint64 `json:"write_q_high"`
 		TsUnixMs         int64  `json:"ts_unix_ms"`
@@ -141,6 +146,7 @@ func writeFile(tag string) {
 		S2CWriteFail:     s.S2CWriteFail,
 		S2CBatchFlush:    s.S2CBatchFlush,
 		S2CRTORetransmit: s.S2CRTORetransmit,
+		S2CAckAdmitDrop:  s.S2CAckAdmitDrop,
 		DownloadQHigh:    s.DownloadQHigh,
 		WriteQHigh:       s.WriteQHigh,
 		TsUnixMs:         time.Now().UnixMilli(),
@@ -159,7 +165,7 @@ func Log(tag string) {
 	}
 	s := SnapshotNow()
 	log.Printf(
-		"RESULT_CONNECT_IP_RELAY_STATS tag=%s c2s_plane_in=%d c2s_plane_bytes=%d s2c_enqueue=%d s2c_out=%d s2c_out_bytes=%d s2c_write_fail=%d s2c_batch_flush=%d s2c_rto_retransmit=%d download_q_high=%d write_q_high=%d",
+		"RESULT_CONNECT_IP_RELAY_STATS tag=%s c2s_plane_in=%d c2s_plane_bytes=%d s2c_enqueue=%d s2c_out=%d s2c_out_bytes=%d s2c_write_fail=%d s2c_batch_flush=%d s2c_rto_retransmit=%d s2c_ack_admit_drop=%d download_q_high=%d write_q_high=%d",
 		tag,
 		s.C2SPlaneIn,
 		s.C2SPlaneBytes,
@@ -169,6 +175,7 @@ func Log(tag string) {
 		s.S2CWriteFail,
 		s.S2CBatchFlush,
 		s.S2CRTORetransmit,
+		s.S2CAckAdmitDrop,
 		s.DownloadQHigh,
 		s.WriteQHigh,
 	)
@@ -219,6 +226,14 @@ func RecordS2CBatchFlush() {
 func RecordS2CRTORetransmit() {
 	if enabled() {
 		global.s2cRTORetransmit.Add(1)
+	}
+}
+
+// RecordS2CAckAdmitDrop records a pure ACK dropped under writeCh pressure
+// (cumulative ACK supersede — safe; avoids demux HOL under iperf -P≥3 upload).
+func RecordS2CAckAdmitDrop() {
+	if enabled() {
+		global.s2cAckAdmitDrop.Add(1)
 	}
 }
 

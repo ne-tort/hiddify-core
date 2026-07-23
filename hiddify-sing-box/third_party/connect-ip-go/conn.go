@@ -274,6 +274,9 @@ type adaptivePrefetchProbeGate struct {
 	emptyProbeStreak atomic.Int32
 }
 
+// Adaptive probe skips empty TryReceive drains under light load. KEEP pending A/B (FI-04);
+// not a usque/RFC must — prod H3 KPI path relies on prefetch ring filling under bulk.
+
 func (g *adaptivePrefetchProbeGate) shouldProbe() bool {
 	for {
 		budget := g.skipBudget.Load()
@@ -1563,9 +1566,6 @@ func (c *Conn) maybeEmitTTLExpiredICMP(original []byte, err error) {
 	}
 }
 
-// WritePacket writes an IP packet to the stream.
-// If sending the packet fails, it might return an ICMP packet.
-// It is the caller's responsibility to send the ICMP packet to the sender.
 // DatagramContextPrefixLen is the RFC9297 context ID prefix length on CONNECT-IP datagrams (default context 0).
 func DatagramContextPrefixLen() int {
 	return len(contextIDZero)
@@ -1653,10 +1653,9 @@ func (c *Conn) WritePacketInPlaceNoWake(b []byte) (icmp []byte, retained bool, e
 		return nil, true, nil
 	}
 	if cs, ok := c.str.(proxiedIPDatagramCoalescedSender); ok {
-		// Copy after in-place prepare: NoWake may retain pkt until Flush; LoopIn pool reuse must not alias.
-		ip := make([]byte, len(b))
-		copy(ip, b)
-		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, ip))
+		// Coalesced senders must copy into their own wire buffer before return
+		// (see SendProxiedIPDatagramNoWake contract). Do not allocate a second copy here.
+		icmp, retErr := c.finishWritePacketSend(b, cs.SendProxiedIPDatagramNoWake(contextIDZero, b))
 		return icmp, false, retErr
 	}
 	// Already prepared in place. Do not call WritePacketNoWake → composeDatagram
@@ -1722,43 +1721,6 @@ func (c *Conn) writePacketMaybeWake(b []byte, wake bool) (icmp []byte, err error
 		return nil, err
 	}
 	return c.writePacketAfterCompose(*buf, b)
-}
-
-// WritePacketPrefixed sends a datagram from a caller buffer laid out as [context ID][IP packet].
-// The IP region is copied into the internal datagram pool before TTL/Hop Limit decrement so retries
-// and caller buffer reuse cannot apply RFC9484 decrement more than once.
-func (c *Conn) WritePacketPrefixed(b []byte) (icmp []byte, err error) {
-	prefixLen := len(contextIDZero)
-	if len(b) <= prefixLen {
-		return nil, fmt.Errorf("connect-ip: prefixed datagram too short")
-	}
-	if c.closeChan != nil {
-		select {
-		case <-c.closeChan:
-			return nil, c.errAfterClose()
-		default:
-		}
-	}
-	packet := b[prefixLen:]
-	buf := datagramPool.Get().(*[]byte)
-	defer datagramPool.Put(buf)
-	need := prefixLen + len(packet)
-	if cap(*buf) < need {
-		*buf = make([]byte, need)
-	} else {
-		*buf = (*buf)[:need]
-	}
-	copy((*buf)[:prefixLen], contextIDZero)
-	copy((*buf)[prefixLen:], packet)
-	prepared := (*buf)[prefixLen:]
-	if err := c.prepareOutgoingProxiedPacket(prepared, c.routeView.Load()); err != nil {
-		c.maybeEmitTTLExpiredICMP(packet, err)
-		logSampledDrop(&outgoingComposeDropTotal, "connect-ip: dropping invalid outgoing prefixed packet (%d bytes): %v", len(packet), err)
-		err = fmt.Errorf("connect-ip: compose datagram: %w", err)
-		err = wrapConnectIPStreamDataplaneErr(c, err)
-		return nil, err
-	}
-	return c.writePacketAfterCompose(*buf, prepared)
 }
 
 func (c *Conn) composeDatagram(dst *[]byte, src []byte) error {

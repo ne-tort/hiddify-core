@@ -26,6 +26,10 @@ type CIPClientRelayStatsSnapshot struct {
 	IngressDrops  uint64
 	H3PrefetchIn  uint64
 	H3PrefetchOut uint64
+	// GATE-H2-UNDERLAY: H2 pipe Writes (actual io.Writer.Write to upload body).
+	H2PipeWrite uint64
+	// H2VisFlush is small-N visibility coalesce flushes (pending → pipe).
+	H2VisFlush uint64
 }
 
 type cipClientRelayStats struct {
@@ -35,6 +39,8 @@ type cipClientRelayStats struct {
 	flush         atomic.Uint64
 	h3PrefetchIn  atomic.Uint64
 	h3PrefetchOut atomic.Uint64
+	h2PipeWrite   atomic.Uint64
+	h2VisFlush    atomic.Uint64
 }
 
 var (
@@ -75,6 +81,8 @@ func ResetCIPClientRelayStats() {
 	globalCIPClientRelayStats.flush.Store(0)
 	globalCIPClientRelayStats.h3PrefetchIn.Store(0)
 	globalCIPClientRelayStats.h3PrefetchOut.Store(0)
+	globalCIPClientRelayStats.h2PipeWrite.Store(0)
+	globalCIPClientRelayStats.h2VisFlush.Store(0)
 }
 
 // SnapshotCIPClientRelayStats returns client write/ingress counters (ingress drops from shared total).
@@ -87,10 +95,15 @@ func SnapshotCIPClientRelayStats() CIPClientRelayStatsSnapshot {
 		IngressDrops:  StreamCapsuleDatagramIngressDropTotal(),
 		H3PrefetchIn:  globalCIPClientRelayStats.h3PrefetchIn.Load(),
 		H3PrefetchOut: globalCIPClientRelayStats.h3PrefetchOut.Load(),
+		H2PipeWrite:   globalCIPClientRelayStats.h2PipeWrite.Load(),
+		H2VisFlush:    globalCIPClientRelayStats.h2VisFlush.Load(),
 	}
 }
 
 func recordCIPClientWriteOK(nBytes int) {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
 	globalCIPClientRelayStats.writeOK.Add(1)
 	if nBytes > 0 {
 		globalCIPClientRelayStats.writeBytes.Add(uint64(nBytes))
@@ -98,19 +111,45 @@ func recordCIPClientWriteOK(nBytes int) {
 }
 
 func recordCIPClientWriteFail() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
 	globalCIPClientRelayStats.writeFail.Add(1)
 }
 
 func recordCIPClientFlush() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
 	globalCIPClientRelayStats.flush.Add(1)
 }
 
 func recordCIPClientH3PrefetchIn() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
 	globalCIPClientRelayStats.h3PrefetchIn.Add(1)
 }
 
 func recordCIPClientH3PrefetchOut() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
 	globalCIPClientRelayStats.h3PrefetchOut.Add(1)
+}
+
+func recordCIPClientH2PipeWrite() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
+	globalCIPClientRelayStats.h2PipeWrite.Add(1)
+}
+
+func recordCIPClientH2VisFlush() {
+	if !cipClientRelayStatsEnabled() {
+		return
+	}
+	globalCIPClientRelayStats.h2VisFlush.Add(1)
 }
 
 // LogCIPClientRelayStats emits RESULT_CONNECT_IP_CLIENT_STATS for field scrapers.
@@ -120,7 +159,7 @@ func LogCIPClientRelayStats(tag string) {
 	}
 	s := SnapshotCIPClientRelayStats()
 	log.Printf(
-		"RESULT_CONNECT_IP_CLIENT_STATS tag=%s write_ok=%d write_fail=%d write_bytes=%d flush=%d ingress_drops=%d h3_prefetch_in=%d h3_prefetch_out=%d",
+		"RESULT_CONNECT_IP_CLIENT_STATS tag=%s write_ok=%d write_fail=%d write_bytes=%d flush=%d ingress_drops=%d h3_prefetch_in=%d h3_prefetch_out=%d h2_pipe_write=%d h2_vis_flush=%d",
 		tag,
 		s.WriteOK,
 		s.WriteFail,
@@ -129,6 +168,8 @@ func LogCIPClientRelayStats(tag string) {
 		s.IngressDrops,
 		s.H3PrefetchIn,
 		s.H3PrefetchOut,
+		s.H2PipeWrite,
+		s.H2VisFlush,
 	)
 }
 
@@ -143,6 +184,8 @@ func writeCIPClientRelayStatsFile(tag string) {
 		IngressDrops  uint64 `json:"ingress_drops"`
 		H3PrefetchIn  uint64 `json:"h3_prefetch_in"`
 		H3PrefetchOut uint64 `json:"h3_prefetch_out"`
+		H2PipeWrite   uint64 `json:"h2_pipe_write"`
+		H2VisFlush    uint64 `json:"h2_vis_flush"`
 		TsUnixMs      int64  `json:"ts_unix_ms"`
 	}
 	d := dump{
@@ -154,6 +197,8 @@ func writeCIPClientRelayStatsFile(tag string) {
 		IngressDrops:  s.IngressDrops,
 		H3PrefetchIn:  s.H3PrefetchIn,
 		H3PrefetchOut: s.H3PrefetchOut,
+		H2PipeWrite:   s.H2PipeWrite,
+		H2VisFlush:    s.H2VisFlush,
 		TsUnixMs:      time.Now().UnixMilli(),
 	}
 	raw, err := json.Marshal(d)

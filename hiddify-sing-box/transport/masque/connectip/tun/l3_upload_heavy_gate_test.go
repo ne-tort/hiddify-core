@@ -11,9 +11,7 @@ import (
 func TestGATEConnectIPUpload524DiscriminateFastPath(t *testing.T) {
 	seg := makeUpload524BulkSeg(t)
 	w := &mockL3Writer{}
-	m := runHostKernelPumpMeter(t, hostEgressInfinite(seg), w, 150*time.Millisecond, upload524PumpHarnessOpts{
-		LoopInUsqueImmediate: true,
-	})
+	m := runHostKernelPumpMeter(t, hostEgressInfinite(seg), w, 150*time.Millisecond, upload524PumpHarnessOpts{})
 	if m.Writes < 500 {
 		t.Fatalf("writes=%d want >=500", m.Writes)
 	}

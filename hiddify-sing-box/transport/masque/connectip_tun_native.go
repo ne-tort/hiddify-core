@@ -67,6 +67,8 @@ func ConnectIPTunNativeL3(
 		readPacketCtxAdapter{read: reader.ReadPacketWithContext},
 		nat,
 	)
+	// H2 LoopInMaxBatch A/B (2026-07-22): batch=8 UP flat (~364); batch=1 DOWN regress (~500).
+	// Leave DefaultLoopInMaxBatch=48. SetLoopInMaxBatch remains for lab-only experiments.
 	if hostKernel {
 		if hr, ok := tunIf.(interface {
 			ReadHostEgress(context.Context, []byte) (int, error)
