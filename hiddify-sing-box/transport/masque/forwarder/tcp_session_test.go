@@ -1612,3 +1612,4 @@ func TestForwarderPureAckThenPayloadStartsRemotePumpReadOnlyDownload(t *testing.
 	t.Fatalf("read-only download: segs=%d total=%d max=%d want bulk=%d after syn dial",
 		segs, total, max, len(payload))
 }
+

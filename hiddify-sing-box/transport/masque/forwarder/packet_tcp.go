@@ -4,6 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -13,20 +16,37 @@ import (
 )
 
 const (
-	maxIPv4Datagram       = MaxIPv4WireBytes
-	remoteReadBuf         = 256 << 10
-	remoteWriteBuf        = 2 << 20
-	remoteFlushBatch      = 64 * 1024
+	maxIPv4Datagram = MaxIPv4WireBytes
+	remoteReadBuf   = 256 << 10
+	// Keep 16KiB C2S flush: 64KiB reintroduced W/RTT stop-wait under fat onward
+	// RTT (local netem@30 H2 UP ~9.5). Async pump removed demux HOL, not onward
+	// socket-buffer coupling when wmem is small.
+	remoteWriteBuf   = 16 << 10
+	remoteFlushBatch = 16 << 10
 	// Residual C2S (iperf results JSON ~1–4KiB) sits below remoteFlushBatch and
 	// above the ≤512 immediate flush — without idle flush it never reaches the
 	// backend and host-TUN iperf -P≥3 hangs on "unable to receive results".
-	remoteIdleFlushAfter   = 1 * time.Millisecond
-	writeQueueDepth        = 2048
-	downloadQueueDepth     = 8192
-	writePacketMaxPersist  = 128
-	kernelBuf              = 16 << 20
-	icmpRelayMax           = 8
+	remoteIdleFlushAfter = 1 * time.Millisecond
+	// Async C2S queue default: demux must not block on onward TCP Write/Flush.
+	// Tip KEEP = 16384 (~22MiB). DIAG: MASQUE_CONNECT_IP_C2S_DEPTH (segs).
+	c2sQueueDepthDefault = 16384
+	writeQueueDepth       = 2048
+	downloadQueueDepth    = 8192
+	writePacketMaxPersist = 128
+	kernelBuf             = 16 << 20
+	icmpRelayMax          = 8
 )
+
+// c2sQueueDepth returns async C2S channel capacity (segments).
+// Env MASQUE_CONNECT_IP_C2S_DEPTH overrides tip 16384 for colo BDP-absorb A/B.
+func c2sQueueDepth() int {
+	if v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_C2S_DEPTH")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 64 && n <= 16384 {
+			return n
+		}
+	}
+	return c2sQueueDepthDefault
+}
 
 // MaxSegmentPayload caps one CONNECT-IP TCP segment payload (MSS minus timestamp options).
 func MaxSegmentPayload(clientMSS uint16) int {
@@ -50,8 +70,17 @@ func MaxSegmentPayload(clientMSS uint16) int {
 func tuneRemote(c net.Conn) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		_ = tc.SetNoDelay(true)
-		_ = tc.SetReadBuffer(kernelBuf)
-		_ = tc.SetWriteBuffer(kernelBuf)
+		buf := kernelBuf
+		// DIAG colo: MASQUE_CONNECT_IP_ONWARD_WMEM (bytes) clamps SetWriteBuffer/ReadBuffer.
+		// Tip KEEP = 16MiB. Hypothesis: smaller onward sndbuf → Write blocks earlier →
+		// c2s silence → nested ACK clock couples to onward drain.
+		if v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_ONWARD_WMEM")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 64<<10 && n <= 16<<20 {
+				buf = n
+			}
+		}
+		_ = tc.SetReadBuffer(buf)
+		_ = tc.SetWriteBuffer(buf)
 	}
 }
 
@@ -246,6 +275,7 @@ func parseAckWireMeta(pkt []byte) ackWireMeta {
 	}
 	meta.seqOff = meta.tcpOff + 4
 	meta.ackOff = meta.tcpOff + 8
+	meta.wndOff = meta.tcpOff + 14
 	opts := pkt[meta.tcpOff+header.TCPMinimumSize : meta.tcpOff+meta.tcpLen]
 	for i := 0; i < len(opts); {
 		switch opts[i] {

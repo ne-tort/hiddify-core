@@ -11,6 +11,8 @@ import (
 	"time"
 
 	connectip "github.com/quic-go/connect-ip-go"
+
+	"github.com/sagernet/sing-box/transport/masque/connectip/frame"
 )
 
 // TunnelOptions configures RunTunnel (usque MaintainTunnel pump + R2 flush/wake extensions).
@@ -101,6 +103,12 @@ func dispatchLoopOutFrame(ctx context.Context, device TunnelDevice, opts TunnelO
 		return opts.Demux.DispatchIngress(ctx, pkt)
 	}
 	return device.WritePacket(pkt)
+}
+
+func noteLoopOutAckInject(pkt []byte) {
+	if frame.IPv4TCPAckOnly(pkt) {
+		connectip.RecordCIPClientAckInjectGap()
+	}
 }
 
 func runLoopIn(ctx context.Context, device TunnelDevice, conn PacketConn, opts TunnelOptions, pool *NetBuffer) error {
@@ -232,6 +240,7 @@ func drainLoopOutWireCoalesce(ctx context.Context, device TunnelDevice, conn Pac
 		if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n2]); err != nil {
 			return err
 		}
+		noteLoopOutAckInject(buf[:n2])
 	}
 }
 
@@ -271,9 +280,12 @@ func runLoopOut(ctx context.Context, device TunnelDevice, conn PacketConn, opts 
 		if n <= 0 {
 			continue
 		}
+		t0 := time.Now()
 		if err := dispatchLoopOutFrame(ctx, device, opts, buf[:n]); err != nil {
 			return err
 		}
+		connectip.RecordCIPClientS2CInject(time.Since(t0))
+		noteLoopOutAckInject(buf[:n])
 		// RunTunnelBatch only: zero-timeout wire coalesce (not usque 1:1; avoids tun ENOBUFS on ACK storms).
 		if err := drainLoopOutWireCoalesce(ctx, device, conn, opts, tryCtx, buf); err != nil {
 			return err

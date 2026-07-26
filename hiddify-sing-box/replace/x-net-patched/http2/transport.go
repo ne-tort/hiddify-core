@@ -125,8 +125,8 @@ type Transport struct {
 	MaxReadFrameSize uint32
 
 	// MasqueUploadFlushBytes, when >0, overrides the MASQUE CONNECT-stream
-	// upload bulk flush threshold (default 256 KiB). Chrome-like profiles use
-	// MaxReadFrameSize (16 KiB) so DATA bursts match frame size.
+	// upload bulk flush threshold (prod default 16 KiB — see h2.DefaultUploadFlushBytes).
+	// Larger values (e.g. 256 KiB) delay wire visibility of C2S DATA and inflate nested SRTT.
 	MasqueUploadFlushBytes int
 
 	// MaxDecoderHeaderTableSize optionally specifies the http2

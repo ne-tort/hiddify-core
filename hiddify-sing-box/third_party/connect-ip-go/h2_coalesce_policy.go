@@ -4,7 +4,7 @@ package connectip
 //
 // Docker A/B (2026-07-22) — C2S vis N after S2C ACK Flush KEEP:
 //
-//	N=4            — UP ~713 (ACK Flush alone)
+//	N=4            — UP ~713 (ACK Flush alone); P6-SC netem@30: local UP regress ~259, RTT flat
 //	N=8            — UP ~964
 //	N=16 / 16KiB   — UP ~1140 / DOWN ~1290 (U/D≈0.88) KEEP
 //	N=24           — UP ~1060 REGRESS vs 16
@@ -14,6 +14,9 @@ package connectip
 // N>4 is forever unsafe. Relay S2C N=32 still OK via downloadCh+writeCh wake.
 
 const (
+	// Client C2S visibility coalesce (prod). Colo A/B 2026-07-23: N=32/64KiB flat
+	// (~93–108) vs N=16 — no channel unlock; keep local KEEP band.
+	// Colo 2026-07-24: vis N=2 → UP~58 REJECT (C2S framing tax; SRTT unchanged).
 	h2C2SVisMaxPkts  = 16
 	h2C2SVisMaxBytes = 16 << 10
 

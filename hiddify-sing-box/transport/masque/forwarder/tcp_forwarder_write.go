@@ -17,16 +17,17 @@ import (
 // downloadCh: short coalesce wait forms ~MSS×N batches (required for local L1
 // attrib; pure non-blocking micro-batches → download_q_high→3k / ~250 Mbit/s).
 //
-// writeCh ACK/control: immediate WritePacket wake (not NoWake batch). True
-// AddNoWake on ACKs delayed the nested TCP clock and regressed WAN UP
-// ~42→~17 (RTO↑). DATA S2C still uses NoWake+Flush below.
+// writeCh pure ACK: NoWake + Flush every N / idle (P6-SC). Wake Flush-per-ACK
+// under sendMu capped H2 UP ~12Mbit. Blind AddNoWake without timed Flush once
+// regressed WAN UP (RTO↑) — keep idle≤100µs / every≤8.
+// DATA S2C still uses NoWake+Flush below.
 const (
 	downloadBatchMaxPkts      = 32
 	downloadBatchCoalesceWait = 400 * time.Microsecond
 	downloadBatchMinWireBytes = 32 * 1024
 	// Mid-batch writeCh drain every N DATA under sendMu. 0 = disabled mid-batch
 	// (only bounded drainWriteChLocked after Flush) — mid-batch Flush starved H2
-	// MultiShort under short-storm ACK floods.
+	// MultiShort under short-storm ACK floods. Colo flush4k+N=4 flat vs STREAM.
 	ackInterleaveEvery = 0
 	// Max ACK/control segments drained per mid-batch interleave (when enabled).
 	writeChDrainMax = 2
@@ -36,6 +37,12 @@ const (
 	// Soft ACK admission: when writeCh is this deep, drop pure ACKs (cumulative
 	// supersede). Avoids demux HOL / results bury under iperf -P≥3 upload ACK storm.
 	writeChAckAdmitHigh = 512
+	// ACK NoWake Flush from egress only (demux uses writeCh). Every=1 is OK here:
+	// demux HOL was the ~12–27 Mbit REJECT, not egress Flush rate. Colo nested
+	// SRTT 50–120ms needs tighter ACK visibility than N=8.
+	// Combo 2KiB coalesce + FlushEvery=8 → UP~87 DN~39 REJECT (2026-07-24).
+	writeChAckNoWakeFlushEvery = 1
+	writeChAckNoWakeFlushIdle  = 50 * time.Microsecond
 )
 
 func (f *packetForwarder) egressStopped() bool {
@@ -46,6 +53,37 @@ func (f *packetForwarder) egressStopped() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (f *packetForwarder) noteAckFlushGap() {
+	now := time.Now().UnixNano()
+	prev := f.lastAckFlushNs.Swap(now)
+	if prev > 0 {
+		relaystats.RecordAckFlushGap(time.Duration(now - prev))
+	}
+}
+
+func (f *packetForwarder) noteAckEnqueued() {
+	if f == nil || f.ackEnqNs == nil {
+		return
+	}
+	select {
+	case f.ackEnqNs <- time.Now().UnixNano():
+	default:
+	}
+}
+
+func (f *packetForwarder) popAckSojourn() {
+	if f == nil || f.ackEnqNs == nil {
+		return
+	}
+	select {
+	case ns := <-f.ackEnqNs:
+		if ns > 0 {
+			relaystats.RecordS2CAckSojourn(time.Duration(time.Now().UnixNano() - ns))
+		}
+	default:
 	}
 }
 
@@ -79,10 +117,73 @@ func (f *packetForwarder) sendWriteChPkt(pkt []byte) {
 	f.sendWriteChDequeued(pkt)
 }
 
-// sendWriteChDequeued sends one already-dequeued writeCh packet (ACK/control)
-// with wake. Leftovers from ACK coalesce are already dequeued — do not
-// noteDequeued again.
+// sendWriteChDequeued sends one already-dequeued writeCh packet (ACK/control).
+// Pure ACK on a coalescing plane: keep intermediate same-flow ACKs (ACK clock)
+// up to ackClockBatchMax, NoWake each, one Flush — not newest-only collapse
+// (that starved segs_in vs 8KiB schedule rate on colo).
 func (f *packetForwarder) sendWriteChDequeued(pkt []byte) {
+	if _, isAck := ackOnlyFlow(pkt); isAck {
+		f.popAckSojourn()
+		if cw, ok := f.conn.(packetPlaneCoalescedWriter); ok {
+			batch, leftover := f.collectAckClockBatch(pkt)
+			f.sendMu.Lock()
+			var err error
+			for _, p := range batch {
+				err = f.writePacketRelayLocked(cw.WritePacketNoWake, p)
+				if err != nil {
+					break
+				}
+			}
+			if err == nil {
+				f.clearAckNoWakeTrackingLocked()
+				f.flushDatagramOutsideSendMu(cw)
+				f.noteAckFlushGap()
+			}
+			f.sendMu.Unlock()
+			if err != nil {
+				if mcip.IsRetryablePacketWriteError(err) {
+					for _, p := range batch {
+						select {
+						case <-f.writeStopped:
+							returnPacket(p)
+						case f.writeCh <- p:
+							f.noteAckEnqueued()
+						}
+					}
+					if leftover != nil {
+						select {
+						case <-f.writeStopped:
+							returnPacket(leftover)
+						case f.writeCh <- leftover:
+							if _, ok := ackOnlyFlow(leftover); ok {
+								f.noteAckEnqueued()
+							}
+						}
+					}
+					return
+				}
+				for _, p := range batch {
+					returnPacket(p)
+				}
+				if leftover != nil {
+					returnPacket(leftover)
+				}
+				if egressWriteKillsPlane(err) {
+					f.stopPlaneFromEgress()
+				} else {
+					relaystats.RecordS2CWriteFail()
+				}
+				return
+			}
+			for _, p := range batch {
+				returnPacket(p)
+			}
+			if leftover != nil {
+				f.sendWriteChDequeued(leftover)
+			}
+			return
+		}
+	}
 	coalesced, leftover := f.coalesceQueuedAckOnly(pkt)
 	err := f.sendPacketNow(coalesced)
 	if err != nil {
@@ -116,6 +217,65 @@ func (f *packetForwarder) sendWriteChDequeued(pkt []byte) {
 	if leftover != nil {
 		f.sendWriteChDequeued(leftover)
 	}
+}
+
+// noteAckNoWakeLocked records one NoWake ACK; Flushes every N or arms idle.
+// Caller holds sendMu.
+func (f *packetForwarder) noteAckNoWakeLocked(cw packetPlaneCoalescedWriter) {
+	f.ackNoWakeN++
+	if f.ackNoWakeN >= writeChAckNoWakeFlushEvery {
+		f.flushAckNoWakeLocked(cw)
+		return
+	}
+	if f.ackFlushTimer == nil {
+		f.ackFlushTimer = time.AfterFunc(writeChAckNoWakeFlushIdle, f.ackNoWakeIdleFlush)
+		return
+	}
+	f.ackFlushTimer.Reset(writeChAckNoWakeFlushIdle)
+}
+
+// clearAckNoWakeTrackingLocked drops timer/count without Flush (caller Flushes).
+func (f *packetForwarder) clearAckNoWakeTrackingLocked() {
+	if f.ackFlushTimer != nil {
+		_ = f.ackFlushTimer.Stop()
+		f.ackFlushTimer = nil
+	}
+	f.ackNoWakeN = 0
+}
+
+// flushDatagramOutsideSendMu runs plane Flush without holding sendMu so demux
+// sendAckNowSync TryLock is not parked on http2 ResponseWriter.Flush (colo
+// underlay Recv-Q / nested ACK clock). Caller must hold sendMu; unlocks, Flushes, re-locks.
+func (f *packetForwarder) flushDatagramOutsideSendMu(cw packetPlaneCoalescedWriter) {
+	f.sendMu.Unlock()
+	t0 := time.Now()
+	cw.FlushOutgoingDatagramSend()
+	relaystats.RecordS2CFlushDuration(time.Since(t0))
+	relaystats.RecordS2CBatchFlush()
+	f.sendMu.Lock()
+}
+
+func (f *packetForwarder) flushAckNoWakeLocked(cw packetPlaneCoalescedWriter) {
+	if f.ackNoWakeN == 0 {
+		if f.ackFlushTimer != nil {
+			_ = f.ackFlushTimer.Stop()
+			f.ackFlushTimer = nil
+		}
+		return
+	}
+	f.clearAckNoWakeTrackingLocked()
+	f.flushDatagramOutsideSendMu(cw)
+}
+
+func (f *packetForwarder) ackNoWakeIdleFlush() {
+	cw, ok := f.conn.(packetPlaneCoalescedWriter)
+	if !ok {
+		return
+	}
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	f.ackFlushTimer = nil
+	f.flushAckNoWakeLocked(cw)
 }
 
 func (f *packetForwarder) sendDownloadChPkt(pkt []byte) {
@@ -192,6 +352,7 @@ func (f *packetForwarder) writeChHasPending() bool {
 
 // drainWriteChLocked drains up to writeChDrainMax ACK/control while holding sendMu.
 func (f *packetForwarder) drainWriteChLocked() {
+	cw, hasCW := f.conn.(packetPlaneCoalescedWriter)
 	for n := 0; n < writeChDrainMax; n++ {
 		select {
 		case pkt, ok := <-f.writeCh:
@@ -199,12 +360,40 @@ func (f *packetForwarder) drainWriteChLocked() {
 				return
 			}
 			f.o.WriteQueueMetrics.noteDequeued()
+			if _, isAck := ackOnlyFlow(pkt); isAck {
+				f.popAckSojourn()
+			}
 			coalesced, leftover := f.coalesceQueuedAckOnly(pkt)
-			err := f.writePacketRelayLocked(f.conn.WritePacket, coalesced)
+			var err error
+			if hasCW {
+				if _, isAck := ackOnlyFlow(coalesced); isAck {
+					err = f.writePacketRelayLocked(cw.WritePacketNoWake, coalesced)
+					if err == nil {
+						f.noteAckNoWakeLocked(cw)
+					}
+				} else {
+					f.flushAckNoWakeLocked(cw)
+					err = f.writePacketRelayLocked(f.conn.WritePacket, coalesced)
+				}
+			} else {
+				err = f.writePacketRelayLocked(f.conn.WritePacket, coalesced)
+			}
 			returnPacket(coalesced)
 			if leftover != nil {
 				if err == nil {
-					err = f.writePacketRelayLocked(f.conn.WritePacket, leftover)
+					if hasCW {
+						if _, isAck := ackOnlyFlow(leftover); isAck {
+							err = f.writePacketRelayLocked(cw.WritePacketNoWake, leftover)
+							if err == nil {
+								f.noteAckNoWakeLocked(cw)
+							}
+						} else {
+							f.flushAckNoWakeLocked(cw)
+							err = f.writePacketRelayLocked(f.conn.WritePacket, leftover)
+						}
+					} else {
+						err = f.writePacketRelayLocked(f.conn.WritePacket, leftover)
+					}
 				}
 				returnPacket(leftover)
 			}
@@ -244,13 +433,14 @@ func (f *packetForwarder) sendCoalescedBatch(pkts [][]byte) error {
 			}
 			// Mid-batch interleave: every N DATA Flush+drain. N=0 disables (MultiShort).
 			if n := ackInterleaveEvery; n > 0 && (i+1)%n == 0 && f.writeChHasPending() {
-				cw.FlushOutgoingDatagramSend()
-				relaystats.RecordS2CBatchFlush()
+				f.clearAckNoWakeTrackingLocked()
+				f.flushDatagramOutsideSendMu(cw)
 				f.drainWriteChLocked()
 			}
 		}
-		cw.FlushOutgoingDatagramSend()
-		relaystats.RecordS2CBatchFlush()
+		// Pending ACK NoWake capsules share this Flush; clear tracking first.
+		f.clearAckNoWakeTrackingLocked()
+		f.flushDatagramOutsideSendMu(cw)
 		// Bounded drain: nested bulk ACKs under sendMu without Flush×storm.
 		f.drainWriteChLocked()
 		return nil
@@ -365,6 +555,9 @@ func (f *packetForwarder) enqueueWrite(pkt []byte) error {
 	case f.writeCh <- pkt:
 		f.o.WriteQueueMetrics.noteEnqueued()
 		relaystats.RecordS2CEnqueue()
+		if _, isACK := ackOnlyFlow(pkt); isACK {
+			f.noteAckEnqueued()
+		}
 		if f.o.WriteQueueMetrics != nil {
 			relaystats.NoteWriteQHigh(f.o.WriteQueueMetrics.Depth.Load())
 		}
@@ -486,6 +679,9 @@ func (f *packetForwarder) peerPrefixesCached() []netip.Prefix {
 func (f *packetForwarder) sendPacketNow(pkt []byte) error {
 	f.sendMu.Lock()
 	defer f.sendMu.Unlock()
+	if cw, ok := f.conn.(packetPlaneCoalescedWriter); ok {
+		f.flushAckNoWakeLocked(cw)
+	}
 	return f.writePacketRelayLocked(f.conn.WritePacket, pkt)
 }
 

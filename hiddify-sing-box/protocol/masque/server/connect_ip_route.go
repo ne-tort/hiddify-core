@@ -63,23 +63,46 @@ func RouteConnectIPBlocked(router adapter.Router, reqCtx context.Context, packet
 		_ = packetConn.Close()
 		notify()
 	}
-	// P1-5 LOCK: prod CONNECT-IP server dataplane = S2 terminate (TCP+UDP) via
-	// forwarder.RunConnectIPTCPPacketPlaneForwarder — not transparent L3 IP forward.
-	// RoutePacketConnectionEx is unused here: it models extracted UDP payloads and drops
-	// TCP SYNs (would tear down the session). Transparent L3 onward = optional future mode
-	// (FOCUS-04 IP-SRV-L3), not the default product path.
+	// CIP identity = IP packet transport (RFC 9484 §7.2). Default egress = packet (TUN).
+	// terminate = lab stub only (MASQUE_CONNECT_IP_EGRESS=terminate / connect_ip_egress).
 	_ = router
 	_ = metadata
 	fwdCtx := DataplaneContext(reqCtx)
+	egress := fwd.ResolveConnectIPEgress(opts.ConnectIPEgress)
+	go func() {
+		var err error
+		switch egress {
+		case fwd.ConnectIPEgressTerminate:
+			err = runConnectIPTerminateStub(fwdCtx, packetConn.Conn, opts, onwardDialer)
+		default:
+			err = runConnectIPPacketEgress(fwdCtx, packetConn.Conn, opts, onwardDialer, logger, reqCtx)
+		}
+		onClose(err)
+	}()
+	<-done
+}
+
+func runConnectIPTerminateStub(ctx context.Context, conn fwd.PacketPlaneConn, opts option.MasqueEndpointOptions, onwardDialer net.Dialer) error {
 	fwdOpts := fwd.ConnectIPTCPForwarderOptions{
 		AllowPrivateTargets: opts.AllowPrivateTargets,
 		AllowedTargetPorts:  opts.AllowedTargetPorts,
 		BlockedTargetPorts:  opts.BlockedTargetPorts,
 		Dialer:              onwardDialer,
 	}
-	go func() {
-		err := fwd.RunConnectIPTCPPacketPlaneForwarder(fwdCtx, packetConn.Conn, fwdOpts)
-		onClose(err)
-	}()
-	<-done
+	return fwd.RunConnectIPTCPPacketPlaneForwarder(ctx, conn, fwdOpts)
+}
+
+func runConnectIPPacketEgress(ctx context.Context, conn fwd.PacketPlaneConn, opts option.MasqueEndpointOptions, onwardDialer net.Dialer, logger log.ContextLogger, reqCtx context.Context) error {
+	dev, err := fwd.OpenConnectIPServerPacketDevice()
+	if err != nil {
+		if fwd.ConnectIPEgressIsExplicit(opts.ConnectIPEgress) {
+			return fmt.Errorf("masque connect-ip packet egress required: %w", err)
+		}
+		if logger != nil {
+			logger.DebugContext(reqCtx, fmt.Sprintf("masque connect-ip packet TUN unavailable (%v); falling back to terminate stub", err))
+		}
+		return runConnectIPTerminateStub(ctx, conn, opts, onwardDialer)
+	}
+	defer dev.Close()
+	return fwd.RunConnectIPPacketPlaneRelay(ctx, conn, dev)
 }

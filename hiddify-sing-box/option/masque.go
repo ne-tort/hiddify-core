@@ -175,6 +175,10 @@ type MasqueEndpointOptions struct {
 	AllowPrivateTargets bool                    `json:"allow_private_targets,omitempty"`
 	AllowedTargetPorts  []uint16                `json:"allowed_target_ports,omitempty"`
 	BlockedTargetPorts  []uint16                `json:"blocked_target_ports,omitempty"`
+	// ConnectIPEgress is server-only CONNECT-IP dataplane after ASSIGN/ROUTE:
+	// "packet" (default) = RFC §7.2 full IP ↔ TUN; "terminate" = lab S2 TCP/UDP dial stub.
+	// Override: MASQUE_CONNECT_IP_EGRESS.
+	ConnectIPEgress string `json:"connect_ip_egress,omitempty"`
 	// ConnectUDPRelayPayloadPolicy is server-only relay MTU cap for proxied UDP: prod (default, 1500 B)
 	// or rfc_interop (65527 B). Process-wide when multiple masque endpoints are configured.
 	ConnectUDPRelayPayloadPolicy string `json:"connect_udp_relay_payload_policy,omitempty"`

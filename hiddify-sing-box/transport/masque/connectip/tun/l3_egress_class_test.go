@@ -24,6 +24,16 @@ func TestHostKernelBulkEgressNoWake(t *testing.T) {
 	}
 }
 
+func TestHostKernelC2SWakeAllDisablesBulkNoWake(t *testing.T) {
+	t.Setenv("MASQUE_CONNECT_IP_C2S_WAKE_ALL", "1")
+	src := netip.MustParseAddr("10.0.0.1")
+	dst := netip.MustParseAddr("10.0.0.2")
+	bulk := makeIPv4TCPPayload(src, dst, 1000, 80, byte(header.TCPFlagAck|header.TCPFlagPsh), make([]byte, 512))
+	if hostKernelBulkEgressNoWake(bulk) {
+		t.Fatal("wake-all DIAG: bulk DATA must not use NoWake")
+	}
+}
+
 func TestWriteHostKernelEgressWireBulkSync(t *testing.T) {
 	src := netip.MustParseAddr("10.0.0.1")
 	dst := netip.MustParseAddr("10.0.0.2")

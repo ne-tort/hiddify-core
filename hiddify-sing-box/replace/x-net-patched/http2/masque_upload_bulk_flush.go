@@ -6,12 +6,14 @@ import (
 )
 
 const (
-	masqueBulkFlushThresholdBytes = 256 << 10
+	// Fallback when Transport.MasqueUploadFlushBytes unset (prod sets 16 KiB via h2.DefaultUploadFlushBytes).
+	masqueBulkFlushThresholdBytes = 16 << 10
 	// Deadline floor: avoid Flush of tiny pending while still reading a full pipe.
 	// Empty-pipe MUST still Flush any pending before blocking Read (see wire_ack) —
 	// otherwise pending sits in bw forever while Read blocks (deadline not polled).
 	masqueBulkFlushMinPending = 64 << 10
-	masqueBulkFlushMaxDelay   = 3 * time.Millisecond
+	// Colo: 3ms hold was long vs STREAM SRTT~7ms; 100µs keeps deadline without Flush storm.
+	masqueBulkFlushMaxDelay = 100 * time.Microsecond
 )
 
 func masqueEffectiveFlushThreshold(override int) int {

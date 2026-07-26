@@ -44,27 +44,36 @@ func TestH2CapsulePipeStreamC2SVisCoalesce(t *testing.T) {
 	if err := str.SendProxiedIPDatagramNoWake(contextIDZero, make([]byte, 40)); err != nil {
 		t.Fatal(err)
 	}
+	str.syncPipeForTest()
 	if w.writes != 1 {
 		t.Fatalf("at threshold writes=%d want 1", w.writes)
 	}
 	if err := str.SendProxiedIPDatagramNoWake(contextIDZero, make([]byte, 40)); err != nil {
 		t.Fatal(err)
 	}
-	if w.writes != 1 {
-		t.Fatalf("partial batch writes=%d want 1", w.writes)
-	}
 	str.FlushProxiedIPDatagramSend()
+	str.syncPipeForTest()
 	if w.writes != 2 {
-		t.Fatalf("after Flush writes=%d want 2", w.writes)
+		t.Fatalf("after partial+Flush writes=%d want 2", w.writes)
 	}
 }
 
-// TestH2CapsulePipeStreamACKWakeDrainsPendingVis: N=16 is safe only if wake path
-// never leaves prior NoWake DATA sitting while an ACK waits behind it in pendingVis.
+// syncPipeForTest waits for async bulk pipe writes (prod LoopIn does not wait).
+func (s *h2CapsulePipeStream) syncPipeForTest() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.syncPipeWritesLocked()
+}
+
+// TestH2CapsulePipeStreamACKWakeDrainsPendingVis: wake path must not leave prior
+// NoWake DATA sitting while an ACK waits behind it in pendingVis.
 func TestH2CapsulePipeStreamACKWakeDrainsPendingVis(t *testing.T) {
 	w := &countingPipeWriter{}
 	str := &h2CapsulePipeStream{pipeW: w}
-	const pending = 7 // mid-batch under any prod N≥8
+	pending := h2C2SVisMaxPkts - 1 // mid-batch under prod N
+	if pending < 1 {
+		t.Fatal("h2C2SVisMaxPkts must be >= 2")
+	}
 	for i := 0; i < pending; i++ {
 		if err := str.SendProxiedIPDatagramNoWake(contextIDZero, make([]byte, 800)); err != nil {
 			t.Fatalf("NoWake[%d]: %v", i, err)

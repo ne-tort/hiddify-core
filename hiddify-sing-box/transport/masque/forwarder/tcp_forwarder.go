@@ -34,6 +34,14 @@ type packetForwarder struct {
 	// planeStopOnce closes PacketPlaneConn once on egress plane death (P4-5).
 	planeStopOnce sync.Once
 
+	// P6-SC: ACK NoWake batch — Flush on timer / count, not Flush-per-ACK (H2 ~12Mbit ceiling).
+	ackFlushTimer *time.Timer
+	ackNoWakeN    int
+	lastAckFlushNs atomic.Int64 // DIAG: inter-ACK Flush gap
+
+	// DIAG: parallel enqueue timestamps for pure ACK sojourn (MASQUE_CONNECT_IP_RELAY_STATS).
+	ackEnqNs chan int64
+
 	sMu      sync.Mutex
 	sessions map[tcp4Tuple]*tcpForwardSession
 
@@ -57,6 +65,7 @@ func RunConnectIPTCPPacketPlaneForwarder(ctx context.Context, conn PacketPlaneCo
 		downloadCh:      make(chan []byte, downloadQueueDepth),
 		writeStopped:    make(chan struct{}),
 		downloadStopped: make(chan struct{}),
+		ackEnqNs:        make(chan int64, writeQueueDepth),
 	}
 	// Always-on queue occupancy (P4-3); nil hooks were silent no-ops in prod.
 	if f.o.WriteQueueMetrics == nil {

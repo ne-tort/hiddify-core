@@ -1,6 +1,9 @@
 package tun
 
 import (
+	"os"
+	"strings"
+
 	cipframe "github.com/sagernet/sing-box/transport/masque/connectip/frame"
 )
 
@@ -8,10 +11,20 @@ import (
 // segments (incl. tail probes) keep sync flush for ACK clock (PERF-1b bulk/sync).
 const hostKernelBulkEgressMinBytes = 256
 
+// hostKernelC2SWakeAll reports MASQUE_CONNECT_IP_C2S_WAKE_ALL DIAG: force wake WritePacket
+// for bulk DATA (skip NoWake vis coalesce) to probe post-TX delay vs nested SRTT.
+func hostKernelC2SWakeAll() bool {
+	v := strings.TrimSpace(os.Getenv("MASQUE_CONNECT_IP_C2S_WAKE_ALL"))
+	return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+}
+
 // hostKernelBulkEgressNoWake reports whether host-kernel LoopIn should use in-place NoWake.
 // Bulk TCP DATA only. ACK/SYN/FIN/small → wake WritePacket (NOT NoWake) so pendingVis
 // cannot hold control across C2S vis N (see writeHostKernelEgressInPlace).
 func hostKernelBulkEgressNoWake(pkt []byte) bool {
+	if hostKernelC2SWakeAll() {
+		return false
+	}
 	return len(pkt) >= hostKernelBulkEgressMinBytes && cipframe.IPv4TCPHasPayload(pkt)
 }
 

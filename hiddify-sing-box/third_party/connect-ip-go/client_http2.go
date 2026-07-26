@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -79,6 +80,18 @@ func (*h2ExtendedConnectDuplexBody) Close() error {
 	return nil
 }
 
+// Shallow C2S pipe queue: LoopIn must not block on unbuffered io.Pipe→http2.
+// Depth 2 ≈ one-in-flight + one queued (~vis batch). Depth 8 added ~100 KiB
+// wire delay and kept nested SRTT~50–80 ms on colo (flight≈unacked×MSS).
+const h2C2SPipeWriteQueueDepth = 2
+
+// h2PipeWriteReq is one ordered write onto the Extended CONNECT upload pipe.
+// done != nil → caller waits until this chunk (and prior queue) hit pipeW.
+type h2PipeWriteReq struct {
+	chunk []byte
+	done  chan error
+}
+
 // h2CapsulePipeStream carries CONNECT-IP control capsules and DATAGRAM capsules on one HTTP/2 stream (RFC 8441 + RFC 9297).
 type h2CapsulePipeStream struct {
 	body  io.ReadCloser
@@ -100,6 +113,11 @@ type h2CapsulePipeStream struct {
 	// Test/diag overrides (0 → prod h2C2SVisMax*).
 	visMaxPkts  int
 	visMaxBytes int
+
+	// Async upload writer: bulk vis flush enqueues; wake/ACK waits (order preserved).
+	pipeWriteCh    chan h2PipeWriteReq
+	pipeWriterOnce sync.Once
+	pipeWriterDone chan struct{}
 }
 
 func (s *h2CapsulePipeStream) effectiveVisMaxPkts() int {
@@ -121,15 +139,88 @@ func (s *h2CapsulePipeStream) Read(p []byte) (int, error) { return s.body.Read(p
 func (s *h2CapsulePipeStream) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.writePipeLocked(p)
+	chunk := append([]byte(nil), p...)
+	if err := s.enqueuePipeWriteLocked(chunk, true); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
-func (s *h2CapsulePipeStream) writePipeLocked(p []byte) (int, error) {
-	n, err := writeAllWriter(s.pipeW, p)
-	if err == nil {
-		recordCIPClientH2PipeWrite()
+func (s *h2CapsulePipeStream) ensurePipeWriterLocked() {
+	s.pipeWriterOnce.Do(func() {
+		s.pipeWriteCh = make(chan h2PipeWriteReq, h2C2SPipeWriteQueueDepth)
+		s.pipeWriterDone = make(chan struct{})
+		go s.pipeWriteLoop()
+	})
+}
+
+func (s *h2CapsulePipeStream) pipeWriteLoop() {
+	defer close(s.pipeWriterDone)
+	for req := range s.pipeWriteCh {
+		var err error
+		if len(req.chunk) > 0 && s.pipeW != nil {
+			_, err = writeAllWriter(s.pipeW, req.chunk)
+			if err == nil {
+				recordCIPClientH2PipeWrite()
+			}
+		}
+		if req.done != nil {
+			req.done <- err
+		}
 	}
-	return n, err
+}
+
+// enqueuePipeWriteLocked sends chunk to the pipe writer. wait=true blocks until
+// this chunk is written (wake/ACK/control). wait=false returns after enqueue
+// (bulk vis) so LoopIn can read TUN while http2 consumes the pipe.
+//
+// Releases s.mu while blocked on a full queue or wait — otherwise AckWake Flush
+// deadlocks behind LoopIn holding mu (colo nested SRTT↑).
+func (s *h2CapsulePipeStream) enqueuePipeWriteLocked(chunk []byte, wait bool) error {
+	if len(chunk) == 0 && !wait {
+		return nil
+	}
+	if s.pipeW == nil {
+		return io.ErrClosedPipe
+	}
+	s.ensurePipeWriterLocked()
+	ch := s.pipeWriteCh
+	var done chan error
+	if wait {
+		done = make(chan error, 1)
+	}
+	req := h2PipeWriteReq{chunk: chunk, done: done}
+	select {
+	case ch <- req:
+	default:
+		s.mu.Unlock()
+		t0 := time.Now()
+		ch <- req
+		recordCIPClientH2PipeWait(time.Since(t0), true)
+		s.mu.Lock()
+		if s.pipeW == nil {
+			return io.ErrClosedPipe
+		}
+	}
+	if !wait {
+		return nil
+	}
+	s.mu.Unlock()
+	t0 := time.Now()
+	err := <-done
+	recordCIPClientH2PipeWait(time.Since(t0), false)
+	s.mu.Lock()
+	return err
+}
+
+// syncPipeWritesLocked waits until all previously enqueued chunks are written.
+func (s *h2CapsulePipeStream) syncPipeWritesLocked() error {
+	if s.pipeWriteCh == nil {
+		return nil
+	}
+	done := make(chan error, 1)
+	s.pipeWriteCh <- h2PipeWriteReq{done: done} // nil chunk = barrier
+	return <-done
 }
 
 func (s *h2CapsulePipeStream) SendDatagram(payload []byte) error {
@@ -186,19 +277,26 @@ func (s *h2CapsulePipeStream) SendProxiedIPDatagramNoWake(contextPrefix, ipPacke
 }
 
 // FlushProxiedIPDatagramSend drains visibility coalesce tail (LoopIn OnLoopInEnd).
+// Async enqueue only — must not block LoopIn on io.Pipe (colo nested Send-Q root).
+// Wake/ACK already waits inside flushVisLocked(false); closePipeWriter barriers.
 func (s *h2CapsulePipeStream) FlushProxiedIPDatagramSend() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_ = s.flushVisLocked(true)
 }
 
+// flushVisLocked copies pendingVis and hands it to the pipe writer.
+// recordVis=true (bulk): async enqueue — do not block LoopIn on io.Pipe.
+// recordVis=false (wake/ACK): wait until this chunk is on the pipe (after prior queue).
 func (s *h2CapsulePipeStream) flushVisLocked(recordVis bool) error {
 	if s.pendingVis.Len() == 0 {
 		return nil
 	}
-	_, err := s.writePipeLocked(s.pendingVis.Bytes())
+	chunk := append([]byte(nil), s.pendingVis.Bytes()...)
 	s.pendingVis.Reset()
 	s.pendingVisPkts = 0
+	wait := !recordVis
+	err := s.enqueuePipeWriteLocked(chunk, wait)
 	if err == nil && recordVis {
 		recordCIPClientH2VisFlush()
 	}
@@ -222,7 +320,16 @@ func (s *h2CapsulePipeStream) Close() error {
 func (s *h2CapsulePipeStream) closePipeWriter() error {
 	s.mu.Lock()
 	_ = s.flushVisLocked(true)
+	_ = s.syncPipeWritesLocked()
+	if s.pipeWriteCh != nil {
+		close(s.pipeWriteCh)
+		s.pipeWriteCh = nil
+	}
+	done := s.pipeWriterDone
 	s.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 	if s.uploadBody != nil {
 		s.uploadBody.MarkUploadWriterDone()
 	}

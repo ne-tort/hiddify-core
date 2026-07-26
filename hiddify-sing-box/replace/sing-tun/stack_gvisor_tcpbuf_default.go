@@ -13,6 +13,7 @@ const (
 	tcpRXBufMaxSize = 8 << 20 // 8MiB
 
 	tcpTXBufMinSize = tcp.MinBufferSize
+	// Colo A/B txbuf 256/512KiB: CIP UP~98 flat + sndbuf_limited~11% — REJECT (2026-07-24).
 	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
 	tcpTXBufMaxSize = 6 << 20 // 6MiB
 )

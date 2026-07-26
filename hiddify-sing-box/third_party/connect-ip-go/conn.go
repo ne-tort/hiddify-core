@@ -336,6 +336,8 @@ type Conn struct {
 	prefetchSlots [][]byte
 	prefetchHead  int
 	prefetchCount int
+	// DIAG: parallel FIFO stamps for capsule→ReadPacket sojourn (MASQUE_CONNECT_IP_RELAY_STATS).
+	s2cIngressEnqNs chan int64
 	// Lock-free empty-queue check for hot ReadPacket path.
 	prefetchCountAtomic atomic.Int32
 	prefetchGate        adaptivePrefetchProbeGate
@@ -442,6 +444,8 @@ func newProxiedConn(str http3Stream, http2CapsuleDatagramDataplane bool) *Conn {
 		availableRoutesNotify: make(chan struct{}, 1),
 		closeChan:             make(chan struct{}),
 		prefetchSlots:         make([][]byte, connReadPrefetchMax),
+		// ingress+prefetch can both fill; keep stamp FIFO from dropping under DIAG.
+		s2cIngressEnqNs: make(chan int64, connReadPrefetchMax*2),
 	}
 	if http2CapsuleDatagramDataplane {
 		c.datagramCapsuleIngress = make(chan []byte, connReadPrefetchMax)
@@ -567,6 +571,29 @@ func (c *Conn) runH2CapsuleIngressPrefetchDrainer() {
 	c.runIngressPrefetchDrainer(c.datagramCapsuleIngress)
 }
 
+func (c *Conn) noteS2CIngressEnq() {
+	if c == nil || c.s2cIngressEnqNs == nil || !cipClientRelayStatsEnabled() {
+		return
+	}
+	select {
+	case c.s2cIngressEnqNs <- time.Now().UnixNano():
+	default:
+	}
+}
+
+func (c *Conn) popS2CPrefetchSojourn() {
+	if c == nil || c.s2cIngressEnqNs == nil {
+		return
+	}
+	select {
+	case ns := <-c.s2cIngressEnqNs:
+		if ns > 0 {
+			recordCIPClientS2CPrefetchSojourn(time.Duration(time.Now().UnixNano() - ns))
+		}
+	default:
+	}
+}
+
 func (c *Conn) runIngressPrefetchDrainer(ingress <-chan []byte) {
 	for {
 		select {
@@ -592,6 +619,7 @@ func (c *Conn) runIngressPrefetchDrainer(ingress <-chan []byte) {
 			c.prefetchSlots[tail] = d
 			c.prefetchCount++
 			c.prefetchCountAtomic.Store(int32(c.prefetchCount))
+			noteCIPClientS2CPrefetchQHigh(uint64(c.prefetchCount))
 			c.prefetchMu.Unlock()
 			c.signalPrefetchNotify()
 		}
@@ -628,6 +656,7 @@ func (c *Conn) pumpH3QUICDatagrams() {
 		case <-c.closeChan:
 			return false
 		case c.h3UnifiedDatagramIngress <- d:
+			c.noteS2CIngressEnq()
 			recordCIPClientH3PrefetchIn()
 			return true
 		default:
@@ -693,6 +722,7 @@ func (c *Conn) enqueueIngressWithBackpressure(ingress chan []byte, d []byte) boo
 		case <-c.closeChan:
 			return false
 		case ingress <- d:
+			c.noteS2CIngressEnq()
 			return true
 		}
 	}
@@ -718,6 +748,7 @@ func (c *Conn) takePrefetchedRaw() ([]byte, bool, bool) {
 		c.prefetchCond.Broadcast()
 	}
 	recordCIPClientH3PrefetchOut()
+	c.popS2CPrefetchSojourn()
 	return d, true, c.prefetchCount > 0
 }
 

@@ -129,6 +129,7 @@ func (c *Conn) dispatchStreamCapsule(t http3.CapsuleType, cr io.Reader) error {
 			case <-c.closeChan:
 				return c.errAfterClose()
 			case c.datagramCapsuleIngress <- payload:
+				c.noteS2CIngressEnq()
 			default:
 				if !c.enqueueH2CapsuleIngressWithBackpressure(payload) {
 					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h2 capsule ingress full)")
@@ -142,6 +143,7 @@ func (c *Conn) dispatchStreamCapsule(t http3.CapsuleType, cr io.Reader) error {
 			case <-c.closeChan:
 				return c.errAfterClose()
 			case c.h3UnifiedDatagramIngress <- payload:
+				c.noteS2CIngressEnq()
 			default:
 				if !c.enqueueH3UnifiedIngressWithBackpressure(payload) {
 					logSampledDrop(&streamCapsuleDatagramIngressDropTotal, "connect-ip: dropped stream HTTP_DATAGRAM capsule (h3 unified ingress full)")

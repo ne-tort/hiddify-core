@@ -20,7 +20,9 @@ const (
 	DefaultMaxConcurrentStreams      = 1000
 	DefaultReadIdleTimeout           = 15 * time.Second
 	DefaultPingTimeout               = 15 * time.Second
-	DefaultUploadFlushBytes          = 256 << 10
+	// Chrome-like upload flush was 256 KiB; colo nested SRTT~50 held DATA in cc.bw.
+	// 4 KiB + ACK-clock batch: UP~98 flat, DOWN~48 regress — keep 16 KiB (2026-07-24).
+	DefaultUploadFlushBytes          = 16 << 10
 	DefaultUploadPipeBytes           = 256 << 10
 	DefaultDownloadBufferBytes       = 4 << 20
 	DefaultDownloadFillWait          = 10 * time.Millisecond

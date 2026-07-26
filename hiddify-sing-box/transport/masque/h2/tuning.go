@@ -22,14 +22,11 @@ type Tuning struct {
 	DownloadFillMaxWall       time.Duration
 }
 
-// AutoUploadFlushBytes: frame-sized flush when max frame ≤16 KiB; else 256 KiB.
+// AutoUploadFlushBytes: frame-sized flush when max frame ≤16 KiB; else prod default.
 func AutoUploadFlushBytes(maxReadFrame uint32) int {
-	const (
-		chromeFrame = 16 << 10
-		bulkFlush   = 256 << 10
-	)
+	const chromeFrame = 16 << 10
 	if maxReadFrame > 0 && maxReadFrame <= chromeFrame {
 		return int(maxReadFrame)
 	}
-	return bulkFlush
+	return DefaultUploadFlushBytes
 }

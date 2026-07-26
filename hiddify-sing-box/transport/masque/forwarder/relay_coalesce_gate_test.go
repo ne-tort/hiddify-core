@@ -48,7 +48,7 @@ func (c *coalescingPlaneConn) snap() (writes, nowake, flushes int) {
 }
 
 // TestGATERelayDownloadBatchCoalesce: downloadCh DATA → one Flush per ≤32-pkt batch;
-// writeCh ACK stays wake-per-pkt (not NoWake). Documents relay UP/DOWN asymmetry lever.
+// writeCh pure ACK → NoWake + deferred Flush (not wake Flush-per-ACK).
 func TestGATERelayDownloadBatchCoalesce(t *testing.T) {
 	conn := &coalescingPlaneConn{}
 	f := &packetForwarder{
@@ -93,26 +93,35 @@ func TestGATERelayDownloadBatchCoalesce(t *testing.T) {
 		t.Fatalf("nowake=%d want %d", nowake, n)
 	}
 
-	// ACK path: writeCh → wake WritePacket, not NoWake+Flush.
+	// ACK path: writeCh → NoWake + Flush (not wake WritePacket).
 	beforeW, beforeN, beforeF := conn.snap()
-	f.writeCh <- append([]byte(nil), pkt[:40]...)
+	flow := tcp4Tuple{
+		srcAddr: tcpip.AddrFrom4([4]byte{10, 0, 0, 1}),
+		dstAddr: tcpip.AddrFrom4([4]byte{10, 0, 0, 2}),
+		srcPort: 12345,
+		dstPort: 443,
+	}
+	f.writeCh <- buildClientAckSegment(flow, 1000)
 	deadline = time.Now().Add(time.Second)
 	for {
-		w, _, _ := conn.snap()
-		if w > beforeW {
+		_, nw, fl := conn.snap()
+		if nw > beforeN && fl > beforeF {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("ACK writeCh did not wake WritePacket")
+			t.Fatal("ACK writeCh did not NoWake+Flush")
 		}
 		time.Sleep(time.Millisecond)
 	}
 	w, nw, fl := conn.snap()
-	if w != beforeW+1 {
-		t.Fatalf("ACK wake writes=%d want %d", w, beforeW+1)
+	if w != beforeW {
+		t.Fatalf("ACK must not wake WritePacket: writes %d→%d", beforeW, w)
 	}
-	if nw != beforeN || fl != beforeF {
-		t.Fatalf("ACK must not use NoWake/Flush: nowake %d→%d flushes %d→%d", beforeN, nw, beforeF, fl)
+	if nw < beforeN+1 {
+		t.Fatalf("ACK nowake=%d want ≥%d", nw, beforeN+1)
+	}
+	if fl < beforeF+1 {
+		t.Fatalf("ACK flushes=%d want ≥%d", fl, beforeF+1)
 	}
 }
 
@@ -179,9 +188,12 @@ func TestGATERelayDownloadBatchDoesNotDrainWriteCh(t *testing.T) {
 	if len(f.writeCh) != 0 {
 		t.Fatalf("writeCh depth=%d want 0 after explicit drainWriteChLocked", len(f.writeCh))
 	}
-	w, _, _ := conn.snap()
-	if w < 1 {
-		t.Fatal("ACK was not drained")
+	w, nw, _ := conn.snap()
+	if w != 0 {
+		t.Fatalf("ACK drain must use NoWake, not wake WritePacket: writes=%d", w)
+	}
+	if nw < 1 {
+		t.Fatal("ACK was not drained via NoWake")
 	}
 }
 

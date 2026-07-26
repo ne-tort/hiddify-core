@@ -11,6 +11,11 @@ import (
 // Under iperf -P≥3, A/B/C ACK interleave previously defeated same-flow-only coalesce.
 const ackCoalesceScanMax = 64
 
+// ackClockBatchMax: keep intermediate same-flow ACKs (not newest-only) so nested
+// TCP gets multiple ACK-clock ticks per H2 Flush. Colo: segs_in≪8KiB-coalesce
+// rate suggested merge was destroying clock; CUBIC/BBR A/B still ~100 class.
+const ackClockBatchMax = 8
+
 func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, leftover []byte) {
 	flow, ok := ackOnlyFlow(first)
 	if !ok {
@@ -27,6 +32,7 @@ func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, le
 		case next := <-f.writeCh:
 			f.o.WriteQueueMetrics.noteDequeued()
 			if nf, ok := ackOnlyFlow(next); ok {
+				f.popAckSojourn()
 				if nf == flow {
 					returnPacket(newest)
 					newest = next
@@ -52,6 +58,7 @@ func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, le
 				select {
 				case f.writeCh <- others[i].pkt:
 					f.o.WriteQueueMetrics.noteEnqueued()
+					f.noteAckEnqueued()
 				default:
 					// Prefer keeping newest primary ACK on wire; drop overflow others.
 					returnPacket(others[i].pkt)
@@ -64,6 +71,7 @@ func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, le
 				select {
 				case f.writeCh <- others[i].pkt:
 					f.o.WriteQueueMetrics.noteEnqueued()
+					f.noteAckEnqueued()
 				default:
 					returnPacket(others[i].pkt)
 					relaystats.RecordS2CAckAdmitDrop()
@@ -76,12 +84,74 @@ func (f *packetForwarder) coalesceQueuedAckOnly(first []byte) (newest []byte, le
 		select {
 		case f.writeCh <- others[i].pkt:
 			f.o.WriteQueueMetrics.noteEnqueued()
+			f.noteAckEnqueued()
 		default:
 			returnPacket(others[i].pkt)
 			relaystats.RecordS2CAckAdmitDrop()
 		}
 	}
 	return newest, nil
+}
+
+// collectAckClockBatch drains same-flow ACK-only packets from writeCh keeping
+// intermediates (up to ackClockBatchMax) for nested ACK clock. Other-flow ACKs
+// are re-queued; first non-ACK becomes leftover.
+func (f *packetForwarder) collectAckClockBatch(first []byte) (batch [][]byte, leftover []byte) {
+	flow, ok := ackOnlyFlow(first)
+	if !ok {
+		return [][]byte{first}, nil
+	}
+	batch = [][]byte{first}
+	type held struct {
+		flow tcp4Tuple
+		pkt  []byte
+	}
+	var others []held
+	requeueOthers := func() {
+		for i := len(others) - 1; i >= 0; i-- {
+			select {
+			case f.writeCh <- others[i].pkt:
+				f.o.WriteQueueMetrics.noteEnqueued()
+				f.noteAckEnqueued()
+			default:
+				returnPacket(others[i].pkt)
+				relaystats.RecordS2CAckAdmitDrop()
+			}
+		}
+	}
+	for scanned := 0; scanned < ackCoalesceScanMax && len(batch) < ackClockBatchMax; scanned++ {
+		select {
+		case next := <-f.writeCh:
+			f.o.WriteQueueMetrics.noteDequeued()
+			if nf, ok := ackOnlyFlow(next); ok {
+				f.popAckSojourn()
+				if nf == flow {
+					batch = append(batch, next)
+					continue
+				}
+				replaced := false
+				for i := range others {
+					if others[i].flow == nf {
+						returnPacket(others[i].pkt)
+						others[i].pkt = next
+						replaced = true
+						break
+					}
+				}
+				if !replaced {
+					others = append(others, held{flow: nf, pkt: next})
+				}
+				continue
+			}
+			requeueOthers()
+			return batch, next
+		default:
+			requeueOthers()
+			return batch, nil
+		}
+	}
+	requeueOthers()
+	return batch, nil
 }
 
 func ackOnlyFlow(pkt []byte) (tcp4Tuple, bool) {

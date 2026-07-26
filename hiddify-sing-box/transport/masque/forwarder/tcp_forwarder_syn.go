@@ -96,6 +96,7 @@ func (f *packetForwarder) handleSyn(ctx context.Context, origPkt []byte, tc head
 		irs:       irs,
 		iss:       iss,
 		rcvNxt:    irs + 1,
+		rcvAck:    irs + 1,
 		sndNxt:    iss + 1,
 		peerAck:   iss + 1, // SYN-ACK consumes iss; avoid inflight=sndNxt-0 wrap before first ACK
 		clientMSS: mss,

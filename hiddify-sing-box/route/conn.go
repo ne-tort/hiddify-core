@@ -42,10 +42,12 @@ const connectIPShortRelayWarmThreshold = 256 * 1024
 const connectIPShortRelayUploadWarmMax = 8 * 1024
 
 // connectionCopyRelayStallTimeout aborts relay when no bytes move while legs remain open.
-const connectionCopyRelayStallTimeout = 5 * time.Second
+// 5s was too aggressive for iperf3 control sockets (idle during bulk) — colo stream
+// died at ~8–9s with "control socket has closed unexpectedly" while data hit ~190 Mbit.
+const connectionCopyRelayStallTimeout = 120 * time.Second
 
 // connectionCopyRelayZeroByteTimeout aborts relay that never transferred bytes (ghost stream / stuck dial).
-const connectionCopyRelayZeroByteTimeout = 10 * time.Second
+const connectionCopyRelayZeroByteTimeout = 30 * time.Second
 
 const connectionCopyRelayStallPoll = 500 * time.Millisecond
 

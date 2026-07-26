@@ -19,7 +19,9 @@ import (
 // SendDatagram (one-shot timer — not "idle check on next packet only").
 const (
 	h2S2CFlushEvery = 16
-	h2S2CFlushIdle  = time.Millisecond
+	// 1ms idle added ~1 RTT-worth of nested ACK delay on colo DOWN; 100µs keeps
+	// coalesce without stacking milliseconds onto the return path.
+	h2S2CFlushIdle = 100 * time.Microsecond
 	// Mirror client hostKernelBulkEgressMinBytes: only large TCP DATA may skip Flush.
 	h2S2CBulkMinBytes = 256
 )
@@ -101,6 +103,7 @@ func h2S2CIPv4TCPHasPayload(pkt []byte) bool {
 
 // h2S2CImmediateFlushIP reports ACK/SYN/FIN/small/non-bulk: must Flush now so nested TCP
 // upload clock is not delayed by EVERY=16 / 1ms idle (client C2S ACK-wake mirror).
+// P6-SC A/B: letting pure ACK join EVERY/idle collapsed H2 UP under onward RTT → KEEP immediate.
 func h2S2CImmediateFlushIP(ipPacket []byte) bool {
 	return len(ipPacket) < h2S2CBulkMinBytes || !h2S2CIPv4TCPHasPayload(ipPacket)
 }
