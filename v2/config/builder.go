@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	context "context"
@@ -18,7 +18,6 @@ import (
 	sdns "github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json/badoption"
-	"github.com/sagernet/wireguard-go/hiddify"
 )
 
 const (
@@ -36,16 +35,16 @@ const (
 	DNSMultiDirectTag = "dns-direct"
 	DNSMultiRemoteTag = "dns-remote"
 
-	OutboundDirectTag = "direct §hide§"
-	OutboundBypassTag = "bypass §hide§"
-	// OutboundBlockTag          = "block §hide§"
+	OutboundDirectTag = "direct В§hideВ§"
+	OutboundBypassTag = "bypass В§hideВ§"
+	// OutboundBlockTag          = "block В§hideВ§"
 	OutboundSelectTag         = "select"
 	OutboundURLTestTag        = "lowest"
 	OutboundRoundRobinTag     = "balance"
-	OutboundDNSTag            = "dns-out §hide§"
-	OutboundDirectFragmentTag = "direct-fragment §hide§"
+	OutboundDNSTag            = "dns-out В§hideВ§"
+	OutboundDirectFragmentTag = "direct-fragment В§hideВ§"
 
-	WARPConfigTag = "🔒 WARP"
+	WARPConfigTag = "рџ”’ WARP"
 
 	InboundTUNTag    = "tun-in"
 	InboundMixedTag  = "mixed-in"
@@ -153,20 +152,21 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			continue
 		case C.TypeSelector, C.TypeURLTest:
 			continue
-		case C.TypeCustom:
+		case "custom": // LX-STUB: C.TypeCustom absent in sing-box-lx
 			continue
 		default:
 
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
 				continue
 			}
-			if out.Type == C.TypePsiphon {
+			// LX-STUB: "psiphon" /* LX-STUB */ absent in sing-box-lx
+			if out.Type == "psiphon" {
 				if hasPsiphon {
 					continue
 				}
 				hasPsiphon = true
 			}
-			if !strings.Contains(out.Tag, "§hide§") {
+			if !strings.Contains(out.Tag, "В§hideВ§") {
 				tags = append(tags, out.Tag)
 			}
 			// OutboundWARPConfigDetour = OutboundSelectTag
@@ -175,60 +175,22 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		}
 	}
 
+	// LX-STUB: EnableWarp / TypeWARP endpoint path disabled вЂ” sing-box-lx has no WARP
+	// endpoint. Client WARP UI may still toggle the option; it is ignored here.
 	if opt.Warp.EnableWarp {
-		// wg := getOrGenerateWarpLocallyIfNeeded(&opt.Warp)
-
-		// out, err := GenerateWarpSingbox(wg, opt.Warp.CleanIP, opt.Warp.CleanPort, &option.WireGuardHiddify{
-		// 	FakePackets:      opt.Warp.FakePackets,
-		// 	FakePacketsSize:  opt.Warp.FakePacketSize,
-		// 	FakePacketsDelay: opt.Warp.FakePacketDelay,
-		// 	FakePacketsMode:  opt.Warp.FakePacketMode,
-		// })
-		out, err := GenerateWarpSingboxNew("p1", &hiddify.NoiseOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to generate warp config: %v", err)
-		}
-		out.Tag = WARPConfigTag
-		if opts, ok := out.Options.(*option.WARPEndpointOptions); ok {
-			if opt.Warp.Mode == "warp_over_proxy" {
-				opts.Detour = OutboundSelectTag
-				opts.MTU = 1280
-			} else {
-				opts.Detour = OutboundDirectTag
-				opt.MTU = max(opt.MTU, 1340)
-			}
-
-		}
-
-		OutboundMainDetour = WARPConfigTag
-		// patchWarp(out, opt, true, nil)
-		out, err = patchEndpoint(out, *opt, staticIPs)
-		if err != nil {
-			return err
-		}
-		endpoints = append(endpoints, *out)
+		fmt.Printf("LX-STUB: Warp.EnableWarp ignored (sing-box-lx has no TypeWARP)\n")
 	}
 	for _, end := range input.Endpoints {
 		if contains(PredefinedOutboundTags, end.Tag) {
 			continue
 		}
 		if opt.Warp.EnableWarp {
-			if end.Type == C.TypeWARP {
-				if opts, ok := end.Options.(*option.WARPEndpointOptions); ok {
-					if opts.UniqueIdentifier == "p1" {
-						continue
-					}
-					if opt.Warp.EnableWarp && opt.Warp.Mode == "warp_over_proxy" {
-						opt.MTU = max(opt.MTU, 1340)
-					}
-				}
-			}
 			if end.Type == C.TypeWireGuard {
 				if opts, ok := end.Options.(*option.WireGuardEndpointOptions); ok {
 					if opts.PrivateKey == opt.Warp.WireguardConfig.PrivateKey {
 						continue
 					}
-					if opt.Warp.EnableWarp && opt.Warp.Mode == "warp_over_proxy" {
+					if opt.Warp.Mode == "warp_over_proxy" {
 						opt.MTU = max(opt.MTU, 1340)
 					}
 				}
@@ -240,7 +202,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			return err
 		}
 
-		if !strings.Contains(out.Tag, "§hide§") {
+		if !strings.Contains(out.Tag, "В§hideВ§") {
 			tags = append(tags, out.Tag)
 		}
 
@@ -302,8 +264,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 	defaultSelect := tags[0]
 
 	for _, tag := range tags {
-		if strings.Contains(tag, "§default§") {
-			defaultSelect = "§default§"
+		if strings.Contains(tag, "В§defaultВ§") {
+			defaultSelect = "В§defaultВ§"
 		}
 	}
 
@@ -390,26 +352,19 @@ func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 			hopt.ClashApiSecret = generateRandomString(16)
 		}
 		options.Experimental = &option.ExperimentalOptions{
-			UnifiedDelay: &option.UnifiedDelayOptions{
-				Enabled: true,
-			},
+			// LX-STUB: UnifiedDelayOptions absent in sing-box-lx
 			ClashAPI: &option.ClashAPIOptions{
 				ExternalController: fmt.Sprintf("%s:%d", "127.0.0.1", hopt.ClashApiPort),
 				Secret:             hopt.ClashApiSecret,
 			},
 
 			CacheFile: &option.CacheFileOptions{
-				Enabled:         true,
-				StoreWARPConfig: true,
-				Path:            "data/clash.db",
+				Enabled: true,
+				// LX-STUB: StoreWARPConfig absent in sing-box-lx CacheFileOptions
+				Path: "data/clash.db",
 			},
-
-			Monitoring: &option.MonitoringOptions{
-				URLs:           hopt.ConnectionTestUrls,
-				Interval:       badoption.Duration(hopt.URLTestInterval.Duration()),
-				DebounceWindow: badoption.Duration(time.Millisecond * 500),
-				IdleTimeout:    badoption.Duration(hopt.URLTestInterval.Duration().Nanoseconds() * 3),
-			},
+			// LX-STUB: MonitoringOptions (URL-test monitor) absent in sing-box-lx ExperimentalOptions
+			// URLs were: hopt.ConnectionTestUrls
 		}
 	}
 }
@@ -752,7 +707,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 					DisableCache:   false,
-					BypassIfFailed: false,
+					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 				},
 			},
 		})
@@ -885,7 +840,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 					Server:         DNSMultiDirectTag,
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: false,
+					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 				},
 			},
 		})
@@ -917,7 +872,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 					Server:         DNSMultiDirectTag,
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					RewriteTTL:     &DEFAULT_DNS_TTL,
-					BypassIfFailed: false,
+					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 				},
 			},
 		})
@@ -1020,7 +975,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 						Strategy:       hopt.RemoteDnsDomainStrategy,
 						RewriteTTL:     &DEFAULT_DNS_TTL,
 						DisableCache:   true,
-						BypassIfFailed: false,
+						// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 					},
 				},
 			})
@@ -1035,7 +990,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 				Server:         DNSMultiRemoteTag,
 				Strategy:       hopt.RemoteDnsDomainStrategy,
 				RewriteTTL:     &DEFAULT_DNS_TTL,
-				BypassIfFailed: false,
+				// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 			},
 		},
 	},
@@ -1105,7 +1060,7 @@ func setRoutingOptions(options *option.Options, hopt *HiddifyOptions) error {
 }
 
 func patchHiddifyWarpFromConfig(out *option.Outbound, opt HiddifyOptions) *option.Outbound {
-	if out.Type == C.TypePsiphon {
+	if out.Type == "psiphon" /* LX-STUB */ {
 		return out
 	}
 	if opt.Warp.EnableWarp && opt.Warp.Mode == "proxy_over_warp" {

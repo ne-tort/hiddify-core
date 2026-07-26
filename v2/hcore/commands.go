@@ -13,7 +13,7 @@ import (
 	// "github.com/sagernet/sing-box/common/conntrack"
 	"github.com/sagernet/sing-box/protocol/group"
 
-	"github.com/sagernet/sing-box/common/monitoring"
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/memory"
 	"google.golang.org/grpc"

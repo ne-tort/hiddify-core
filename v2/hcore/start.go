@@ -11,11 +11,9 @@ import (
 	"github.com/hiddify/hiddify-core/v2/db"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
 	service_manager "github.com/hiddify/hiddify-core/v2/service_manager"
-	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/service"
 )
 
 func (s *CoreService) Start(ctx context.Context, in *StartRequest) (*CoreInfoResponse, error) {
@@ -130,16 +128,19 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	}
 	ctx = libbox.FromContext(ctx, static.globalPlatformInterface)
 	if static.globalPlatformInterface != nil {
-		platformWrapper := libbox.WrapPlatformInterface(static.globalPlatformInterface)
-		service.MustRegister[adapter.PlatformInterface](ctx, platformWrapper)
-		// } else {
-		// 	service.MustRegister[adapter.PlatformInterface](ctx, (*adapter.PlatformInterface)nil)
+		// LX-STUB: libbox.WrapPlatformInterface exists in hiddify-sing-box but was not
+		// exported from sing-box-lx service.go (wrapper type is unexported-only).
+		// Platform registration deferred; TUN/platform path may be incomplete until restored.
+		_ = static.globalPlatformInterface
+		// platformWrapper := libbox.WrapPlatformInterface(static.globalPlatformInterface)
+		// service.MustRegister[adapter.PlatformInterface](ctx, platformWrapper)
 	}
 	Log(LogLevel_DEBUG, LogType_CORE, "Stating Service with delay ?", in.DelayStart)
 	if in.DelayStart {
 		<-time.After(1000 * time.Millisecond)
 	}
-	libbox.SetMemoryLimit(C.IsIos || !in.DisableMemoryLimit)
+	// LX-STUB: libbox.SetMemoryLimit absent in sing-box-lx; skip iOS/low-memory GC tune.
+	_ = (C.IsIos || !in.DisableMemoryLimit)
 	instance, err := NewService(ctx, *options)
 	if err != nil {
 		return errorWrapper(MessageType_START_SERVICE, err)

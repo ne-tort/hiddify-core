@@ -25,64 +25,19 @@ func patchOutboundMux(base option.Outbound, configOpt HiddifyOptions, obj outbou
 }
 
 func patchOutboundTLSTricks(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
+	// LX-STUB: option.TLSTricksOptions (MixedCaseSNI/Padding) absent in sing-box-lx.
+	// Keep fragment side-effect (TCPFastOpen off) only.
 	if base.Type == C.TypeSelector || base.Type == C.TypeURLTest || base.Type == C.TypeBlock || base.Type == C.TypeDNS {
 		return base
 	}
 	if isOutboundReality(base) {
 		return base
 	}
-
-	var tls *option.OutboundTLSOptions
-	if tlsopt, ok := base.Options.(option.OutboundTLSOptionsWrapper); ok {
-		tls = tlsopt.TakeOutboundTLSOptions()
-	}
-
-	var transport *option.V2RayTransportOptions
-	if opts, ok := base.Options.(option.VLESSOutboundOptions); ok {
-		transport = opts.Transport
-	} else if opts, ok := base.Options.(option.TrojanOutboundOptions); ok {
-		transport = opts.Transport
-	} else if opts, ok := base.Options.(option.VMessOutboundOptions); ok {
-		transport = opts.Transport
-	}
-
 	if base.Type == C.TypeDirect {
 		return patchOutboundFragment(base, configOpt)
 	}
-
-	if tls == nil || !tls.Enabled || transport == nil {
-		return base
-	}
-
-	if transport.Type != C.V2RayTransportTypeWebsocket && transport.Type != C.V2RayTransportTypeGRPC && transport.Type != C.V2RayTransportTypeHTTPUpgrade {
-		return base
-	}
-
-	base = patchOutboundFragment(base, configOpt)
-
-	if tls.TLSTricks == nil {
-		tls.TLSTricks = &option.TLSTricksOptions{}
-	}
-	tls.TLSTricks.MixedCaseSNI = tls.TLSTricks.MixedCaseSNI || configOpt.TLSTricks.MixedSNICase
-
-	if false && configOpt.TLSTricks.EnablePadding {
-		tls.TLSTricks.PaddingMode = "random"
-		tls.TLSTricks.PaddingSize = configOpt.TLSTricks.PaddingSize
-		tls.UTLS = &option.OutboundUTLSOptions{
-			Enabled:     true,
-			Fingerprint: "custom",
-		}
-		// fmt.Printf("--------------------%+v----%+v", tlsTricks.PaddingSize, configOpt)
-
-	}
-
-	// if tlsTricks.MixedCaseSNI || tlsTricks.PaddingMode != "" {
-	// 	// } else {
-	// 	// 	tls["tls_tricks"] = nil
-	// }
-	// fmt.Printf("-------%+v------------- ", tlsTricks)
-
-	return base
+	_ = configOpt
+	return patchOutboundFragment(base, configOpt)
 }
 
 func patchOutboundFragment(base option.Outbound, configOpt HiddifyOptions) option.Outbound {

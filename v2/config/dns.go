@@ -237,7 +237,7 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 				RouteOptions: option.DNSRouteActionOptions{
 					Server:         DNSRemoteNoWarpTag,
 					Strategy:       hopt.DirectDnsDomainStrategy,
-					BypassIfFailed: false,
+					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 					RewriteTTL:     &DEFAULT_DNS_TTL,
 				},
 			},
@@ -269,7 +269,7 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 						Server:         DNSMultiDirectTag,
 						Strategy:       hopt.DirectDnsDomainStrategy,
 						RewriteTTL:     &DEFAULT_DNS_TTL,
-						BypassIfFailed: false,
+						// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 					},
 				},
 			},
@@ -504,17 +504,22 @@ func getStaticDNSServerOptions(tag string, staticIps *map[string][]string) (*opt
 	return &o, nil
 }
 func getMultiDnsServerOptions(tag string, servers []string, parallel bool) (*option.DNSServerOptions, error) {
-	o := option.DNSServerOptions{
-		Tag:  tag,
-		Type: C.DNSTypeMulti,
-		Options: &option.MultiDNSServerOptions{
-			Servers:  servers,
-			Parallel: parallel,
-			IgnoreRanges: []badoption.Prefix{
-				badoption.Prefix(netip.MustParsePrefix("10.10.34.0/24")),
-				badoption.Prefix(netip.MustParsePrefix("001:4188:2:600::/64")),
-			},
+	// LX-STUB: C.DNSTypeMulti / MultiDNSServerOptions are Hiddify-only.
+	// Fall back to the first listed server as a plain UDP DNS server.
+	_ = parallel
+	server := "1.1.1.1"
+	if len(servers) > 0 && servers[0] != "" {
+		server = servers[0]
+	}
+	remoteOptions := option.RemoteDNSServerOptions{
+		DNSServerAddressOptions: option.DNSServerAddressOptions{
+			Server: server,
 		},
+	}
+	o := option.DNSServerOptions{
+		Tag:     tag,
+		Type:    C.DNSTypeUDP,
+		Options: &remoteOptions,
 	}
 	return &o, nil
 }

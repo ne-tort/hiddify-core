@@ -9,7 +9,6 @@ import (
 
 	"github.com/hiddify/hiddify-core/v2/config"
 	T "github.com/sagernet/sing-box/option"
-	"github.com/sagernet/wireguard-go/hiddify"
 	"github.com/spf13/cobra"
 )
 
@@ -116,7 +115,8 @@ func generateWarp() (*T.Outbound, error) {
 	_, _, wg, err := config.GenerateWarpInfo("", "", "")
 
 	// fmt.Printf("%v", wgConfig)
-	singboxConfig, err := config.GenerateWarpSingbox(*wg, "", 0, &hiddify.NoiseOptions{})
+	// LX-STUB: NoiseOptions dropped with sing-box-lx (no wireguard-go/hiddify).
+	singboxConfig, err := config.GenerateWarpSingbox(*wg, "", 0, nil)
 	singboxJSON, err := json.MarshalIndent(singboxConfig, "", "    ")
 	if err != nil {
 		fmt.Println("Error marshaling Singbox configuration:", err)

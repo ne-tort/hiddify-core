@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/sagernet/sing-box/common/monitoring"
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"

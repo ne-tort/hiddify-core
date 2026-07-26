@@ -12,12 +12,6 @@ type MobilePlatformInterface struct {
 	platform libbox.PlatformInterface
 }
 
-func (h *MobilePlatformInterface) SystemCertificates() libbox.StringIterator {
-	if h.platform == nil {
-		return nil
-	}
-	return h.platform.SystemCertificates()
-}
 func (h *MobilePlatformInterface) LocalDNSTransport() libbox.LocalDNSTransport {
 	if h.platform == nil {
 		return nil
@@ -138,4 +132,61 @@ func (h *MobilePlatformInterface) RegisterMyInterface(name string) {
 		return
 	}
 	h.platform.RegisterMyInterface(name)
+}
+
+// LX-STUB: shell/bridge/SSH platform APIs are lx additions; Hiddify mobile wrapper
+// does not expose them — return safe no-ops / "not supported".
+func (h *MobilePlatformInterface) UsePlatformShell() bool {
+	if h.platform == nil {
+		return false
+	}
+	return h.platform.UsePlatformShell()
+}
+func (h *MobilePlatformInterface) CheckPlatformShell() error {
+	if h.platform == nil {
+		return fmt.Errorf("LX-STUB: platform shell unsupported")
+	}
+	return h.platform.CheckPlatformShell()
+}
+func (h *MobilePlatformInterface) OpenShellSession(user *libbox.PlatformUser, command string, environ libbox.StringIterator, term string, rows int32, cols int32) (libbox.ShellSession, error) {
+	if h.platform == nil {
+		return nil, fmt.Errorf("LX-STUB: platform shell unsupported")
+	}
+	return h.platform.OpenShellSession(user, command, environ, term, rows, cols)
+}
+func (h *MobilePlatformInterface) LookupUser(username string) (*libbox.PlatformUser, error) {
+	if h.platform == nil {
+		return nil, fmt.Errorf("LX-STUB: LookupUser unsupported")
+	}
+	return h.platform.LookupUser(username)
+}
+func (h *MobilePlatformInterface) LookupSFTPServer() (string, error) {
+	if h.platform == nil {
+		return "", fmt.Errorf("LX-STUB: LookupSFTPServer unsupported")
+	}
+	return h.platform.LookupSFTPServer()
+}
+func (h *MobilePlatformInterface) ReadSystemSSHHostKey() (string, error) {
+	if h.platform == nil {
+		return "", fmt.Errorf("LX-STUB: ReadSystemSSHHostKey unsupported")
+	}
+	return h.platform.ReadSystemSSHHostKey()
+}
+func (h *MobilePlatformInterface) TailscaleHostname() string {
+	if h.platform == nil {
+		return ""
+	}
+	return h.platform.TailscaleHostname()
+}
+func (h *MobilePlatformInterface) UsePlatformBridge() bool {
+	if h.platform == nil {
+		return false
+	}
+	return h.platform.UsePlatformBridge()
+}
+func (h *MobilePlatformInterface) CreateBridge(options *libbox.BridgeOptions) (libbox.BridgeSession, error) {
+	if h.platform == nil {
+		return nil, fmt.Errorf("LX-STUB: CreateBridge unsupported")
+	}
+	return h.platform.CreateBridge(options)
 }

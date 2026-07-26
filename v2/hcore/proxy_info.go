@@ -7,9 +7,8 @@ import (
 	"github.com/hiddify/hiddify-core/v2/config"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/monitoring"
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	G "github.com/sagernet/sing-box/protocol/group"
-	"github.com/sagernet/sing-box/protocol/group/balancer"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 	"google.golang.org/grpc"
@@ -27,7 +26,8 @@ func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory,
 	// realTag := ""
 
 	out.Tag = detour.Tag()
-	out.Type = detour.DisplayType()
+	// LX-STUB: adapter.Outbound.DisplayType() was Hiddify-only; lx has Type() only.
+	out.Type = detour.Type()
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		out.IsGroup = true
 		gnow := group.Now()
@@ -38,43 +38,14 @@ func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory,
 	if tag := monitoring.RealTag(detour); tag != "" {
 		dtag := TrimTagName(tag)
 		out.GroupSelectedTagDisplay = &dtag
-		if balancer, ok := detour.(*balancer.Balancer); ok {
-			if stg := balancer.Strategy(); stg != "lowest-delay" {
-				out.GroupSelectedTagDisplay = &stg
-			}
-		}
 	}
-	// realTag = adapter.OutboundTag(detour)
 
-	// realTag = out.Tag
-
-	// url_test_history := historyStorage.LoadURLTestHistory(realTag)
-	if trafficManager := h.TrafficManager(); trafficManager != nil {
-		up, down := trafficManager.OutboundUsage(out.Tag)
-		out.Upload = up
-		out.Download = down
-
-	}
+	// Outbound-scoped counters are hiddify-sing-box specific; lx exposes totals only.
+	_ = h.TrafficManager()
 	if url_test_history != nil {
 		out.UrlTestTime = timestamppb.New(url_test_history.Time)
 		out.UrlTestDelay = int32(url_test_history.Delay)
-		if url_test_history.IsFromCache {
-			out.UrlTestDelay = 0
-		}
-		if url_test_history.IpInfo != nil {
-			out.Ipinfo = &IpInfo{
-				Ip:          url_test_history.IpInfo.IP,
-				CountryCode: url_test_history.IpInfo.CountryCode,
-				Region:      url_test_history.IpInfo.Region,
-				City:        url_test_history.IpInfo.City,
-				Asn:         int32(url_test_history.IpInfo.ASN),
-				Org:         url_test_history.IpInfo.Org,
-				Latitude:    url_test_history.IpInfo.Latitude,
-				Longitude:   url_test_history.IpInfo.Longitude,
-				PostalCode:  url_test_history.IpInfo.PostalCode,
-			}
-		}
-
+		// LX-STUB: IsFromCache / IpInfo fields absent on lx adapter.URLTestHistory.
 	}
 	if deps := detour.Dependencies(); len(deps) == 1 {
 		out.Detour = deps[0]
