@@ -558,6 +558,7 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 	})
 
 	if hopt.BypassLAN {
+		// Before profile: private RFC1918/ULA/link-local/loopback (sing IPIsPrivate).
 		routeRules = append(
 			routeRules,
 			option.Rule{
@@ -565,6 +566,21 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 				DefaultOptions: option.DefaultRule{
 					RawDefaultRule: option.RawDefaultRule{
 						IPIsPrivate: true,
+					},
+					RuleAction: option.RuleAction{
+						Action: C.RuleActionTypeRoute,
+						RouteOptions: option.RouteActionOptions{
+							Outbound: OutboundDirectTag,
+						},
+					},
+				},
+			},
+			// CGNAT (RFC 6598) — not covered by Go netip.IsPrivate / IPIsPrivate.
+			option.Rule{
+				Type: C.RuleTypeDefault,
+				DefaultOptions: option.DefaultRule{
+					RawDefaultRule: option.RawDefaultRule{
+						IPCIDR: []string{"100.64.0.0/10"},
 					},
 					RuleAction: option.RuleAction{
 						Action: C.RuleActionTypeRoute,
@@ -614,6 +630,24 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 			},
 		})
 	}
+
+	// L4: client-owned ads block (before profile buckets and subscription overlay).
+	if hopt.BlockAds && hopt.AdsRuleSetPath != "" {
+		appendAdsBlockRules(&rulesets, &routeRules, hopt.AdsRuleSetPath)
+	}
+
+	// L4: client-owned route — local profile first, then optional subscription overlay.
+	var localRS []option.RuleSet
+	var localRules []option.Rule
+	if hopt.RoutingProfile != nil && hopt.RoutingProfile.Enabled {
+		localRS, localRules = CompileRoutingProfile(hopt.RoutingProfile, hopt.GeoIPRuleSetURL, hopt.GeoSiteRuleSetURL)
+	}
+	for _, rs := range localRS {
+		rulesets = append(rulesets, rs)
+	}
+	routeRules = append(routeRules, localRules...)
+
+	// After profile: reject remaining QUIC so LAN / "No VPN" (direct) keep QUIC.
 	if hopt.RouteOptions.BlockQuic {
 		routeRules = append(routeRules, option.Rule{
 			Type: C.RuleTypeDefault,
@@ -630,17 +664,6 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 			},
 		})
 	}
-
-	// L4: client-owned route — local profile first, then optional subscription overlay.
-	var localRS []option.RuleSet
-	var localRules []option.Rule
-	if hopt.RoutingProfile != nil && hopt.RoutingProfile.Enabled {
-		localRS, localRules = CompileRoutingProfile(hopt.RoutingProfile, hopt.GeoIPRuleSetURL, hopt.GeoSiteRuleSetURL)
-	}
-	for _, rs := range localRS {
-		rulesets = append(rulesets, rs)
-	}
-	routeRules = append(routeRules, localRules...)
 
 	// Subscription route is raw merge at connect time only (never auto-imported into local profile).
 	// Local rules are always evaluated first so the client wins conflicts.

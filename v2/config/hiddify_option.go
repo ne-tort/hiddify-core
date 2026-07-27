@@ -85,6 +85,8 @@ type RouteOptions struct {
 	RoutingProfile *RoutingProfile `json:"routing-profile,omitempty"`
 	GeoIPRuleSetURL   string `json:"geoip-ruleset-url,omitempty"`
 	GeoSiteRuleSetURL string `json:"geosite-ruleset-url,omitempty"`
+	// AdsRuleSetPath: absolute path to bundled/cached hiddify-ads.srs (local rule-set).
+	AdsRuleSetPath string `json:"ads-ruleset-path,omitempty"`
 }
 
 type TLSTricks struct {
