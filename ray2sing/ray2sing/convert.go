@@ -19,7 +19,7 @@ import (
 // Unknown schemes fail here; unknown JSON `type` fails later in sing-box registry.
 //
 // Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://, awg://, [Interface].
-// lx types: mieru / carrier / derp (outbound), wireguard (endpoint + Amnezia root fields).
+// lx types: mieru / carrier / derp / shadowquic / sudoku / trusttunnel (outbound), wireguard (endpoint + Amnezia root fields).
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
 	"vless://":     VlessSingbox,
@@ -34,10 +34,13 @@ var configTypes = map[string]ParserFunc{
 	"hy2://":       Hysteria2Singbox,
 	"ssh://":       SSHSingbox,
 	"naive://":     NaiveSingbox,
-	"mieru://":     MieruSingbox,
-	"mierus://":    MieruSingbox,
-	"carrier://":   CarrierSingbox,
-	"derp://":      DerpSingbox,
+	"mieru://":       MieruSingbox,
+	"mierus://":      MieruSingbox,
+	"carrier://":     CarrierSingbox,
+	"derp://":        DerpSingbox,
+	"shadowquic://":  ShadowQUICSingbox,
+	"sudoku://":      SudokuSingbox,
+	"trusttunnel://": TrustTunnelSingbox,
 
 	"ssconf://":  BeepassSingbox,
 	"direct://":  DirectSingbox,
