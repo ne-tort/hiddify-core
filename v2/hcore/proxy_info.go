@@ -4,7 +4,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/hiddify/hiddify-core/compat/monitoring"
@@ -131,14 +130,6 @@ func (h *HiddifyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTestHi
 
 		groups.Items = append(groups.Items, &group)
 
-		if onlyGroupitems && group.Tag == config.OutboundSelectTag {
-			if warp_info, ok := outbounds_converted[config.WARPConfigTag]; ok {
-				warp_info.TagDisplay = config.WARPConfigTag + " → " + outbounds_converted[group.Selected].TagDisplay
-				group.Selected = warp_info.Tag
-				group.Items = append([]*OutboundInfo{warp_info}, group.Items...)
-			}
-
-		}
 
 	}
 

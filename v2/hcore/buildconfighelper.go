@@ -28,19 +28,22 @@ func BuildConfigJson(ctx context.Context, in *StartRequest) (string, error) {
 func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error) {
 	Log(LogLevel_DEBUG, LogType_CORE, "Building Config...")
 
-	readOpt := &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath}
-	if !in.EnableRawConfig {
-		// hcontent, err := json.MarshalIndent(static.HiddifyOptions, "", " ")
-		// if err != nil {
-		// 	return nil, err
-		// }
-
-		// Log(LogLevel_DEBUG, LogType_CORE, "Building config ", string(hcontent))
-		// Log(LogLevel_DEBUG, LogType_CORE, "Building config ")
-		return config.BuildConfig(ctx, static.HiddifyOptions, readOpt)
+	if in.EnableRawConfig {
+		return config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 	}
-	return config.ReadSingOptions(ctx, readOpt)
 
+	// Prefer uncut import source: re-parse each Start with current HiddifyOptions
+	// so ignore-subscription-dns/route and similar knobs apply to the original body.
+	if in.ConfigPath != "" {
+		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
+			if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
+				Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", src)
+				return config.ParseBuildConfig(ctx, static.HiddifyOptions, &config.ReadOptions{Path: src})
+			}
+		}
+	}
+
+	return config.BuildConfig(ctx, static.HiddifyOptions, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 }
 
 func (s *CoreService) Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
@@ -58,7 +61,16 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		path = in.ConfigPath
 	}
 
-	config, err := config.ParseConfigBytes(ctx, &config.ReadOptions{Content: in.Content, Path: path}, true, static.HiddifyOptions, false)
+	readOpt := &config.ReadOptions{Content: in.Content, Path: path}
+	// Preserve import source uncut: Build/Start re-parse this with current hopts
+	// (DNS/route subscription toggles, etc.). Sliced .json remains for editor/legacy.
+	if in.ConfigPath != "" {
+		if raw, err := config.ReadContent(ctx, readOpt); err == nil && len(raw) > 0 {
+			_ = os.WriteFile(config.ProfileSourcePath(in.ConfigPath), raw, 0o644)
+		}
+	}
+
+	parsed, err := config.ParseConfigBytes(ctx, readOpt, true, static.HiddifyOptions, false)
 	if err != nil {
 		return &ParseResponse{
 			ResponseCode: hcommon.ResponseCode_FAILED,
@@ -66,7 +78,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		}, err
 	}
 	if in.ConfigPath != "" {
-		err = os.WriteFile(in.ConfigPath, config, 0o644)
+		err = os.WriteFile(in.ConfigPath, parsed, 0o644)
 		if err != nil {
 			return &ParseResponse{
 				ResponseCode: hcommon.ResponseCode_FAILED,
@@ -76,7 +88,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	}
 	return &ParseResponse{
 		ResponseCode: hcommon.ResponseCode_OK,
-		Content:      string(config),
+		Content:      string(parsed),
 		Message:      "",
 	}, err
 }
@@ -123,18 +135,6 @@ func ChangeHiddifySettings(in *ChangeHiddifySettingsRequest, insert bool) (*Core
 		return nil, err
 	}
 
-	if static.HiddifyOptions.Warp.WireguardConfigStr != "" {
-		err := json.Unmarshal([]byte(static.HiddifyOptions.Warp.WireguardConfigStr), &static.HiddifyOptions.Warp.WireguardConfig)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if static.HiddifyOptions.Warp2.WireguardConfigStr != "" {
-		err := json.Unmarshal([]byte(static.HiddifyOptions.Warp2.WireguardConfigStr), &static.HiddifyOptions.Warp2.WireguardConfig)
-		if err != nil {
-			return nil, err
-		}
-	}
 	return &CoreInfoResponse{}, nil
 }
 

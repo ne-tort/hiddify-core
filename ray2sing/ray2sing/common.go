@@ -297,10 +297,15 @@ func getALPNversion(s []string) int {
 //	}
 func getDialerOptions(decoded map[string]string) option.DialerOptions {
 	// fragment := getFragmentOptions(decoded)
-	return T.DialerOptions{
+	opts := T.DialerOptions{
 		// TCPFastOpen: !fragment.Enabled,
 		// TLSFragment: fragment,
 	}
+	// Tag-style detour from share-link query (?detour=relay). URL-style chains use &&detour=.
+	if d := strings.TrimSpace(decoded["detour"]); d != "" && !strings.Contains(d, "://") {
+		opts.Detour = d
+	}
+	return opts
 }
 
 func decodeBase64IfNeeded(b64string string) (string, error) {

@@ -15,6 +15,11 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 )
 
+// Share-link → typed option.Outbound / Endpoint.
+// Unknown schemes fail here; unknown JSON `type` fails later in sing-box registry.
+//
+// Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://, awg://, [Interface].
+// lx types: mieru / carrier / derp (outbound), wireguard (endpoint + Amnezia root fields).
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
 	"vless://":     VlessSingbox,
@@ -29,6 +34,10 @@ var configTypes = map[string]ParserFunc{
 	"hy2://":       Hysteria2Singbox,
 	"ssh://":       SSHSingbox,
 	"naive://":     NaiveSingbox,
+	"mieru://":     MieruSingbox,
+	"mierus://":    MieruSingbox,
+	"carrier://":   CarrierSingbox,
+	"derp://":      DerpSingbox,
 
 	"ssconf://":  BeepassSingbox,
 	"direct://":  DirectSingbox,
@@ -41,17 +50,10 @@ var configTypes = map[string]ParserFunc{
 	"xvless://":  VlessXray,
 	"xtrojan://": TrojanXray,
 	"xdirect://": DirectXray,
-	"mieru://":   MieruSingbox,
-	"mierus://":  MieruSingbox,
-	"psiphon://": PsiphonSingbox,
-	"dnstt://":   DnsttSingbox,
 }
 var endpointParsers = map[string]EndpointParserFunc{
-	"wg://":        AWGSingbox,
-	"wireguard://": AWGSingbox,
-	"warp://":      WarpSingbox,
-	"awg://":       AWGSingbox,
-	"[Interface]":  AWGSingboxTxt,
+	"wg://":         WireguardEndpoint,
+	"wireguard://":  WireguardEndpoint,
 }
 var xrayConfigTypes = map[string]ParserFunc{
 	"vmess://":  VmessXray,
@@ -71,8 +73,9 @@ func decodeUrlBase64IfNeeded(config string) string {
 }
 
 type OutEnd struct {
-	outbound *T.Outbound
-	endpoint *T.Endpoint
+	outbound  *T.Outbound
+	outbounds []*T.Outbound // multi (e.g. mierus port/protocol pairs); outbound == first when set
+	endpoint  *T.Endpoint
 }
 
 func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEnd, err error) {
@@ -85,7 +88,6 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
 			err = E.New("Error in Parsing:", r, "Stack trace:", stackStr)
 		}
 	}()
-	// configDecoded := decodeUrlBase64IfNeeded(config)
 	outend = &OutEnd{}
 	if false && (useXrayWhenPossible || strings.Contains(config, "&core=xray")) {
 		for k, v := range xrayConfigTypes {
@@ -95,17 +97,29 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
 			}
 		}
 	}
-	if outend.outbound == nil {
-		for k, v := range configTypes {
-			if strings.HasPrefix(config, k) {
-				outend.outbound, err = v(config)
-				break
+	if outend.outbound == nil && len(outend.outbounds) == 0 {
+		if strings.HasPrefix(config, "mieru://") || strings.HasPrefix(config, "mierus://") {
+			outs, e := MieruSingboxAll(config)
+			err = e
+			if err == nil && len(outs) > 0 {
+				outend.outbounds = outs
+				outend.outbound = outs[0]
 			}
-		}
-		for k, v := range endpointParsers {
-			if strings.HasPrefix(config, k) {
-				outend.endpoint, err = v(config)
-				break
+		} else {
+			for k, v := range configTypes {
+				if k == "mieru://" || k == "mierus://" {
+					continue
+				}
+				if strings.HasPrefix(config, k) {
+					outend.outbound, err = v(config)
+					break
+				}
+			}
+			for k, v := range endpointParsers {
+				if strings.HasPrefix(config, k) {
+					outend.endpoint, err = v(config)
+					break
+				}
 			}
 		}
 	}
@@ -113,17 +127,21 @@ func processSingleConfig(config string, useXrayWhenPossible bool) (outend *OutEn
 	if err != nil {
 		return nil, err
 	}
-	if outend.endpoint == nil && outend.outbound == nil {
+	if outend.endpoint == nil && outend.outbound == nil && len(outend.outbounds) == 0 {
 		return nil, E.New("Not supported config type")
 	}
-	if outend.outbound != nil && outend.outbound.Tag == "" {
-		outend.outbound.Tag = outend.outbound.Type
+	if len(outend.outbounds) == 0 && outend.outbound != nil {
+		outend.outbounds = []*T.Outbound{outend.outbound}
+	}
+	for _, ob := range outend.outbounds {
+		if ob.Tag == "" {
+			ob.Tag = ob.Type
+		}
 	}
 	if outend.endpoint != nil && outend.endpoint.Tag == "" {
 		outend.endpoint.Tag = outend.endpoint.Type
 	}
 
-	// json.MarshalIndent(configSingbox, "", "  ")
 	return outend, nil
 }
 
@@ -141,7 +159,7 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 		}
 		detourTag := ""
 
-		chains := strings.Split(config, " -> ")
+		chains := strings.Split(normalizeDetourChain(config), " -> ")
 		for i := len(chains) - 1; i >= 0; i-- {
 			chain1 := chains[i]
 
@@ -155,32 +173,35 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 				continue
 			}
 
-			if outend.outbound != nil {
-				outend.outbound.Tag += " § " + strconv.Itoa(counter)
-				if dialerOpt, ok := outend.outbound.Options.(T.DialerOptionsWrapper); ok {
-					d := dialerOpt.TakeDialerOptions()
-					d.Detour = detourTag
-					dialerOpt.ReplaceDialerOptions(d)
+			if len(outend.outbounds) > 0 {
+				for _, ob := range outend.outbounds {
+					ob.Tag += " § " + strconv.Itoa(counter)
+					if dialerOpt, ok := ob.Options.(T.DialerOptionsWrapper); ok {
+						d := dialerOpt.TakeDialerOptions()
+						// Multi-hop chain overrides; keep ?detour=tag from getDialerOptions otherwise.
+						if detourTag != "" {
+							d.Detour = detourTag
+							dialerOpt.ReplaceDialerOptions(d)
+						}
+					}
+					detourTag = ob.Tag
+					outbounds = append(outbounds, *ob)
+					counter += 1
 				}
-
-				detourTag = outend.outbound.Tag
-				outbounds = append(outbounds, *outend.outbound)
-
 			} else if outend.endpoint != nil {
 				outend.endpoint.Tag += " § " + strconv.Itoa(counter)
 				if dialerOpt, ok := outend.endpoint.Options.(T.DialerOptionsWrapper); ok {
 					d := dialerOpt.TakeDialerOptions()
-					d.Detour = detourTag
-					dialerOpt.ReplaceDialerOptions(d)
+					if detourTag != "" {
+						d.Detour = detourTag
+						dialerOpt.ReplaceDialerOptions(d)
+					}
 				}
 
 				detourTag = outend.endpoint.Tag
 				endpoints = append(endpoints, *outend.endpoint)
-
+				counter += 1
 			}
-
-			counter += 1
-
 		}
 
 	}
@@ -189,12 +210,93 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 		return nil, E.New("No outbounds found")
 	}
 
+	resolveDetourTagRefs(outbounds, endpoints)
+
 	fullConfig := T.Options{
 		Outbounds: outbounds,
 		Endpoints: endpoints,
 	}
 
 	return &fullConfig, nil
+}
+
+// normalizeDetourChain turns Hiddify `exit&&detour=entry` into `exit -> entry`
+// so GenerateConfigLite can wire DialerOptions.Detour across hops.
+func normalizeDetourChain(config string) string {
+	if strings.Contains(config, " -> ") {
+		return config
+	}
+	const marker = "&&detour="
+	if !strings.Contains(config, marker) {
+		return config
+	}
+	parts := strings.Split(config, marker)
+	trimmed := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			trimmed = append(trimmed, p)
+		}
+	}
+	if len(trimmed) < 2 {
+		return config
+	}
+	return strings.Join(trimmed, " -> ")
+}
+
+func outboundTagBase(tag string) string {
+	if i := strings.Index(tag, "§"); i >= 0 {
+		return strings.TrimSpace(tag[:i])
+	}
+	return strings.TrimSpace(tag)
+}
+
+// resolveDetourTagRefs rewrites detour values that name a share-link base tag
+// (before " § N") to the concrete renamed tag after numbering.
+func resolveDetourTagRefs(outbounds []T.Outbound, endpoints []T.Endpoint) {
+	byBase := make(map[string]string, len(outbounds)+len(endpoints))
+	register := func(tag string) {
+		if tag == "" {
+			return
+		}
+		byBase[tag] = tag
+		if base := outboundTagBase(tag); base != "" {
+			byBase[base] = tag
+		}
+	}
+	for _, ob := range outbounds {
+		register(ob.Tag)
+	}
+	for _, ep := range endpoints {
+		register(ep.Tag)
+	}
+	apply := func(opts any) {
+		w, ok := opts.(T.DialerOptionsWrapper)
+		if !ok {
+			return
+		}
+		d := w.TakeDialerOptions()
+		if d.Detour == "" {
+			return
+		}
+		if full, ok := byBase[d.Detour]; ok {
+			if full != d.Detour {
+				d.Detour = full
+				w.ReplaceDialerOptions(d)
+			}
+			return
+		}
+		if full, ok := byBase[outboundTagBase(d.Detour)]; ok && full != d.Detour {
+			d.Detour = full
+			w.ReplaceDialerOptions(d)
+		}
+	}
+	for i := range outbounds {
+		apply(outbounds[i].Options)
+	}
+	for i := range endpoints {
+		apply(endpoints[i].Options)
+	}
 }
 
 func Ray2Singbox(ctx context.Context, configs string, useXrayWhenPossible bool) (out []byte, err error) {

@@ -18,13 +18,11 @@ import (
 
 var DnsDirectTags = []string{
 	DNSStaticTag,
-	DNSDirectTag,
+	DNSBootstrapTag,
 	DNSLocalTag,
 }
 var DnsRemoteTags = []string{
 	DNSRemoteTag,
-	DNSRemoteTagFallback,
-	DNSTricksDirectTag,
 }
 
 var DEFAULT_DNS_TTL = uint32(60 * 60 * 24)
@@ -36,87 +34,46 @@ func getDnsAddress(d string) string {
 	return d
 }
 
+// setDns builds the simple/advanced client DNS template (L2 when subscription has no dns
+// or IgnoreSubscriptionDNS is set). Bootstrap has no detour (resolves outbound servers);
+// remote uses OutboundMainDetour for app DNS.
 func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string) error {
-	remoteAddr := getDnsAddress(opt.RemoteDnsAddress)
-	fallbackAddr := "https://8.8.8.8/dns-query"
-	if remoteAddr == fallbackAddr {
-		fallbackAddr = "https://1.0.0.1/dns-query"
+	bootstrap, err := getDNSServerOptions(DNSBootstrapTag, opt.DirectDnsAddress, DNSLocalTag, "")
+	if err != nil {
+		// plain IP / udp without needing local resolver
+		bootstrap, err = getDNSServerOptions(DNSBootstrapTag, opt.DirectDnsAddress, "", "")
+		if err != nil {
+			return err
+		}
 	}
-
-	// if strings.HasPrefix(remoteAddr, "udp://") {
-	// 	remoteAddr = strings.Replace(remoteAddr, "udp://", "tcp://", 1)
-	// }
-
-	remote_dns, err := getDNSServerOptions(DNSRemoteTag, remoteAddr, DNSDirectTag, OutboundMainDetour)
+	remote, err := getDNSServerOptions(DNSRemoteTag, getDnsAddress(opt.RemoteDnsAddress), DNSBootstrapTag, OutboundMainDetour)
 	if err != nil {
 		return err
 	}
-	remote_dns_fallback, err := getDNSServerOptions(DNSRemoteTagFallback, fallbackAddr, DNSDirectTag, OutboundMainDetour)
-	if err != nil {
-		return err
-	}
-	remote_no_warp_dns, err := getDNSServerOptions(DNSRemoteNoWarpTag, opt.RemoteDnsAddress, DNSDirectTag, OutboundWARPConfigDetour)
+	local, err := getDNSServerOptions(DNSLocalTag, "local", "", "")
 	if err != nil {
 		return err
 	}
 
-	direct_detour := OutboundDirectFragmentTag
-	if strings.HasPrefix(opt.DirectDnsAddress, "udp://") || !strings.Contains(opt.DirectDnsAddress, "://") {
-		direct_detour = ""
+	servers := []option.DNSServerOptions{*local, *bootstrap, *remote}
+	if staticIps != nil && len(*staticIps) > 0 {
+		static_dns, err := getStaticDNSServerOptions(DNSStaticTag, staticIps)
+		if err != nil {
+			return err
+		}
+		servers = append([]option.DNSServerOptions{*static_dns}, servers...)
 	}
-
-	direct_dns, err := getDNSServerOptions(DNSDirectTag, opt.DirectDnsAddress, DNSLocalTag, direct_detour)
-	if err != nil {
-		return err
-	}
-	trick_dns, err := getDNSServerOptions(DNSTricksDirectTag, "https://dns.cloudflare.com/dns-query#fragment=300", DNSDirectTag, OutboundDirectFragmentTag)
-	if err != nil {
-		return err
-	}
-	local_dns, err := getDNSServerOptions(DNSLocalTag, "local", "", "")
-	if err != nil {
-		return err
-	}
-	static_dns, err := getStaticDNSServerOptions(DNSStaticTag, staticIps)
-	if err != nil {
-		return err
-	}
-	// block_dns, err := getDNSServerOptions(DNSBlockTag, "rcode://name_error", "", "")
-	// if err != nil {
-	// 	return err
-	// }
-
-	// multi_dns_direct, err := getMultiDnsServerOptions(DNSMultiDirectTag, DnsDirectTags, false)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// multi_dns_remote, err := getMultiDnsServerOptions(DNSMultiRemoteTag, DnsRemoteTags, true)
-	// if err != nil {
-	// 	return err
-	// }
 
 	dnsOptions := option.DNSOptions{
 		RawDNSOptions: option.RawDNSOptions{
 			DNSClientOptions: option.DNSClientOptions{
-				IndependentCache: opt.IndependentDNSCache && !C.IsIos,
+				// sing-box 1.14+ deprecates independent_cache; keep disabled for forward compatibility.
+				IndependentCache: false,
 				DisableExpire:    true,
 			},
-			Final: DNSMultiRemoteTag,
-
-			Servers: []option.DNSServerOptions{
-				*static_dns,
-				*remote_dns,
-				*remote_dns_fallback,
-				*trick_dns,
-				*direct_dns,
-				*local_dns,
-				*remote_no_warp_dns,
-				// *multi_dns_direct,
-				// *multi_dns_remote,
-				// *block_dns,
-			},
-			Rules: []option.DNSRule{},
+			Final:   DNSRemoteTag,
+			Servers: servers,
+			Rules:   []option.DNSRule{},
 		},
 	}
 	if opt.EnableFakeDNS {
@@ -132,20 +89,9 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 		})
 	}
 	options.DNS = &dnsOptions
-
-	// options.DNS.StaticIPs["time.apple.com"] = []string{"time.g.aaplimg.com", "time.apple.com"}
-	// options.DNS.StaticIPs["ipinfo.io"] = []string{"ipinfo.io"}
-	// options.DNS.StaticIPs["dns.cloudflare.com"] = []string{"www.speedtest.net", "cloudflare.com"}
-	// options.DNS.StaticIPs["ipwho.is"] = []string{"ipwho.is"}
-	// options.DNS.StaticIPs["api.my-ip.io"] = []string{"api.my-ip.io"}
-	// options.DNS.StaticIPs["myip.expert"] = []string{"myip.expert"}
-	// options.DNS.StaticIPs["ip-api.com"] = []string{"ip-api.com"}
-	// options.DNS.StaticIPs["freeipapi.com"] = []string{"www.speedtest.net", "cloudflare.com"}
-	// options.DNS.StaticIPs["reallyfreegeoip.org"] = []string{"www.speedtest.net", "cloudflare.com"}
-	// options.DNS.StaticIPs["ipapi.co"] = []string{"www.speedtest.net", "cloudflare.com"}
-	// options.DNS.StaticIPs["api.ip.sb"] = []string{"www.speedtest.net", "cloudflare.com"}
 	return nil
 }
+
 func getAllOutboundsOptions(options *option.Options) []any {
 	outbounds := []any{}
 	for _, o := range options.Outbounds {
@@ -235,7 +181,7 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 			DNSRuleAction: option.DNSRuleAction{
 				Action: C.RuleActionTypeRoute,
 				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSRemoteNoWarpTag,
+					Server:         DNSRemoteTag,
 					Strategy:       hopt.DirectDnsDomainStrategy,
 					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
 					RewriteTTL:     &DEFAULT_DNS_TTL,

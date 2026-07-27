@@ -232,17 +232,5 @@ func ReadHiddifyOptionsAt(path string) (*config.HiddifyOptions, error) {
 	if err != nil {
 		return nil, err
 	}
-	if options.Warp.WireguardConfigStr != "" {
-		err := json.Unmarshal([]byte(options.Warp.WireguardConfigStr), &options.Warp.WireguardConfig)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if options.Warp2.WireguardConfigStr != "" {
-		err := json.Unmarshal([]byte(options.Warp2.WireguardConfigStr), &options.Warp2.WireguardConfig)
-		if err != nil {
-			return nil, err
-		}
-	}
 	return &options, nil
 }

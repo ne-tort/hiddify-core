@@ -2,6 +2,7 @@ package config
 
 import (
 	context "context"
+	"strings"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
@@ -11,6 +12,18 @@ type ReadOptions struct {
 	Path    string
 	Content string
 	Options *option.Options
+}
+
+// ProfileSourcePath is the uncut import body next to the sliced profile JSON.
+// Example: configs/<id>.json → configs/<id>.src
+func ProfileSourcePath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(configPath), ".json") {
+		return configPath[:len(configPath)-len(".json")] + ".src"
+	}
+	return configPath + ".src"
 }
 
 func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, error) {

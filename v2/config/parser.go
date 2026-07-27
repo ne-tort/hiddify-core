@@ -11,7 +11,6 @@ import (
 	"github.com/hiddify/ray2sing/ray2sing"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common/batch"
 	SJ "github.com/sagernet/sing/common/json"
 	"github.com/xmdhs/clash2singbox/convert"
 	clash2singmodel "github.com/xmdhs/clash2singbox/model"
@@ -38,7 +37,7 @@ func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *H
 	if err != nil {
 		return nil, err
 	}
-	return parseConfigContent(ctx, content, debug, nil, false)
+	return parseConfigContent(ctx, content, debug, configOpt, fullConfig)
 }
 
 func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) ([]byte, error) {
@@ -75,6 +74,13 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 					if tmpJsonObj["endpoints"] != nil {
 						jsonObj["endpoints"] = tmpJsonObj["endpoints"]
 					}
+					// Retain dns/route for Build L2/L4 (do not strip on Parse).
+					if tmpJsonObj["dns"] != nil {
+						jsonObj["dns"] = tmpJsonObj["dns"]
+					}
+					if tmpJsonObj["route"] != nil {
+						jsonObj["route"] = tmpJsonObj["route"]
+					}
 				}
 			}
 		} else if jsonArray, ok := tmpJsonResult.([]map[string]interface{}); ok {
@@ -106,7 +112,7 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 		return patchConfigStr(ctx, output, "ClashParser", configOpt)
 	}
 
-	v2ray, err := ray2sing.Ray2SingboxOptions(ctx, string(content), configOpt.UseXrayCoreWhenPossible)
+	v2ray, err := ray2sing.Ray2SingboxOptions(ctx, string(content), false)
 	if err == nil {
 		return patchConfigOptions(ctx, v2ray, "V2rayParser", configOpt)
 	}
@@ -125,27 +131,8 @@ func patchConfigStr(ctx context.Context, content []byte, name string, configOpt 
 	return patchConfigOptions(ctx, &options, name, configOpt)
 }
 func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *HiddifyOptions) (*option.Options, error) {
-	b, _ := batch.New(ctx, batch.WithConcurrencyNum[*option.Endpoint](2))
-	for _, base := range options.Endpoints {
-		out := base
-		b.Go(base.Tag, func() (*option.Endpoint, error) {
-			err := patchWarp(&out, configOpt, false, nil)
-			if err != nil {
-				return nil, fmt.Errorf("[Warp] patch warp error: %w", err)
-			}
-			// options.Outbounds[i] = base
-			return &out, nil
-		})
-	}
-	if res, err := b.WaitAndGetResult(); err != nil {
-		return nil, err
-	} else {
-		for i, base := range options.Endpoints {
-			options.Endpoints[i] = *res[base.Tag].Value
-		}
-	}
-
-	// fmt.Printf("%s\n", content)
+	_ = ctx
+	_ = configOpt
 	return validateResult(ctx, options, name)
 }
 

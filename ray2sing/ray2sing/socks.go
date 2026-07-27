@@ -11,6 +11,7 @@ func SocksSingbox(url string) (*T.Outbound, error) {
 		return nil, err
 	}
 	opts := T.SOCKSOutboundOptions{
+		DialerOptions: getDialerOptions(u.Params),
 		ServerOptions: u.GetServerOption(),
 		Username:      u.Username,
 		Password:      u.Password,

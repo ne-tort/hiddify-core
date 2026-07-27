@@ -6,7 +6,9 @@ set CGO_ENABLED=1
 go run ./cli tunnel exit
 del bin\hiddify-core.dll bin\HiddifyCli.exe
 set CGO_LDFLAGS=
-go build -trimpath -tags with_gvisor,with_quic,with_wireguard,with_ech,with_utls,with_clash_api,with_grpc -ldflags="-w -s" -buildmode=c-shared -o bin/hiddify-core.dll ./custom
+REM Keep in sync with Makefile TAGS / build_tags.txt
+set TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_carrier_client,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_purego,badlinkname
+go build -trimpath -tags %TAGS% -ldflags="-w -s" -buildmode=c-shared -o bin/hiddify-core.dll ./custom
 go get github.com/akavel/rsrc
 go install github.com/akavel/rsrc
 

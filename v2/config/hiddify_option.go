@@ -24,8 +24,6 @@ type HiddifyOptions struct {
 	// GeoIPPath        string      `json:"geoip-path"`
 	// GeoSitePath      string      `json:"geosite-path"`
 	Rules     []Rule      `json:"rules,omitempty" overridable:"true"`
-	Warp      WarpOptions `json:"warp,omitempty"`
-	Warp2     WarpOptions `json:"warp2,omitempty"`
 	Mux       MuxOptions  `json:"mux,omitempty" overridable:"true"`
 	TLSTricks TLSTricks   `json:"tls-tricks,omitempty"`
 	EnableNTP bool        `json:"enable-ntp,omitempty"`
@@ -41,19 +39,26 @@ type DNSOptions struct {
 	RemoteDnsDomainStrategy option.DomainStrategy `json:"remote-dns-domain-strategy,omitempty" overridable:"true"`
 	DirectDnsAddress        string                `json:"direct-dns-address,omitempty" overridable:"true"`
 	DirectDnsDomainStrategy option.DomainStrategy `json:"direct-dns-domain-strategy,omitempty" overridable:"true"`
-	IndependentDNSCache     bool                  `json:"independent-dns-cache,omitempty"`
 	EnableFakeDNS           bool                  `json:"enable-fake-dns,omitempty"`
-	// EnableDNSRouting        bool                  `json:"enable-dns-routing,omitempty"`
+	// IgnoreSubscriptionDNS: when true, always build the client DNS template
+	// even if the subscription profile contains a dns block.
+	IgnoreSubscriptionDNS bool `json:"ignore-subscription-dns,omitempty"`
+	// EnableDnsHijack: sniff + protocol:dns → hijack-dns (route L3). Default off.
+	EnableDnsHijack bool `json:"enable-dns-hijack,omitempty"`
 }
 
 type InboundOptions struct {
-	EnableTun        bool   `json:"enable-tun,omitempty"`
-	EnableTunService bool   `json:"enable-tun-service,omitempty"`
-	SetSystemProxy   bool   `json:"set-system-proxy,omitempty"`
-	MixedPort        uint16 `json:"mixed-port,omitempty"`
-	TProxyPort       uint16 `json:"tproxy-port,omitempty"`
-	RedirectPort     uint16 `json:"redirect-port,omitempty"`
-	DirectPort       uint16 `json:"direct-port,omitempty"`
+	EnableTun          bool   `json:"enable-tun,omitempty"`
+	EnableTunService   bool   `json:"enable-tun-service,omitempty"`
+	SetSystemProxy     bool   `json:"set-system-proxy,omitempty"`
+	EnableMixedPort    bool   `json:"enable-mixed-port,omitempty"`
+	EnableTProxyPort   bool   `json:"enable-tproxy-port,omitempty"`
+	EnableRedirectPort bool   `json:"enable-redirect-port,omitempty"`
+	EnableDirectPort   bool   `json:"enable-direct-port,omitempty"`
+	MixedPort          uint16 `json:"mixed-port,omitempty"`
+	TProxyPort         uint16 `json:"tproxy-port,omitempty"`
+	RedirectPort       uint16 `json:"redirect-port,omitempty"`
+	DirectPort         uint16 `json:"direct-port,omitempty"`
 	MTU              uint32 `json:"mtu,omitempty"`
 	StrictRoute      bool   `json:"strict-route,omitempty"`
 	TUNStack         string `json:"tun-implementation,omitempty"`
@@ -72,6 +77,14 @@ type RouteOptions struct {
 	BypassLAN              bool                  `json:"bypass-lan,omitempty"`
 	AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
 	BlockQuic              bool                  `json:"block-quic,omitempty"`
+	// IgnoreSubscriptionRoute skips merging subscription route.rule_set/rules (raw connect-time overlay).
+	IgnoreSubscriptionRoute bool `json:"ignore-subscription-route,omitempty"`
+	// RoutePriority is ignored: local profile always precedes subscription (client owns conflicts).
+	RoutePriority RoutePriority `json:"route-priority,omitempty"`
+	// RoutingProfile is the Happ-like local profile compiled into rule_sets when Enabled.
+	RoutingProfile *RoutingProfile `json:"routing-profile,omitempty"`
+	GeoIPRuleSetURL   string `json:"geoip-ruleset-url,omitempty"`
+	GeoSiteRuleSetURL string `json:"geosite-ruleset-url,omitempty"`
 }
 
 type TLSTricks struct {
@@ -90,20 +103,6 @@ type MuxOptions struct {
 	Protocol   string `json:"protocol,omitempty" overridable:"true"`
 }
 
-type WarpOptions struct {
-	Id                 string              `json:"id,omitempty"`
-	EnableWarp         bool                `json:"enable,omitempty"`
-	Mode               string              `json:"mode,omitempty"`
-	WireguardConfigStr string              `json:"wireguard-config,omitempty"`
-	WireguardConfig    WarpWireguardConfig `json:"wireguardConfig,omitempty"` // TODO check
-	FakePackets        string              `json:"noise,omitempty"`
-	FakePacketSize     string              `json:"noise-size,omitempty"`
-	FakePacketDelay    string              `json:"noise-delay,omitempty"`
-	FakePacketMode     string              `json:"noise-mode,omitempty"`
-	CleanIP            string              `json:"clean-ip,omitempty"`
-	CleanPort          uint16              `json:"clean-port,omitempty"`
-	Account            WarpAccount
-}
 
 func DefaultHiddifyOptions() *HiddifyOptions {
 	return &HiddifyOptions{
@@ -113,20 +112,23 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			RemoteDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
 			DirectDnsAddress:        "1.1.1.1",
 			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
-			IndependentDNSCache:     false,
 			EnableFakeDNS:           false,
 			// EnableDNSRouting:        false,
 		},
 		InboundOptions: InboundOptions{
-			EnableTun:      false,
-			SetSystemProxy: false,
-			MixedPort:      12334,
-			TProxyPort:     12335,
-			RedirectPort:   12336,
-			DirectPort:     12337,
+			EnableTun:          false,
+			SetSystemProxy:     false,
+			EnableMixedPort:    true,
+			EnableTProxyPort:   true,
+			EnableRedirectPort: true,
+			EnableDirectPort:   true,
+			MixedPort:          12334,
+			TProxyPort:         12335,
+			RedirectPort:       12336,
+			DirectPort:         12337,
 			MTU:            9000,
 			StrictRoute:    true,
-			TUNStack:       "mixed",
+			TUNStack:       "gvisor",
 		},
 		URLTestOptions: URLTestOptions{
 			ConnectionTestUrl: "http://cp.cloudflare.com/",
@@ -138,12 +140,11 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			IPv6Mode:               option.DomainStrategy(dns.DomainStrategyAsIS),
 			BypassLAN:              false,
 			AllowConnectionFromLAN: false,
-		},
-		LogLevel: "warn",
+		},		LogLevel: "error",
 		// LogFile:        "/dev/null",
-		LogFile:        "data/box.log",
+		LogFile:        "box.log",
 		Region:         "other",
-		EnableClashApi: true,
+		EnableClashApi: false,
 
 		ClashApiPort:   16756,
 		ClashApiSecret: "",
