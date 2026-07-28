@@ -2,10 +2,12 @@ package hcore
 
 import (
 	"os"
+	"time"
 
 	"github.com/hiddify/hiddify-core/v2/service_manager"
 	daemon "github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 var _ log.PlatformWriter = (*LogInterface)(nil)
@@ -43,7 +45,16 @@ func (h *LogInterface) WriteDebugMessage(message string) {
 	h.WriteMessage(log.LevelDebug, message)
 }
 func (h *LogInterface) WriteMessage(level log.Level, message string) {
-	Log(convertLogLevel(level), LogType_SERVICE, message)
+	lv := convertLogLevel(level)
+	if lv < static.logLevel {
+		return
+	}
+	static.logObserver.Publish(&LogMessage{
+		Level:   lv,
+		Type:    LogType_SERVICE,
+		Time:    timestamppb.New(time.Now()),
+		Message: message,
+	})
 }
 func convertLogLevel(level log.Level) LogLevel {
 	switch level {

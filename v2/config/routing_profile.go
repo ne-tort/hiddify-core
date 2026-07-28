@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -101,10 +102,11 @@ func CompileRoutingProfile(p *RoutingProfile, geoIPURL, geoSiteURL string) (rule
 			return
 		}
 		seen[tag] = struct{}{}
+		format := localRuleSetFormatByPath(path)
 		rulesets = append(rulesets, option.RuleSet{
 			Type:   C.RuleSetTypeLocal,
 			Tag:    tag,
-			Format: C.RuleSetFormatBinary,
+			Format: format,
 			LocalOptions: option.LocalRuleSet{
 				Path: path,
 			},
@@ -142,7 +144,7 @@ func CompileRoutingProfile(p *RoutingProfile, geoIPURL, geoSiteURL string) (rule
 				addRS(tag, url)
 				*rs = append(*rs, tag)
 			case strings.HasPrefix(lower, "local-srs:"):
-				path := strings.TrimSpace(raw[len("local-srs:"):])
+				path := normalizeLocalRulesetPath(strings.TrimSpace(raw[len("local-srs:"):]))
 				if path == "" {
 					continue
 				}
@@ -256,6 +258,42 @@ func isCIDR(s string) bool {
 	}
 	_, err := netip.ParseAddr(s)
 	return err == nil
+}
+
+func localRuleSetFormatByPath(path string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(path)))
+	switch ext {
+	case ".json":
+		return C.RuleSetFormatSource
+	default:
+		return C.RuleSetFormatBinary
+	}
+}
+
+// normalizeLocalRulesetPath converts legacy absolute Windows paths to base-relative refs.
+// sing-box filemanager.BasePath only treats "/" as absolute, so "C:\..." gets joined again.
+func normalizeLocalRulesetPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return path
+	}
+	lower := strings.ToLower(path)
+	for _, marker := range []string{
+		"routing_profiles" + string(filepath.Separator),
+		"routing_profiles/",
+		"rules" + string(filepath.Separator),
+		"rules/",
+	} {
+		idx := strings.Index(lower, strings.ToLower(marker))
+		if idx >= 0 {
+			return filepath.FromSlash(filepath.ToSlash(path[idx:]))
+		}
+	}
+	return path
 }
 
 // ParseHappRoutingProfile imports Happ-compatible JSON fields into RoutingProfile.

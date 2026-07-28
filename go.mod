@@ -1,6 +1,6 @@
 module github.com/hiddify/hiddify-core
 
-go 1.26
+go 1.26.1
 
 require (
 	github.com/improbable-eng/grpc-web v0.15.0
@@ -34,6 +34,7 @@ require (
 	filippo.io/hpke v0.4.0 // indirect
 	github.com/AdguardTeam/golibs v0.32.7 // indirect
 	github.com/DataDog/zstd v1.4.1 // indirect
+	github.com/akavel/rsrc v0.10.2 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
 	github.com/ameshkov/dnscrypt/v2 v2.4.0 // indirect

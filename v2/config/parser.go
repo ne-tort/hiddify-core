@@ -29,7 +29,14 @@ func ReadContent(ctx context.Context, opt *ReadOptions) ([]byte, error) {
 		}
 		opt.Content = string(contentBytes)
 	}
-	return []byte(opt.Content), nil
+	return stripUTF8BOM([]byte(opt.Content)), nil
+}
+
+func stripUTF8BOM(b []byte) []byte {
+	if len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+		return b[3:]
+	}
+	return b
 }
 
 func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) (*option.Options, error) {
@@ -41,19 +48,24 @@ func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *H
 }
 
 func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) ([]byte, error) {
-
 	options, err := ParseConfig(ctx, opt, debug, configOpt, fullConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	return options.MarshalJSONContext(ctx)
+	// Empty profiles marshal to "{}" (omitempty), which then fails re-parse via the
+	// single-outbound wrap path. Keep a stable empty shape for WARP-only / placeholder profiles.
+	if len(options.Outbounds) == 0 && len(options.Endpoints) == 0 {
+		return []byte("{\"outbounds\":[]}"), nil
+	}
 
+	return options.MarshalJSONContext(ctx)
 }
 func parseConfigContent(ctx context.Context, content []byte, debug bool, configOpt *HiddifyOptions, fullConfig bool) (*option.Options, error) {
 	if configOpt == nil {
 		configOpt = DefaultHiddifyOptions()
 	}
+	content = stripUTF8BOM(content)
 
 	var jsonObj map[string]interface{} = make(map[string]interface{})
 
@@ -63,7 +75,12 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 		fmt.Printf("Convert using json\n")
 		if tmpJsonObj, ok := tmpJsonResult.(map[string]interface{}); ok {
 			if tmpJsonObj["outbounds"] == nil && tmpJsonObj["endpoints"] == nil {
-				jsonObj["outbounds"] = []interface{}{jsonObj}
+				// Empty object → empty profile (WARP-only etc.). Non-empty object → single outbound wrap.
+				if len(tmpJsonObj) == 0 {
+					jsonObj["outbounds"] = []interface{}{}
+				} else {
+					jsonObj["outbounds"] = []interface{}{tmpJsonObj}
+				}
 			} else {
 				if fullConfig || (configOpt != nil && configOpt.EnableFullConfig) {
 					jsonObj = tmpJsonObj
@@ -85,11 +102,16 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 			}
 		} else if jsonArray, ok := tmpJsonResult.([]map[string]interface{}); ok {
 			jsonObj["outbounds"] = jsonArray
+		} else if jsonArray, ok := tmpJsonResult.([]interface{}); ok {
+			jsonObj["outbounds"] = jsonArray
 		} else {
 			return nil, fmt.Errorf("[SingboxParser] Incorrect Json Format")
 		}
 
-		newContent, _ := json.MarshalIndent(jsonObj, "", "  ")
+		newContent, err := json.MarshalIndent(jsonObj, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("[SingboxParser] marshal error: %w", err)
+		}
 
 		return patchConfigStr(ctx, newContent, "SingboxParser", configOpt)
 	}

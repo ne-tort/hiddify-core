@@ -56,6 +56,57 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		StopAndAlert(MessageType_UNEXPECTED_ERROR, err.Error())
 	})
 
+  if static.HiddifyOptions == nil {
+		static.HiddifyOptions = config.DefaultHiddifyOptions()
+	}
+
+	// Client-side rule-set merge (routing profile compiler).
+	if in.Content != "" {
+		var mergeReq struct {
+			Action string   `json:"hiddify_action"`
+			Inputs []string `json:"inputs"`
+			Output string   `json:"output"`
+		}
+		if err := json.Unmarshal([]byte(in.Content), &mergeReq); err == nil && mergeReq.Action == "merge_rulesets" {
+			if err := config.MergeLocalRuleSets(mergeReq.Inputs, mergeReq.Output); err != nil {
+				return &ParseResponse{
+					ResponseCode: hcommon.ResponseCode_FAILED,
+					Message:      err.Error(),
+				}, nil
+			}
+			return &ParseResponse{
+				ResponseCode: hcommon.ResponseCode_OK,
+				Content:      mergeReq.Output,
+			}, nil
+		}
+	}
+
+	// Full config generation (debug/export): only config_path is set.
+	// Apply current HiddifyOptions (incl. WARP inject) and do not rewrite the profile file.
+	if in.TempPath == "" && in.Content == "" && in.ConfigPath != "" {
+		readPath := in.ConfigPath
+		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
+			if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
+				readPath = src
+			}
+		}
+		built, err := config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: readPath})
+		if err != nil && readPath != in.ConfigPath {
+			// .src may contain comment headers; fall back to sliced .json
+			built, err = config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: in.ConfigPath})
+		}
+		if err != nil {
+			return &ParseResponse{
+				ResponseCode: hcommon.ResponseCode_FAILED,
+				Message:      err.Error(),
+			}, nil
+		}
+		return &ParseResponse{
+			ResponseCode: hcommon.ResponseCode_OK,
+			Content:      string(built),
+		}, nil
+	}
+
 	path := in.TempPath
 	if path == "" {
 		path = in.ConfigPath
@@ -75,7 +126,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		return &ParseResponse{
 			ResponseCode: hcommon.ResponseCode_FAILED,
 			Message:      err.Error(),
-		}, err
+		}, nil
 	}
 	if in.ConfigPath != "" {
 		err = os.WriteFile(in.ConfigPath, parsed, 0o644)
@@ -83,14 +134,14 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 			return &ParseResponse{
 				ResponseCode: hcommon.ResponseCode_FAILED,
 				Message:      err.Error(),
-			}, err
+			}, nil
 		}
 	}
 	return &ParseResponse{
 		ResponseCode: hcommon.ResponseCode_OK,
 		Content:      string(parsed),
 		Message:      "",
-	}, err
+	}, nil
 }
 
 func (s *CoreService) ChangeHiddifySettings(ctx context.Context, in *ChangeHiddifySettingsRequest) (*CoreInfoResponse, error) {

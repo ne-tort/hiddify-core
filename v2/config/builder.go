@@ -49,7 +49,6 @@ const (
 	OutboundDNSTag            = "dns-out §hide§"
 	OutboundDirectFragmentTag = "direct-fragment §hide§"
 
-
 	InboundTUNTag    = "tun-in"
 	InboundMixedTag  = "mixed-in"
 	InboundTProxy    = "tproxy-in"
@@ -58,8 +57,8 @@ const (
 )
 
 var (
-	OutboundMainDetour       = OutboundSelectTag
-	PredefinedOutboundTags   = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag}
+	OutboundMainDetour     = OutboundSelectTag
+	PredefinedOutboundTags = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag, WarpWGTag, WarpMasqueTag}
 )
 
 // BuildConfig merges layers:
@@ -136,12 +135,17 @@ func getHostnameIfNotIP(inp string) (string, error) {
 	return "", fmt.Errorf("not a hostname: %s", inp)
 }
 
+func isOutboundDisabled(tag string, disabled []string) bool {
+	return contains(disabled, tag)
+}
+
 func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string) error {
 	var outbounds []option.Outbound
 	var endpoints []option.Endpoint
 	var tags []string
-	// OutboundMainProxyTag = OutboundSelectTag
 	OutboundMainDetour = OutboundSelectTag
+	chainTarget := opt.Chain.DetourTarget
+	chainMembers := chainMemberSet(opt.Chain.DetourMembers)
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
@@ -152,11 +156,14 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			return err
 		}
 		out = *outbound
+		if shouldApplyChainDetour(out.Tag, chainTarget, chainMembers) {
+			out = applyDetourToOutbound(out, chainTarget)
+		}
 
 		switch out.Type {
 		case C.TypeBlock, C.TypeDNS:
 			continue
-		case C.TypeSelector, C.TypeURLTest:
+		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer:
 			continue
 		case "custom": // LX-STUB: C.TypeCustom absent in sing-box-lx
 			continue
@@ -165,10 +172,9 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			if contains([]string{"direct", "bypass", "block"}, out.Tag) {
 				continue
 			}
-			if !strings.Contains(out.Tag, "§hide§") {
+			if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
 				tags = append(tags, out.Tag)
 			}
-			// OutboundDirectFragmentTag = OutboundSelectTag
 			outbounds = append(outbounds, out)
 		}
 	}
@@ -182,12 +188,33 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		if err != nil {
 			return err
 		}
+		if shouldApplyChainDetour(out.Tag, chainTarget, chainMembers) {
+			applyDetourToEndpoint(out, chainTarget)
+		}
 
-		if !strings.Contains(out.Tag, "§hide§") {
+		if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
 			tags = append(tags, out.Tag)
 		}
 
 		endpoints = append(endpoints, *out)
+	}
+
+	// Inject optional Cloudflare WARP nodes into the selectable/balancer pool (not route.final).
+	if opt.Warp.EnableWireguard && opt.Warp.WireguardConfig.PrivateKey != "" && !isOutboundDisabled(WarpWGTag, opt.DisabledOutboundTags) {
+		wg, err := buildWarpWireGuardEndpoint(opt.Warp.WireguardConfig)
+		if err != nil {
+			return fmt.Errorf("warp wireguard: %w", err)
+		}
+		endpoints = append(endpoints, *wg)
+		tags = append(tags, wg.Tag)
+	}
+	if opt.Warp.EnableMasque && opt.Warp.MasqueConfig.PrivateKey != "" && !isOutboundDisabled(WarpMasqueTag, opt.DisabledOutboundTags) {
+		mq, err := buildWarpMasqueOutbound(opt.Warp.MasqueConfig)
+		if err != nil {
+			return fmt.Errorf("warp masque: %w", err)
+		}
+		outbounds = append(outbounds, *mq)
+		tags = append(tags, mq.Tag)
 	}
 	if len(opt.ConnectionTestUrls) == 0 {
 		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl, "https://www.google.com/generate_204", "http://captive.apple.com/generate_204", "https://cp.cloudflare.com"}
@@ -676,11 +703,15 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 		final = OutboundDirectTag
 	}
 
+	strategy := defaultNetworkStrategyForIPv6Mode(hopt.IPv6Mode)
+	// sing-box requires auto_detect_interface whenever default_network_strategy is set.
+	autoDetect := (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService || strategy != nil)
+
 	options.Route = &option.RouteOptions{
 		Rules:                  routeRules,
 		Final:                  final,
-		AutoDetectInterface:    (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService),
-		DefaultNetworkStrategy: defaultNetworkStrategyForIPv6Mode(hopt.IPv6Mode),
+		AutoDetectInterface:    autoDetect,
+		DefaultNetworkStrategy: strategy,
 		RuleSet:                rulesets,
 		FindProcess:            false,
 	}

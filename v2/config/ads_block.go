@@ -9,6 +9,7 @@ const AdsRuleSetTag = "hiddify-ads"
 
 // appendAdsBlockRules prepends a local ads rule-set and reject rule (L4, before profile buckets).
 func appendAdsBlockRules(rulesets *[]option.RuleSet, rules *[]option.Rule, path string) {
+	path = normalizeLocalRulesetPath(path)
 	if path == "" {
 		return
 	}

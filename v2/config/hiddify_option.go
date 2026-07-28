@@ -27,6 +27,9 @@ type HiddifyOptions struct {
 	Mux       MuxOptions  `json:"mux,omitempty" overridable:"true"`
 	TLSTricks TLSTricks   `json:"tls-tricks,omitempty"`
 	EnableNTP bool        `json:"enable-ntp,omitempty"`
+	Warp                 WarpOptions `json:"warp,omitempty"`
+	Chain                ChainOptions `json:"chain,omitempty"`
+	DisabledOutboundTags []string    `json:"disabled-outbound-tags,omitempty"`
 
 	DNSOptions
 	InboundOptions
