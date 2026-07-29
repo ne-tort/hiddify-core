@@ -10,6 +10,7 @@ import (
 	"github.com/hiddify/hiddify-core/v2/config"
 	"github.com/hiddify/hiddify-core/v2/db"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	"github.com/hiddify/hiddify-core/v2/hutils"
 	service_manager "github.com/hiddify/hiddify-core/v2/service_manager"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -143,6 +144,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	_ = (C.IsIos || !in.DisableMemoryLimit)
 	instance, err := NewService(ctx, *options)
 	if err != nil {
+		hutils.HealStickyTun()
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance

@@ -217,10 +217,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		tags = append(tags, mq.Tag)
 	}
 	if len(opt.ConnectionTestUrls) == 0 {
-		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl, "https://www.google.com/generate_204", "http://captive.apple.com/generate_204", "https://cp.cloudflare.com"}
-		if isBlockedConnectionTestUrl(opt.ConnectionTestUrl) {
-			opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl}
-		}
+		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl}
 	}
 	// urlTest := option.Outbound{
 	// 	Type: C.TypeURLTest,
@@ -325,14 +322,6 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 	return nil
 }
 
-func isBlockedConnectionTestUrl(d string) bool {
-	u, err := url.Parse(d)
-	if err != nil {
-		return false
-	}
-	return isBlockedDomain(u.Host)
-}
-
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -344,10 +333,7 @@ func contains(slice []string, item string) bool {
 
 func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 	if len(hopt.ConnectionTestUrls) == 0 {
-		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl, "http://captive.apple.com/generate_204", "https://cp.cloudflare.com", "https://google.com/generate_204"}
-		if isBlockedConnectionTestUrl(hopt.ConnectionTestUrl) {
-			hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
-		}
+		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
 	}
 	exp := &option.ExperimentalOptions{
 		CacheFile: &option.CacheFileOptions{
@@ -427,10 +413,11 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	if hopt.EnableTun {
 
 		opts := option.TunInboundOptions{
-			Stack:       hopt.TUNStack,
-			MTU:         hopt.MTU,
-			AutoRoute:   true,
-			StrictRoute: hopt.StrictRoute,
+			Stack:         hopt.TUNStack,
+			MTU:           hopt.MTU,
+			AutoRoute:     true,
+			StrictRoute:   hopt.StrictRoute,
+			InterfaceName: hutils.TunInterfaceName,
 			// Align with UI DNS hijack: lx default dns_mode is hijack; when UI hijack is off
 			// keep TUN from silently hijacking :53 (route rule also omitted).
 			DNSMode: map[bool]string{true: "hijack", false: "native"}[hopt.EnableDnsHijack],

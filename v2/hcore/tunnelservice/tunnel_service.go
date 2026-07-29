@@ -12,6 +12,7 @@ import (
 
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
 	"github.com/hiddify/hiddify-core/v2/hcore"
+	hutils "github.com/hiddify/hiddify-core/v2/hutils"
 )
 
 type TunnelService struct {
@@ -23,11 +24,15 @@ func (s *TunnelService) Start(ctx context.Context, in *TunnelStartRequest) (*Tun
 	if in.ServerPort == 0 {
 		in.ServerPort = 12334
 	}
+	// Reclaim leftover adapter before creating a new TUN.
+	hutils.HealStickyTun()
+
 	option := makeTunnelConfig(in)
 
 	box, err := hcore.NewService(ctx, option)
 	s.box = box
 	if err != nil {
+		hutils.HealStickyTun()
 		return &TunnelResponse{
 			Message: err.Error(),
 		}, err
@@ -54,7 +59,7 @@ func makeTunnelConfig(in *TunnelStartRequest) option.Options {
 					StrictRoute:            in.StrictRoute,
 					AutoRoute:              true,
 					Address:                ips,
-					InterfaceName:          "HiddifyTunnel",
+					InterfaceName:          hutils.TunInterfaceName,
 					Stack:                  in.Stack,
 				},
 			},

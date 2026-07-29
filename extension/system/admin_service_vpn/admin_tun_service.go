@@ -1,6 +1,8 @@
 package admin_service_vpn
 
 import (
+	"fmt"
+
 	"github.com/sagernet/sing-box/option"
 
 	ex "github.com/hiddify/hiddify-core/extension"
@@ -23,6 +25,9 @@ type AdminServiceExtension struct {
 }
 
 func (b *AdminServiceExtension) OnMainServicePreStart(singconfig *option.Options) error {
+	// Always attempt reclaim of leftover adapters before (re)creating TUN.
+	hutils.HealStickyTun()
+
 	if hutils.TunAllowed() {
 		return nil
 	}
@@ -32,11 +37,15 @@ func (b *AdminServiceExtension) OnMainServicePreStart(singconfig *option.Options
 		if inb.Type == C.TypeTun {
 			if d, ok := inb.Options.(option.TunInboundOptions); ok {
 				b.tunInboundOptions = &d
+			} else if d, ok := inb.Options.(*option.TunInboundOptions); ok {
+				b.tunInboundOptions = d
 			}
 		} else {
 			if inb.Type == C.TypeSOCKS {
 				if d, ok := inb.Options.(option.SocksInboundOptions); ok {
 					b.socksOptions = &d
+				} else if d, ok := inb.Options.(*option.SocksInboundOptions); ok {
+					b.socksOptions = d
 				}
 			}
 			newInbounds = append(newInbounds, inb)
@@ -57,8 +66,7 @@ func (b *AdminServiceExtension) OnMainServiceStart() error {
 		username = b.socksOptions.Users[0].Username
 		password = b.socksOptions.Users[0].Password
 	}
-	tunnelservice.ActivateTunnelService(&tunnelservice.TunnelStartRequest{
-		// Ipv6:                   len(b.tunInboundOptions.Inet6Address) > 0,
+	if err := tunnelservice.ActivateTunnelService(&tunnelservice.TunnelStartRequest{
 		Ipv6:                   true,
 		ServerPort:             int32(b.socksOptions.ListenPort),
 		ServerUsername:         username,
@@ -66,15 +74,21 @@ func (b *AdminServiceExtension) OnMainServiceStart() error {
 		StrictRoute:            b.tunInboundOptions.StrictRoute,
 		Stack:                  b.tunInboundOptions.Stack,
 		EndpointIndependentNat: b.tunInboundOptions.EndpointIndependentNat,
-	})
+	}); err != nil {
+		// Surface to Flutter as a real connect failure (was previously ignored).
+		return fmt.Errorf("tunnel service failed: %w", err)
+	}
 	return nil
 }
 
 func (b *AdminServiceExtension) OnMainServiceClose() error {
+	hutils.HealStickyTun()
 	if b.tunInboundOptions == nil || b.socksOptions == nil {
 		return nil
 	}
-	return tunnelservice.DeactivateTunnelService()
+	err := tunnelservice.DeactivateTunnelService()
+	hutils.HealStickyTun()
+	return err
 }
 
 func NewAdminServiceExtension() ex.Extension {
