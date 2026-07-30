@@ -85,7 +85,7 @@ func CompileRoutingProfile(p *RoutingProfile, geoIPURL, geoSiteURL string) (rule
 		seen[tag] = struct{}{}
 		rulesets = append(rulesets, option.RuleSet{
 			Type:   C.RuleSetTypeRemote,
-			Tag:    tag,
+			Tag:    ruleSetTags(tag),
 			Format: C.RuleSetFormatBinary,
 			RemoteOptions: option.RemoteRuleSet{
 				URL:            url,
@@ -105,7 +105,7 @@ func CompileRoutingProfile(p *RoutingProfile, geoIPURL, geoSiteURL string) (rule
 		format := localRuleSetFormatByPath(path)
 		rulesets = append(rulesets, option.RuleSet{
 			Type:   C.RuleSetTypeLocal,
-			Tag:    tag,
+			Tag:    ruleSetTags(tag),
 			Format: format,
 			LocalOptions: option.LocalRuleSet{
 				Path: path,

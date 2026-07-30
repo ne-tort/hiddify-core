@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	dns "github.com/sagernet/sing-dns"
 )
 
 type HiddifyOptions struct {
@@ -38,9 +38,17 @@ type HiddifyOptions struct {
 }
 
 type DNSOptions struct {
-	RemoteDnsAddress        string                `json:"remote-dns-address,omitempty" overridable:"true"`
+	RemoteDnsServers        []string              `json:"remote-dns-servers,omitempty" overridable:"true"`
+	RemoteDnsCustomServers  []string              `json:"remote-dns-custom-servers,omitempty" overridable:"true"`
+	RemoteDnsGroupMode      string                `json:"remote-dns-group-mode,omitempty" overridable:"true"`
+	RemoteDnsErrorTTL       string                `json:"remote-dns-error-ttl,omitempty" overridable:"true"`
+	RemoteDnsWinTTL         string                `json:"remote-dns-win-ttl,omitempty" overridable:"true"`
 	RemoteDnsDomainStrategy option.DomainStrategy `json:"remote-dns-domain-strategy,omitempty" overridable:"true"`
-	DirectDnsAddress        string                `json:"direct-dns-address,omitempty" overridable:"true"`
+	DirectDnsServers        []string              `json:"direct-dns-servers,omitempty" overridable:"true"`
+	DirectDnsCustomServers  []string              `json:"direct-dns-custom-servers,omitempty" overridable:"true"`
+	DirectDnsGroupMode      string                `json:"direct-dns-group-mode,omitempty" overridable:"true"`
+	DirectDnsErrorTTL       string                `json:"direct-dns-error-ttl,omitempty" overridable:"true"`
+	DirectDnsWinTTL         string                `json:"direct-dns-win-ttl,omitempty" overridable:"true"`
 	DirectDnsDomainStrategy option.DomainStrategy `json:"direct-dns-domain-strategy,omitempty" overridable:"true"`
 	EnableFakeDNS           bool                  `json:"enable-fake-dns,omitempty"`
 	// IgnoreSubscriptionDNS: when true, always build the client DNS template
@@ -113,12 +121,17 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 	return &HiddifyOptions{
 		EnableNTP: true,
 		DNSOptions: DNSOptions{
-			RemoteDnsAddress:        "1.1.1.1",
-			RemoteDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
-			DirectDnsAddress:        "1.1.1.1",
-			DirectDnsDomainStrategy: option.DomainStrategy(dns.DomainStrategyAsIS),
+			RemoteDnsServers:        []string{"local"},
+			RemoteDnsGroupMode:      "stable",
+			RemoteDnsErrorTTL:       "2",
+			RemoteDnsWinTTL:         "5",
+			RemoteDnsDomainStrategy: option.DomainStrategy(C.DomainStrategyAsIS),
+			DirectDnsServers:        []string{"udp://1.1.1.1"},
+			DirectDnsGroupMode:      "stable",
+			DirectDnsErrorTTL:       "2",
+			DirectDnsWinTTL:         "5",
+			DirectDnsDomainStrategy: option.DomainStrategy(C.DomainStrategyAsIS),
 			EnableFakeDNS:           false,
-			// EnableDNSRouting:        false,
 		},
 		InboundOptions: InboundOptions{
 			EnableTun:          false,
@@ -142,7 +155,7 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 		},
 		RouteOptions: RouteOptions{
 			ResolveDestination:     false,
-			IPv6Mode:               option.DomainStrategy(dns.DomainStrategyAsIS),
+			IPv6Mode:               option.DomainStrategy(C.DomainStrategyAsIS),
 			BypassLAN:              false,
 			AllowConnectionFromLAN: false,
 		},		LogLevel: "error",

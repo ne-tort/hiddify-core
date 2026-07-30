@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -36,26 +37,61 @@ func getDnsAddress(d string) string {
 
 // setDns builds the simple/advanced client DNS template (L2 when subscription has no dns
 // or IgnoreSubscriptionDNS is set). Bootstrap has no detour (resolves outbound servers);
-// remote uses OutboundMainDetour for app DNS.
+// remote uses OutboundMainDetour for app DNS. Both resolve via DNS groups (type: group).
 func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string) error {
-	bootstrap, err := getDNSServerOptions(DNSBootstrapTag, opt.DirectDnsAddress, DNSLocalTag, "")
-	if err != nil {
-		// plain IP / udp without needing local resolver
-		bootstrap, err = getDNSServerOptions(DNSBootstrapTag, opt.DirectDnsAddress, "", "")
-		if err != nil {
-			return err
-		}
-	}
-	remote, err := getDNSServerOptions(DNSRemoteTag, getDnsAddress(opt.RemoteDnsAddress), DNSBootstrapTag, OutboundMainDetour)
-	if err != nil {
-		return err
-	}
+	directServers := resolveDnsServerList(opt.DirectDnsServers, "udp://1.1.1.1")
+	remoteServers := resolveDnsServerList(opt.RemoteDnsServers, "local")
+
 	local, err := getDNSServerOptions(DNSLocalTag, "local", "", "")
 	if err != nil {
 		return err
 	}
 
-	servers := []option.DNSServerOptions{*local, *bootstrap, *remote}
+	bootstrapMembers, bootstrapTags, err := buildDnsGroupMembers(
+		DNSBootstrapTag,
+		directServers,
+		DNSLocalTag,
+		"",
+	)
+	if err != nil {
+		return err
+	}
+	bootstrapGroup, err := getGroupDNSServerOptions(
+		DNSBootstrapTag,
+		bootstrapTags,
+		opt.DirectDnsGroupMode,
+		opt.DirectDnsErrorTTL,
+		opt.DirectDnsWinTTL,
+	)
+	if err != nil {
+		return err
+	}
+
+	remoteMembers, remoteTags, err := buildDnsGroupMembers(
+		DNSRemoteTag,
+		remoteServers,
+		DNSBootstrapTag,
+		OutboundMainDetour,
+	)
+	if err != nil {
+		return err
+	}
+	remoteGroup, err := getGroupDNSServerOptions(
+		DNSRemoteTag,
+		remoteTags,
+		opt.RemoteDnsGroupMode,
+		opt.RemoteDnsErrorTTL,
+		opt.RemoteDnsWinTTL,
+	)
+	if err != nil {
+		return err
+	}
+
+	servers := []option.DNSServerOptions{*local}
+	servers = append(servers, bootstrapMembers...)
+	servers = append(servers, *bootstrapGroup)
+	servers = append(servers, remoteMembers...)
+	servers = append(servers, *remoteGroup)
 	if staticIps != nil && len(*staticIps) > 0 {
 		static_dns, err := getStaticDNSServerOptions(DNSStaticTag, staticIps)
 		if err != nil {
@@ -90,6 +126,97 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 	}
 	options.DNS = &dnsOptions
 	return nil
+}
+
+func resolveDnsServerList(servers []string, fallback string) []string {
+	out := make([]string, 0, len(servers))
+	seen := map[string]struct{}{}
+	for _, s := range servers {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return []string{fallback}
+}
+
+func buildDnsGroupMembers(
+	groupTag string,
+	addresses []string,
+	domainResolver string,
+	detour string,
+) ([]option.DNSServerOptions, []string, error) {
+	members := make([]option.DNSServerOptions, 0, len(addresses))
+	tags := make([]string, 0, len(addresses))
+	for i, addr := range addresses {
+		tag := fmt.Sprintf("%s-%d", groupTag, i)
+		member, err := getDNSServerOptions(tag, getDnsAddress(addr), domainResolver, detour)
+		if err != nil && domainResolver != "" {
+			// plain IP / udp without needing local resolver
+			member, err = getDNSServerOptions(tag, getDnsAddress(addr), "", detour)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		members = append(members, *member)
+		tags = append(tags, tag)
+	}
+	return members, tags, nil
+}
+
+func getGroupDNSServerOptions(
+	tag string,
+	memberTags []string,
+	mode string,
+	errorTTL string,
+	winTTL string,
+) (*option.DNSServerOptions, error) {
+	if len(memberTags) == 0 {
+		return nil, E.New("dns group ", tag, ": servers is required")
+	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "stable"
+	}
+	opts := &option.GroupDNSServerOptions{
+		Servers:  memberTags,
+		Mode:     mode,
+		ErrorTTL: parseDnsGroupDuration(errorTTL, 2*time.Minute),
+	}
+	if mode == "fastest" {
+		opts.WinTTL = parseDnsGroupDuration(winTTL, 5*time.Minute)
+	}
+	return &option.DNSServerOptions{
+		Tag:     tag,
+		Type:    C.DNSTypeGroup,
+		Options: opts,
+	}, nil
+}
+
+func parseDnsGroupDuration(raw string, fallback time.Duration) badoption.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return badoption.Duration(fallback)
+	}
+	if minutes, err := strconv.Atoi(raw); err == nil {
+		if minutes <= 0 {
+			return badoption.Duration(fallback)
+		}
+		return badoption.Duration(time.Duration(minutes) * time.Minute)
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return badoption.Duration(fallback)
+	}
+	return badoption.Duration(d)
 }
 
 func getAllOutboundsOptions(options *option.Options) []any {
@@ -179,13 +306,8 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 				Domain: []string{"api.cloudflareclient.com"},
 			},
 			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSRemoteTag,
-					Strategy:       hopt.DirectDnsDomainStrategy,
-					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
-					RewriteTTL:     &DEFAULT_DNS_TTL,
-				},
+				Action:       C.RuleActionTypeRoute,
+				RouteOptions: dnsRouteAction(DNSRemoteTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
 			},
 		},
 	)
@@ -210,13 +332,8 @@ func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.Def
 					Domain: domains,
 				},
 				DNSRuleAction: option.DNSRuleAction{
-					Action: C.RuleActionTypeRoute,
-					RouteOptions: option.DNSRouteActionOptions{
-						Server:         DNSMultiDirectTag,
-						Strategy:       hopt.DirectDnsDomainStrategy,
-						RewriteTTL:     &DEFAULT_DNS_TTL,
-						// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
-					},
+					Action:       C.RuleActionTypeRoute,
+					RouteOptions: dnsRouteAction(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
 				},
 			},
 		)
@@ -273,13 +390,7 @@ func getDNSServerOptions(tag string, dnsurl string, domain_resolver string, deto
 	}
 	remoteOptions := option.RemoteDNSServerOptions{
 		RawLocalDNSServerOptions: option.RawLocalDNSServerOptions{
-			DialerOptions: option.DialerOptions{
-				Detour: detour,
-				DomainResolver: &option.DomainResolveOptions{
-					Server:   domain_resolver,
-					Strategy: option.DomainStrategy(C.DomainStrategyPreferIPv4),
-				},
-			},
+			DialerOptions: dialerWithResolver(detour, domain_resolver, option.DomainStrategy(C.DomainStrategyPreferIPv4)),
 		},
 	}
 	o := option.DNSServerOptions{

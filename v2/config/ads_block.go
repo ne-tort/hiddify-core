@@ -15,7 +15,7 @@ func appendAdsBlockRules(rulesets *[]option.RuleSet, rules *[]option.Rule, path 
 	}
 	*rulesets = append(*rulesets, option.RuleSet{
 		Type:   C.RuleSetTypeLocal,
-		Tag:    AdsRuleSetTag,
+		Tag:    ruleSetTags(AdsRuleSetTag),
 		Format: C.RuleSetFormatBinary,
 		LocalOptions: option.LocalRuleSet{
 			Path: path,

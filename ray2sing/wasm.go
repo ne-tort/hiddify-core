@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"syscall/js"
 
 	"github.com/hiddify/ray2sing/ray2sing"
@@ -22,7 +23,7 @@ func callGoFunction(this js.Value, args []js.Value) (string, error) {
 	input := args[0].String()
 
 	// Process the input and generate output
-	output, err := ray2sing.Ray2Singbox(input)
+	output, err := ray2sing.Ray2Singbox(context.Background(), input, false)
 
 	return output, err
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/hiddify/ray2sing/ray2sing"
@@ -26,7 +27,7 @@ func init() {
 }
 
 func convert(link string) error {
-	outbound, err := ray2sing.Ray2Singbox(link, false)
+	outbound, err := ray2sing.Ray2Singbox(context.Background(), link, false)
 	if err != nil {
 		return err
 	}

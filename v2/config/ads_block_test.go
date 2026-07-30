@@ -23,7 +23,7 @@ func TestAppendAdsBlockRules(t *testing.T) {
 	if len(rulesets) != 1 {
 		t.Fatalf("rulesets=%d", len(rulesets))
 	}
-	if rulesets[0].Tag != AdsRuleSetTag || rulesets[0].Type != C.RuleSetTypeLocal {
+	if len(rulesets[0].Tag) != 1 || rulesets[0].Tag[0] != AdsRuleSetTag || rulesets[0].Type != C.RuleSetTypeLocal {
 		t.Fatalf("ruleset tag/type")
 	}
 	if rulesets[0].LocalOptions.Path != path {

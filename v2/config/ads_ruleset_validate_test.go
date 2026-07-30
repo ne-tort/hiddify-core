@@ -182,7 +182,7 @@ func TestBuildConfigInjectsAdsBlock(t *testing.T) {
 	var rules []option.Rule
 	appendAdsBlockRules(&rulesets, &rules, abs)
 
-	if len(rulesets) != 1 || rulesets[0].Tag != AdsRuleSetTag {
+	if len(rulesets) != 1 || len(rulesets[0].Tag) != 1 || rulesets[0].Tag[0] != AdsRuleSetTag {
 		t.Fatalf("rulesets=%+v", rulesets)
 	}
 	if len(rules) != 1 || rules[0].DefaultOptions.RuleAction.Action != C.RuleActionTypeReject {

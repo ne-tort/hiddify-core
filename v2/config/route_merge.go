@@ -112,18 +112,34 @@ func MergeSubscriptionRoute(
 	}
 	seen := make(map[string]struct{}, len(*rulesets))
 	for _, rs := range *rulesets {
-		if rs.Tag != "" {
-			seen[rs.Tag] = struct{}{}
+		for _, tag := range rs.Tag {
+			if tag != "" {
+				seen[tag] = struct{}{}
+			}
 		}
 	}
 	for _, rs := range sub.RuleSet {
-		if rs.Tag == "" {
+		if len(rs.Tag) == 0 {
 			continue
 		}
-		if _, ok := seen[rs.Tag]; ok {
+		dup := false
+		for _, tag := range rs.Tag {
+			if tag == "" {
+				continue
+			}
+			if _, ok := seen[tag]; ok {
+				dup = true
+				break
+			}
+		}
+		if dup {
 			continue
 		}
-		seen[rs.Tag] = struct{}{}
+		for _, tag := range rs.Tag {
+			if tag != "" {
+				seen[tag] = struct{}{}
+			}
+		}
 		*rulesets = append(*rulesets, rs)
 	}
 	for _, rule := range sub.Rules {

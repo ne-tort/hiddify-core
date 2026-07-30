@@ -32,7 +32,7 @@ func NewService(ctx context.Context, options option.Options) (*daemon.StartedSer
 	if err != nil {
 		return nil, err
 	}
-	if err := instance.StartOrReloadService(string(configJSON), nil); err != nil {
+	if err := instance.StartOrReloadService(ctx, string(configJSON), nil); err != nil {
 		return nil, err
 	}
 	// ExtraServices/AddService is hiddify-sing-box-specific; invoke lifecycle hooks directly.

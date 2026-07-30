@@ -91,8 +91,8 @@ func TestBuildIgnoresSubscriptionDNSWhenFlagged(t *testing.T) {
 }`
 	h := config.DefaultHiddifyOptions()
 	h.IgnoreSubscriptionDNS = true
-	h.DirectDnsAddress = "1.1.1.1"
-	h.RemoteDnsAddress = "8.8.8.8"
+	h.DirectDnsServers = []string{"udp://1.1.1.1"}
+	h.RemoteDnsServers = []string{"udp://8.8.8.8"}
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
 		t.Fatal(err)
@@ -112,8 +112,8 @@ func TestBuildIgnoresSubscriptionDNSWhenFlagged(t *testing.T) {
 func TestBuildTemplateWhenNoSubscriptionDNS(t *testing.T) {
 	profile := `{"outbounds":[{"type":"direct","tag":"node-a"}]}`
 	h := config.DefaultHiddifyOptions()
-	h.DirectDnsAddress = "1.1.1.1"
-	h.RemoteDnsAddress = "8.8.8.8"
+	h.DirectDnsServers = []string{"udp://1.1.1.1"}
+	h.RemoteDnsServers = []string{"udp://8.8.8.8"}
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
 		t.Fatal(err)

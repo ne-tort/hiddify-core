@@ -312,7 +312,9 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 				Type: C.TypeDirect,
 				Options: &option.DirectOutboundOptions{
 					DialerOptions: option.DialerOptions{
-						TCPFastOpen: false,
+						AbstractDialerOptions: option.AbstractDialerOptions{
+							TCPFastOpen: false,
+						},
 					},
 				},
 			},
@@ -619,14 +621,8 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 				Domain: forceDirectRoute,
 			},
 			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:         DNSMultiDirectTag,
-					Strategy:       hopt.DirectDnsDomainStrategy,
-					RewriteTTL:     &DEFAULT_DNS_TTL,
-					DisableCache:   false,
-					// LX-STUB: BypassIfFailed absent in lx DNSRouteActionOptions
-				},
+				Action:       C.RuleActionTypeRoute,
+				RouteOptions: dnsRouteAction(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
 			},
 		})
 		routeRules = append(routeRules, option.Rule{
@@ -730,25 +726,16 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 						},
 					},
 					DNSRuleAction: option.DNSRuleAction{
-						Action: C.RuleActionTypeRoute,
-						RouteOptions: option.DNSRouteActionOptions{
-							Server:       DNSFakeTag,
-							Strategy:     hopt.RemoteDnsDomainStrategy,
-							RewriteTTL:   &DEFAULT_DNS_TTL,
-							DisableCache: true,
-						},
+						Action:       C.RuleActionTypeRoute,
+						RouteOptions: dnsRouteAction(DNSFakeTag, hopt.RemoteDnsDomainStrategy, &DEFAULT_DNS_TTL, true),
 					},
 				})
 		}
 		dnsRules = append(dnsRules, option.DefaultDNSRule{
 			RawDefaultDNSRule: option.RawDefaultDNSRule{},
 			DNSRuleAction: option.DNSRuleAction{
-				Action: C.RuleActionTypeRoute,
-				RouteOptions: option.DNSRouteActionOptions{
-					Server:     DNSRemoteTag,
-					Strategy:   hopt.RemoteDnsDomainStrategy,
-					RewriteTTL: &DEFAULT_DNS_TTL,
-				},
+				Action:       C.RuleActionTypeRoute,
+				RouteOptions: dnsRouteAction(DNSRemoteTag, hopt.RemoteDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
 			},
 		})
 	}

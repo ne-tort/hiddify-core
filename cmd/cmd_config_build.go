@@ -143,8 +143,8 @@ func addHConfigFlags(commandRun *cobra.Command) {
 
 	commandRun.Flags().BoolVar(&defaultConfigs.TLSTricks.MixedSNICase, "mixed-sni-case", false, "MixedSNICase")
 
-	commandRun.Flags().StringVar(&defaultConfigs.RemoteDnsAddress, "dns-remote", "1.1.1.1", "RemoteDNS (1.1.1.1, https://1.1.1.1/dns-query)")
-	commandRun.Flags().StringVar(&defaultConfigs.DirectDnsAddress, "dns-direct", "1.1.1.1", "DirectDNS (1.1.1.1, https://1.1.1.1/dns-query)")
+	commandRun.Flags().StringSliceVar(&defaultConfigs.RemoteDnsServers, "dns-remote", []string{"local"}, "Remote DNS members (local, 1.1.1.1, https://1.1.1.1/dns-query)")
+	commandRun.Flags().StringSliceVar(&defaultConfigs.DirectDnsServers, "dns-direct", []string{"1.1.1.1"}, "Direct DNS members (1.1.1.1, https://1.1.1.1/dns-query)")
 	commandRun.Flags().StringVar(&defaultConfigs.ClashApiSecret, "web-secret", "", "Web Server Secret")
 	commandRun.Flags().Uint16Var(&defaultConfigs.ClashApiPort, "web-port", 6756, "Web Server Port")
 	commandRun.Flags().StringVar(&defaultConfigs.LogLevel, "log-level", "warn", "log level")
