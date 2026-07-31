@@ -646,11 +646,20 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 		appendAdsBlockRules(&rulesets, &routeRules, hopt.AdsRuleSetPath)
 	}
 
-	// L4: client-owned route — local profile first, then optional subscription overlay.
+	// L4: client-owned route — local profile stack first, then optional subscription overlay.
 	var localRS []option.RuleSet
 	var localRules []option.Rule
-	if hopt.RoutingProfile != nil && hopt.RoutingProfile.Enabled {
-		localRS, localRules = CompileRoutingProfile(hopt.RoutingProfile, hopt.GeoIPRuleSetURL, hopt.GeoSiteRuleSetURL)
+	profiles := hopt.RoutingProfiles
+	if len(profiles) == 0 && hopt.RoutingProfile != nil {
+		profiles = []*RoutingProfile{hopt.RoutingProfile}
+	}
+	for _, rp := range profiles {
+		if rp == nil || !rp.Enabled {
+			continue
+		}
+		rs, rules := CompileRoutingProfile(rp, hopt.GeoIPRuleSetURL, hopt.GeoSiteRuleSetURL)
+		localRS = append(localRS, rs...)
+		localRules = append(localRules, rules...)
 	}
 	for _, rs := range localRS {
 		rulesets = append(rulesets, rs)
@@ -682,7 +691,22 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 	}
 
 	final := OutboundMainDetour
-	if hopt.RoutingProfile != nil && hopt.RoutingProfile.Enabled && !hopt.RoutingProfile.GlobalProxy {
+	globalProxy := true
+	if hopt.RoutingGlobalProxy != nil {
+		globalProxy = *hopt.RoutingGlobalProxy
+	} else if len(profiles) == 1 && profiles[0] != nil {
+		globalProxy = profiles[0].GlobalProxy
+	} else if hopt.RoutingProfile != nil {
+		globalProxy = hopt.RoutingProfile.GlobalProxy
+	}
+	anyEnabled := false
+	for _, rp := range profiles {
+		if rp != nil && rp.Enabled {
+			anyEnabled = true
+			break
+		}
+	}
+	if anyEnabled && !globalProxy {
 		final = OutboundDirectTag
 	}
 

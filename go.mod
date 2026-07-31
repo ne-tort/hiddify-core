@@ -304,7 +304,7 @@ replace github.com/hiddify/ray2sing => ./ray2sing
 // Engine: ne-tort/sing-box-lx (checked out at hiddify-app/vendor/sing-box-lx).
 replace github.com/sagernet/sing-box => ../vendor/sing-box-lx
 
-replace github.com/sagernet/sing-vmess => github.com/starifly/sing-vmess v0.2.7-mod.9
+replace github.com/sagernet/sing-vmess => ../vendor/sing-vmess
 
 replace github.com/sagernet/wireguard-go => ../vendor/sing-box-lx/submodules/wireguard-go
 

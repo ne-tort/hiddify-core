@@ -92,7 +92,11 @@ type RouteOptions struct {
 	IgnoreSubscriptionRoute bool `json:"ignore-subscription-route,omitempty"`
 	// RoutePriority is ignored: local profile always precedes subscription (client owns conflicts).
 	RoutePriority RoutePriority `json:"route-priority,omitempty"`
-	// RoutingProfile is the Happ-like local profile compiled into rule_sets when Enabled.
+	// RoutingProfiles is the ordered stack of local profiles (first wins domain conflicts).
+	RoutingProfiles []*RoutingProfile `json:"routing-profiles,omitempty"`
+	// RoutingGlobalProxy selects route.final after all profile rules (true → proxy, false → direct).
+	RoutingGlobalProxy *bool `json:"routing-global-proxy,omitempty"`
+	// RoutingProfile is legacy singular profile; used when RoutingProfiles is empty.
 	RoutingProfile *RoutingProfile `json:"routing-profile,omitempty"`
 	GeoIPRuleSetURL   string `json:"geoip-ruleset-url,omitempty"`
 	GeoSiteRuleSetURL string `json:"geosite-ruleset-url,omitempty"`

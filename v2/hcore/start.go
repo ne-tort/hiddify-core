@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	"github.com/hiddify/hiddify-core/v2/config"
 	"github.com/hiddify/hiddify-core/v2/db"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
@@ -148,6 +149,12 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance
+	monitoring.Activate(static.Context(), static.Box(), static.UrlTestHistory(), func() string {
+		if static.HiddifyOptions != nil {
+			return static.HiddifyOptions.ConnectionTestUrl
+		}
+		return ""
+	})
 	if static.debug {
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-start.log"))
 	}

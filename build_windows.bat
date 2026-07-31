@@ -1,10 +1,18 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 set GOOS=windows
 set GOARCH=amd64
 set CGO_ENABLED=1
-REM Keep in sync with Makefile TAGS / build_tags.txt
-set TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_shadowquic,with_sudoku,with_trusttunnel,with_carrier_client,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_purego,badlinkname
+
+REM TAGS from build_tags.txt (single source of truth)
+set "TAGS="
+for /f "usebackq eol=# tokens=* delims=" %%i in ("%~dp0build_tags.txt") do (
+  if not defined TAGS set "TAGS=%%i"
+)
+if not defined TAGS (
+  echo Error: could not read TAGS from build_tags.txt
+  exit /b 1
+)
 
 if not exist bin mkdir bin
 if not exist bin\libcronet.dll (
@@ -15,6 +23,7 @@ if not exist bin\libcronet.dll (
 )
 
 echo Building hiddify-core.dll...
+echo Tags: %TAGS%
 go build -trimpath -tags %TAGS%,with_purego -buildmode=c-shared -ldflags="-w -s -checklinkname=0" -o bin/hiddify-core.dll ./platform/desktop
 if errorlevel 1 exit /b 1
 

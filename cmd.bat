@@ -1,4 +1,12 @@
 @echo off
-REM Keep in sync with Makefile TAGS / build_tags.txt (lx: mieru, derp, carrier, balancer).
-set TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_shadowquic,with_sudoku,with_trusttunnel,with_carrier_client,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_purego,badlinkname
+REM TAGS from build_tags.txt (single source of truth)
+setlocal EnableExtensions
+set "TAGS="
+for /f "usebackq eol=# tokens=* delims=" %%i in ("%~dp0build_tags.txt") do (
+  if not defined TAGS set "TAGS=%%i"
+)
+if not defined TAGS (
+  echo Error: could not read TAGS from build_tags.txt
+  exit /b 1
+)
 go run --tags %TAGS% ./cli %*

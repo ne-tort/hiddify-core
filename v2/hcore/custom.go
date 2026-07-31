@@ -1,6 +1,7 @@
 package hcore
 
 import (
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	"github.com/hiddify/hiddify-core/v2/config"
 	"github.com/sagernet/sing-box/log"
 )
@@ -14,6 +15,7 @@ func errorWrapper(state MessageType, err error) (*CoreInfoResponse, error) {
 func StopAndAlert(msgType MessageType, message string) {
 	SetCoreStatus(CoreStates_STOPPED, msgType, message)
 
+	monitoring.Deactivate()
 	if ss := static.StartedService; ss != nil {
 		ss.CloseService()
 		static.StartedService = nil

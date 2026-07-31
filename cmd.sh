@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Keep in sync with Makefile TAGS / build_tags.txt (lx: mieru, derp, carrier, balancer).
+# TAGS from build_tags.txt (single source of truth)
 set -euo pipefail
-TAGS=with_gvisor,with_quic,with_wireguard,with_utls,with_grpc,with_awg,tfogo_checklinkname0,with_naive_outbound,with_conntrack,with_xhttp,with_mieru,with_derp,with_shadowquic,with_sudoku,with_trusttunnel,with_carrier_client,with_carrier_vk,with_carrier_jitsi,with_carrier_telemost,with_carrier_wbstream,with_balancer,with_purego,badlinkname
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAGS="$(grep -v '^[[:space:]]*#' "$ROOT/build_tags.txt" | grep -v '^[[:space:]]*$' | tr -d '\r' | head -n1)"
+if [[ -z "${TAGS}" ]]; then
+  echo "Error: could not read TAGS from build_tags.txt" >&2
+  exit 1
+fi
 go run --tags "$TAGS" ./cmd/main "$@"

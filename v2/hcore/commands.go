@@ -323,60 +323,9 @@ func (h *HiddifyInstance) UrlTest(in *UrlTestRequest) (*hcommon.Response, error)
 	if box == nil {
 		return nil, E.New("service not ready")
 	}
-	monitor := monitoring.Get(h.Context())
-	monitor.TestNow(in.Tag)
-	// router := box.Outbound()
-	// abstractOutboundGroup, isLoaded := router.Outbound(groupTag)
-	// if !isLoaded {
-	// 	return &hcommon.Response{
-	// 		Code:    hcommon.ResponseCode_FAILED,
-	// 		Message: E.New("outbound group not found: ", in.GroupTag).Error(),
-	// 	}, E.New("outbound group not found: ", groupTag)
-	// }
-	// outboundGroup, isOutboundGroup := abstractOutboundGroup.(adapter.OutboundGroup)
-	// if !isOutboundGroup {
-	// 	return &hcommon.Response{
-	// 		Code:    hcommon.ResponseCode_FAILED,
-	// 		Message: E.New("outbound is not a group: ", in.GroupTag).Error(),
-	// 	}, E.New("outbound is not a group: ", groupTag)
-	// }
-
-	// if urlTest, isURLTest := abstractOutboundGroup.(*group.URLTest); isURLTest {
-	// 	go func() {
-	// 		for _, p := range router.Outbounds() {
-	// 			if p.Tag() == groupTag {
-	// 				continue
-	// 			}
-	// 			if group, isGroup := p.(adapter.OutboundGroup); isGroup {
-	// 				urlTest.ForceRecheckOutbound(group.Now())
-	// 			}
-	// 		}
-	// 		urlTest.CheckOutbounds()
-	// 	}()
-	// } else {
-	// 	historyStorage := h.UrlTestHistory()
-	// 	outbounds := common.Filter(common.Map(outboundGroup.All(), func(it string) adapter.Outbound {
-	// 		itOutbound, _ := router.Outbound(it)
-	// 		return itOutbound
-	// 	}), func(it adapter.Outbound) bool {
-	// 		if it == nil {
-	// 			return false
-	// 		}
-	// 		_, isGroup := it.(adapter.OutboundGroup)
-	// 		return !isGroup
-	// 	})
-	// 	b, _ := batch.New(h.Context(), batch.WithConcurrencyNum[any](10))
-	// 	for _, detour := range outbounds {
-	// 		outboundToTest := detour
-	// 		outboundTag := outboundToTest.Tag()
-	// 		b.Go(outboundTag, func() (any, error) {
-	// 			instance := box
-
-	// 			group.CheckOutbound(instance.Logger(), h.Context(), historyStorage, router, "", outboundToTest, nil)
-	// 			return nil, nil
-	// 		})
-	// 	}
-	// }
+	// Run probe synchronously (bounded by monitoring.ProbeTimeout = 3s).
+	// Results are stored in HistoryStorage and pushed via MainOutboundsInfo stream.
+	_ = monitoring.Get(h.Context()).TestNow(in.Tag)
 
 	return &hcommon.Response{
 		Code:    hcommon.ResponseCode_OK,

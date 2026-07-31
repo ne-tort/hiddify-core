@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/hiddify/hiddify-core/cmd/internal/build_shared"
+	"github.com/hiddify/hiddify-core/internal/buildtags"
 	_ "github.com/sagernet/gomobile"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/rw"
@@ -47,14 +48,12 @@ const libName = "hiddify-core"
 func init() {
 	sharedFlags = append(sharedFlags, "-trimpath")
 	sharedFlags = append(sharedFlags, "-ldflags", "-s -w")
-	sharedTags = append(sharedTags,
-		"with_gvisor", "with_quic", "with_wireguard", "with_utls", "with_grpc",
-		"with_awg", "tfogo_checklinkname0", "with_naive_outbound", "with_conntrack", "with_xhttp",
-		"with_mieru", "with_derp", "with_shadowquic", "with_sudoku", "with_trusttunnel",
-		"with_carrier_client", "with_carrier_vk", "with_carrier_jitsi", "with_carrier_telemost", "with_carrier_wbstream",
-		"with_balancer", "with_purego", "badlinkname",
-	)
-	iosTags = append(iosTags, "with_dhcp", "with_low_memory", "with_conntrack")
+	tags, err := buildtags.Load(".", filepath.Join("..", "..", ".."))
+	if err != nil {
+		log.Fatal("load build_tags.txt: ", err)
+	}
+	sharedTags = append(sharedTags, tags...)
+	iosTags = append(iosTags, "with_low_memory", "with_conntrack")
 }
 
 func setDesktopEnv() {

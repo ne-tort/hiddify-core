@@ -354,16 +354,18 @@ jobs:
       - name: Set build tags
         run: |
           set -xeuo pipefail
-          TAGS='with_v2ray_api,with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_acme,with_tailscale,with_ccm,with_ocm,tfogo_checklinkname0'
-          if [[ "${{ matrix.naive }}" == "true" ]]; then
-            TAGS="${TAGS},with_naive_outbound"
+          # Single source of truth with local Makefile / Windows bat / build_libcore.
+          TAGS="$(grep -v '^[[:space:]]*#' build_tags.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | head -n1)"
+          if [[ -z "${TAGS}" ]]; then
+            echo "empty build_tags.txt" >&2
+            exit 1
           fi
-          if [[ "${{ matrix.variant }}" == "purego" ]]; then
-            TAGS="${TAGS},with_purego"
-          elif [[ "${{ matrix.variant }}" == "musl" ]]; then
+          # Matrix may add musl; purego/naive are already in build_tags.txt when required.
+          if [[ "${{ matrix.variant }}" == "musl" ]]; then
             TAGS="${TAGS},with_musl"
           fi
           echo "BUILD_TAGS=${TAGS}" >> "${GITHUB_ENV}"
+          echo "BUILD_TAGS=${TAGS}"
       - name: Build (purego)
         if: matrix.variant == 'purego'
         run: |

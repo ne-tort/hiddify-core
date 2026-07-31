@@ -18,8 +18,8 @@ import (
 // Share-link → typed option.Outbound / Endpoint.
 // Unknown schemes fail here; unknown JSON `type` fails later in sing-box registry.
 //
-// Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://, awg://, [Interface].
-// lx types: mieru / carrier / derp / shadowquic / sudoku / trusttunnel (outbound), wireguard (endpoint + Amnezia root fields).
+// Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://.
+// lx: mieru / carrier / derp / shadowquic / sudoku / trusttunnel; wireguard endpoint + Amnezia (wg://, awg://, [Interface]).
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
 	"vless://":     VlessSingbox,
@@ -57,6 +57,8 @@ var configTypes = map[string]ParserFunc{
 var endpointParsers = map[string]EndpointParserFunc{
 	"wg://":         WireguardEndpoint,
 	"wireguard://":  WireguardEndpoint,
+	"awg://":        AWGSingbox,
+	"[Interface]":   AWGSingboxTxt,
 }
 var xrayConfigTypes = map[string]ParserFunc{
 	"vmess://":  VmessXray,

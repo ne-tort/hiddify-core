@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hiddify/hiddify-core/compat/monitoring"
 	"github.com/hiddify/hiddify-core/v2/config"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
 )
@@ -29,9 +30,11 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	SetCoreStatus(CoreStates_STOPPING, MessageType_EMPTY, "")
 	ss := static.StartedService
 	if ss == nil {
+		monitoring.Deactivate()
 		return SetCoreStatus(CoreStates_STOPPED, MessageType_ALREADY_STOPPED, ""), nil
 	}
 
+	monitoring.Deactivate()
 	if err := ss.CloseService(); err != nil {
 		static.StartedService = nil
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-stop.log"))
