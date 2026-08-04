@@ -54,6 +54,15 @@ func parseWGPrefixesCSV(raw string) (badoption.Listable[netip.Prefix], error) {
 	return badoption.Listable[netip.Prefix](out), nil
 }
 
+// toPrefixableAddrs adapts netip.Prefix list to WireGuardEndpointOptions.Address (SPEC 057).
+func toPrefixableAddrs(list []netip.Prefix) badoption.Listable[badoption.Prefixable] {
+	out := make(badoption.Listable[badoption.Prefixable], len(list))
+	for i, p := range list {
+		out[i] = badoption.Prefixable(p)
+	}
+	return out
+}
+
 func amneziaFromParams(params map[string]string) T.AmneziaWGOptions {
 	return T.AmneziaWGOptions{
 		Jc:                     uint32(toUInt16(params["jc"], 0)),
@@ -184,7 +193,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 
 	opts := &T.WireGuardEndpointOptions{
 		PrivateKey:       privateKey,
-		Address:          badoption.Listable[netip.Prefix](addresses),
+		Address:          toPrefixableAddrs(addresses),
 		Peers:            []T.WireGuardPeer{peer},
 		AmneziaWGOptions: amneziaFromParams(awgFlat),
 	}
@@ -290,7 +299,7 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 
 	opts := &T.WireGuardEndpointOptions{
 		PrivateKey:       pk,
-		Address:          addresses,
+		Address:          toPrefixableAddrs(addresses),
 		Peers:            []T.WireGuardPeer{peer},
 		MTU:              uint32(toUInt16(getOneOfN(u.Params, "0", "mtu"), 0)),
 		Workers:          int(toUInt16(u.Params["workers"], 0)),

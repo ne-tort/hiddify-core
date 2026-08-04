@@ -2,11 +2,14 @@ package config
 
 import (
 	"encoding/base64"
+	"net/netip"
 	"strings"
 	"testing"
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/wireguard"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 func TestBuildWarpWireGuardEndpoint(t *testing.T) {
@@ -23,7 +26,43 @@ func TestBuildWarpWireGuardEndpoint(t *testing.T) {
 	if ep.Tag != WarpWGTag || ep.Type != C.TypeWireGuard {
 		t.Fatalf("unexpected endpoint %#v", ep)
 	}
+	opts := ep.Options.(*option.WireGuardEndpointOptions)
+	// Legacy path for Cloudflare WARP (single peer, full tunnel) — must not enter sugar mode.
+	if opts.Subnet.IsValid() {
+		t.Fatal("warp must not set sugar subnet")
+	}
+	if len(opts.Peers) != 1 {
+		t.Fatalf("peers=%d", len(opts.Peers))
+	}
+	peer := opts.Peers[0]
+	if peer.IP.IsValid() {
+		t.Fatal("warp must not set peer.ip sugar")
+	}
+	if peer.ExitNode || opts.UseExitNode || opts.AdvertiseExitNode {
+		t.Fatal("warp must not set exit-node sugar flags")
+	}
+	if len(peer.AllowedIPs) < 2 {
+		t.Fatalf("legacy allowed_ips required, got %v", peer.AllowedIPs)
+	}
+	if len(opts.Address) != 2 {
+		t.Fatalf("want v4+v6 address, got %v", opts.Address)
+	}
+	// Prefixable accepts host+/CIDR; builder normalizes bare IPs to /32 and /128.
+	if netip.Prefix(opts.Address[0]).String() != "172.16.0.2/32" {
+		t.Fatalf("v4 address=%v", opts.Address[0])
+	}
+	if peer.Address != "engage.cloudflareclient.com" || peer.Port != 2408 {
+		t.Fatalf("peer endpoint=%s:%d", peer.Address, peer.Port)
+	}
+	before := append(badoption.Listable[netip.Prefix](nil), peer.AllowedIPs...)
+	if err := wireguard.NormalizeWireGuardSugar(opts); err != nil {
+		t.Fatalf("legacy WARP must pass sugar normalize: %v", err)
+	}
+	if len(opts.Peers[0].AllowedIPs) != len(before) {
+		t.Fatalf("normalize mutated WARP allowed_ips: before=%v after=%v", before, opts.Peers[0].AllowedIPs)
+	}
 }
+
 
 func TestBuildWarpMasqueOutbound(t *testing.T) {
 	out, err := buildWarpMasqueOutbound(WarpMasqueConfig{

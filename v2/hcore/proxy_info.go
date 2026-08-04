@@ -15,6 +15,49 @@ import (
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
+func (h *HiddifyInstance) historyForDetour(hismap map[string]*adapter.URLTestHistory, detour adapter.Outbound) *adapter.URLTestHistory {
+	if hismap == nil || detour == nil {
+		return nil
+	}
+	pickAlive := func(tag string) *adapter.URLTestHistory {
+		h := hismap[tag]
+		if h == nil || h.Delay == 0 || h.Delay >= monitoring.FailDelay {
+			return nil
+		}
+		return h
+	}
+	if h := pickAlive(detour.Tag()); h != nil {
+		return h
+	}
+	// Balancer/selector tags usually have no own history — use the selected leaf.
+	tag := monitoring.RealTag(detour)
+	if tag != "" && tag != detour.Tag() {
+		if h := pickAlive(tag); h != nil {
+			return h
+		}
+	}
+	if group, ok := detour.(adapter.OutboundGroup); ok {
+		var best *adapter.URLTestHistory
+		for _, itemTag := range group.All() {
+			h := pickAlive(itemTag)
+			if h == nil {
+				continue
+			}
+			if best == nil || h.Delay < best.Delay {
+				best = h
+			}
+		}
+		if best != nil {
+			return best
+		}
+		// Fall back to raw selected history (including fail) so UI can show timeout.
+		if tag != "" {
+			return hismap[tag]
+		}
+	}
+	return hismap[detour.Tag()]
+}
+
 func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory, detour adapter.Outbound) *OutboundInfo {
 	// historyStorage := h.UrlTestHistory()
 	// if historyStorage == nil {
@@ -62,12 +105,10 @@ func (h *HiddifyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTestHi
 	outbounds_converted := make(map[string]*OutboundInfo, 0)
 	var iGroups []adapter.OutboundGroup
 	for _, it := range box.Endpoint().Endpoints() {
-		his, _ := hismap[it.Tag()]
-		outbounds_converted[it.Tag()] = h.GetProxyInfo(his, it)
+		outbounds_converted[it.Tag()] = h.GetProxyInfo(h.historyForDetour(hismap, it), it)
 	}
 	for _, it := range box.Outbound().Outbounds() {
-		his, _ := hismap[it.Tag()]
-		outbounds_converted[it.Tag()] = h.GetProxyInfo(his, it)
+		outbounds_converted[it.Tag()] = h.GetProxyInfo(h.historyForDetour(hismap, it), it)
 	}
 	for _, it := range outbounds_converted {
 		if it.Detour == "" {

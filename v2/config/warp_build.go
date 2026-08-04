@@ -9,9 +9,20 @@ import (
 
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
+func toWGPrefixableAddrs(list []netip.Prefix) badoption.Listable[badoption.Prefixable] {
+	out := make(badoption.Listable[badoption.Prefixable], len(list))
+	for i, p := range list {
+		out[i] = badoption.Prefixable(p)
+	}
+	return out
+}
+
 func buildWarpWireGuardEndpoint(cfg WarpWireguardConfig) (*option.Endpoint, error) {
+	// Intentional legacy WireGuard shape (SPEC 057): no subnet / peer.ip.
+	// Cloudflare WARP is a single full-tunnel peer; sugar is for hub stars only.
 	if cfg.PrivateKey == "" || cfg.PeerPublicKey == "" {
 		return nil, fmt.Errorf("warp wg: missing keys")
 	}
@@ -47,13 +58,13 @@ func buildWarpWireGuardEndpoint(cfg WarpWireguardConfig) (*option.Endpoint, erro
 		Tag:  WarpWGTag,
 		Options: &option.WireGuardEndpointOptions{
 			MTU:        1280,
-			Address:    addrs,
+			Address:    toWGPrefixableAddrs(addrs),
 			PrivateKey: cfg.PrivateKey,
 			Peers: []option.WireGuardPeer{{
-				Address: host,
-				Port:    port,
+				Address:   host,
+				Port:      port,
 				PublicKey: cfg.PeerPublicKey,
-				AllowedIPs: []netip.Prefix{
+				AllowedIPs: badoption.Listable[netip.Prefix]{
 					netip.MustParsePrefix("0.0.0.0/0"),
 					netip.MustParsePrefix("::/0"),
 				},

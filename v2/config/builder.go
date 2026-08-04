@@ -58,7 +58,7 @@ const (
 
 var (
 	OutboundMainDetour     = OutboundSelectTag
-	PredefinedOutboundTags = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag, WarpWGTag, WarpMasqueTag}
+	PredefinedOutboundTags = []string{OutboundDirectTag, OutboundBypassTag, OutboundSelectTag, OutboundURLTestTag, OutboundDNSTag, OutboundDirectFragmentTag}
 )
 
 // BuildConfig merges layers:
@@ -199,23 +199,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		endpoints = append(endpoints, *out)
 	}
 
-	// Inject optional Cloudflare WARP nodes into the selectable/balancer pool (not route.final).
-	if opt.Warp.EnableWireguard && opt.Warp.WireguardConfig.PrivateKey != "" && !isOutboundDisabled(WarpWGTag, opt.DisabledOutboundTags) {
-		wg, err := buildWarpWireGuardEndpoint(opt.Warp.WireguardConfig)
-		if err != nil {
-			return fmt.Errorf("warp wireguard: %w", err)
-		}
-		endpoints = append(endpoints, *wg)
-		tags = append(tags, wg.Tag)
-	}
-	if opt.Warp.EnableMasque && opt.Warp.MasqueConfig.PrivateKey != "" && !isOutboundDisabled(WarpMasqueTag, opt.DisabledOutboundTags) {
-		mq, err := buildWarpMasqueOutbound(opt.Warp.MasqueConfig)
-		if err != nil {
-			return fmt.Errorf("warp masque: %w", err)
-		}
-		outbounds = append(outbounds, *mq)
-		tags = append(tags, mq.Tag)
-	}
+	// WARP nodes live in a dedicated local profile (Flutter WarpAutoProfileSync).
+	// Do not mix them into other profiles — multi-select merge covers composition.
 	if len(opt.ConnectionTestUrls) == 0 {
 		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl}
 	}
@@ -275,6 +260,42 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 
 	// Traffic path: route.final → select → (balance|lowest|node) → nodes.
 	// Keep final on select so UI/SelectOutbound can switch modes and nodes.
+	if len(tags) == 0 {
+		// Direct-only / empty leaf pool: select → direct (no empty balancers).
+		selector := option.Outbound{
+			Type: C.TypeSelector,
+			Tag:  OutboundSelectTag,
+			Options: &option.SelectorOutboundOptions{
+				Outbounds:                 []string{OutboundDirectTag},
+				Default:                   OutboundDirectTag,
+				InterruptExistConnections: true,
+			},
+		}
+		options.Endpoints = endpoints
+		options.Outbounds = append(
+			[]option.Outbound{selector},
+			append(outbounds,
+				option.Outbound{
+					Tag:     OutboundDirectTag,
+					Type:    C.TypeDirect,
+					Options: &option.DirectOutboundOptions{},
+				},
+				option.Outbound{
+					Tag:  OutboundDirectFragmentTag,
+					Type: C.TypeDirect,
+					Options: &option.DirectOutboundOptions{
+						DialerOptions: option.DialerOptions{
+							AbstractDialerOptions: option.AbstractDialerOptions{
+								TCPFastOpen: false,
+							},
+						},
+					},
+				},
+			)...,
+		)
+		return nil
+	}
+
 	defaultSelect := ""
 	if len(tags) > 0 {
 		defaultSelect = tags[0]
@@ -454,7 +475,9 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	for _, bind := range binds {
 		addr := badoption.Addr(netip.MustParseAddr(bind))
 
-		if hopt.EnableMixedPort {
+		// Always expose mixed-port when configured: required for system-proxy, app IP
+		// probes, and TUN-side localhost checks. Without it, configs had zero inbounds.
+		if hopt.MixedPort > 0 {
 			options.Inbounds = append(
 				options.Inbounds,
 				option.Inbound{

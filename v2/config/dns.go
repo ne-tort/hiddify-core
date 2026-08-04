@@ -39,6 +39,19 @@ func getDnsAddress(d string) string {
 // or IgnoreSubscriptionDNS is set). Bootstrap has no detour (resolves outbound servers);
 // remote uses OutboundMainDetour for app DNS. Both resolve via DNS groups (type: group).
 func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string) error {
+	return setDnsWithRemoteDetour(options, opt, staticIps, OutboundMainDetour)
+}
+
+// BuildDnsFragment builds a standalone dns object (for controlplane server PUT).
+// remoteDetour defaults to "direct" when empty (server dataplane has no select outbound).
+func BuildDnsFragment(options *option.Options, opt *HiddifyOptions, remoteDetour string) error {
+	if strings.TrimSpace(remoteDetour) == "" {
+		remoteDetour = "direct"
+	}
+	return setDnsWithRemoteDetour(options, opt, nil, remoteDetour)
+}
+
+func setDnsWithRemoteDetour(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string, remoteDetour string) error {
 	directServers := resolveDnsServerList(opt.DirectDnsServers, "udp://1.1.1.1")
 	remoteServers := resolveDnsServerList(opt.RemoteDnsServers, "local")
 
@@ -71,7 +84,7 @@ func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string]
 		DNSRemoteTag,
 		remoteServers,
 		DNSBootstrapTag,
-		OutboundMainDetour,
+		remoteDetour,
 	)
 	if err != nil {
 		return err

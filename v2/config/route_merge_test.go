@@ -6,7 +6,17 @@ import (
 	"github.com/hiddify/hiddify-core/v2/config"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 )
+
+func ruleSetTagContains(tags badoption.Listable[string], want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
+}
 
 func TestBuildMergesSubscriptionRuleSet(t *testing.T) {
 	profile := `{
@@ -42,7 +52,7 @@ func TestBuildMergesSubscriptionRuleSet(t *testing.T) {
 	}
 	foundRS := false
 	for _, rs := range built.Route.RuleSet {
-		if rs.Tag == "geoip-ru" {
+		if ruleSetTagContains(rs.Tag, "geoip-ru") {
 			foundRS = true
 			if rs.Type != C.RuleSetTypeRemote {
 				t.Fatalf("type=%s", rs.Type)
@@ -93,7 +103,7 @@ func TestBuildIgnoresSubscriptionRouteWhenFlagged(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rs := range built.Route.RuleSet {
-		if rs.Tag == "geoip-ru" {
+		if ruleSetTagContains(rs.Tag, "geoip-ru") {
 			t.Fatal("subscription rule_set should be ignored")
 		}
 	}
@@ -113,7 +123,9 @@ func TestCompileRoutingProfile(t *testing.T) {
 	}
 	tags := map[string]bool{}
 	for _, r := range rs {
-		tags[r.Tag] = true
+		for _, tag := range r.Tag {
+			tags[tag] = true
+		}
 	}
 	if !tags["geoip-ru"] || !tags["geosite-category-ads-all"] {
 		t.Fatalf("tags=%v", tags)
@@ -229,7 +241,7 @@ func TestSubscriptionRouteHasPolicy(t *testing.T) {
 		t.Fatal("bare sniff is not policy")
 	}
 	if !config.SubscriptionRouteHasPolicy(&option.RouteOptions{
-		RuleSet: []option.RuleSet{{Tag: "geoip-ru"}},
+		RuleSet: []option.RuleSet{{Tag: []string{"geoip-ru"}}},
 	}) {
 		t.Fatal("rule_set is policy")
 	}

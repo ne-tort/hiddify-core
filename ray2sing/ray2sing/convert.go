@@ -19,7 +19,9 @@ import (
 // Unknown schemes fail here; unknown JSON `type` fails later in sing-box registry.
 //
 // Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://.
-// lx: mieru / carrier / derp / shadowquic / sudoku / trusttunnel; wireguard endpoint + Amnezia (wg://, awg://, [Interface]).
+// lx: mieru / carrier / derp / shadowquic / sudoku / trusttunnel / anytls / shadowtls / snell;
+// wireguard endpoint + Amnezia (wg://, awg://, [Interface]).
+// inbound-only (no share parser): mixed, cloudflared.
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
 	"vless://":     VlessSingbox,
@@ -41,6 +43,9 @@ var configTypes = map[string]ParserFunc{
 	"shadowquic://":  ShadowQUICSingbox,
 	"sudoku://":      SudokuSingbox,
 	"trusttunnel://": TrustTunnelSingbox,
+	"anytls://":      AnyTLSSingbox,
+	"shadowtls://":   ShadowTLSSingbox,
+	"snell://":       SnellSingbox,
 
 	"ssconf://":  BeepassSingbox,
 	"direct://":  DirectSingbox,

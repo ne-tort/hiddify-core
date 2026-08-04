@@ -62,22 +62,46 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 
 	// Client-side rule-set merge (routing profile compiler).
 	if in.Content != "" {
-		var mergeReq struct {
-			Action string   `json:"hiddify_action"`
-			Inputs []string `json:"inputs"`
-			Output string   `json:"output"`
+		var actionReq struct {
+			Action string `json:"hiddify_action"`
 		}
-		if err := json.Unmarshal([]byte(in.Content), &mergeReq); err == nil && mergeReq.Action == "merge_rulesets" {
-			if err := config.MergeLocalRuleSets(mergeReq.Inputs, mergeReq.Output); err != nil {
-				return &ParseResponse{
-					ResponseCode: hcommon.ResponseCode_FAILED,
-					Message:      err.Error(),
-				}, nil
+		if err := json.Unmarshal([]byte(in.Content), &actionReq); err == nil {
+			switch actionReq.Action {
+			case "merge_rulesets":
+				var mergeReq struct {
+					Action string   `json:"hiddify_action"`
+					Inputs []string `json:"inputs"`
+					Output string   `json:"output"`
+				}
+				if err := json.Unmarshal([]byte(in.Content), &mergeReq); err != nil {
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+				}
+				if err := config.MergeLocalRuleSets(mergeReq.Inputs, mergeReq.Output); err != nil {
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+				}
+				return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: mergeReq.Output}, nil
+			case "build_dns_fragment":
+				var dnsReq struct {
+					Action       string                 `json:"hiddify_action"`
+					RemoteDetour string                 `json:"remote_detour"`
+					Options      map[string]any         `json:"options"`
+				}
+				if err := json.Unmarshal([]byte(in.Content), &dnsReq); err != nil {
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+				}
+				rawOpts, _ := json.Marshal(dnsReq.Options)
+				hopt := config.DefaultHiddifyOptions()
+				_ = json.Unmarshal(rawOpts, hopt)
+				opts := option.Options{}
+				if err := config.BuildDnsFragment(&opts, hopt, dnsReq.RemoteDetour); err != nil {
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+				}
+				out, err := json.Marshal(opts.DNS)
+				if err != nil {
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+				}
+				return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: string(out)}, nil
 			}
-			return &ParseResponse{
-				ResponseCode: hcommon.ResponseCode_OK,
-				Content:      mergeReq.Output,
-			}, nil
 		}
 	}
 

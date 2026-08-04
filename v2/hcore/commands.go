@@ -282,13 +282,26 @@ func (h *HiddifyInstance) UrlTestActive() (*hcommon.Response, error) {
 				Message: E.New("outbound not found in selector: ", config.OutboundSelectTag).Error(),
 			}, E.New("outbound not found in selector: ", config.OutboundSelectTag)
 		}
-		if outboundGroupInner, isLoaded := box.Outbound().Outbound(now); isLoaded {
-			if grp, isgrp := outboundGroupInner.(adapter.OutboundGroup); isgrp {
-				if n2 := grp.Now(); n2 != "" {
-					now = n2
-				}
+		// Walk nested groups (select → balance/lowest → leaf) until a concrete outbound.
+		seen := map[string]struct{}{now: {}}
+		for {
+			ob, ok := box.Outbound().Outbound(now)
+			if !ok {
+				break
 			}
-
+			grp, isgrp := ob.(adapter.OutboundGroup)
+			if !isgrp {
+				break
+			}
+			n2 := grp.Now()
+			if n2 == "" || n2 == now {
+				break
+			}
+			if _, loop := seen[n2]; loop {
+				break
+			}
+			seen[n2] = struct{}{}
+			now = n2
 		}
 		return h.UrlTest(&UrlTestRequest{
 			Tag: now,

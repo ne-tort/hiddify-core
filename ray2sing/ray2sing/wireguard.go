@@ -64,7 +64,7 @@ func WireguardEndpoint(rawURL string) (*T.Endpoint, error) {
 
 	opts := &T.WireGuardEndpointOptions{
 		DialerOptions:    getDialerOptions(decoded),
-		Address:          addrs,
+		Address:          toPrefixableAddrs(addrs),
 		PrivateKey:       privateKey,
 		Peers:            []T.WireGuardPeer{peer},
 		MTU:              uint32(toUInt16(decoded["mtu"], 0)),

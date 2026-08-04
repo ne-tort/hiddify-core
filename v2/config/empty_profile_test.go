@@ -35,8 +35,11 @@ func TestEmptyProfileRoundTripAndWarpBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal("build from {} src:", err)
 	}
-	if !strings.Contains(string(built), WarpMasqueTag) {
-		t.Fatalf("missing WARP-MASQUE in %s", built)
+	if !strings.Contains(string(built), "select") {
+		t.Fatalf("missing select outbound in %s", built)
+	}
+	if strings.Contains(string(built), WarpMasqueTag) {
+		t.Fatalf("WARP must not be mixed into empty profile build: %s", built)
 	}
 
 	// UTF-8 BOM must not break parse (Windows editors / PowerShell -Encoding utf8).
