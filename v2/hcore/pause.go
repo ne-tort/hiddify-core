@@ -47,3 +47,11 @@ func Wake() {
 	}
 
 }
+
+func ResetNetwork() {
+	if b := static.Box(); b != nil {
+		if n := b.Network(); n != nil {
+			n.ResetNetwork()
+		}
+	}
+}

@@ -8,7 +8,7 @@ import (
 func TestNormalizeLocalRulesetPath(t *testing.T) {
 	abs := `C:\data\hiddify_portable_data\routing_profiles\preset-ru\direct\merged.srs`
 	got := normalizeLocalRulesetPath(abs)
-	want := `routing_profiles\preset-ru\direct\merged.srs`
+	want := filepath.FromSlash("routing_profiles/preset-ru/direct/merged.srs")
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
@@ -20,8 +20,9 @@ func TestNormalizeLocalRulesetPath(t *testing.T) {
 
 	ads := `C:\data\hiddify_portable_data\rules\hiddify-ads.srs`
 	gotAds := normalizeLocalRulesetPath(ads)
-	if gotAds != `rules\hiddify-ads.srs` {
-		t.Fatalf("ads path got %q", gotAds)
+	wantAds := filepath.FromSlash("rules/hiddify-ads.srs")
+	if gotAds != wantAds {
+		t.Fatalf("ads path got %q want %q", gotAds, wantAds)
 	}
 }
 
@@ -34,8 +35,9 @@ func TestCompileRoutingProfileLocalSrsRelative(t *testing.T) {
 	if len(rs) != 1 {
 		t.Fatalf("want 1 ruleset got %d", len(rs))
 	}
-	if rs[0].LocalOptions.Path != `routing_profiles\preset-ru\direct\merged.srs` {
-		t.Fatalf("path %q", rs[0].LocalOptions.Path)
+	want := filepath.FromSlash("routing_profiles/preset-ru/direct/merged.srs")
+	if rs[0].LocalOptions.Path != want {
+		t.Fatalf("path %q want %q", rs[0].LocalOptions.Path, want)
 	}
 	if len(rules) != 1 {
 		t.Fatalf("want 1 rule got %d", len(rules))

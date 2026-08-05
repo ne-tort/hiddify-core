@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 
+	"github.com/hiddify/hiddify-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"google.golang.org/grpc"
 )
@@ -33,7 +33,7 @@ func (s *server) ParseConfig(ctx context.Context, in *ParseConfigRequest) (resp 
 	if err != nil {
 		return nil, err
 	}
-	err = os.WriteFile(in.Path, []byte(configStr), 0o644)
+	err = hutils.WriteFileAtomic(in.Path, []byte(configStr), 0o644)
 	if err != nil {
 		return nil, err
 	}

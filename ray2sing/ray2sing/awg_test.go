@@ -46,17 +46,24 @@ PersistentKeepalive = 15
 	if !ok {
 		t.Fatalf("options type %T", ep.Options)
 	}
-	if !opts.AmneziaWGOptions.IsSet() {
+	if opts.AWG2.IsSet() {
+		t.Fatal("expected awg3 nested block, not awg2")
+	}
+	awg := opts.EffectiveAmneziaWG()
+	if !awg.IsSet() {
 		t.Fatal("expected Amnezia fields")
 	}
-	if opts.Jc != 4 || opts.Jmin != 40 || opts.Jmax != 70 {
-		t.Fatalf("junk params: %+v", opts.AmneziaWGOptions)
+	if awg.Jc != 4 || awg.Jmin != 40 || awg.Jmax != 70 {
+		t.Fatalf("junk params: %+v", awg)
 	}
-	if opts.I1 != "<b 0x01>" || opts.Id != "example.com" || opts.Ip != "quic" || opts.Ib != "chrome" {
-		t.Fatalf("cps/masque: %+v", opts.AmneziaWGOptions)
+	if awg.I1 != "<b 0x01>" || awg.Id != "example.com" || awg.Ip != "quic" || awg.Ib != "chrome" {
+		t.Fatalf("cps/masque: %+v", awg)
 	}
-	if opts.HeaderProtectionKey == "" || string(opts.ContentPaddingAddition) == "" || string(opts.RekeyAfterTime) == "" {
-		t.Fatalf("awg3 missing: %+v", opts.AmneziaWGOptions)
+	if awg.HeaderProtectionKey == "" || string(awg.ContentPaddingAddition) == "" || string(awg.RekeyAfterTime) == "" {
+		t.Fatalf("awg3 missing: %+v", awg)
+	}
+	if !opts.AWG3.IsSet() {
+		t.Fatal("expected nested awg3")
 	}
 	if len(opts.Peers) != 1 || opts.Peers[0].Port != 8080 {
 		t.Fatalf("peer: %+v", opts.Peers)
@@ -64,16 +71,20 @@ PersistentKeepalive = 15
 }
 
 func TestWireguardEndpointAmneziaQuery(t *testing.T) {
-	raw := "wg://1.2.3.4:51820/?pk=priv&peer_public_key=pub&local_address=10.0.0.2/32&jc=3&jmin=10&jmax=20&i1=x&id=d.example&ip=dns&ib=firefox&header_protection_key=k&rekey_timeout=1-2#t"
+	raw := "wg://1.2.3.4:41641/?pk=priv&peer_public_key=pub&local_address=10.0.0.2/32&jc=3&jmin=10&jmax=20&i1=x&id=d.example&ip=dns&ib=firefox&header_protection_key=k&rekey_timeout=1-2#t"
 	ep, err := WireguardEndpoint(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	opts := ep.Options.(*T.WireGuardEndpointOptions)
-	if opts.Jc != 3 || opts.I1 != "x" || opts.Id != "d.example" || opts.Ip != "dns" {
-		t.Fatalf("%+v", opts.AmneziaWGOptions)
+	awg := opts.EffectiveAmneziaWG()
+	if awg.Jc != 3 || awg.I1 != "x" || awg.Id != "d.example" || awg.Ip != "dns" {
+		t.Fatalf("%+v", awg)
 	}
-	if string(opts.RekeyTimeout) != "1-2" {
-		t.Fatalf("rekey_timeout=%q", opts.RekeyTimeout)
+	if string(awg.RekeyTimeout) != "1-2" {
+		t.Fatalf("rekey_timeout=%q", awg.RekeyTimeout)
+	}
+	if !opts.AWG3.IsSet() || opts.AWG2.IsSet() {
+		t.Fatalf("want awg3 only, got awg2=%v awg3=%v", opts.AWG2.IsSet(), opts.AWG3.IsSet())
 	}
 }

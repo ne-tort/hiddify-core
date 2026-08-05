@@ -7,104 +7,104 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-func TestChainDetourOnMembers(t *testing.T) {
-	opt := DefaultHiddifyOptions()
-	opt.Chain = ChainOptions{
-		DetourTarget:  "relay",
-		DetourMembers: []string{"node-a", "node-b"},
+func TestResolvedChainDetoursPrefersMap(t *testing.T) {
+	c := ChainOptions{
+		DetourTarget:  "old-exit",
+		DetourMembers: []string{"a"},
+		Detours:       map[string]string{"node1": "exit1", "node2": "balance"},
 	}
-	input := &option.Options{
-		Outbounds: []option.Outbound{
-			{
-				Type: C.TypeVLESS,
-				Tag:  "relay",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-			{
-				Type: C.TypeVLESS,
-				Tag:  "node-a",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-			{
-				Type: C.TypeVLESS,
-				Tag:  "node-b",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-			{
-				Type: C.TypeVLESS,
-				Tag:  "node-c",
-				Options: &option.VLESSOutboundOptions{
-					DialerOptions: option.DialerOptions{},
-				},
-			},
-		},
+	got := resolvedChainDetours(c)
+	if got["node1"] != "exit1" || got["node2"] != "balance" {
+		t.Fatalf("got=%v", got)
 	}
-	var out option.Options
-	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
-		t.Fatal(err)
-	}
-	for _, o := range out.Outbounds {
-		switch o.Tag {
-		case "relay", "node-a", "node-b", "node-c":
-			opts, ok := o.Options.(*option.VLESSOutboundOptions)
-			if !ok {
-				t.Fatalf("%s: expected vless options", o.Tag)
-			}
-			switch o.Tag {
-			case "relay":
-				if opts.Detour != "" {
-					t.Fatalf("relay detour=%q want empty", opts.Detour)
-				}
-			case "node-a", "node-b":
-				if opts.Detour != "relay" {
-					t.Fatalf("%s detour=%q want relay", o.Tag, opts.Detour)
-				}
-			case "node-c":
-				if opts.Detour != "" {
-					t.Fatalf("node-c detour=%q want empty", opts.Detour)
-				}
-			}
-		}
+	if _, ok := got["a"]; ok {
+		t.Fatal("legacy should be ignored when map present")
 	}
 }
 
-func TestChainDetourEmptyTarget(t *testing.T) {
-	opt := DefaultHiddifyOptions()
-	opt.Chain = ChainOptions{
-		DetourTarget:  "",
-		DetourMembers: []string{"node-a"},
+func TestResolvedChainDetoursLegacyExpand(t *testing.T) {
+	c := ChainOptions{
+		DetourTarget:  "exit",
+		DetourMembers: []string{"a", "exit", "  b  ", ""},
 	}
-	input := &option.Options{
-		Outbounds: []option.Outbound{{
-			Type: C.TypeVLESS,
-			Tag:  "node-a",
-			Options: &option.VLESSOutboundOptions{
-				DialerOptions: option.DialerOptions{},
-			},
-		}},
+	got := resolvedChainDetours(c)
+	if len(got) != 2 || got["a"] != "exit" || got["b"] != "exit" {
+		t.Fatalf("got=%v", got)
 	}
-	var out option.Options
-	if err := setOutbounds(&out, input, opt, &map[string][]string{}); err != nil {
+}
+
+func TestChainExitForMissingAndSelf(t *testing.T) {
+	detours := map[string]string{
+		"a": "missing-exit",
+		"b": "b",
+		"c": "balance",
+	}
+	known := map[string]struct{}{
+		"balance": {},
+		"c":       {},
+	}
+	if chainExitFor("a", detours, known) != "" {
+		t.Fatal("missing exit must skip")
+	}
+	if chainExitFor("b", detours, known) != "" {
+		t.Fatal("self exit must skip")
+	}
+	if chainExitFor("c", detours, known) != "balance" {
+		t.Fatal("balance exit should apply")
+	}
+}
+
+func TestApplyDetourAllowsWarpMember(t *testing.T) {
+	out := option.Outbound{
+		Type: C.TypeVLESS,
+		Tag:  WarpWGTag,
+		Options: &option.VLESSOutboundOptions{
+			DialerOptions: option.DialerOptions{},
+		},
+	}
+	out = applyDetourToOutbound(out, "balance")
+	opts := out.Options.(*option.VLESSOutboundOptions)
+	if opts.Detour != "balance" {
+		t.Fatalf("WARP-tagged member detour=%q want balance", opts.Detour)
+	}
+}
+
+func TestBuildConfigChainDetoursMap(t *testing.T) {
+	profile := `{
+  "outbounds": [
+    {"type":"vless","tag":"leaf-a","server":"1.1.1.1","server_port":443,"uuid":"00000000-0000-0000-0000-000000000001"},
+    {"type":"vless","tag":"leaf-b","server":"1.1.1.2","server_port":443,"uuid":"00000000-0000-0000-0000-000000000002"}
+  ]
+}`
+	h := DefaultHiddifyOptions()
+	h.IgnoreSubscriptionRoute = true
+	h.Chain = ChainOptions{
+		Detours: map[string]string{
+			"leaf-a": "balance",
+			"leaf-b": "gone",
+		},
+	}
+	built, err := BuildConfig(testCtx(), h, &ReadOptions{Content: profile})
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range out.Outbounds {
-		if o.Tag != "node-a" {
+	var gotA, gotB string
+	for _, out := range built.Outbounds {
+		opts, ok := out.Options.(*option.VLESSOutboundOptions)
+		if !ok {
 			continue
 		}
-		opts, ok := o.Options.(*option.VLESSOutboundOptions)
-		if !ok {
-			t.Fatal("node-a: expected vless options")
+		if out.Tag == "leaf-a" {
+			gotA = opts.Detour
 		}
-		if opts.Detour != "" {
-			t.Fatalf("detour=%q want empty", opts.Detour)
+		if out.Tag == "leaf-b" {
+			gotB = opts.Detour
 		}
-		return
 	}
-	t.Fatal("node-a not found in outbounds")
+	if gotA != "balance" {
+		t.Fatalf("leaf-a detour=%q", gotA)
+	}
+	if gotB != "" {
+		t.Fatalf("leaf-b missing exit must be skipped, got %q", gotB)
+	}
 }

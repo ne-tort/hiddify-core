@@ -69,7 +69,9 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 			Debug:           params.Debug,
 		})
 
-	hutils.RedirectStderr(fmt.Sprint(params.WorkingDir, "/data/stderr", params.Mode, ".log"))
+	// Setup() already pointed crash output at CrashReport-*.log; override with a
+	// mode-specific path under data/ (uses LX libbox.RedirectStderr + archive).
+	_ = libbox.RedirectStderr(fmt.Sprint(params.WorkingDir, "/data/stderr", params.Mode, ".log"))
 
 	Log(LogLevel_DEBUG, LogType_CORE, fmt.Sprintf("libbox.Setup success %s %s %s %v", params.BasePath, params.WorkingDir, params.TempDir, tcpConn))
 
@@ -128,6 +130,7 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 		}
 
 	}
+	hutils.HealStickyTun()
 	return InitHiddifyService()
 }
 

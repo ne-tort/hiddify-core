@@ -2,9 +2,7 @@ package config
 
 import (
 	context "context"
-	"encoding/base64"
 	"fmt"
-	"math/rand"
 	"net"
 	"net/netip"
 	"net/url"
@@ -144,8 +142,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 	var endpoints []option.Endpoint
 	var tags []string
 	OutboundMainDetour = OutboundSelectTag
-	chainTarget := opt.Chain.DetourTarget
-	chainMembers := chainMemberSet(opt.Chain.DetourMembers)
+	detours := resolvedChainDetours(opt.Chain)
+	knownExits := chainKnownExitSet(input)
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
@@ -156,8 +154,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 			return err
 		}
 		out = *outbound
-		if shouldApplyChainDetour(out.Tag, chainTarget, chainMembers) {
-			out = applyDetourToOutbound(out, chainTarget)
+		if exit := chainExitFor(out.Tag, detours, knownExits); exit != "" {
+			out = applyDetourToOutbound(out, exit)
 		}
 
 		switch out.Type {
@@ -188,8 +186,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOp
 		if err != nil {
 			return err
 		}
-		if shouldApplyChainDetour(out.Tag, chainTarget, chainMembers) {
-			applyDetourToEndpoint(out, chainTarget)
+		if exit := chainExitFor(out.Tag, detours, knownExits); exit != "" {
+			applyDetourToEndpoint(out, exit)
 		}
 
 		if !strings.Contains(out.Tag, "§hide§") && !isOutboundDisabled(out.Tag, opt.DisabledOutboundTags) {
@@ -367,9 +365,8 @@ func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 		// LX-STUB: MonitoringOptions (URL-test monitor) absent in sing-box-lx ExperimentalOptions
 	}
 	if hopt.EnableClashApi {
-		if hopt.ClashApiSecret == "" {
-			hopt.ClashApiSecret = generateRandomString(16)
-		}
+		// Secret must come from the client (persisted web-secret). Do not randomize
+		// here — a generated value would desync Dart Bearer auth for Connections.
 		exp.ClashAPI = &option.ClashAPIOptions{
 			ExternalController: fmt.Sprintf("%s:%d", "127.0.0.1", hopt.ClashApiPort),
 			Secret:             hopt.ClashApiSecret,
@@ -713,6 +710,12 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 		MergeSubscriptionRoute(input.Route, &rulesets, &routeRules)
 	}
 
+	sanitized, err := sanitizeRuleSetsLocalOnly(rulesets)
+	if err != nil {
+		return err
+	}
+	rulesets = sanitized
+
 	final := OutboundMainDetour
 	globalProxy := true
 	if hopt.RoutingGlobalProxy != nil {
@@ -737,13 +740,21 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Hid
 	// sing-box requires auto_detect_interface whenever default_network_strategy is set.
 	autoDetect := (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService || strategy != nil)
 
+	findProcess := false
+	for _, rp := range profiles {
+		if ProfileNeedsFindProcess(rp) {
+			findProcess = true
+			break
+		}
+	}
+
 	options.Route = &option.RouteOptions{
 		Rules:                  routeRules,
 		Final:                  final,
 		AutoDetectInterface:    autoDetect,
 		DefaultNetworkStrategy: strategy,
 		RuleSet:                rulesets,
-		FindProcess:            false,
+		FindProcess:            findProcess,
 	}
 	if useSubDNS {
 		if options.DNS != nil {
@@ -892,22 +903,4 @@ func removeDuplicateStr(strSlice []string) []string {
 		}
 	}
 	return list
-}
-
-func generateRandomString(length int) string {
-	// Determine the number of bytes needed
-	bytesNeeded := (length*6 + 7) / 8
-
-	// Generate random bytes
-	randomBytes := make([]byte, bytesNeeded)
-	_, err := rand.Read(randomBytes)
-	if err != nil {
-		return "hiddify"
-	}
-
-	// Encode random bytes to base64
-	randomString := base64.URLEncoding.EncodeToString(randomBytes)
-
-	// Trim padding characters and return the string
-	return randomString[:length]
 }

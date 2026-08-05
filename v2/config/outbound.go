@@ -1,8 +1,12 @@
 package config
 
 import (
+	"strings"
+	"time"
+
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 )
 
 type outboundMap map[string]interface{}
@@ -16,64 +20,81 @@ func patchOutboundMux(base option.Outbound, configOpt HiddifyOptions, obj outbou
 			Protocol:   configOpt.Mux.Protocol,
 		}
 		obj["multiplex"] = multiplex
-		// } else {
-		// 	delete(obj, "multiplex")
 	}
 	return obj
 }
 
 func patchOutboundTLSTricks(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
-	// LX-STUB: option.TLSTricksOptions (MixedCaseSNI/Padding) absent in sing-box-lx.
-	// Keep fragment side-effect (TCPFastOpen off) only.
-	if base.Type == C.TypeSelector || base.Type == C.TypeURLTest || base.Type == C.TypeBlock || base.Type == C.TypeDNS {
+	switch base.Type {
+	case C.TypeSelector, C.TypeURLTest, C.TypeBlock, C.TypeDNS:
+		return base
+	// QUIC / non-TCP-TLS ClientHello paths — native tls.fragment does not apply.
+	case C.TypeHysteria, C.TypeHysteria2, C.TypeTUIC, C.TypeShadowQUIC,
+		C.TypeNaive, C.TypeSudoku, C.TypeTrustTunnel:
 		return base
 	}
 	if isOutboundReality(base) {
 		return base
 	}
-	if base.Type == C.TypeDirect {
-		return patchOutboundFragment(base, configOpt)
-	}
-	_ = configOpt
 	return patchOutboundFragment(base, configOpt)
 }
 
-func patchOutboundFragment(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
-	if configOpt.TLSTricks.EnableFragment {
-		if opts, ok := base.Options.(option.DialerOptionsWrapper); ok {
-			dialer := opts.TakeDialerOptions()
-			dialer.TCPFastOpen = false
-			// dialer.TLSFragment = option.TLSFragmentOptions{
-			// 	Enabled: configOpt.TLSTricks.EnableFragment,
-			// 	Size:    configOpt.TLSTricks.FragmentSize,
-			// 	Sleep:   configOpt.TLSTricks.FragmentSleep,
-			// }
-			opts.ReplaceDialerOptions(dialer)
-		}
+func tlsFragmentEnabled(tricks TLSTricks) bool {
+	return tricks.EnableFragment || tricks.EnableRecordFragment
+}
 
+func parseFragmentFallbackDelay(raw string) badoption.Duration {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return badoption.Duration(C.TLSFragmentFallbackDelay)
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return badoption.Duration(C.TLSFragmentFallbackDelay)
+	}
+	return badoption.Duration(d)
+}
+
+func patchOutboundFragment(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
+	tricks := configOpt.TLSTricks
+	if !tlsFragmentEnabled(tricks) {
+		return base
+	}
+
+	// Apply native sing-box-lx TLS fragment knobs on TLS outbounds.
+	if tlsopt, ok := base.Options.(option.OutboundTLSOptionsWrapper); ok {
+		tls := tlsopt.TakeOutboundTLSOptions()
+		if tls != nil && tls.Enabled {
+			if tricks.EnableFragment {
+				tls.Fragment = true
+			}
+			if tricks.EnableRecordFragment {
+				tls.RecordFragment = true
+			}
+			tls.FragmentFallbackDelay = parseFragmentFallbackDelay(tricks.FragmentFallbackDelay)
+			tlsopt.ReplaceOutboundTLSOptions(tls)
+		}
+	}
+
+	// Fragment is incompatible with TCP Fast Open.
+	if opts, ok := base.Options.(option.DialerOptionsWrapper); ok {
+		dialer := opts.TakeDialerOptions()
+		dialer.TCPFastOpen = false
+		opts.ReplaceDialerOptions(dialer)
 	}
 
 	return base
 }
 
 func isOutboundReality(base option.Outbound) bool {
-	// this function checks reality status ONLY FOR VLESS.
-	// Some other protocols can also use reality, but it's discouraged as stated in the reality document
-	if base.Type != C.TypeVLESS {
-		return false
-	}
+	// Reality + fragment is unreliable; skip (legacy Hiddify behavior for VLESS Reality).
 	var tls *option.OutboundTLSOptions
 	if tlsopt, ok := base.Options.(option.OutboundTLSOptionsWrapper); ok {
 		tls = tlsopt.TakeOutboundTLSOptions()
 	}
-
-	if tls == nil || !tls.Enabled {
+	if tls == nil || !tls.Enabled || tls.Reality == nil {
 		return false
 	}
-	if tls.Reality == nil {
-		return false
-	}
-
 	return tls.Reality.Enabled
 }
 
@@ -83,155 +104,10 @@ func patchEndpoint(base *option.Endpoint, configOpt HiddifyOptions, staticIPs *m
 	ApplyDialerDetourRemap(base.Options)
 	return base, nil
 }
-func patchOutbound(base option.Outbound, configOpt HiddifyOptions, staticIPs *map[string][]string) (*option.Outbound, error) {
 
+func patchOutbound(base option.Outbound, configOpt HiddifyOptions, staticIPs *map[string][]string) (*option.Outbound, error) {
 	base = patchOutboundTLSTricks(base, configOpt)
 	ApplyDialerDetourRemap(base.Options)
-
-	// switch base.Type {
-	// case C.TypeVMess, C.TypeVLESS, C.TypeTrojan, C.TypeShadowsocks:
-	// 	obj = patchOutboundMux(base, configOpt, obj)
-	// }
-	// base = patchOutboundXray(base, configOpt, *staticIPs)
-
+	_ = staticIPs
 	return &base, nil
 }
-
-// func patchOutboundXray(base option.Outbound, configOpt HiddifyOptions, staticIpsDns map[string][]string) outboundMap {
-// 	if base.Type == C.TypeXray {
-// 		if opts, ok := base.Options.(option.XrayOutboundOptions); ok {
-// 			if opts.DeprecatedXrayOutboundJson != nil {
-// 				opts.XConfig = opts.DeprecatedXrayOutboundJson
-// 				opts.DeprecatedXrayOutboundJson = nil
-// 			}
-// 			if xconfig := *(opts.XConfig); xconfig != nil {
-// 				if _, exists := xconfig["outbounds"]; !exists {
-// 					xconfig = map[string]any{"outbounds": []any{xconfig}}
-// 					opts.XConfig = &xconfig
-// 				}
-
-// 				xconfig = map[string]any{"outbounds": []any{xconfig}}
-// 			}
-// 		}
-
-// 		// Ensure "outbounds" key exists within "xconfig"
-
-// 		if configOpt.TLSTricks.EnableFragment {
-// 			// TODO
-// 			// if obj["xray_fragment"] == nil || obj["xray_fragment"].(map[string]any)["packets"] == "" {
-// 			// 	obj["xray_fragment"] = map[string]any{
-// 			// 		"packets":  "tlshello",
-// 			// 		"length":   configOpt.TLSTricks.FragmentSize,
-// 			// 		"interval": configOpt.TLSTricks.FragmentSleep,
-// 			// 	}
-// 			// }
-// 		}
-
-// 		dnsConfig, ok := xconfig["dns"].(map[string]any)
-// 		if !ok {
-// 			dnsConfig = map[string]any{}
-// 		}
-// 		if dnsConfig["tag"] == nil {
-// 			dnsConfig["tag"] = "hiddify-dns-out"
-// 		}
-// 		// Ensure "servers" key exists and is a slice
-// 		servers, ok := dnsConfig["servers"].([]any)
-// 		if !ok {
-// 			servers = []any{}
-// 		}
-
-// 		// Ensure "hosts" key exists and is a slice
-// 		// hosts, ok := dnsConfig["hosts"].(map[string]any)
-// 		// if !ok {
-// 		// 	hosts = map[string]any{}
-// 		// }
-// 		// // for host, ip := range staticIpsDns {
-// 		// // hosts[host] = ip
-// 		// // }
-// 		// dnsConfig["hosts"] = hosts
-
-// 		// // Ensure "servers" key exists and is a slice
-// 		// hosts, ok := dnsConfig["hosts"].([]any)
-// 		// if !ok {
-// 		// 	hosts = []any{}
-// 		// }
-// 		// for _, host := range base.DNSOptions. {
-// 		// 	hosts = append(hosts, host)
-// 		// }
-// 		addDnsServer := func(dnsAdd string) []any {
-// 			if dnsAdd == "local" {
-// 				dnsAdd = "localhost"
-// 			} else {
-// 				dnsAdd = strings.Replace(dnsAdd, "udp://", "", 1)
-// 				dnsAdd = strings.Replace(dnsAdd, "://", "+local://", 1)
-// 			}
-// 			for _, server := range servers {
-// 				if server == dnsAdd {
-// 					return servers
-// 				}
-// 			}
-// 			return append(servers, dnsAdd)
-// 		}
-// 		// Append remote DNS address
-// 		servers = addDnsServer(configOpt.DNSOptions.RemoteDnsAddress)
-// 		servers = addDnsServer(configOpt.DNSOptions.DirectDnsAddress)
-// 		servers = addDnsServer("1.1.1.1")
-
-// 		// if outbounds, ok := xconfig["outbounds"].([]any); ok {
-// 		// 	hasDns := false
-// 		// 	for _, out := range outbounds {
-// 		// 		if outbound, ok := out.(map[string]any); ok {
-// 		// 			if outbound["tag"] == dnsConfig["tag"] {
-// 		// 				hasDns = true
-// 		// 			}
-// 		// 		}
-// 		// 	}
-// 		// 	if !hasDns {
-// 		// 		outbounds = append(outbounds, map[string]any{
-// 		// 			"tag":      dnsConfig["tag"],
-// 		// 			"protocol": "dns",
-// 		// 		})
-// 		// 	}
-// 		// 	xconfig["outbounds"] = outbounds
-// 		// }
-
-// 		// Ensure "routing" is a map
-// 		// routing, ok := xconfig["routing"].(map[string]any)
-// 		// if !ok {
-// 		// 	routing = map[string]any{}
-// 		// }
-
-// 		// // Ensure "rules" is a slice of maps
-// 		// rules, ok := routing["rules"].([]map[string]any)
-// 		// if !ok {
-// 		// 	rules = []map[string]any{}
-// 		// }
-
-// 		// // Append the DNS rule
-// 		// // rules = append([]map[string]any{{
-// 		// // 	"type":        "field",
-// 		// // 	"port":        53,
-// 		// // 	"outboundTag": dnsConfig["tag"],
-// 		// // }}, rules...)
-
-// 		// routing["rules"] = rules
-// 		// xconfig["routing"] = routing
-// 		// Update "servers" key in "dns"
-// 		dnsConfig["servers"] = servers
-// 		dnsConfig["disableFallback"] = false
-// 		xconfig["dns"] = dnsConfig
-// 		obj["xconfig"] = xconfig
-// 		obj["xdebug"] = configOpt.LogLevel == "debug" || configOpt.LogLevel == "trace"
-// 	}
-
-// 	return obj
-// }
-
-// func (o outboundMap) transportType() string {
-// 	if transport, ok := o["transport"].(map[string]interface{}); ok {
-// 		if transportType, ok := transport["type"].(string); ok {
-// 			return transportType
-// 		}
-// 	}
-// 	return ""
-// }

@@ -28,10 +28,13 @@ type WarpMasqueConfig struct {
 	AccessToken   string `json:"access-token,omitempty"`
 }
 
-// ChainOptions maps selected profile outbounds/endpoints through a detour target.
+// ChainOptions maps leaf/endpoint tags to an exit outbound (DialerOptions.detour).
 type ChainOptions struct {
+	// Legacy single-exit model (expanded into Detours when Detours is empty).
 	DetourTarget  string   `json:"detour-target,omitempty"`
 	DetourMembers []string `json:"detour-members,omitempty"`
+	// Detours is memberTag → exitTag (runtime / merged tags).
+	Detours map[string]string `json:"detours,omitempty"`
 }
 
 // WarpOptions is injected via ChangeHiddifySettings JSON (kebab).

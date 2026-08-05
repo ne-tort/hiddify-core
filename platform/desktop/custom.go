@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	hutils "github.com/hiddify/hiddify-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
 )
@@ -125,6 +126,11 @@ func stop() *C.char {
 
 	_, err := hcore.Stop()
 	return emptyOrErrorC(err)
+}
+
+//export healStickyTun
+func healStickyTun() {
+	hutils.HealStickyTun()
 }
 
 //export restart

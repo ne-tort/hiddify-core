@@ -7,6 +7,7 @@ import (
 	"github.com/hiddify/hiddify-core/compat/monitoring"
 	"github.com/hiddify/hiddify-core/v2/config"
 	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	hutils "github.com/hiddify/hiddify-core/v2/hutils"
 )
 
 func (s *CoreService) Stop(ctx context.Context, empty *hcommon.Empty) (*CoreInfoResponse, error) {
@@ -38,10 +39,12 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	if err := ss.CloseService(); err != nil {
 		static.StartedService = nil
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-stop.log"))
+		hutils.HealStickyTun()
 		return errorWrapper(MessageType_UNEXPECTED_ERROR, err)
 	}
 	// err = common.Close(static.StartedService)
 	static.StartedService = nil
 
+	hutils.HealStickyTun()
 	return SetCoreStatus(CoreStates_STOPPED, MessageType_EMPTY, ""), nil
 }

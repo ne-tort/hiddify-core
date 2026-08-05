@@ -105,12 +105,15 @@ type RouteOptions struct {
 }
 
 type TLSTricks struct {
-	EnableFragment bool   `json:"enable-fragment,omitempty" overridable:"true"`
-	FragmentSize   string `json:"fragment-size,omitempty" overridable:"true"`
-	FragmentSleep  string `json:"fragment-sleep,omitempty" overridable:"true"`
-	MixedSNICase   bool   `json:"mixed-sni-case,omitempty" overridable:"true"`
-	EnablePadding  bool   `json:"enable-padding,omitempty" overridable:"true"`
-	PaddingSize    string `json:"padding-size,omitempty" overridable:"true"`
+	EnableFragment         bool   `json:"enable-fragment,omitempty" overridable:"true"`
+	EnableRecordFragment   bool   `json:"enable-record-fragment,omitempty" overridable:"true"`
+	FragmentFallbackDelay  string `json:"fragment-fallback-delay,omitempty" overridable:"true"`
+	// Legacy dialer knobs (size/sleep) — ignored by sing-box-lx; kept for import compat.
+	FragmentSize  string `json:"fragment-size,omitempty" overridable:"true"`
+	FragmentSleep string `json:"fragment-sleep,omitempty" overridable:"true"`
+	MixedSNICase  bool   `json:"mixed-sni-case,omitempty" overridable:"true"`
+	EnablePadding bool   `json:"enable-padding,omitempty" overridable:"true"`
+	PaddingSize   string `json:"padding-size,omitempty" overridable:"true"`
 }
 
 type MuxOptions struct {
@@ -180,12 +183,14 @@ func DefaultHiddifyOptions() *HiddifyOptions {
 			Protocol:   "h2mux",
 		},
 		TLSTricks: TLSTricks{
-			EnableFragment: false,
-			FragmentSize:   "10-100",
-			FragmentSleep:  "50-200",
-			MixedSNICase:   false,
-			EnablePadding:  false,
-			PaddingSize:    "1200-1500",
+			EnableFragment:        false,
+			EnableRecordFragment:  true,
+			FragmentFallbackDelay: "500ms",
+			FragmentSize:          "10-100",
+			FragmentSleep:         "50-200",
+			MixedSNICase:          false,
+			EnablePadding:         false,
+			PaddingSize:           "1200-1500",
 		},
 		UseXrayCoreWhenPossible: false,
 	}

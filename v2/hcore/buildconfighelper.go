@@ -141,7 +141,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	// (DNS/route subscription toggles, etc.). Sliced .json remains for editor/legacy.
 	if in.ConfigPath != "" {
 		if raw, err := config.ReadContent(ctx, readOpt); err == nil && len(raw) > 0 {
-			_ = os.WriteFile(config.ProfileSourcePath(in.ConfigPath), raw, 0o644)
+			_ = hutils.WriteFileAtomic(config.ProfileSourcePath(in.ConfigPath), raw, 0o644)
 		}
 	}
 
@@ -153,7 +153,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		}, nil
 	}
 	if in.ConfigPath != "" {
-		err = os.WriteFile(in.ConfigPath, parsed, 0o644)
+		err = hutils.WriteFileAtomic(in.ConfigPath, parsed, 0o644)
 		if err != nil {
 			return &ParseResponse{
 				ResponseCode: hcommon.ResponseCode_FAILED,

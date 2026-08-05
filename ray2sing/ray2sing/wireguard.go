@@ -11,11 +11,11 @@ import (
 )
 
 // WireguardEndpoint maps wg:// / wireguard:// share links to lx WireGuard **endpoint**
-// (not outbound). AmneziaWG 2.0/3.0 fields sit at the endpoint root (with_awg).
+// (not outbound). AmneziaWG 2.0/3.0 fields nest under awg2/awg3 (with_awg).
 //
-//	wg://host:51820/?pk=PRIVATE&peer_public_key=PUB&local_address=10.0.0.2/32&pre_shared_key=&reserved=0,0,0&mtu=1408&workers=4&jc=4&jmin=40&jmax=70&s1=0&s2=0&h1=1&h2=2&h3=3&h4=4&i1=...&id=example.com&ip=quic&ib=chrome&header_protection_key=...&content_padding_addition=0-16&rekey_after_time=...&up_mbps=100&down_mbps=100
+//	wg://host:41641/?pk=PRIVATE&peer_public_key=PUB&local_address=10.0.0.2/32&pre_shared_key=&reserved=0,0,0&mtu=1408&workers=4&jc=4&jmin=40&jmax=70&s1=0&s2=0&h1=1&h2=2&h3=3&h4=4&i1=...&id=example.com&ip=quic&ib=chrome&header_protection_key=...&content_padding_addition=0-16&rekey_after_time=...&up_mbps=100&down_mbps=100
 func WireguardEndpoint(rawURL string) (*T.Endpoint, error) {
-	u, err := ParseUrl(rawURL, 51820)
+	u, err := ParseUrl(rawURL, 41641)
 	if err != nil {
 		return nil, err
 	}
@@ -63,16 +63,16 @@ func WireguardEndpoint(rawURL string) (*T.Endpoint, error) {
 	}
 
 	opts := &T.WireGuardEndpointOptions{
-		DialerOptions:    getDialerOptions(decoded),
-		Address:          toPrefixableAddrs(addrs),
-		PrivateKey:       privateKey,
-		Peers:            []T.WireGuardPeer{peer},
-		MTU:              uint32(toUInt16(decoded["mtu"], 0)),
-		Workers:          int(toUInt16(decoded["workers"], 0)),
-		UpMbps:           int(toUInt16(decoded["up mbps"], 0)),
-		DownMbps:         int(toUInt16(decoded["down mbps"], 0)),
-		AmneziaWGOptions: amneziaFromParams(decoded),
+		DialerOptions: getDialerOptions(decoded),
+		Address:       toPrefixableAddrs(addrs),
+		PrivateKey:    privateKey,
+		Peers:         []T.WireGuardPeer{peer},
+		MTU:           uint32(toUInt16(decoded["mtu"], 0)),
+		Workers:       int(toUInt16(decoded["workers"], 0)),
+		UpMbps:        int(toUInt16(decoded["up mbps"], 0)),
+		DownMbps:      int(toUInt16(decoded["down mbps"], 0)),
 	}
+	applyAmneziaNested(opts, amneziaFromParams(decoded))
 	if name := getOneOfN(decoded, "", "interface name", "name", "ifname"); name != "" {
 		opts.Name = name
 	}

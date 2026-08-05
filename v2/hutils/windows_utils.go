@@ -3,7 +3,6 @@
 package hutils
 
 import (
-	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -12,10 +11,6 @@ import (
 
 	"golang.org/x/sys/windows"
 )
-
-func RedirectStderr(path string) error {
-	return fmt.Errorf("not supported on windows")
-}
 
 func IsAdmin() bool {
 	adminSID, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)

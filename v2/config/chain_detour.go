@@ -27,26 +27,76 @@ func isSkippedDetourTag(tag string) bool {
 	return contains([]string{"direct", "bypass", "block"}, tag)
 }
 
-func chainMemberSet(members []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(members))
-	for _, m := range members {
-		if m != "" {
-			set[m] = struct{}{}
+// resolvedChainDetours prefers Detours map; otherwise expands legacy target+members.
+func resolvedChainDetours(c ChainOptions) map[string]string {
+	if len(c.Detours) > 0 {
+		out := make(map[string]string, len(c.Detours))
+		for member, exit := range c.Detours {
+			m := strings.TrimSpace(member)
+			e := strings.TrimSpace(exit)
+			if m == "" || e == "" {
+				continue
+			}
+			out[m] = e
 		}
+		return out
 	}
-	return set
+	target := strings.TrimSpace(c.DetourTarget)
+	if target == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, raw := range c.DetourMembers {
+		m := strings.TrimSpace(raw)
+		if m == "" || m == target {
+			continue
+		}
+		out[m] = target
+	}
+	return out
 }
 
-func shouldApplyChainDetour(tag, target string, members map[string]struct{}) bool {
-	if target == "" || tag == target || isSkippedDetourTag(tag) || isWarpManagedTag(tag) {
-		return false
+func chainKnownExitSet(input *option.Options) map[string]struct{} {
+	known := map[string]struct{}{
+		OutboundSelectTag:     {},
+		OutboundURLTestTag:    {},
+		OutboundRoundRobinTag: {},
 	}
-	_, ok := members[tag]
-	return ok
+	if input == nil {
+		return known
+	}
+	for _, out := range input.Outbounds {
+		if out.Tag != "" {
+			known[out.Tag] = struct{}{}
+		}
+	}
+	for _, end := range input.Endpoints {
+		if end.Tag != "" {
+			known[end.Tag] = struct{}{}
+		}
+	}
+	return known
+}
+
+// chainExitFor returns the exit tag for member, or "" if the pair must be skipped.
+func chainExitFor(member string, detours map[string]string, known map[string]struct{}) string {
+	if member == "" || len(detours) == 0 {
+		return ""
+	}
+	exit := strings.TrimSpace(detours[member])
+	if exit == "" || exit == member || isSkippedDetourTag(member) || isSkippedDetourTag(exit) {
+		return ""
+	}
+	if known != nil {
+		if _, ok := known[exit]; !ok {
+			return ""
+		}
+	}
+	return exit
 }
 
 func applyDetourToOutbound(base option.Outbound, detour string) option.Outbound {
-	if detour == "" || isSkippedDetourTag(base.Tag) || isWarpManagedTag(base.Tag) || isNonLeafOutboundType(base.Type) {
+	if detour == "" || isSkippedDetourTag(base.Tag) || isNonLeafOutboundType(base.Type) {
 		return base
 	}
 	if opts, ok := base.Options.(option.DialerOptionsWrapper); ok {
@@ -58,7 +108,7 @@ func applyDetourToOutbound(base option.Outbound, detour string) option.Outbound 
 }
 
 func applyDetourToEndpoint(base *option.Endpoint, detour string) {
-	if base == nil || detour == "" || isSkippedDetourTag(base.Tag) || isWarpManagedTag(base.Tag) {
+	if base == nil || detour == "" || isSkippedDetourTag(base.Tag) {
 		return
 	}
 	if opts, ok := base.Options.(option.DialerOptionsWrapper); ok {

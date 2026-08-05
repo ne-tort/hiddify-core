@@ -94,8 +94,30 @@ func amneziaFromParams(params map[string]string) T.AmneziaWGOptions {
 	}
 }
 
+func amneziaHasAWG3(awg T.AmneziaWGOptions) bool {
+	return awg.HeaderProtectionKey != "" ||
+		awg.ContentPaddingAddition != "" ||
+		awg.RekeyAfterTime != "" ||
+		awg.RekeyTimeout != "" ||
+		awg.RejectAfterTime != "" ||
+		awg.KeepaliveTimeout != "" ||
+		awg.MaxHandshakeAttempts != ""
+}
+
+// applyAmneziaNested places Amnezia knobs under awg2 or awg3 (lx nested UX).
+func applyAmneziaNested(opts *T.WireGuardEndpointOptions, awg T.AmneziaWGOptions) {
+	if opts == nil || !awg.IsSet() {
+		return
+	}
+	if amneziaHasAWG3(awg) {
+		opts.AWG3 = awg
+		return
+	}
+	opts.AWG2 = awg
+}
+
 // AWGSingboxTxt maps awg-quick / WireGuard .conf text ([Interface]/[Peer]) to an lx
-// WireGuard endpoint with Amnezia fields at the root (with_awg).
+// WireGuard endpoint with nested Amnezia blocks (awg2/awg3).
 func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 	var (
 		privateKey string
@@ -192,11 +214,11 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 	}
 
 	opts := &T.WireGuardEndpointOptions{
-		PrivateKey:       privateKey,
-		Address:          toPrefixableAddrs(addresses),
-		Peers:            []T.WireGuardPeer{peer},
-		AmneziaWGOptions: amneziaFromParams(awgFlat),
+		PrivateKey: privateKey,
+		Address:    toPrefixableAddrs(addresses),
+		Peers:      []T.WireGuardPeer{peer},
 	}
+	applyAmneziaNested(opts, amneziaFromParams(awgFlat))
 	if mtu != 0 {
 		opts.MTU = mtu
 	}
@@ -205,7 +227,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 	}
 
 	tag := "wireguard"
-	if opts.AmneziaWGOptions.IsSet() {
+	if opts.AWG2.IsSet() || opts.AWG3.IsSet() {
 		tag = "awg"
 	}
 	return &T.Endpoint{
@@ -215,7 +237,7 @@ func AWGSingboxTxt(content string) (*T.Endpoint, error) {
 	}, nil
 }
 
-// AWGSingbox maps awg:// (URL or base64 .conf) to a WireGuard endpoint with Amnezia root fields.
+// AWGSingbox maps awg:// (URL or base64 .conf) to a WireGuard endpoint with nested Amnezia blocks.
 func AWGSingbox(raw string) (*T.Endpoint, error) {
 	splt := strings.SplitN(raw, "://", 2)
 	if len(splt) == 2 {
@@ -298,20 +320,20 @@ func AWGSingbox(raw string) (*T.Endpoint, error) {
 	}
 
 	opts := &T.WireGuardEndpointOptions{
-		PrivateKey:       pk,
-		Address:          toPrefixableAddrs(addresses),
-		Peers:            []T.WireGuardPeer{peer},
-		MTU:              uint32(toUInt16(getOneOfN(u.Params, "0", "mtu"), 0)),
-		Workers:          int(toUInt16(u.Params["workers"], 0)),
-		AmneziaWGOptions: amneziaFromParams(u.Params),
+		PrivateKey: pk,
+		Address:    toPrefixableAddrs(addresses),
+		Peers:      []T.WireGuardPeer{peer},
+		MTU:        uint32(toUInt16(getOneOfN(u.Params, "0", "mtu"), 0)),
+		Workers:    int(toUInt16(u.Params["workers"], 0)),
 	}
+	applyAmneziaNested(opts, amneziaFromParams(u.Params))
 	if name := getOneOfN(u.Params, "", "interface name", "name", "ifname"); name != "" {
 		opts.Name = name
 	}
 
 	tag := u.Name
 	if tag == "" {
-		if opts.AmneziaWGOptions.IsSet() {
+		if opts.AWG2.IsSet() || opts.AWG3.IsSet() {
 			tag = "AWG"
 		} else {
 			tag = "WG"

@@ -80,3 +80,7 @@ func Pause() {
 func Wake() {
 	hcore.Wake()
 }
+
+func ResetNetwork() {
+	hcore.ResetNetwork()
+}

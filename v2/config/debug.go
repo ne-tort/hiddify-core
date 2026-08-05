@@ -3,11 +3,11 @@ package config
 import (
 	context "context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime/debug"
 	"time"
 
+	"github.com/hiddify/hiddify-core/v2/hutils"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -17,12 +17,11 @@ func SaveCurrentConfig(ctx context.Context, path string, options option.Options)
 		return err
 	}
 	p, err := filepath.Abs(path)
-	os.MkdirAll(filepath.Dir(p), 0o755)
 	fmt.Printf("Saving config to %v %+v\n", p, err)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(json), 0o644)
+	return hutils.WriteFileAtomic(p, []byte(json), 0o644)
 }
 
 func DeferPanicToError(name string, err func(error)) {

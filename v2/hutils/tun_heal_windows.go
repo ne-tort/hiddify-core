@@ -45,6 +45,8 @@ func HealStickyTun() {
 		}
 		runHidden(1*time.Second, "netsh", "interface", "set", "interface", "name="+alt, "admin=DISABLED")
 	}
+
+	cleanupNLAProfiles()
 }
 
 func runHidden(timeout time.Duration, name string, args ...string) {
