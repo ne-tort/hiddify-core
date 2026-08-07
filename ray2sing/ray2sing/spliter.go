@@ -92,7 +92,24 @@ func expandDecodedConfig(configs string) []string {
 
 	newConfigs := splitByPrefix(strings.Join(configs2, "\n"))
 
-	add(newConfigs...)
+	// Amnezia vpn:// may contain several WG/AWG containers → expand to INI bodies
+	// so each is parsed via [Interface] / AWGSingboxTxt.
+	expanded := make([]string, 0, len(newConfigs))
+	for _, c := range newConfigs {
+		tc := strings.TrimSpace(c)
+		if strings.HasPrefix(strings.ToLower(tc), "vpn://") {
+			inis, err := DecodeAmneziaVpnINIs(tc)
+			if err != nil {
+				expanded = append(expanded, tc)
+				continue
+			}
+			expanded = append(expanded, inis...)
+			continue
+		}
+		expanded = append(expanded, tc)
+	}
+
+	add(expanded...)
 
 	return res
 }

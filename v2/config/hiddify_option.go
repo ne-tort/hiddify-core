@@ -87,7 +87,9 @@ type RouteOptions struct {
 	IPv6Mode               option.DomainStrategy `json:"ipv6-mode,omitempty"`
 	BypassLAN              bool                  `json:"bypass-lan,omitempty"`
 	AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
-	BlockQuic              bool                  `json:"block-quic,omitempty"`
+	// LanSharingPassword authenticates local mixed inbound (HTTP/SOCKS users).
+	LanSharingPassword string `json:"lan-sharing-password,omitempty"`
+	BlockQuic          bool   `json:"block-quic,omitempty"`
 	// IgnoreSubscriptionRoute skips merging subscription route.rule_set/rules (raw connect-time overlay).
 	IgnoreSubscriptionRoute bool `json:"ignore-subscription-route,omitempty"`
 	// RoutePriority is ignored: local profile always precedes subscription (client owns conflicts).

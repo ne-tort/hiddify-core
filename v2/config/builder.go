@@ -14,6 +14,7 @@ import (
 	mDNS "github.com/miekg/dns"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/auth"
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
@@ -475,18 +476,25 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 		// Always expose mixed-port when configured: required for system-proxy, app IP
 		// probes, and TUN-side localhost checks. Without it, configs had zero inbounds.
 		if hopt.MixedPort > 0 {
+			mixedOpts := &option.HTTPMixedInboundOptions{
+				ListenOptions: option.ListenOptions{
+					Listen:     &addr,
+					ListenPort: hopt.MixedPort,
+				},
+				SetSystemProxy: hopt.SetSystemProxy,
+			}
+			if pw := strings.TrimSpace(hopt.LanSharingPassword); pw != "" && !hopt.SetSystemProxy {
+				mixedOpts.Users = []auth.User{{
+					Username: "hiddify",
+					Password: pw,
+				}}
+			}
 			options.Inbounds = append(
 				options.Inbounds,
 				option.Inbound{
-					Type: C.TypeMixed,
-					Tag:  InboundMixedTag + bind,
-					Options: &option.HTTPMixedInboundOptions{
-						ListenOptions: option.ListenOptions{
-							Listen:     &addr,
-							ListenPort: hopt.MixedPort,
-						},
-						SetSystemProxy: hopt.SetSystemProxy,
-					},
+					Type:    C.TypeMixed,
+					Tag:     InboundMixedTag + bind,
+					Options: mixedOpts,
 				},
 			)
 		}

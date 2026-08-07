@@ -20,7 +20,7 @@ import (
 //
 // Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://.
 // lx: mieru / carrier / derp / shadowquic / sudoku / trusttunnel / anytls / shadowtls / snell;
-// wireguard endpoint + Amnezia (wg://, awg://, [Interface]).
+// wireguard endpoint + Amnezia (wg://, awg://, vpn://, [Interface]) + pathology://.
 // inbound-only (no share parser): mixed, cloudflared.
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
@@ -60,10 +60,13 @@ var configTypes = map[string]ParserFunc{
 	"xdirect://": DirectXray,
 }
 var endpointParsers = map[string]EndpointParserFunc{
-	"wg://":         WireguardEndpoint,
-	"wireguard://":  WireguardEndpoint,
-	"awg://":        AWGSingbox,
-	"[Interface]":   AWGSingboxTxt,
+	"wg://":          WireguardEndpoint,
+	"wireguard://":   WireguardEndpoint,
+	"awg://":         AWGSingbox,
+	"vpn://":         AmneziaVpnEndpoint,
+	"pathology://":   PathologySingbox,
+	"patologiya://":  PathologySingbox,
+	"[Interface]":    AWGSingboxTxt,
 }
 var xrayConfigTypes = map[string]ParserFunc{
 	"vmess://":  VmessXray,
@@ -161,7 +164,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 
 	var outbounds []T.Outbound
 	var endpoints []T.Endpoint
-	counter := 0
 
 	for _, config := range configArray {
 		if len(config) < 5 || config[0] == '#' || config[0] == '/' {
@@ -173,7 +175,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 		for i := len(chains) - 1; i >= 0; i-- {
 			chain1 := chains[i]
 
-			// fmt.Printf("%s", chain)
 			chain, _ := decodeBase64IfNeeded(chain1)
 			outend, err := processSingleConfig(chain, useXrayWhenPossible)
 
@@ -185,7 +186,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 
 			if len(outend.outbounds) > 0 {
 				for _, ob := range outend.outbounds {
-					ob.Tag += " § " + strconv.Itoa(counter)
 					if dialerOpt, ok := ob.Options.(T.DialerOptionsWrapper); ok {
 						d := dialerOpt.TakeDialerOptions()
 						// Multi-hop chain overrides; keep ?detour=tag from getDialerOptions otherwise.
@@ -196,10 +196,8 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 					}
 					detourTag = ob.Tag
 					outbounds = append(outbounds, *ob)
-					counter += 1
 				}
 			} else if outend.endpoint != nil {
-				outend.endpoint.Tag += " § " + strconv.Itoa(counter)
 				if dialerOpt, ok := outend.endpoint.Options.(T.DialerOptionsWrapper); ok {
 					d := dialerOpt.TakeDialerOptions()
 					if detourTag != "" {
@@ -210,7 +208,6 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 
 				detourTag = outend.endpoint.Tag
 				endpoints = append(endpoints, *outend.endpoint)
-				counter += 1
 			}
 		}
 
@@ -220,6 +217,7 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 		return nil, E.New("No outbounds found")
 	}
 
+	uniquifyShareTags(outbounds, endpoints)
 	resolveDetourTagRefs(outbounds, endpoints)
 
 	fullConfig := T.Options{
@@ -228,6 +226,72 @@ func GenerateConfigLite(input string, useXrayWhenPossible bool) (*option.Options
 	}
 
 	return &fullConfig, nil
+}
+
+// uniquifyShareTags assigns deterministic tags: first keeps base name,
+// duplicates become base-1, base-2, … (no " § N" suffixes).
+func uniquifyShareTags(outbounds []T.Outbound, endpoints []T.Endpoint) {
+	used := map[string]int{}
+	allocate := func(tag string) string {
+		base := strings.TrimSpace(tag)
+		if base == "" {
+			base = "proxy"
+		}
+		// Strip legacy " § N" if present.
+		if i := strings.Index(base, "§"); i >= 0 {
+			base = strings.TrimSpace(base[:i])
+			if base == "" {
+				base = "proxy"
+			}
+		}
+		n := used[base]
+		used[base] = n + 1
+		if n == 0 {
+			return base
+		}
+		return base + "-" + strconv.Itoa(n)
+	}
+
+	oldToNew := map[string]string{}
+	for i := range outbounds {
+		old := outbounds[i].Tag
+		neu := allocate(old)
+		outbounds[i].Tag = neu
+		if old != "" {
+			oldToNew[old] = neu
+		}
+	}
+	for i := range endpoints {
+		old := endpoints[i].Tag
+		neu := allocate(old)
+		endpoints[i].Tag = neu
+		if old != "" {
+			oldToNew[old] = neu
+		}
+	}
+	// Rewrite in-chain detours that still point at pre-unique tags within this batch.
+	for i := range outbounds {
+		if dialerOpt, ok := outbounds[i].Options.(T.DialerOptionsWrapper); ok {
+			d := dialerOpt.TakeDialerOptions()
+			if d.Detour != "" {
+				if neu, ok := oldToNew[d.Detour]; ok {
+					d.Detour = neu
+					dialerOpt.ReplaceDialerOptions(d)
+				}
+			}
+		}
+	}
+	for i := range endpoints {
+		if dialerOpt, ok := endpoints[i].Options.(T.DialerOptionsWrapper); ok {
+			d := dialerOpt.TakeDialerOptions()
+			if d.Detour != "" {
+				if neu, ok := oldToNew[d.Detour]; ok {
+					d.Detour = neu
+					dialerOpt.ReplaceDialerOptions(d)
+				}
+			}
+		}
+	}
 }
 
 // normalizeDetourChain turns Hiddify `exit&&detour=entry` into `exit -> entry`
