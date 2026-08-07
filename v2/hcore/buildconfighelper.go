@@ -60,47 +60,57 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		static.ClientOptions = config.DefaultClientOptions()
 	}
 
-	// Client-side rule-set merge (routing profile compiler).
+	// Client-side rule-set merge / DNS fragment actions.
 	if in.Content != "" {
 		var actionReq struct {
-			Action string `json:"hiddify_action"`
+			HiddifyAction   string `json:"hiddify_action"`
+			PathologyAction string `json:"pathology_action"`
 		}
 		if err := json.Unmarshal([]byte(in.Content), &actionReq); err == nil {
-			switch actionReq.Action {
-			case "merge_rulesets":
-				var mergeReq struct {
-					Action string   `json:"hiddify_action"`
-					Inputs []string `json:"inputs"`
-					Output string   `json:"output"`
+			action := actionReq.HiddifyAction
+			if action == "" {
+				action = actionReq.PathologyAction
+			}
+			if action != "" {
+				switch action {
+				case "merge_rulesets":
+					var mergeReq struct {
+						Inputs []string `json:"inputs"`
+						Output string   `json:"output"`
+					}
+					if err := json.Unmarshal([]byte(in.Content), &mergeReq); err != nil {
+						return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+					}
+					if err := config.MergeLocalRuleSets(mergeReq.Inputs, mergeReq.Output); err != nil {
+						return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+					}
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: mergeReq.Output}, nil
+				case "build_dns_fragment":
+					var dnsReq struct {
+						RemoteDetour string         `json:"remote_detour"`
+						Options      map[string]any `json:"options"`
+					}
+					if err := json.Unmarshal([]byte(in.Content), &dnsReq); err != nil {
+						return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+					}
+					rawOpts, _ := json.Marshal(dnsReq.Options)
+					hopt := config.DefaultClientOptions()
+					_ = json.Unmarshal(rawOpts, hopt)
+					opts := option.Options{}
+					if err := config.BuildDnsFragment(&opts, hopt, dnsReq.RemoteDetour); err != nil {
+						return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+					}
+					out, err := json.Marshal(opts.DNS)
+					if err != nil {
+						return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
+					}
+					return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: string(out)}, nil
+				default:
+					return &ParseResponse{
+						ResponseCode: hcommon.ResponseCode_FAILED,
+						Message:      "unknown parse action: " + action,
+					}, nil
 				}
-				if err := json.Unmarshal([]byte(in.Content), &mergeReq); err != nil {
-					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
-				}
-				if err := config.MergeLocalRuleSets(mergeReq.Inputs, mergeReq.Output); err != nil {
-					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
-				}
-				return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: mergeReq.Output}, nil
-			case "build_dns_fragment":
-				var dnsReq struct {
-					Action       string                 `json:"hiddify_action"`
-					RemoteDetour string                 `json:"remote_detour"`
-					Options      map[string]any         `json:"options"`
-				}
-				if err := json.Unmarshal([]byte(in.Content), &dnsReq); err != nil {
-					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
-				}
-				rawOpts, _ := json.Marshal(dnsReq.Options)
-				hopt := config.DefaultClientOptions()
-				_ = json.Unmarshal(rawOpts, hopt)
-				opts := option.Options{}
-				if err := config.BuildDnsFragment(&opts, hopt, dnsReq.RemoteDetour); err != nil {
-					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
-				}
-				out, err := json.Marshal(opts.DNS)
-				if err != nil {
-					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
-				}
-				return &ParseResponse{ResponseCode: hcommon.ResponseCode_OK, Content: string(out)}, nil
 			}
 		}
 	}

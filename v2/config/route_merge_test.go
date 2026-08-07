@@ -567,3 +567,172 @@ func TestSubscriptionRouteHasPolicy(t *testing.T) {
 		t.Fatal("rule_set is policy")
 	}
 }
+
+func TestCompileRoutingProfileProcessSingBoxJSONSyntax(t *testing.T) {
+	// Assert the exact sing-box route rule JSON keys that will be launched:
+	// process_name / process_path / process_path_regex + action/outbound.
+	p := &config.RoutingProfile{
+		Name:    "proc-syntax",
+		Enabled: true,
+		ProxyProcesses: []config.ProcessMatch{
+			{Name: "chrome.exe"},
+		},
+		DirectProcesses: []config.ProcessMatch{
+			{Path: `C:\Games\game.exe`},
+			{PathRegex: `(.*)\\Steam\\(.*)`},
+		},
+		BlockProcesses: []config.ProcessMatch{
+			{Name: "torrent.exe"},
+		},
+	}
+	_, rules := config.CompileRoutingProfile(p, "", "")
+	if len(rules) < 4 {
+		t.Fatalf("rules=%d want >=4", len(rules))
+	}
+
+	type hit struct {
+		name, path, pathRegex, action, outbound bool
+	}
+	var got hit
+	for _, rule := range rules {
+		b, err := json.Marshal(rule)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		// Listable may encode a single value as string or []string — both are valid sing-box.
+		has := func(key, want string) bool {
+			v, ok := m[key]
+			if !ok {
+				return false
+			}
+			switch t := v.(type) {
+			case string:
+				return t == want
+			case []any:
+				for _, e := range t {
+					if s, ok := e.(string); ok && s == want {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		if has("process_name", "chrome.exe") {
+			if m["outbound"] != config.OutboundSelectTag {
+				t.Fatalf("chrome outbound=%v want %q in %s", m["outbound"], config.OutboundSelectTag, b)
+			}
+			got.name = true
+		}
+		if has("process_path", `C:\Games\game.exe`) {
+			if m["outbound"] != config.OutboundDirectTag {
+				t.Fatalf("path outbound=%v want %q in %s", m["outbound"], config.OutboundDirectTag, b)
+			}
+			got.path = true
+		}
+		if has("process_path_regex", `(.*)\\Steam\\(.*)`) {
+			if m["outbound"] != config.OutboundDirectTag {
+				t.Fatalf("regex outbound=%v want %q in %s", m["outbound"], config.OutboundDirectTag, b)
+			}
+			got.pathRegex = true
+		}
+		if has("process_name", "torrent.exe") {
+			if m["action"] != C.RuleActionTypeReject {
+				t.Fatalf("block action=%v want reject in %s", m["action"], b)
+			}
+			if _, hasOutbound := m["outbound"]; hasOutbound {
+				t.Fatalf("reject must not set outbound: %s", b)
+			}
+			got.action = true
+		}
+	}
+	if !got.name || !got.path || !got.pathRegex || !got.action {
+		t.Fatalf("hits=%+v", got)
+	}
+	if !config.ProfileNeedsFindProcess(p) {
+		t.Fatal("find_process required")
+	}
+}
+
+func TestBuildConfigProcessOwnerSingBoxJSON(t *testing.T) {
+	profile := `{
+  "outbounds": [{"type":"direct","tag":"node-a"}]
+}`
+	h := config.DefaultClientOptions()
+	h.IgnoreSubscriptionRoute = true
+	h.RoutingProfiles = []*config.RoutingProfile{{
+		Name:    "p",
+		Enabled: true,
+		ProxyProcesses: []config.ProcessMatch{
+			{Name: "chrome.exe"},
+			{Path: `C:\Program Files\Game\game.exe`},
+			{PathRegex: `(.*)\\Steam\\(.*)`},
+		},
+		BlockProcesses: []config.ProcessMatch{{Name: "torrent.exe"}},
+	}}
+	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built.Route == nil || !built.Route.FindProcess {
+		t.Fatalf("FindProcess want true, route=%+v", built.Route)
+	}
+	routeJSON, err := json.Marshal(built.Route)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var route map[string]any
+	if err := json.Unmarshal(routeJSON, &route); err != nil {
+		t.Fatal(err)
+	}
+	if route["find_process"] != true {
+		t.Fatalf("find_process=%v in %s", route["find_process"], routeJSON)
+	}
+	rules, ok := route["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("rules missing: %s", routeJSON)
+	}
+
+	foundProxy, foundPath, foundRx, foundReject := false, false, false, false
+	for _, raw := range rules {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		has := func(key, want string) bool {
+			v, ok := m[key]
+			if !ok {
+				return false
+			}
+			switch t := v.(type) {
+			case string:
+				return t == want
+			case []any:
+				for _, e := range t {
+					if s, ok := e.(string); ok && s == want {
+						return true
+					}
+				}
+			}
+			return false
+		}
+		if has("process_name", "chrome.exe") && m["outbound"] == config.OutboundSelectTag {
+			foundProxy = true
+		}
+		if has("process_path", `C:\Program Files\Game\game.exe`) && m["outbound"] == config.OutboundSelectTag {
+			foundPath = true
+		}
+		if has("process_path_regex", `(.*)\\Steam\\(.*)`) && m["outbound"] == config.OutboundSelectTag {
+			foundRx = true
+		}
+		if has("process_name", "torrent.exe") && m["action"] == C.RuleActionTypeReject {
+			foundReject = true
+		}
+	}
+	if !foundProxy || !foundPath || !foundRx || !foundReject {
+		t.Fatalf("proxy=%v path=%v rx=%v reject=%v json=%s", foundProxy, foundPath, foundRx, foundReject, routeJSON)
+	}
+}

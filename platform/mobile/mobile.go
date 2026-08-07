@@ -10,18 +10,19 @@ import (
 )
 
 type SetupOptions struct {
-	BasePath        string
-	WorkingDir      string
-	TempDir         string
-	Listen          string
-	Secret          string
-	Debug           bool
-	Mode            int
-	FixAndroidStack bool
+	BasePath         string
+	WorkingDir       string
+	TempDir          string
+	Listen           string
+	Secret           string
+	Debug            bool
+	Mode             int
+	FixAndroidStack  bool
+	OomKillerEnabled bool
 }
 
 func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) error {
-	return hcore.Setup(&hcore.SetupRequest{
+	if err := hcore.Setup(&hcore.SetupRequest{
 		BasePath:          opt.BasePath,
 		WorkingDir:        opt.WorkingDir,
 		TempDir:           opt.TempDir,
@@ -31,9 +32,15 @@ func Setup(opt *SetupOptions, platformInterface libbox.PlatformInterface) error 
 		Mode:              hcore.SetupMode(opt.Mode),
 		Secret:            opt.Secret,
 		FixAndroidStack:   opt.FixAndroidStack,
-	}, platformInterface)
-
-	// return hcore.Start(17078)
+	}, platformInterface); err != nil {
+		return err
+	}
+	// libbox SetMemoryLimit was removed; OOM policy is applied via SetupOptions.
+	libbox.ReloadSetupOptions(&libbox.SetupOptions{
+		OomKillerEnabled:  opt.OomKillerEnabled,
+		OomKillerDisabled: !opt.OomKillerEnabled,
+	})
+	return nil
 }
 
 // func Start(configPath string, configContent string, platformInterface libbox.PlatformInterface) (*hcore.CoreInfoResponse, error) {
