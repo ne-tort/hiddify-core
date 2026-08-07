@@ -263,6 +263,9 @@ replace github.com/sagernet/sing-box => ../../vendor/sing-box-lx
 // replace github.com/xtls/xray-core => github.com/hiddify/xray-core v0.0.0-20260124181826-59e6569c13e9
 replace github.com/sagernet/wireguard-go => ../../vendor/sing-box-lx/submodules/wireguard-go
 
+// lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — keep in sync with pathology-core/go.mod.
+replace github.com/sagernet/sing-tun => ../../vendor/sing-box-lx/patches/sing-tun
+
 replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.0-extended-1.0.0
 
 replace github.com/Psiphon-Labs/quic-go => github.com/hiddify/psiphon-quic-go v0.0.0-20260205155832-2164d1653824
