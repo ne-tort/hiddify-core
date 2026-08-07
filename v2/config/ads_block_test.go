@@ -11,7 +11,7 @@ import (
 
 func TestAppendAdsBlockRules(t *testing.T) {
 	tmp := t.TempDir()
-	path := filepath.Join(tmp, "hiddify-ads.srs")
+	path := filepath.Join(tmp, "pathology-ads.srs")
 	if err := os.WriteFile(path, []byte("dummy"), 0o644); err != nil {
 		t.Fatal(err)
 	}

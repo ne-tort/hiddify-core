@@ -13,12 +13,12 @@ import (
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
-// PathologySingbox maps pathology:// share links to a WireGuard endpoint with
+// PathologySingbox maps pathology-wg:// share links to a WireGuard endpoint with
 // nested pathology{} (SPEC 059). Mutually exclusive with awg2/awg3.
 //
 // Compact form (preferred):
 //
-//	pathology://host:port/<base64url>#tag
+//	pathology-wg://host:port/<base64url>#tag
 //
 // where base64url is JSON:
 //
@@ -34,17 +34,20 @@ import (
 //
 // Query fallback:
 //
-//	pathology://host:port/?pk=…&peer_public_key=…&local_address=…&pathology_key=…&auto=1
+//	pathology-wg://host:port/?pk=…&peer_public_key=…&local_address=…&pathology_key=…&auto=1
 //
-// Alias: patologiya:// (same grammar).
+// Aliases: pathology:// (legacy share with host:port), patologiya://.
 func PathologySingbox(rawURL string) (*T.Endpoint, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	lower := strings.ToLower(rawURL)
 	switch {
+	case strings.HasPrefix(lower, "pathology-wg://"):
+		// ok (canonical)
 	case strings.HasPrefix(lower, "patologiya://"):
-		rawURL = "pathology://" + rawURL[len("patologiya://"):]
+		rawURL = "pathology-wg://" + rawURL[len("patologiya://"):]
 	case strings.HasPrefix(lower, "pathology://"):
-		// ok
+		// Legacy VPN share scheme (app deep links are pathology:///path without VPN host).
+		rawURL = "pathology-wg://" + rawURL[len("pathology://"):]
 	default:
 		return nil, E.New("pathology: unsupported scheme")
 	}

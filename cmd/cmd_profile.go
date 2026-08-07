@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/hiddify/hiddify-core/v2/profile"
+	"github.com/ne-tort/pathology-core/v2/profile"
 	"github.com/sagernet/sing-box/experimental/libbox"
 
-	// "github.com/hiddify/hiddify-core/extension_repository/cleanip_scanner"
+	// "github.com/ne-tort/pathology-core/extension_repository/cleanip_scanner"
 	"github.com/spf13/cobra"
 )
 

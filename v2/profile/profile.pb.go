@@ -7,7 +7,7 @@
 package profile
 
 import (
-	hiddifyoptions "github.com/hiddify/hiddify-core/v2/hiddifyoptions"
+	clientoptions "github.com/ne-tort/pathology-core/v2/clientoptions"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -34,7 +34,7 @@ type ProfileEntity struct {
 	LastUpdate             int64                          `protobuf:"varint,5,opt,name=last_update,json=lastUpdate,proto3" json:"last_update,omitempty"`                                      // Last update time in milliseconds of the profile.
 	Options                *ProfileOptions                `protobuf:"bytes,6,opt,name=options,proto3" json:"options,omitempty"`                                                               // Options associated with the profile.
 	SubInfo                *SubscriptionInfo              `protobuf:"bytes,7,opt,name=sub_info,json=subInfo,proto3" json:"sub_info,omitempty"`                                                // Subscription-related information.
-	OverrideHiddifyOptions *hiddifyoptions.HiddifyOptions `protobuf:"bytes,8,opt,name=override_hiddify_options,json=overrideHiddifyOptions,proto3" json:"override_hiddify_options,omitempty"` // Override Hiddify options.
+	OverrideClientOptions *clientoptions.ClientOptions `protobuf:"bytes,8,opt,name=override_client_options,json=overrideClientOptions,proto3" json:"override_client_options,omitempty"` // Override client options.
 }
 
 func (x *ProfileEntity) Reset() {
@@ -111,9 +111,9 @@ func (x *ProfileEntity) GetSubInfo() *SubscriptionInfo {
 	return nil
 }
 
-func (x *ProfileEntity) GetOverrideHiddifyOptions() *hiddifyoptions.HiddifyOptions {
+func (x *ProfileEntity) GetOverrideClientOptions() *clientoptions.ClientOptions {
 	if x != nil {
-		return x.OverrideHiddifyOptions
+		return x.OverrideClientOptions
 	}
 	return nil
 }
@@ -321,12 +321,12 @@ var file_v2_profile_profile_proto_goTypes = []any{
 	(*ProfileEntity)(nil),                 // 0: profile.ProfileEntity
 	(*ProfileOptions)(nil),                // 1: profile.ProfileOptions
 	(*SubscriptionInfo)(nil),              // 2: profile.SubscriptionInfo
-	(*hiddifyoptions.HiddifyOptions)(nil), // 3: hiddifyoptions.HiddifyOptions
+	(*clientoptions.ClientOptions)(nil), // 3: clientoptions.ClientOptions
 }
 var file_v2_profile_profile_proto_depIdxs = []int32{
 	1, // 0: profile.ProfileEntity.options:type_name -> profile.ProfileOptions
 	2, // 1: profile.ProfileEntity.sub_info:type_name -> profile.SubscriptionInfo
-	3, // 2: profile.ProfileEntity.override_hiddify_options:type_name -> hiddifyoptions.HiddifyOptions
+	3, // 2: profile.ProfileEntity.override_client_options:type_name -> clientoptions.ClientOptions
 	3, // [3:3] is the sub-list for method output_type
 	3, // [3:3] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name

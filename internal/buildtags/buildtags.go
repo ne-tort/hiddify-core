@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Load reads hiddify-core/build_tags.txt (comma-separated tags, # comments).
+// Load reads pathology-core/build_tags.txt (comma-separated tags, # comments).
 // searchRoots are directories to walk upward from (typically module / executable dir).
 func Load(searchRoots ...string) ([]string, error) {
 	path, err := find(searchRoots...)

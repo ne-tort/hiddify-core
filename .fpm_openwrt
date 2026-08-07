@@ -1,5 +1,5 @@
 -s dir
---name hiddify-core
+--name pathology-core
 --category net
 --license GPL-3.0-or-later
 --description "The universal proxy platform."
@@ -8,7 +8,7 @@
 --no-deb-generate-changes
 
 --config-files /etc/config/hiddify
---config-files /etc/hiddify/config.json
+--config-files /etc/pathology/config.json
 
 --depends ca-bundle
 --depends kmod-inet-diag
@@ -18,10 +18,10 @@
 
 --before-remove release/config/openwrt.prerm
 
-release/config/config.json=/etc/hiddify/config.json
+release/config/config.json=/etc/pathology/config.json
 
 release/config/openwrt.conf=/etc/config/hiddify
 release/config/openwrt.init=/etc/init.d/hiddify
 release/config/openwrt.keep=/lib/upgrade/keep.d/hiddify 
 
-LICENSE.md=/usr/share/licenses/hiddify-core/LICENSE.md
+LICENSE.md=/usr/share/licenses/pathology-core/LICENSE.md

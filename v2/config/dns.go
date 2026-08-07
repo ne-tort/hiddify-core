@@ -38,20 +38,20 @@ func getDnsAddress(d string) string {
 // setDns builds the simple/advanced client DNS template (L2 when subscription has no dns
 // or IgnoreSubscriptionDNS is set). Bootstrap has no detour (resolves outbound servers);
 // remote uses OutboundMainDetour for app DNS. Both resolve via DNS groups (type: group).
-func setDns(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string) error {
+func setDns(options *option.Options, opt *ClientOptions, staticIps *map[string][]string) error {
 	return setDnsWithRemoteDetour(options, opt, staticIps, OutboundMainDetour)
 }
 
 // BuildDnsFragment builds a standalone dns object (for controlplane server PUT).
 // remoteDetour defaults to "direct" when empty (server dataplane has no select outbound).
-func BuildDnsFragment(options *option.Options, opt *HiddifyOptions, remoteDetour string) error {
+func BuildDnsFragment(options *option.Options, opt *ClientOptions, remoteDetour string) error {
 	if strings.TrimSpace(remoteDetour) == "" {
 		remoteDetour = "direct"
 	}
 	return setDnsWithRemoteDetour(options, opt, nil, remoteDetour)
 }
 
-func setDnsWithRemoteDetour(options *option.Options, opt *HiddifyOptions, staticIps *map[string][]string, remoteDetour string) error {
+func setDnsWithRemoteDetour(options *option.Options, opt *ClientOptions, staticIps *map[string][]string, remoteDetour string) error {
 	directServers := resolveDnsServerList(opt.DirectDnsServers, "udp://1.1.1.1")
 	remoteServers := resolveDnsServerList(opt.RemoteDnsServers, "local")
 
@@ -242,7 +242,7 @@ func getAllOutboundsOptions(options *option.Options) []any {
 	}
 	return outbounds
 }
-func addForceDirect(options *option.Options, hopt *HiddifyOptions) ([]option.DefaultDNSRule, error) {
+func addForceDirect(options *option.Options, hopt *ClientOptions) ([]option.DefaultDNSRule, error) {
 	dnsMap := make(map[string]string)
 	// outbounds := getAllOutboundsOptions(options)
 

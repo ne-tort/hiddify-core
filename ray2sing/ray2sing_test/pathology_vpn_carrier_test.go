@@ -27,7 +27,7 @@ func TestPathologyCompactLink(t *testing.T) {
 	}
 	raw, _ := json.Marshal(body)
 	b64 := base64.RawURLEncoding.EncodeToString(raw)
-	link := "pathology://203.0.113.50:51820/" + b64 + "#path-1"
+	link := "pathology-wg://203.0.113.50:51820/" + b64 + "#path-1"
 	ep, err := ray2sing.PathologySingbox(link)
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestPathologyCompactLink(t *testing.T) {
 }
 
 func TestPathologyQueryLink(t *testing.T) {
-	link := "pathology://203.0.113.50:51820/?pk=priv&peer_public_key=pub&local_address=10.8.0.2/32&pathology_key=psk&auto=1&persona=balanced#q"
+	link := "pathology-wg://203.0.113.50:51820/?pk=priv&peer_public_key=pub&local_address=10.8.0.2/32&pathology_key=psk&auto=1&persona=balanced#q"
 	ep, err := ray2sing.PathologySingbox(link)
 	if err != nil {
 		t.Fatal(err)

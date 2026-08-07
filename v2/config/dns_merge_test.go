@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/hiddify/ray2sing/ray2sing"
 	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -31,7 +31,7 @@ func TestParseRetainsDNSAndRoute(t *testing.T) {
     {"type":"direct","tag":"proxy-node"}
   ]
 }`
-	opts, err := config.ParseConfig(testCtx(), &config.ReadOptions{Content: raw}, false, config.DefaultHiddifyOptions(), false)
+	opts, err := config.ParseConfig(testCtx(), &config.ReadOptions{Content: raw}, false, config.DefaultClientOptions(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestBuildUsesSubscriptionDNSRaw(t *testing.T) {
     {"type":"direct","tag":"node-a"}
   ]
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionDNS = false
 	h.EnableDnsHijack = false
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
@@ -89,7 +89,7 @@ func TestBuildIgnoresSubscriptionDNSWhenFlagged(t *testing.T) {
     {"type":"direct","tag":"node-a"}
   ]
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionDNS = true
 	h.DirectDnsServers = []string{"udp://1.1.1.1"}
 	h.RemoteDnsServers = []string{"udp://8.8.8.8"}
@@ -111,7 +111,7 @@ func TestBuildIgnoresSubscriptionDNSWhenFlagged(t *testing.T) {
 
 func TestBuildTemplateWhenNoSubscriptionDNS(t *testing.T) {
 	profile := `{"outbounds":[{"type":"direct","tag":"node-a"}]}`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.DirectDnsServers = []string{"udp://1.1.1.1"}
 	h.RemoteDnsServers = []string{"udp://8.8.8.8"}
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
@@ -128,7 +128,7 @@ func TestBuildTemplateWhenNoSubscriptionDNS(t *testing.T) {
 
 func TestBuildDnsHijackToggle(t *testing.T) {
 	profile := `{"outbounds":[{"type":"direct","tag":"node-a"}]}`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.EnableDnsHijack = true
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
@@ -186,8 +186,8 @@ func TestLXNewTypesParseAndValidate(t *testing.T) {
 	}
 }
 
-func TestHiddifyDNSFlagsJSON(t *testing.T) {
-	h := config.DefaultHiddifyOptions()
+func TestPathologyDNSFlagsJSON(t *testing.T) {
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionDNS = true
 	h.EnableDnsHijack = true
 	b, err := json.Marshal(h)

@@ -10,7 +10,7 @@ import (
 	sync "sync"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/v2/hutils"
 	mDNS "github.com/miekg/dns"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -66,7 +66,7 @@ var (
 //	L2 dns — subscription dns as-is, or simple/advanced client template (setDns)
 //	L3 client hooks — sniff; optional hijack-dns (setRoutingOptions)
 //	L4 route policy — local RoutingProfile + subscription route merge (setRoutingOptions)
-func BuildConfig(ctx context.Context, hopts *HiddifyOptions, inputOpt *ReadOptions) (*option.Options, error) {
+func BuildConfig(ctx context.Context, hopts *ClientOptions, inputOpt *ReadOptions) (*option.Options, error) {
 
 	input, err := ReadSingOptions(ctx, inputOpt)
 	if err != nil {
@@ -138,7 +138,7 @@ func isOutboundDisabled(tag string, disabled []string) bool {
 	return contains(disabled, tag)
 }
 
-func setOutbounds(options *option.Options, input *option.Options, opt *HiddifyOptions, staticIPs *map[string][]string) error {
+func setOutbounds(options *option.Options, input *option.Options, opt *ClientOptions, staticIPs *map[string][]string) error {
 	var outbounds []option.Outbound
 	var endpoints []option.Endpoint
 	var tags []string
@@ -353,7 +353,7 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-func setExperimental(options *option.Options, hopt *HiddifyOptions) {
+func setExperimental(options *option.Options, hopt *ClientOptions) {
 	if len(hopt.ConnectionTestUrls) == 0 {
 		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
 	}
@@ -376,7 +376,7 @@ func setExperimental(options *option.Options, hopt *HiddifyOptions) {
 	options.Experimental = exp
 }
 
-func setLog(options *option.Options, opt *HiddifyOptions) {
+func setLog(options *option.Options, opt *ClientOptions) {
 	logOutput := opt.LogFile
 	logDisabled := strings.TrimSpace(logOutput) == ""
 	options.Log = &option.LogOptions{
@@ -429,7 +429,7 @@ func defaultNetworkStrategyForIPv6Mode(mode option.DomainStrategy) *option.Netwo
 	}
 }
 
-func setInbound(options *option.Options, hopt *HiddifyOptions) {
+func setInbound(options *option.Options, hopt *ClientOptions) {
 	ipv6Enable := isIPv6Supported()
 	if hopt.EnableTun {
 
@@ -546,7 +546,7 @@ func setInbound(options *option.Options, hopt *HiddifyOptions) {
 	}
 }
 
-func setRoutingOptions(options *option.Options, input *option.Options, hopt *HiddifyOptions, useSubDNS bool) error {
+func setRoutingOptions(options *option.Options, input *option.Options, hopt *ClientOptions, useSubDNS bool) error {
 	dnsRules := []option.DefaultDNSRule{}
 	routeRules := []option.Rule{}
 	rulesets := []option.RuleSet{}

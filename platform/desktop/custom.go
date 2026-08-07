@@ -16,8 +16,8 @@ import (
 	// "syscall"
 	"unsafe"
 
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
-	hutils "github.com/hiddify/hiddify-core/v2/hutils"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
+	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
 )

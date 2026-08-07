@@ -582,7 +582,7 @@ const file_v2_ezytel_ezytel_proto_rawDesc = "" +
 	"\x15ParseChannelsResponse\x12\x1f\n" +
 	"\vchannel_ids\x18\x01 \x03(\tR\n" +
 	"channelIdsBK\n" +
-	"\x1ecom.hiddify.core.api.v2.ezytelZ)github.com/hiddify/hiddify-core/v2/ezytelb\x06proto3"
+	"\x1ecom.pathology.core.api.v2.ezytelZ)github.com/ne-tort/pathology-core/v2/ezytelb\x06proto3"
 
 var (
 	file_v2_ezytel_ezytel_proto_rawDescOnce sync.Once

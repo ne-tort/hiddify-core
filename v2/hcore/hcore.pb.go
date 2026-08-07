@@ -7,7 +7,7 @@
 package hcore
 
 import (
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1571,16 +1571,16 @@ func (x *ParseResponse) GetMessage() string {
 	return ""
 }
 
-type ChangeHiddifySettingsRequest struct {
+type ChangeClientSettingsRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	HiddifySettingsJson string `protobuf:"bytes,1,opt,name=hiddify_settings_json,json=hiddifySettingsJson,proto3" json:"hiddify_settings_json,omitempty"`
+	ClientSettingsJson string `protobuf:"bytes,1,opt,name=client_settings_json,json=clientSettingsJson,proto3" json:"client_settings_json,omitempty"`
 }
 
-func (x *ChangeHiddifySettingsRequest) Reset() {
-	*x = ChangeHiddifySettingsRequest{}
+func (x *ChangeClientSettingsRequest) Reset() {
+	*x = ChangeClientSettingsRequest{}
 	if protoimpl.UnsafeEnabled {
 		mi := &file_v2_hcore_hcore_proto_msgTypes[15]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1588,13 +1588,13 @@ func (x *ChangeHiddifySettingsRequest) Reset() {
 	}
 }
 
-func (x *ChangeHiddifySettingsRequest) String() string {
+func (x *ChangeClientSettingsRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ChangeHiddifySettingsRequest) ProtoMessage() {}
+func (*ChangeClientSettingsRequest) ProtoMessage() {}
 
-func (x *ChangeHiddifySettingsRequest) ProtoReflect() protoreflect.Message {
+func (x *ChangeClientSettingsRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_v2_hcore_hcore_proto_msgTypes[15]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -1606,14 +1606,14 @@ func (x *ChangeHiddifySettingsRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ChangeHiddifySettingsRequest.ProtoReflect.Descriptor instead.
-func (*ChangeHiddifySettingsRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use ChangeClientSettingsRequest.ProtoReflect.Descriptor instead.
+func (*ChangeClientSettingsRequest) Descriptor() ([]byte, []int) {
 	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{15}
 }
 
-func (x *ChangeHiddifySettingsRequest) GetHiddifySettingsJson() string {
+func (x *ChangeClientSettingsRequest) GetClientSettingsJson() string {
 	if x != nil {
-		return x.HiddifySettingsJson
+		return x.ClientSettingsJson
 	}
 	return ""
 }
@@ -2435,7 +2435,7 @@ var file_v2_hcore_hcore_proto_goTypes = []any{
 	(*SystemProxyStatus)(nil),            // 17: hcore.SystemProxyStatus
 	(*ParseRequest)(nil),                 // 18: hcore.ParseRequest
 	(*ParseResponse)(nil),                // 19: hcore.ParseResponse
-	(*ChangeHiddifySettingsRequest)(nil), // 20: hcore.ChangeHiddifySettingsRequest
+	(*ChangeClientSettingsRequest)(nil), // 20: hcore.ChangeClientSettingsRequest
 	(*GenerateConfigRequest)(nil),        // 21: hcore.GenerateConfigRequest
 	(*GenerateConfigResponse)(nil),       // 22: hcore.GenerateConfigResponse
 	(*SelectOutboundRequest)(nil),        // 23: hcore.SelectOutboundRequest
@@ -2658,7 +2658,7 @@ func file_v2_hcore_hcore_proto_init() {
 			}
 		}
 		file_v2_hcore_hcore_proto_msgTypes[15].Exporter = func(v any, i int) any {
-			switch v := v.(*ChangeHiddifySettingsRequest); i {
+			switch v := v.(*ChangeClientSettingsRequest); i {
 			case 0:
 				return &v.state
 			case 1:

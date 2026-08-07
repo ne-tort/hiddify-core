@@ -20,12 +20,12 @@ import (
 	sync "sync"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/hiddify/hiddify-core/v2/db"
-	"github.com/hiddify/hiddify-core/v2/ezytel"
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
-	"github.com/hiddify/hiddify-core/v2/hello"
-	hutils "github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
+	"github.com/ne-tort/pathology-core/v2/ezytel"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/hello"
+	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -114,24 +114,24 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 		}
 	}
 	settings := db.GetTable[hcommon.AppSettings]()
-	val, err := settings.Get("HiddifySettingsJson")
-	Log(LogLevel_DEBUG, LogType_CORE, "HiddifySettingsJson", val, err)
+	val, err := settings.Get("ClientSettingsJson")
+	Log(LogLevel_DEBUG, LogType_CORE, "ClientSettingsJson", val, err)
 	if val == nil || err != nil {
 		// if params.Mode == SetupMode_GRPC_BACKGROUND_INSECURE {
-		_, err := ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: ""}, false)
+		_, err := ChangeClientSettings(&ChangeClientSettingsRequest{ClientSettingsJson: ""}, false)
 		if err != nil {
-			Log(LogLevel_ERROR, LogType_CORE, E.Cause(err, "ChangeHiddifySettings").Error())
+			Log(LogLevel_ERROR, LogType_CORE, E.Cause(err, "ChangeClientSettings").Error())
 		}
 	} else {
 		// settings := db.GetTable[hcommon.AppSettings]()
-		_, err := ChangeHiddifySettings(&ChangeHiddifySettingsRequest{HiddifySettingsJson: val.Value.(string)}, false)
+		_, err := ChangeClientSettings(&ChangeClientSettingsRequest{ClientSettingsJson: val.Value.(string)}, false)
 		if err != nil {
-			Log(LogLevel_ERROR, LogType_CORE, E.Cause(err, "ChangeHiddifySettings").Error())
+			Log(LogLevel_ERROR, LogType_CORE, E.Cause(err, "ChangeClientSettings").Error())
 		}
 
 	}
 	hutils.HealStickyTun()
-	return InitHiddifyService()
+	return InitPathologyService()
 }
 
 func StartGrpcServer(listenAddressG string, service string) (*grpc.Server, error) {

@@ -7,15 +7,15 @@ func TestNLANameMatches(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"HiddifyTunnel", true},
-		{"hiddifytunnel", true},
-		{"HiddifyTunnel 2", true},
+		{"PathologyTunnel", true},
+		{"pathologytunnel", true},
+		{"PathologyTunnel 2", true},
 		{"singbox-tun0", true},
 		{"singbox_tun", true},
 		{"Ethernet", false},
 		{"Wi-Fi", false},
 		{"", false},
-		{"MyHiddifyTunnel", false},
+		{"MyPathologyTunnel", false},
 	}
 	for _, tc := range cases {
 		if got := NLANameMatches(tc.name); got != tc.want {

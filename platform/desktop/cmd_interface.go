@@ -8,7 +8,7 @@ import "C"
 import (
 	"unsafe"
 
-	"github.com/hiddify/hiddify-core/cmd"
+	"github.com/ne-tort/pathology-core/cmd"
 )
 
 //export parseCli

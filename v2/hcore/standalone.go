@@ -14,14 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 
 	"github.com/sagernet/sing-box/option"
 )
 
-func RunStandalone(ctx context.Context, hiddifySettingPath string, configPath string, defaultConfig config.HiddifyOptions) error {
+func RunStandalone(ctx context.Context, clientSettingPath string, configPath string, defaultConfig config.ClientOptions) error {
 	fmt.Println("Running in standalone mode")
-	current, err := readAndBuildConfig(ctx, hiddifySettingPath, configPath, &defaultConfig)
+	current, err := readAndBuildConfig(ctx, clientSettingPath, configPath, &defaultConfig)
 	if err != nil {
 		fmt.Printf("Error in read and build config %v", err)
 		return err
@@ -37,7 +37,7 @@ func RunStandalone(ctx context.Context, hiddifySettingPath string, configPath st
 		fmt.Printf("Error in start service %v", err)
 		return err
 	}
-	go updateConfigInterval(ctx, current, hiddifySettingPath, configPath)
+	go updateConfigInterval(ctx, current, clientSettingPath, configPath)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -53,10 +53,10 @@ func RunStandalone(ctx context.Context, hiddifySettingPath string, configPath st
 type ConfigResult struct {
 	Config                string
 	RefreshInterval       int
-	HiddifyHiddifyOptions *config.HiddifyOptions
+	ClientOptions *config.ClientOptions
 }
 
-func readAndBuildConfig(ctx context.Context, hiddifySettingPath string, configPath string, defaultConfig *config.HiddifyOptions) (ConfigResult, error) {
+func readAndBuildConfig(ctx context.Context, clientSettingPath string, configPath string, defaultConfig *config.ClientOptions) (ConfigResult, error) {
 	var result ConfigResult
 
 	result, err := readConfigContent(configPath)
@@ -64,21 +64,21 @@ func readAndBuildConfig(ctx context.Context, hiddifySettingPath string, configPa
 		return result, err
 	}
 
-	hiddifyconfig := config.DefaultHiddifyOptions()
+	clientconfig := config.DefaultClientOptions()
 
 	if defaultConfig != nil {
-		hiddifyconfig = defaultConfig
+		clientconfig = defaultConfig
 	}
 
-	if hiddifySettingPath != "" {
-		hiddifyconfig, err = ReadHiddifyOptionsAt(hiddifySettingPath)
+	if clientSettingPath != "" {
+		clientconfig, err = ReadClientOptionsAt(clientSettingPath)
 		if err != nil {
 			return result, err
 		}
 	}
 
-	result.HiddifyHiddifyOptions = hiddifyconfig
-	result.Config, err = buildStandaloneConfig(ctx, &config.ReadOptions{Content: result.Config}, result.HiddifyHiddifyOptions)
+	result.ClientOptions = clientconfig
+	result.Config, err = buildStandaloneConfig(ctx, &config.ReadOptions{Content: result.Config}, result.ClientOptions)
 	if err != nil {
 		return result, err
 	}
@@ -99,7 +99,7 @@ func readConfigContent(configPath string) (ConfigResult, error) {
 			fmt.Println("Error creating request:", err)
 			return ConfigResult{}, err
 		}
-		req.Header.Set("User-Agent", "HiddifyNext/4.0.0("+runtime.GOOS+") like ClashMeta v2ray sing-box")
+		req.Header.Set("User-Agent", "Pathology/4.0.0("+runtime.GOOS+") like ClashMeta v2ray sing-box")
 		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Println("Error making GET request:", err)
@@ -155,7 +155,7 @@ func extractRefreshInterval(header http.Header, bodyStr string) (int, error) {
 	return 0, nil
 }
 
-func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts *config.HiddifyOptions) (string, error) {
+func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts *config.ClientOptions) (string, error) {
 	finalconfig, err := config.ParseBuildConfig(ctx, hopts, ropt)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse config content: %w", err)
@@ -197,14 +197,14 @@ func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts 
 	return string(configStr), nil
 }
 
-func updateConfigInterval(ctx context.Context, current ConfigResult, hiddifySettingPath string, configPath string) {
+func updateConfigInterval(ctx context.Context, current ConfigResult, clientSettingPath string, configPath string) {
 	if current.RefreshInterval <= 0 {
 		return
 	}
 
 	for {
 		<-time.After(time.Duration(current.RefreshInterval) * time.Hour)
-		new, err := readAndBuildConfig(ctx, hiddifySettingPath, configPath, current.HiddifyHiddifyOptions)
+		new, err := readAndBuildConfig(ctx, clientSettingPath, configPath, current.ClientOptions)
 		if err != nil {
 			continue
 		}
@@ -222,12 +222,12 @@ func updateConfigInterval(ctx context.Context, current ConfigResult, hiddifySett
 	}
 }
 
-func ReadHiddifyOptionsAt(path string) (*config.HiddifyOptions, error) {
+func ReadClientOptionsAt(path string) (*config.ClientOptions, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var options config.HiddifyOptions
+	var options config.ClientOptions
 	err = json.Unmarshal(content, &options)
 	if err != nil {
 		return nil, err

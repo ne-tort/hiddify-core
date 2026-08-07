@@ -5,16 +5,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/hiddify/hiddify-core/compat/monitoring"
+	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/compat/monitoring"
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
 )
 
-type HiddifyInstance struct {
+type PathologyInstance struct {
 	StartedService *daemon.StartedService
-	HiddifyOptions *config.HiddifyOptions
+	ClientOptions *config.ClientOptions
 	// activeConfigPath string
 	CoreLogFactory            log.Factory
 	coreInfoObserver          *monitoring.Broadcaster[*CoreInfoResponse]
@@ -34,7 +34,7 @@ type HiddifyInstance struct {
 	logLevel LogLevel
 }
 
-var static = &HiddifyInstance{
+var static = &PathologyInstance{
 	CoreState:                 CoreStates_STOPPED,
 	coreInfoObserver:          monitoring.NewBroadcaster[*CoreInfoResponse](context.Background()),
 	logObserver:               monitoring.NewBroadcaster[*LogMessage](context.Background()),

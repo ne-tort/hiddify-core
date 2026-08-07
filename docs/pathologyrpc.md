@@ -12,7 +12,7 @@
     - [Protocol](#config-Protocol)
   
 - [v2/hcore/hcore.proto](#v2_hcore_hcore-proto)
-    - [ChangeHiddifySettingsRequest](#hcore-ChangeHiddifySettingsRequest)
+    - [ChangeClientSettingsRequest](#hcore-ChangeClientSettingsRequest)
     - [CloseRequest](#hcore-CloseRequest)
     - [CoreInfoResponse](#hcore-CoreInfoResponse)
     - [GenerateConfigRequest](#hcore-GenerateConfigRequest)
@@ -54,21 +54,21 @@
 - [v2/hcore/tunnelservice/tunnel_service.proto](#v2_hcore_tunnelservice_tunnel_service-proto)
     - [TunnelService](#tunnelservice-TunnelService)
   
-- [v2/hiddifyoptions/hiddify_options.proto](#v2_hiddifyoptions_hiddify_options-proto)
-    - [DNSOptions](#hiddifyoptions-DNSOptions)
-    - [HiddifyOptions](#hiddifyoptions-HiddifyOptions)
-    - [InboundOptions](#hiddifyoptions-InboundOptions)
-    - [IntRange](#hiddifyoptions-IntRange)
-    - [MuxOptions](#hiddifyoptions-MuxOptions)
-    - [RouteOptions](#hiddifyoptions-RouteOptions)
-    - [Rule](#hiddifyoptions-Rule)
-    - [TLSTricks](#hiddifyoptions-TLSTricks)
-    - [URLTestOptions](#hiddifyoptions-URLTestOptions)
-    - [WarpAccount](#hiddifyoptions-WarpAccount)
-    - [WarpOptions](#hiddifyoptions-WarpOptions)
-    - [WarpWireguardConfig](#hiddifyoptions-WarpWireguardConfig)
+- [v2/clientoptions/client_options.proto](#v2_pathologyoptions_pathology_options-proto)
+    - [DNSOptions](#pathologyoptions-DNSOptions)
+    - [ClientOptions](#pathologyoptions-ClientOptions)
+    - [InboundOptions](#pathologyoptions-InboundOptions)
+    - [IntRange](#pathologyoptions-IntRange)
+    - [MuxOptions](#pathologyoptions-MuxOptions)
+    - [RouteOptions](#pathologyoptions-RouteOptions)
+    - [Rule](#pathologyoptions-Rule)
+    - [TLSTricks](#pathologyoptions-TLSTricks)
+    - [URLTestOptions](#pathologyoptions-URLTestOptions)
+    - [WarpAccount](#pathologyoptions-WarpAccount)
+    - [WarpOptions](#pathologyoptions-WarpOptions)
+    - [WarpWireguardConfig](#pathologyoptions-WarpWireguardConfig)
   
-    - [DomainStrategy](#hiddifyoptions-DomainStrategy)
+    - [DomainStrategy](#pathologyoptions-DomainStrategy)
   
 - [v2/profile/profile_service.proto](#v2_profile_profile_service-proto)
     - [AddProfileRequest](#profile-AddProfileRequest)
@@ -229,15 +229,15 @@
 
 
 
-<a name="hcore-ChangeHiddifySettingsRequest"></a>
+<a name="hcore-ChangeClientSettingsRequest"></a>
 
-### ChangeHiddifySettingsRequest
+### ChangeClientSettingsRequest
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| hiddify_settings_json | [string](#string) |  |  |
+| client_settings_json | [string](#string) |  |  |
 
 
 
@@ -795,7 +795,7 @@ Define the message equivalent of SetupParameters
 | GetSystemInfoStream | [.hcommon.Empty](#hcommon-Empty) | [SystemInfo](#hcore-SystemInfo) stream |  |
 | Setup | [SetupRequest](#hcore-SetupRequest) | [.hcommon.Response](#hcommon-Response) |  |
 | Parse | [ParseRequest](#hcore-ParseRequest) | [ParseResponse](#hcore-ParseResponse) |  |
-| ChangeHiddifySettings | [ChangeHiddifySettingsRequest](#hcore-ChangeHiddifySettingsRequest) | [CoreInfoResponse](#hcore-CoreInfoResponse) |  |
+| ChangeClientSettings | [ChangeClientSettingsRequest](#hcore-ChangeClientSettingsRequest) | [CoreInfoResponse](#hcore-CoreInfoResponse) |  |
 | StartService | [StartRequest](#hcore-StartRequest) | [CoreInfoResponse](#hcore-CoreInfoResponse) | rpc GenerateConfig (GenerateConfigRequest) returns (GenerateConfigResponse); |
 | Stop | [.hcommon.Empty](#hcommon-Empty) | [CoreInfoResponse](#hcore-CoreInfoResponse) |  |
 | Restart | [StartRequest](#hcore-StartRequest) | [CoreInfoResponse](#hcore-CoreInfoResponse) |  |
@@ -893,14 +893,14 @@ Define the message equivalent of SetupParameters
 
 
 
-<a name="v2_hiddifyoptions_hiddify_options-proto"></a>
+<a name="v2_pathologyoptions_pathology_options-proto"></a>
 <p align="right"><a href="#top">Top</a></p>
 
-## v2/hiddifyoptions/hiddify_options.proto
+## v2/clientoptions/client_options.proto
 
 
 
-<a name="hiddifyoptions-DNSOptions"></a>
+<a name="pathologyoptions-DNSOptions"></a>
 
 ### DNSOptions
 DNSOptions defines DNS-related configuration options.
@@ -909,9 +909,9 @@ DNSOptions defines DNS-related configuration options.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | remote_dns_address | [string](#string) |  | Remote DNS server address. |
-| remote_dns_domain_strategy | [DomainStrategy](#hiddifyoptions-DomainStrategy) |  | Strategy for resolving domains with remote DNS. |
+| remote_dns_domain_strategy | [DomainStrategy](#pathologyoptions-DomainStrategy) |  | Strategy for resolving domains with remote DNS. |
 | direct_dns_address | [string](#string) |  | Direct DNS server address. |
-| direct_dns_domain_strategy | [DomainStrategy](#hiddifyoptions-DomainStrategy) |  | Strategy for resolving domains with direct DNS. |
+| direct_dns_domain_strategy | [DomainStrategy](#pathologyoptions-DomainStrategy) |  | Strategy for resolving domains with direct DNS. |
 | independent_dns_cache | [bool](#bool) |  | If true, enables independent DNS caching. |
 | enable_fake_dns | [bool](#bool) |  | If true, enables fake DNS responses. |
 | enable_dns_routing | [bool](#bool) |  | If true, enables DNS routing. |
@@ -921,10 +921,10 @@ DNSOptions defines DNS-related configuration options.
 
 
 
-<a name="hiddifyoptions-HiddifyOptions"></a>
+<a name="pathologyoptions-ClientOptions"></a>
 
-### HiddifyOptions
-HiddifyOptions defines the configuration options for the Hiddify application.
+### ClientOptions
+ClientOptions defines the configuration options for the Pathology application.
 
 
 | Field | Type | Label | Description |
@@ -938,22 +938,22 @@ HiddifyOptions defines the configuration options for the Hiddify application.
 | region | [string](#string) |  | Region for the application. |
 | block_ads | [bool](#bool) |  | If true, blocks ads. |
 | use_xray_core_when_possible | [bool](#bool) |  | If true, use XRay core when possible. |
-| rules | [Rule](#hiddifyoptions-Rule) | repeated | List of routing rules for traffic management. |
-| warp | [WarpOptions](#hiddifyoptions-WarpOptions) |  | Configuration options for Warp. |
-| warp2 | [WarpOptions](#hiddifyoptions-WarpOptions) |  | Additional configuration options for a second Warp instance. |
-| mux | [MuxOptions](#hiddifyoptions-MuxOptions) |  | Configuration options for multiplexing. |
-| tls_tricks | [TLSTricks](#hiddifyoptions-TLSTricks) |  | Options for TLS tricks. |
-| dns_options | [DNSOptions](#hiddifyoptions-DNSOptions) |  | DNS-related options. |
-| inbound_options | [InboundOptions](#hiddifyoptions-InboundOptions) |  | Inbound connection options. |
-| url_test_options | [URLTestOptions](#hiddifyoptions-URLTestOptions) |  | URL test configuration options. |
-| route_options | [RouteOptions](#hiddifyoptions-RouteOptions) |  | Routing-related options. |
+| rules | [Rule](#pathologyoptions-Rule) | repeated | List of routing rules for traffic management. |
+| warp | [WarpOptions](#pathologyoptions-WarpOptions) |  | Configuration options for Warp. |
+| warp2 | [WarpOptions](#pathologyoptions-WarpOptions) |  | Additional configuration options for a second Warp instance. |
+| mux | [MuxOptions](#pathologyoptions-MuxOptions) |  | Configuration options for multiplexing. |
+| tls_tricks | [TLSTricks](#pathologyoptions-TLSTricks) |  | Options for TLS tricks. |
+| dns_options | [DNSOptions](#pathologyoptions-DNSOptions) |  | DNS-related options. |
+| inbound_options | [InboundOptions](#pathologyoptions-InboundOptions) |  | Inbound connection options. |
+| url_test_options | [URLTestOptions](#pathologyoptions-URLTestOptions) |  | URL test configuration options. |
+| route_options | [RouteOptions](#pathologyoptions-RouteOptions) |  | Routing-related options. |
 
 
 
 
 
 
-<a name="hiddifyoptions-InboundOptions"></a>
+<a name="pathologyoptions-InboundOptions"></a>
 
 ### InboundOptions
 InboundOptions defines the configuration options for inbound connections.
@@ -977,7 +977,7 @@ InboundOptions defines the configuration options for inbound connections.
 
 
 
-<a name="hiddifyoptions-IntRange"></a>
+<a name="pathologyoptions-IntRange"></a>
 
 ### IntRange
 IntRange defines a range of integers for various configurations.
@@ -994,7 +994,7 @@ It includes the starting and ending values of the range.
 
 
 
-<a name="hiddifyoptions-MuxOptions"></a>
+<a name="pathologyoptions-MuxOptions"></a>
 
 ### MuxOptions
 MuxOptions defines options for multiplexing connections.
@@ -1012,7 +1012,7 @@ MuxOptions defines options for multiplexing connections.
 
 
 
-<a name="hiddifyoptions-RouteOptions"></a>
+<a name="pathologyoptions-RouteOptions"></a>
 
 ### RouteOptions
 RouteOptions defines options related to traffic routing.
@@ -1021,7 +1021,7 @@ RouteOptions defines options related to traffic routing.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | resolve_destination | [bool](#bool) |  | If true, resolves the destination address. |
-| ipv6_mode | [DomainStrategy](#hiddifyoptions-DomainStrategy) |  | Strategy for handling IPv6 addresses. |
+| ipv6_mode | [DomainStrategy](#pathologyoptions-DomainStrategy) |  | Strategy for handling IPv6 addresses. |
 | bypass_lan | [bool](#bool) |  | If true, bypasses LAN connections. |
 | allow_connection_from_lan | [bool](#bool) |  | If true, allows connections from LAN. |
 
@@ -1030,7 +1030,7 @@ RouteOptions defines options related to traffic routing.
 
 
 
-<a name="hiddifyoptions-Rule"></a>
+<a name="pathologyoptions-Rule"></a>
 
 ### Rule
 Rule defines routing rules for managing traffic.
@@ -1051,7 +1051,7 @@ Rule defines routing rules for managing traffic.
 
 
 
-<a name="hiddifyoptions-TLSTricks"></a>
+<a name="pathologyoptions-TLSTricks"></a>
 
 ### TLSTricks
 TLSTricks defines options for TLS tricks to obfuscate traffic.
@@ -1060,18 +1060,18 @@ TLSTricks defines options for TLS tricks to obfuscate traffic.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | enable_fragment | [bool](#bool) |  | If true, enables fragmentation of packets. |
-| fragment_size | [IntRange](#hiddifyoptions-IntRange) |  | Size of fragments to be used. |
-| fragment_sleep | [IntRange](#hiddifyoptions-IntRange) |  | Sleep time between fragments. |
+| fragment_size | [IntRange](#pathologyoptions-IntRange) |  | Size of fragments to be used. |
+| fragment_sleep | [IntRange](#pathologyoptions-IntRange) |  | Sleep time between fragments. |
 | mixed_sni_case | [bool](#bool) |  | If true, enables mixed SNI case for obfuscation. |
 | enable_padding | [bool](#bool) |  | If true, enables padding of packets. |
-| padding_size | [IntRange](#hiddifyoptions-IntRange) |  | Size of padding to be used. |
+| padding_size | [IntRange](#pathologyoptions-IntRange) |  | Size of padding to be used. |
 
 
 
 
 
 
-<a name="hiddifyoptions-URLTestOptions"></a>
+<a name="pathologyoptions-URLTestOptions"></a>
 
 ### URLTestOptions
 URLTestOptions defines the configuration options for URL testing.
@@ -1087,7 +1087,7 @@ URLTestOptions defines the configuration options for URL testing.
 
 
 
-<a name="hiddifyoptions-WarpAccount"></a>
+<a name="pathologyoptions-WarpAccount"></a>
 
 ### WarpAccount
 WarpAccount defines account details for Warp.
@@ -1103,7 +1103,7 @@ WarpAccount defines account details for Warp.
 
 
 
-<a name="hiddifyoptions-WarpOptions"></a>
+<a name="pathologyoptions-WarpOptions"></a>
 
 ### WarpOptions
 WarpOptions defines configuration options for Warp.
@@ -1114,21 +1114,21 @@ WarpOptions defines configuration options for Warp.
 | id | [string](#string) |  | Unique identifier for the Warp configuration. |
 | enable_warp | [bool](#bool) |  | If true, enables Warp functionality. |
 | mode | [string](#string) |  | Operating mode for Warp. |
-| wireguard_config | [WarpWireguardConfig](#hiddifyoptions-WarpWireguardConfig) |  | Configuration for WireGuard (defined elsewhere). |
+| wireguard_config | [WarpWireguardConfig](#pathologyoptions-WarpWireguardConfig) |  | Configuration for WireGuard (defined elsewhere). |
 | fake_packets | [string](#string) |  | Fake packet configuration. |
-| fake_packet_size | [IntRange](#hiddifyoptions-IntRange) |  | Size of fake packets. |
-| fake_packet_delay | [IntRange](#hiddifyoptions-IntRange) |  | Delay for sending fake packets. |
+| fake_packet_size | [IntRange](#pathologyoptions-IntRange) |  | Size of fake packets. |
+| fake_packet_delay | [IntRange](#pathologyoptions-IntRange) |  | Delay for sending fake packets. |
 | fake_packet_mode | [string](#string) |  | Mode for sending fake packets. |
 | clean_ip | [string](#string) |  | Clean IP address to use. |
 | clean_port | [uint32](#uint32) |  | Port for clean traffic (using uint32 for compatibility). |
-| account | [WarpAccount](#hiddifyoptions-WarpAccount) |  | Account details for Warp (defined elsewhere). |
+| account | [WarpAccount](#pathologyoptions-WarpAccount) |  | Account details for Warp (defined elsewhere). |
 
 
 
 
 
 
-<a name="hiddifyoptions-WarpWireguardConfig"></a>
+<a name="pathologyoptions-WarpWireguardConfig"></a>
 
 ### WarpWireguardConfig
 WarpWireguardConfig defines the configuration details for WireGuard.
@@ -1149,7 +1149,7 @@ WarpWireguardConfig defines the configuration details for WireGuard.
  
 
 
-<a name="hiddifyoptions-DomainStrategy"></a>
+<a name="pathologyoptions-DomainStrategy"></a>
 
 ### DomainStrategy
 DomainStrategy defines the strategies for IP address preference when resolving domain names.
@@ -1297,7 +1297,7 @@ Name of the profile. |
 | last_update | [int64](#int64) |  | Last update time in milliseconds of the profile. |
 | options | [ProfileOptions](#profile-ProfileOptions) |  | Options associated with the profile. |
 | sub_info | [SubscriptionInfo](#profile-SubscriptionInfo) |  | Subscription-related information. |
-| override_hiddify_options | [hiddifyoptions.HiddifyOptions](#hiddifyoptions-HiddifyOptions) |  | Override Hiddify options. |
+| override_client_options | [clientoptions.ClientOptions](#pathologyoptions-ClientOptions) |  | Override client options. |
 
 
 

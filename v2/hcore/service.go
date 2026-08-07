@@ -5,7 +5,7 @@ import (
 
 	box "github.com/sagernet/sing-box"
 
-	"github.com/hiddify/hiddify-core/v2/service_manager"
+	"github.com/ne-tort/pathology-core/v2/service_manager"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/daemon"
@@ -41,7 +41,7 @@ func NewService(ctx context.Context, options option.Options) (*daemon.StartedSer
 	return instance, nil
 }
 
-func (h *HiddifyInstance) UrlTestHistory() *urltest.HistoryStorage {
+func (h *PathologyInstance) UrlTestHistory() *urltest.HistoryStorage {
 	ins := h.Instance()
 	if ins == nil {
 		return nil
@@ -49,7 +49,7 @@ func (h *HiddifyInstance) UrlTestHistory() *urltest.HistoryStorage {
 	return ins.UrlTestHistory()
 }
 
-func (h *HiddifyInstance) Box() *box.Box {
+func (h *PathologyInstance) Box() *box.Box {
 	ins := h.Instance()
 	if ins == nil {
 		return nil
@@ -57,7 +57,7 @@ func (h *HiddifyInstance) Box() *box.Box {
 	return ins.Box()
 }
 
-func (h *HiddifyInstance) Instance() *daemon.Instance {
+func (h *PathologyInstance) Instance() *daemon.Instance {
 	ss := h.StartedService
 	if ss == nil {
 		return nil
@@ -65,7 +65,7 @@ func (h *HiddifyInstance) Instance() *daemon.Instance {
 	return ss.Instance()
 }
 
-func (h *HiddifyInstance) Context() context.Context {
+func (h *PathologyInstance) Context() context.Context {
 	ins := h.Instance()
 	if ins == nil {
 		return nil
@@ -73,7 +73,7 @@ func (h *HiddifyInstance) Context() context.Context {
 	return ins.Context()
 }
 
-func (h *HiddifyInstance) TrafficManager() *trafficcontrol.Manager {
+func (h *PathologyInstance) TrafficManager() *trafficcontrol.Manager {
 	if ins := h.Instance(); ins != nil {
 		return ins.TrafficManager()
 	}

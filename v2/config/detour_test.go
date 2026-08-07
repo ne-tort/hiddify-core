@@ -3,7 +3,7 @@ package config_test
 import (
 	"testing"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -38,7 +38,7 @@ func TestBuildPreservesOutboundDetour(t *testing.T) {
     }
   ]
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestBuildRemapsLogicalDetour(t *testing.T) {
     }
   ]
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
 		t.Fatal(err)

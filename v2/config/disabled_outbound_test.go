@@ -8,7 +8,7 @@ import (
 )
 
 func TestDisabledOutboundExcludedFromBalancer(t *testing.T) {
-	opt := DefaultHiddifyOptions()
+	opt := DefaultClientOptions()
 	opt.DisabledOutboundTags = []string{"node-b"}
 	input := &option.Options{
 		Outbounds: []option.Outbound{

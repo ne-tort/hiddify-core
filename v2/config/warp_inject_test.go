@@ -8,7 +8,7 @@ import (
 )
 
 func TestSetOutboundsDoesNotInjectWarp(t *testing.T) {
-	opt := DefaultHiddifyOptions()
+	opt := DefaultClientOptions()
 	opt.Warp = WarpOptions{
 		EnableMasque:    true,
 		EnableWireguard: true,
@@ -53,7 +53,7 @@ func TestSetOutboundsDoesNotInjectWarp(t *testing.T) {
 }
 
 func TestSetOutboundsKeepsDedicatedWarpProfileLeaves(t *testing.T) {
-	opt := DefaultHiddifyOptions()
+	opt := DefaultClientOptions()
 	wg, err := buildWarpWireGuardEndpoint(WarpWireguardConfig{
 		PrivateKey:       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 		PeerPublicKey:    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",

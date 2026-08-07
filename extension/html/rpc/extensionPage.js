@@ -22,7 +22,7 @@ function connect() {
         console.log('Receiving ', response);
         if (response.getExtensionId() === currentExtensionId) {
             ui = JSON.parse(response.getJsonUi())
-            if (response.getType() == proto.hiddifyrpc.ExtensionResponseType.SHOW_DIALOG) {
+            if (response.getType() == proto.pathologyrpc.ExtensionResponseType.SHOW_DIALOG) {
                 renderForm(ui, "dialog", handleSubmitButtonClick, undefined);
             } else {
                 renderForm(ui, "", handleSubmitButtonClick, handleStopButtonClick);

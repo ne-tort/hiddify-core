@@ -3,8 +3,8 @@ package hcore
 import (
 	"context"
 
-	"github.com/hiddify/hiddify-core/v2/hcommon"
-	"github.com/hiddify/hiddify-core/v2/service_manager"
+	"github.com/ne-tort/pathology-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/service_manager"
 )
 
 var (
@@ -15,7 +15,7 @@ var (
 	statusPropagationPort int64
 )
 
-func InitHiddifyService() error {
+func InitPathologyService() error {
 	return service_manager.StartServices()
 }
 

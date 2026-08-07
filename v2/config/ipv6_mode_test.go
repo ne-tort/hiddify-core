@@ -106,7 +106,7 @@ func TestBuildConfigAppliesIPv6ModeOnRoute(t *testing.T) {
 	t.Parallel()
 
 	profile := `{"outbounds":[{"type":"direct","tag":"direct"}]}`
-	hopts := DefaultHiddifyOptions()
+	hopts := DefaultClientOptions()
 	hopts.EnableTun = true
 	hopts.IPv6Mode = option.DomainStrategy(C.DomainStrategyIPv4Only)
 

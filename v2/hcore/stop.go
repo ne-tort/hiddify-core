@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/hiddify/hiddify-core/compat/monitoring"
-	"github.com/hiddify/hiddify-core/v2/config"
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
-	hutils "github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/compat/monitoring"
+	"github.com/ne-tort/pathology-core/v2/config"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
+	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 )
 
 func (s *CoreService) Stop(ctx context.Context, empty *hcommon.Empty) (*CoreInfoResponse, error) {

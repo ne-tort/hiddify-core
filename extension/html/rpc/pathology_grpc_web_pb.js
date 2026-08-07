@@ -1,5 +1,5 @@
 /**
- * @fileoverview gRPC-Web generated client stub for hiddifyrpc
+ * @fileoverview gRPC-Web generated client stub for pathologyrpc
  * @enhanceable
  * @public
  */
@@ -8,7 +8,7 @@
 // versions:
 // 	protoc-gen-grpc-web v1.5.0
 // 	protoc              v5.28.0
-// source: hiddify.proto
+// source: pathology.proto
 
 
 /* eslint-disable */
@@ -22,7 +22,7 @@ grpc.web = require('grpc-web');
 
 var base_pb = require('./base_pb.js')
 const proto = {};
-proto.hiddifyrpc = require('./hiddify_pb.js');
+proto.pathologyrpc = require('./pathology_pb.js');
 
 /**
  * @param {string} hostname
@@ -32,7 +32,7 @@ proto.hiddifyrpc = require('./hiddify_pb.js');
  * @struct
  * @final
  */
-proto.hiddifyrpc.HelloClient =
+proto.pathologyrpc.HelloClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -58,7 +58,7 @@ proto.hiddifyrpc.HelloClient =
  * @struct
  * @final
  */
-proto.hiddifyrpc.HelloPromiseClient =
+proto.pathologyrpc.HelloPromiseClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -79,16 +79,16 @@ proto.hiddifyrpc.HelloPromiseClient =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.HelloRequest,
- *   !proto.hiddifyrpc.HelloResponse>}
+ *   !proto.pathologyrpc.HelloRequest,
+ *   !proto.pathologyrpc.HelloResponse>}
  */
 const methodDescriptor_Hello_SayHello = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Hello/SayHello',
+  '/pathologyrpc.Hello/SayHello',
   grpc.web.MethodType.UNARY,
   base_pb.HelloRequest,
   base_pb.HelloResponse,
   /**
-   * @param {!proto.hiddifyrpc.HelloRequest} request
+   * @param {!proto.pathologyrpc.HelloRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
@@ -99,19 +99,19 @@ const methodDescriptor_Hello_SayHello = new grpc.web.MethodDescriptor(
 
 
 /**
- * @param {!proto.hiddifyrpc.HelloRequest} request The
+ * @param {!proto.pathologyrpc.HelloRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.HelloResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.HelloResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.HelloResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.HelloResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.HelloClient.prototype.sayHello =
+proto.pathologyrpc.HelloClient.prototype.sayHello =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Hello/SayHello',
+      '/pathologyrpc.Hello/SayHello',
       request,
       metadata || {},
       methodDescriptor_Hello_SayHello,
@@ -120,17 +120,17 @@ proto.hiddifyrpc.HelloClient.prototype.sayHello =
 
 
 /**
- * @param {!proto.hiddifyrpc.HelloRequest} request The
+ * @param {!proto.pathologyrpc.HelloRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.HelloResponse>}
+ * @return {!Promise<!proto.pathologyrpc.HelloResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.HelloPromiseClient.prototype.sayHello =
+proto.pathologyrpc.HelloPromiseClient.prototype.sayHello =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Hello/SayHello',
+      '/pathologyrpc.Hello/SayHello',
       request,
       metadata || {},
       methodDescriptor_Hello_SayHello);
@@ -145,7 +145,7 @@ proto.hiddifyrpc.HelloPromiseClient.prototype.sayHello =
  * @struct
  * @final
  */
-proto.hiddifyrpc.CoreClient =
+proto.pathologyrpc.CoreClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -171,7 +171,7 @@ proto.hiddifyrpc.CoreClient =
  * @struct
  * @final
  */
-proto.hiddifyrpc.CorePromiseClient =
+proto.pathologyrpc.CorePromiseClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -192,39 +192,39 @@ proto.hiddifyrpc.CorePromiseClient =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.StartRequest,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.StartRequest,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
 const methodDescriptor_Core_Start = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/Start',
+  '/pathologyrpc.Core/Start',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.StartRequest,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.StartRequest,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.StartRequest} request
+   * @param {!proto.pathologyrpc.StartRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.CoreInfoResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.CoreInfoResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.start =
+proto.pathologyrpc.CoreClient.prototype.start =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/Start',
+      '/pathologyrpc.Core/Start',
       request,
       metadata || {},
       methodDescriptor_Core_Start,
@@ -233,17 +233,17 @@ proto.hiddifyrpc.CoreClient.prototype.start =
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!Promise<!proto.pathologyrpc.CoreInfoResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.start =
+proto.pathologyrpc.CorePromiseClient.prototype.start =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/Start',
+      '/pathologyrpc.Core/Start',
       request,
       metadata || {},
       methodDescriptor_Core_Start);
@@ -253,36 +253,36 @@ proto.hiddifyrpc.CorePromiseClient.prototype.start =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
 const methodDescriptor_Core_CoreInfoListener = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/CoreInfoListener',
+  '/pathologyrpc.Core/CoreInfoListener',
   grpc.web.MethodType.SERVER_STREAMING,
   base_pb.Empty,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.coreInfoListener =
+proto.pathologyrpc.CoreClient.prototype.coreInfoListener =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/CoreInfoListener',
+      '/pathologyrpc.Core/CoreInfoListener',
       request,
       metadata || {},
       methodDescriptor_Core_CoreInfoListener);
@@ -290,16 +290,16 @@ proto.hiddifyrpc.CoreClient.prototype.coreInfoListener =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.coreInfoListener =
+proto.pathologyrpc.CorePromiseClient.prototype.coreInfoListener =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/CoreInfoListener',
+      '/pathologyrpc.Core/CoreInfoListener',
       request,
       metadata || {},
       methodDescriptor_Core_CoreInfoListener);
@@ -309,36 +309,36 @@ proto.hiddifyrpc.CorePromiseClient.prototype.coreInfoListener =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.OutboundGroupList>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.OutboundGroupList>}
  */
 const methodDescriptor_Core_OutboundsInfo = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/OutboundsInfo',
+  '/pathologyrpc.Core/OutboundsInfo',
   grpc.web.MethodType.SERVER_STREAMING,
   base_pb.Empty,
-  proto.hiddifyrpc.OutboundGroupList,
+  proto.pathologyrpc.OutboundGroupList,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.OutboundGroupList.deserializeBinary
+  proto.pathologyrpc.OutboundGroupList.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.OutboundGroupList>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.OutboundGroupList>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.outboundsInfo =
+proto.pathologyrpc.CoreClient.prototype.outboundsInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/OutboundsInfo',
+      '/pathologyrpc.Core/OutboundsInfo',
       request,
       metadata || {},
       methodDescriptor_Core_OutboundsInfo);
@@ -346,16 +346,16 @@ proto.hiddifyrpc.CoreClient.prototype.outboundsInfo =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.OutboundGroupList>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.OutboundGroupList>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.outboundsInfo =
+proto.pathologyrpc.CorePromiseClient.prototype.outboundsInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/OutboundsInfo',
+      '/pathologyrpc.Core/OutboundsInfo',
       request,
       metadata || {},
       methodDescriptor_Core_OutboundsInfo);
@@ -365,36 +365,36 @@ proto.hiddifyrpc.CorePromiseClient.prototype.outboundsInfo =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.OutboundGroupList>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.OutboundGroupList>}
  */
 const methodDescriptor_Core_MainOutboundsInfo = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/MainOutboundsInfo',
+  '/pathologyrpc.Core/MainOutboundsInfo',
   grpc.web.MethodType.SERVER_STREAMING,
   base_pb.Empty,
-  proto.hiddifyrpc.OutboundGroupList,
+  proto.pathologyrpc.OutboundGroupList,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.OutboundGroupList.deserializeBinary
+  proto.pathologyrpc.OutboundGroupList.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.OutboundGroupList>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.OutboundGroupList>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.mainOutboundsInfo =
+proto.pathologyrpc.CoreClient.prototype.mainOutboundsInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/MainOutboundsInfo',
+      '/pathologyrpc.Core/MainOutboundsInfo',
       request,
       metadata || {},
       methodDescriptor_Core_MainOutboundsInfo);
@@ -402,16 +402,16 @@ proto.hiddifyrpc.CoreClient.prototype.mainOutboundsInfo =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.OutboundGroupList>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.OutboundGroupList>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.mainOutboundsInfo =
+proto.pathologyrpc.CorePromiseClient.prototype.mainOutboundsInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/MainOutboundsInfo',
+      '/pathologyrpc.Core/MainOutboundsInfo',
       request,
       metadata || {},
       methodDescriptor_Core_MainOutboundsInfo);
@@ -421,36 +421,36 @@ proto.hiddifyrpc.CorePromiseClient.prototype.mainOutboundsInfo =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.SystemInfo>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.SystemInfo>}
  */
 const methodDescriptor_Core_GetSystemInfo = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/GetSystemInfo',
+  '/pathologyrpc.Core/GetSystemInfo',
   grpc.web.MethodType.SERVER_STREAMING,
   base_pb.Empty,
-  proto.hiddifyrpc.SystemInfo,
+  proto.pathologyrpc.SystemInfo,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.SystemInfo.deserializeBinary
+  proto.pathologyrpc.SystemInfo.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.SystemInfo>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.SystemInfo>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.getSystemInfo =
+proto.pathologyrpc.CoreClient.prototype.getSystemInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/GetSystemInfo',
+      '/pathologyrpc.Core/GetSystemInfo',
       request,
       metadata || {},
       methodDescriptor_Core_GetSystemInfo);
@@ -458,16 +458,16 @@ proto.hiddifyrpc.CoreClient.prototype.getSystemInfo =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.SystemInfo>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.SystemInfo>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.getSystemInfo =
+proto.pathologyrpc.CorePromiseClient.prototype.getSystemInfo =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/GetSystemInfo',
+      '/pathologyrpc.Core/GetSystemInfo',
       request,
       metadata || {},
       methodDescriptor_Core_GetSystemInfo);
@@ -477,39 +477,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.getSystemInfo =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.SetupRequest,
- *   !proto.hiddifyrpc.Response>}
+ *   !proto.pathologyrpc.SetupRequest,
+ *   !proto.pathologyrpc.Response>}
  */
 const methodDescriptor_Core_Setup = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/Setup',
+  '/pathologyrpc.Core/Setup',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.SetupRequest,
-  proto.hiddifyrpc.Response,
+  proto.pathologyrpc.SetupRequest,
+  proto.pathologyrpc.Response,
   /**
-   * @param {!proto.hiddifyrpc.SetupRequest} request
+   * @param {!proto.pathologyrpc.SetupRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.Response.deserializeBinary
+  proto.pathologyrpc.Response.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.SetupRequest} request The
+ * @param {!proto.pathologyrpc.SetupRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.Response)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.Response)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.Response>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.Response>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.setup =
+proto.pathologyrpc.CoreClient.prototype.setup =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/Setup',
+      '/pathologyrpc.Core/Setup',
       request,
       metadata || {},
       methodDescriptor_Core_Setup,
@@ -518,17 +518,17 @@ proto.hiddifyrpc.CoreClient.prototype.setup =
 
 
 /**
- * @param {!proto.hiddifyrpc.SetupRequest} request The
+ * @param {!proto.pathologyrpc.SetupRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.Response>}
+ * @return {!Promise<!proto.pathologyrpc.Response>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.setup =
+proto.pathologyrpc.CorePromiseClient.prototype.setup =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/Setup',
+      '/pathologyrpc.Core/Setup',
       request,
       metadata || {},
       methodDescriptor_Core_Setup);
@@ -538,39 +538,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.setup =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.ParseRequest,
- *   !proto.hiddifyrpc.ParseResponse>}
+ *   !proto.pathologyrpc.ParseRequest,
+ *   !proto.pathologyrpc.ParseResponse>}
  */
 const methodDescriptor_Core_Parse = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/Parse',
+  '/pathologyrpc.Core/Parse',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.ParseRequest,
-  proto.hiddifyrpc.ParseResponse,
+  proto.pathologyrpc.ParseRequest,
+  proto.pathologyrpc.ParseResponse,
   /**
-   * @param {!proto.hiddifyrpc.ParseRequest} request
+   * @param {!proto.pathologyrpc.ParseRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.ParseResponse.deserializeBinary
+  proto.pathologyrpc.ParseResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.ParseRequest} request The
+ * @param {!proto.pathologyrpc.ParseRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.ParseResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.ParseResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.ParseResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.ParseResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.parse =
+proto.pathologyrpc.CoreClient.prototype.parse =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/Parse',
+      '/pathologyrpc.Core/Parse',
       request,
       metadata || {},
       methodDescriptor_Core_Parse,
@@ -579,17 +579,17 @@ proto.hiddifyrpc.CoreClient.prototype.parse =
 
 
 /**
- * @param {!proto.hiddifyrpc.ParseRequest} request The
+ * @param {!proto.pathologyrpc.ParseRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.ParseResponse>}
+ * @return {!Promise<!proto.pathologyrpc.ParseResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.parse =
+proto.pathologyrpc.CorePromiseClient.prototype.parse =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/Parse',
+      '/pathologyrpc.Core/Parse',
       request,
       metadata || {},
       methodDescriptor_Core_Parse);
@@ -599,100 +599,100 @@ proto.hiddifyrpc.CorePromiseClient.prototype.parse =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.ChangeHiddifySettingsRequest,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.ChangeClientSettingsRequest,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
-const methodDescriptor_Core_ChangeHiddifySettings = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/ChangeHiddifySettings',
+const methodDescriptor_Core_ChangeClientSettings = new grpc.web.MethodDescriptor(
+  '/pathologyrpc.Core/ChangeClientSettings',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.ChangeHiddifySettingsRequest,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.ChangeClientSettingsRequest,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.ChangeHiddifySettingsRequest} request
+   * @param {!proto.pathologyrpc.ChangeClientSettingsRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.ChangeHiddifySettingsRequest} request The
+ * @param {!proto.pathologyrpc.ChangeClientSettingsRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.CoreInfoResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.CoreInfoResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.changeHiddifySettings =
+proto.pathologyrpc.CoreClient.prototype.changePathologySettings =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/ChangeHiddifySettings',
+      '/pathologyrpc.Core/ChangeClientSettings',
       request,
       metadata || {},
-      methodDescriptor_Core_ChangeHiddifySettings,
+      methodDescriptor_Core_ChangeClientSettings,
       callback);
 };
 
 
 /**
- * @param {!proto.hiddifyrpc.ChangeHiddifySettingsRequest} request The
+ * @param {!proto.pathologyrpc.ChangeClientSettingsRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!Promise<!proto.pathologyrpc.CoreInfoResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.changeHiddifySettings =
+proto.pathologyrpc.CorePromiseClient.prototype.changePathologySettings =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/ChangeHiddifySettings',
+      '/pathologyrpc.Core/ChangeClientSettings',
       request,
       metadata || {},
-      methodDescriptor_Core_ChangeHiddifySettings);
+      methodDescriptor_Core_ChangeClientSettings);
 };
 
 
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.StartRequest,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.StartRequest,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
 const methodDescriptor_Core_StartService = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/StartService',
+  '/pathologyrpc.Core/StartService',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.StartRequest,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.StartRequest,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.StartRequest} request
+   * @param {!proto.pathologyrpc.StartRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.CoreInfoResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.CoreInfoResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.startService =
+proto.pathologyrpc.CoreClient.prototype.startService =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/StartService',
+      '/pathologyrpc.Core/StartService',
       request,
       metadata || {},
       methodDescriptor_Core_StartService,
@@ -701,17 +701,17 @@ proto.hiddifyrpc.CoreClient.prototype.startService =
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!Promise<!proto.pathologyrpc.CoreInfoResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.startService =
+proto.pathologyrpc.CorePromiseClient.prototype.startService =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/StartService',
+      '/pathologyrpc.Core/StartService',
       request,
       metadata || {},
       methodDescriptor_Core_StartService);
@@ -721,39 +721,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.startService =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
 const methodDescriptor_Core_Stop = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/Stop',
+  '/pathologyrpc.Core/Stop',
   grpc.web.MethodType.UNARY,
   base_pb.Empty,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.CoreInfoResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.CoreInfoResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.stop =
+proto.pathologyrpc.CoreClient.prototype.stop =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/Stop',
+      '/pathologyrpc.Core/Stop',
       request,
       metadata || {},
       methodDescriptor_Core_Stop,
@@ -762,17 +762,17 @@ proto.hiddifyrpc.CoreClient.prototype.stop =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!Promise<!proto.pathologyrpc.CoreInfoResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.stop =
+proto.pathologyrpc.CorePromiseClient.prototype.stop =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/Stop',
+      '/pathologyrpc.Core/Stop',
       request,
       metadata || {},
       methodDescriptor_Core_Stop);
@@ -782,39 +782,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.stop =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.StartRequest,
- *   !proto.hiddifyrpc.CoreInfoResponse>}
+ *   !proto.pathologyrpc.StartRequest,
+ *   !proto.pathologyrpc.CoreInfoResponse>}
  */
 const methodDescriptor_Core_Restart = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/Restart',
+  '/pathologyrpc.Core/Restart',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.StartRequest,
-  proto.hiddifyrpc.CoreInfoResponse,
+  proto.pathologyrpc.StartRequest,
+  proto.pathologyrpc.CoreInfoResponse,
   /**
-   * @param {!proto.hiddifyrpc.StartRequest} request
+   * @param {!proto.pathologyrpc.StartRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.CoreInfoResponse.deserializeBinary
+  proto.pathologyrpc.CoreInfoResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.CoreInfoResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.CoreInfoResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.CoreInfoResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.CoreInfoResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.restart =
+proto.pathologyrpc.CoreClient.prototype.restart =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/Restart',
+      '/pathologyrpc.Core/Restart',
       request,
       metadata || {},
       methodDescriptor_Core_Restart,
@@ -823,17 +823,17 @@ proto.hiddifyrpc.CoreClient.prototype.restart =
 
 
 /**
- * @param {!proto.hiddifyrpc.StartRequest} request The
+ * @param {!proto.pathologyrpc.StartRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.CoreInfoResponse>}
+ * @return {!Promise<!proto.pathologyrpc.CoreInfoResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.restart =
+proto.pathologyrpc.CorePromiseClient.prototype.restart =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/Restart',
+      '/pathologyrpc.Core/Restart',
       request,
       metadata || {},
       methodDescriptor_Core_Restart);
@@ -843,39 +843,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.restart =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.SelectOutboundRequest,
- *   !proto.hiddifyrpc.Response>}
+ *   !proto.pathologyrpc.SelectOutboundRequest,
+ *   !proto.pathologyrpc.Response>}
  */
 const methodDescriptor_Core_SelectOutbound = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/SelectOutbound',
+  '/pathologyrpc.Core/SelectOutbound',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.SelectOutboundRequest,
-  proto.hiddifyrpc.Response,
+  proto.pathologyrpc.SelectOutboundRequest,
+  proto.pathologyrpc.Response,
   /**
-   * @param {!proto.hiddifyrpc.SelectOutboundRequest} request
+   * @param {!proto.pathologyrpc.SelectOutboundRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.Response.deserializeBinary
+  proto.pathologyrpc.Response.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.SelectOutboundRequest} request The
+ * @param {!proto.pathologyrpc.SelectOutboundRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.Response)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.Response)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.Response>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.Response>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.selectOutbound =
+proto.pathologyrpc.CoreClient.prototype.selectOutbound =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/SelectOutbound',
+      '/pathologyrpc.Core/SelectOutbound',
       request,
       metadata || {},
       methodDescriptor_Core_SelectOutbound,
@@ -884,17 +884,17 @@ proto.hiddifyrpc.CoreClient.prototype.selectOutbound =
 
 
 /**
- * @param {!proto.hiddifyrpc.SelectOutboundRequest} request The
+ * @param {!proto.pathologyrpc.SelectOutboundRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.Response>}
+ * @return {!Promise<!proto.pathologyrpc.Response>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.selectOutbound =
+proto.pathologyrpc.CorePromiseClient.prototype.selectOutbound =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/SelectOutbound',
+      '/pathologyrpc.Core/SelectOutbound',
       request,
       metadata || {},
       methodDescriptor_Core_SelectOutbound);
@@ -904,39 +904,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.selectOutbound =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.UrlTestRequest,
- *   !proto.hiddifyrpc.Response>}
+ *   !proto.pathologyrpc.UrlTestRequest,
+ *   !proto.pathologyrpc.Response>}
  */
 const methodDescriptor_Core_UrlTest = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/UrlTest',
+  '/pathologyrpc.Core/UrlTest',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.UrlTestRequest,
-  proto.hiddifyrpc.Response,
+  proto.pathologyrpc.UrlTestRequest,
+  proto.pathologyrpc.Response,
   /**
-   * @param {!proto.hiddifyrpc.UrlTestRequest} request
+   * @param {!proto.pathologyrpc.UrlTestRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.Response.deserializeBinary
+  proto.pathologyrpc.Response.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.UrlTestRequest} request The
+ * @param {!proto.pathologyrpc.UrlTestRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.Response)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.Response)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.Response>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.Response>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.urlTest =
+proto.pathologyrpc.CoreClient.prototype.urlTest =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/UrlTest',
+      '/pathologyrpc.Core/UrlTest',
       request,
       metadata || {},
       methodDescriptor_Core_UrlTest,
@@ -945,17 +945,17 @@ proto.hiddifyrpc.CoreClient.prototype.urlTest =
 
 
 /**
- * @param {!proto.hiddifyrpc.UrlTestRequest} request The
+ * @param {!proto.pathologyrpc.UrlTestRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.Response>}
+ * @return {!Promise<!proto.pathologyrpc.Response>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.urlTest =
+proto.pathologyrpc.CorePromiseClient.prototype.urlTest =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/UrlTest',
+      '/pathologyrpc.Core/UrlTest',
       request,
       metadata || {},
       methodDescriptor_Core_UrlTest);
@@ -965,39 +965,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.urlTest =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.GenerateWarpConfigRequest,
- *   !proto.hiddifyrpc.WarpGenerationResponse>}
+ *   !proto.pathologyrpc.GenerateWarpConfigRequest,
+ *   !proto.pathologyrpc.WarpGenerationResponse>}
  */
 const methodDescriptor_Core_GenerateWarpConfig = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/GenerateWarpConfig',
+  '/pathologyrpc.Core/GenerateWarpConfig',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.GenerateWarpConfigRequest,
-  proto.hiddifyrpc.WarpGenerationResponse,
+  proto.pathologyrpc.GenerateWarpConfigRequest,
+  proto.pathologyrpc.WarpGenerationResponse,
   /**
-   * @param {!proto.hiddifyrpc.GenerateWarpConfigRequest} request
+   * @param {!proto.pathologyrpc.GenerateWarpConfigRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.WarpGenerationResponse.deserializeBinary
+  proto.pathologyrpc.WarpGenerationResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.GenerateWarpConfigRequest} request The
+ * @param {!proto.pathologyrpc.GenerateWarpConfigRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.WarpGenerationResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.WarpGenerationResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.WarpGenerationResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.WarpGenerationResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.generateWarpConfig =
+proto.pathologyrpc.CoreClient.prototype.generateWarpConfig =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/GenerateWarpConfig',
+      '/pathologyrpc.Core/GenerateWarpConfig',
       request,
       metadata || {},
       methodDescriptor_Core_GenerateWarpConfig,
@@ -1006,17 +1006,17 @@ proto.hiddifyrpc.CoreClient.prototype.generateWarpConfig =
 
 
 /**
- * @param {!proto.hiddifyrpc.GenerateWarpConfigRequest} request The
+ * @param {!proto.pathologyrpc.GenerateWarpConfigRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.WarpGenerationResponse>}
+ * @return {!Promise<!proto.pathologyrpc.WarpGenerationResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.generateWarpConfig =
+proto.pathologyrpc.CorePromiseClient.prototype.generateWarpConfig =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/GenerateWarpConfig',
+      '/pathologyrpc.Core/GenerateWarpConfig',
       request,
       metadata || {},
       methodDescriptor_Core_GenerateWarpConfig);
@@ -1026,39 +1026,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.generateWarpConfig =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.SystemProxyStatus>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.SystemProxyStatus>}
  */
 const methodDescriptor_Core_GetSystemProxyStatus = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/GetSystemProxyStatus',
+  '/pathologyrpc.Core/GetSystemProxyStatus',
   grpc.web.MethodType.UNARY,
   base_pb.Empty,
-  proto.hiddifyrpc.SystemProxyStatus,
+  proto.pathologyrpc.SystemProxyStatus,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.SystemProxyStatus.deserializeBinary
+  proto.pathologyrpc.SystemProxyStatus.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.SystemProxyStatus)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.SystemProxyStatus)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.SystemProxyStatus>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.SystemProxyStatus>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.getSystemProxyStatus =
+proto.pathologyrpc.CoreClient.prototype.getSystemProxyStatus =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/GetSystemProxyStatus',
+      '/pathologyrpc.Core/GetSystemProxyStatus',
       request,
       metadata || {},
       methodDescriptor_Core_GetSystemProxyStatus,
@@ -1067,17 +1067,17 @@ proto.hiddifyrpc.CoreClient.prototype.getSystemProxyStatus =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.SystemProxyStatus>}
+ * @return {!Promise<!proto.pathologyrpc.SystemProxyStatus>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.getSystemProxyStatus =
+proto.pathologyrpc.CorePromiseClient.prototype.getSystemProxyStatus =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/GetSystemProxyStatus',
+      '/pathologyrpc.Core/GetSystemProxyStatus',
       request,
       metadata || {},
       methodDescriptor_Core_GetSystemProxyStatus);
@@ -1087,39 +1087,39 @@ proto.hiddifyrpc.CorePromiseClient.prototype.getSystemProxyStatus =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.SetSystemProxyEnabledRequest,
- *   !proto.hiddifyrpc.Response>}
+ *   !proto.pathologyrpc.SetSystemProxyEnabledRequest,
+ *   !proto.pathologyrpc.Response>}
  */
 const methodDescriptor_Core_SetSystemProxyEnabled = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/SetSystemProxyEnabled',
+  '/pathologyrpc.Core/SetSystemProxyEnabled',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.SetSystemProxyEnabledRequest,
-  proto.hiddifyrpc.Response,
+  proto.pathologyrpc.SetSystemProxyEnabledRequest,
+  proto.pathologyrpc.Response,
   /**
-   * @param {!proto.hiddifyrpc.SetSystemProxyEnabledRequest} request
+   * @param {!proto.pathologyrpc.SetSystemProxyEnabledRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.Response.deserializeBinary
+  proto.pathologyrpc.Response.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.SetSystemProxyEnabledRequest} request The
+ * @param {!proto.pathologyrpc.SetSystemProxyEnabledRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.Response)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.Response)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.Response>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.Response>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.setSystemProxyEnabled =
+proto.pathologyrpc.CoreClient.prototype.setSystemProxyEnabled =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.Core/SetSystemProxyEnabled',
+      '/pathologyrpc.Core/SetSystemProxyEnabled',
       request,
       metadata || {},
       methodDescriptor_Core_SetSystemProxyEnabled,
@@ -1128,17 +1128,17 @@ proto.hiddifyrpc.CoreClient.prototype.setSystemProxyEnabled =
 
 
 /**
- * @param {!proto.hiddifyrpc.SetSystemProxyEnabledRequest} request The
+ * @param {!proto.pathologyrpc.SetSystemProxyEnabledRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.Response>}
+ * @return {!Promise<!proto.pathologyrpc.Response>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.setSystemProxyEnabled =
+proto.pathologyrpc.CorePromiseClient.prototype.setSystemProxyEnabled =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.Core/SetSystemProxyEnabled',
+      '/pathologyrpc.Core/SetSystemProxyEnabled',
       request,
       metadata || {},
       methodDescriptor_Core_SetSystemProxyEnabled);
@@ -1148,36 +1148,36 @@ proto.hiddifyrpc.CorePromiseClient.prototype.setSystemProxyEnabled =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.LogMessage>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.LogMessage>}
  */
 const methodDescriptor_Core_LogListener = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.Core/LogListener',
+  '/pathologyrpc.Core/LogListener',
   grpc.web.MethodType.SERVER_STREAMING,
   base_pb.Empty,
-  proto.hiddifyrpc.LogMessage,
+  proto.pathologyrpc.LogMessage,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.LogMessage.deserializeBinary
+  proto.pathologyrpc.LogMessage.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.LogMessage>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.LogMessage>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CoreClient.prototype.logListener =
+proto.pathologyrpc.CoreClient.prototype.logListener =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/LogListener',
+      '/pathologyrpc.Core/LogListener',
       request,
       metadata || {},
       methodDescriptor_Core_LogListener);
@@ -1185,16 +1185,16 @@ proto.hiddifyrpc.CoreClient.prototype.logListener =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The request proto
+ * @param {!proto.pathologyrpc.Empty} request The request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.LogMessage>}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.LogMessage>}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.CorePromiseClient.prototype.logListener =
+proto.pathologyrpc.CorePromiseClient.prototype.logListener =
     function(request, metadata) {
   return this.client_.serverStreaming(this.hostname_ +
-      '/hiddifyrpc.Core/LogListener',
+      '/pathologyrpc.Core/LogListener',
       request,
       metadata || {},
       methodDescriptor_Core_LogListener);
@@ -1209,7 +1209,7 @@ proto.hiddifyrpc.CorePromiseClient.prototype.logListener =
  * @struct
  * @final
  */
-proto.hiddifyrpc.TunnelServiceClient =
+proto.pathologyrpc.TunnelServiceClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -1235,7 +1235,7 @@ proto.hiddifyrpc.TunnelServiceClient =
  * @struct
  * @final
  */
-proto.hiddifyrpc.TunnelServicePromiseClient =
+proto.pathologyrpc.TunnelServicePromiseClient =
     function(hostname, credentials, options) {
   if (!options) options = {};
   options.format = 'text';
@@ -1256,39 +1256,39 @@ proto.hiddifyrpc.TunnelServicePromiseClient =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.TunnelStartRequest,
- *   !proto.hiddifyrpc.TunnelResponse>}
+ *   !proto.pathologyrpc.TunnelStartRequest,
+ *   !proto.pathologyrpc.TunnelResponse>}
  */
 const methodDescriptor_TunnelService_Start = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.TunnelService/Start',
+  '/pathologyrpc.TunnelService/Start',
   grpc.web.MethodType.UNARY,
-  proto.hiddifyrpc.TunnelStartRequest,
-  proto.hiddifyrpc.TunnelResponse,
+  proto.pathologyrpc.TunnelStartRequest,
+  proto.pathologyrpc.TunnelResponse,
   /**
-   * @param {!proto.hiddifyrpc.TunnelStartRequest} request
+   * @param {!proto.pathologyrpc.TunnelStartRequest} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.TunnelResponse.deserializeBinary
+  proto.pathologyrpc.TunnelResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.TunnelStartRequest} request The
+ * @param {!proto.pathologyrpc.TunnelStartRequest} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.TunnelResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.TunnelResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.TunnelResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.TunnelResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.TunnelServiceClient.prototype.start =
+proto.pathologyrpc.TunnelServiceClient.prototype.start =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Start',
+      '/pathologyrpc.TunnelService/Start',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Start,
@@ -1297,17 +1297,17 @@ proto.hiddifyrpc.TunnelServiceClient.prototype.start =
 
 
 /**
- * @param {!proto.hiddifyrpc.TunnelStartRequest} request The
+ * @param {!proto.pathologyrpc.TunnelStartRequest} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.TunnelResponse>}
+ * @return {!Promise<!proto.pathologyrpc.TunnelResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.TunnelServicePromiseClient.prototype.start =
+proto.pathologyrpc.TunnelServicePromiseClient.prototype.start =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Start',
+      '/pathologyrpc.TunnelService/Start',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Start);
@@ -1317,39 +1317,39 @@ proto.hiddifyrpc.TunnelServicePromiseClient.prototype.start =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.TunnelResponse>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.TunnelResponse>}
  */
 const methodDescriptor_TunnelService_Stop = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.TunnelService/Stop',
+  '/pathologyrpc.TunnelService/Stop',
   grpc.web.MethodType.UNARY,
   base_pb.Empty,
-  proto.hiddifyrpc.TunnelResponse,
+  proto.pathologyrpc.TunnelResponse,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.TunnelResponse.deserializeBinary
+  proto.pathologyrpc.TunnelResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.TunnelResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.TunnelResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.TunnelResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.TunnelResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.TunnelServiceClient.prototype.stop =
+proto.pathologyrpc.TunnelServiceClient.prototype.stop =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Stop',
+      '/pathologyrpc.TunnelService/Stop',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Stop,
@@ -1358,17 +1358,17 @@ proto.hiddifyrpc.TunnelServiceClient.prototype.stop =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.TunnelResponse>}
+ * @return {!Promise<!proto.pathologyrpc.TunnelResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.TunnelServicePromiseClient.prototype.stop =
+proto.pathologyrpc.TunnelServicePromiseClient.prototype.stop =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Stop',
+      '/pathologyrpc.TunnelService/Stop',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Stop);
@@ -1378,39 +1378,39 @@ proto.hiddifyrpc.TunnelServicePromiseClient.prototype.stop =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.TunnelResponse>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.TunnelResponse>}
  */
 const methodDescriptor_TunnelService_Status = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.TunnelService/Status',
+  '/pathologyrpc.TunnelService/Status',
   grpc.web.MethodType.UNARY,
   base_pb.Empty,
-  proto.hiddifyrpc.TunnelResponse,
+  proto.pathologyrpc.TunnelResponse,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.TunnelResponse.deserializeBinary
+  proto.pathologyrpc.TunnelResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.TunnelResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.TunnelResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.TunnelResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.TunnelResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.TunnelServiceClient.prototype.status =
+proto.pathologyrpc.TunnelServiceClient.prototype.status =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Status',
+      '/pathologyrpc.TunnelService/Status',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Status,
@@ -1419,17 +1419,17 @@ proto.hiddifyrpc.TunnelServiceClient.prototype.status =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.TunnelResponse>}
+ * @return {!Promise<!proto.pathologyrpc.TunnelResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.TunnelServicePromiseClient.prototype.status =
+proto.pathologyrpc.TunnelServicePromiseClient.prototype.status =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Status',
+      '/pathologyrpc.TunnelService/Status',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Status);
@@ -1439,39 +1439,39 @@ proto.hiddifyrpc.TunnelServicePromiseClient.prototype.status =
 /**
  * @const
  * @type {!grpc.web.MethodDescriptor<
- *   !proto.hiddifyrpc.Empty,
- *   !proto.hiddifyrpc.TunnelResponse>}
+ *   !proto.pathologyrpc.Empty,
+ *   !proto.pathologyrpc.TunnelResponse>}
  */
 const methodDescriptor_TunnelService_Exit = new grpc.web.MethodDescriptor(
-  '/hiddifyrpc.TunnelService/Exit',
+  '/pathologyrpc.TunnelService/Exit',
   grpc.web.MethodType.UNARY,
   base_pb.Empty,
-  proto.hiddifyrpc.TunnelResponse,
+  proto.pathologyrpc.TunnelResponse,
   /**
-   * @param {!proto.hiddifyrpc.Empty} request
+   * @param {!proto.pathologyrpc.Empty} request
    * @return {!Uint8Array}
    */
   function(request) {
     return request.serializeBinary();
   },
-  proto.hiddifyrpc.TunnelResponse.deserializeBinary
+  proto.pathologyrpc.TunnelResponse.deserializeBinary
 );
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>} metadata User defined
  *     call metadata
- * @param {function(?grpc.web.RpcError, ?proto.hiddifyrpc.TunnelResponse)}
+ * @param {function(?grpc.web.RpcError, ?proto.pathologyrpc.TunnelResponse)}
  *     callback The callback function(error, response)
- * @return {!grpc.web.ClientReadableStream<!proto.hiddifyrpc.TunnelResponse>|undefined}
+ * @return {!grpc.web.ClientReadableStream<!proto.pathologyrpc.TunnelResponse>|undefined}
  *     The XHR Node Readable Stream
  */
-proto.hiddifyrpc.TunnelServiceClient.prototype.exit =
+proto.pathologyrpc.TunnelServiceClient.prototype.exit =
     function(request, metadata, callback) {
   return this.client_.rpcCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Exit',
+      '/pathologyrpc.TunnelService/Exit',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Exit,
@@ -1480,22 +1480,22 @@ proto.hiddifyrpc.TunnelServiceClient.prototype.exit =
 
 
 /**
- * @param {!proto.hiddifyrpc.Empty} request The
+ * @param {!proto.pathologyrpc.Empty} request The
  *     request proto
  * @param {?Object<string, string>=} metadata User defined
  *     call metadata
- * @return {!Promise<!proto.hiddifyrpc.TunnelResponse>}
+ * @return {!Promise<!proto.pathologyrpc.TunnelResponse>}
  *     Promise that resolves to the response
  */
-proto.hiddifyrpc.TunnelServicePromiseClient.prototype.exit =
+proto.pathologyrpc.TunnelServicePromiseClient.prototype.exit =
     function(request, metadata) {
   return this.client_.unaryCall(this.hostname_ +
-      '/hiddifyrpc.TunnelService/Exit',
+      '/pathologyrpc.TunnelService/Exit',
       request,
       metadata || {},
       methodDescriptor_TunnelService_Exit);
 };
 
 
-module.exports = proto.hiddifyrpc;
+module.exports = proto.pathologyrpc;
 

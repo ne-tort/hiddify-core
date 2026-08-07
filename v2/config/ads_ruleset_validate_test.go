@@ -18,7 +18,7 @@ func repoRoot(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	// .../hiddify-core/v2/config
+	// .../pathology-core/v2/config
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
 }
 
@@ -74,12 +74,12 @@ func writeSRS(t *testing.T, rs option.PlainRuleSet, version uint8) []byte {
 	return buf.Bytes()
 }
 
-func TestHiddifyAdsRulesetFormat(t *testing.T) {
+func TestPathologyAdsRulesetFormat(t *testing.T) {
 	root := repoRoot(t)
-	path := filepath.Join(root, "rules", "ads", "hiddify-ads.srs")
+	path := filepath.Join(root, "rules", "ads", "pathology-ads.srs")
 	info, err := os.Stat(path)
 	if err != nil {
-		t.Skip("bundled rules/ads/hiddify-ads.srs missing:", err)
+		t.Skip("bundled rules/ads/pathology-ads.srs missing:", err)
 	}
 
 	rs := readSRS(t, path)
@@ -101,9 +101,9 @@ func TestHiddifyAdsRulesetFormat(t *testing.T) {
 	}
 }
 
-func TestHiddifyAdsMatchesUpstream(t *testing.T) {
+func TestPathologyAdsMatchesUpstream(t *testing.T) {
 	root := repoRoot(t)
-	local := filepath.Join(root, "rules", "ads", "hiddify-ads.srs")
+	local := filepath.Join(root, "rules", "ads", "pathology-ads.srs")
 	tmp := filepath.Join(root, "_tmp", "ads-test", "geosite-category-ads-all.srs")
 	if _, err := os.Stat(local); err != nil {
 		t.Skip("local srs missing")
@@ -165,7 +165,7 @@ func TestNaiveMergeVsSingleRuleset(t *testing.T) {
 
 func TestBuildConfigInjectsAdsBlock(t *testing.T) {
 	root := repoRoot(t)
-	srsPath := filepath.Join(root, "rules", "ads", "hiddify-ads.srs")
+	srsPath := filepath.Join(root, "rules", "ads", "pathology-ads.srs")
 	if _, err := os.Stat(srsPath); err != nil {
 		t.Skip("srs missing")
 	}
@@ -174,7 +174,7 @@ func TestBuildConfigInjectsAdsBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hopt := DefaultHiddifyOptions()
+	hopt := DefaultClientOptions()
 	hopt.BlockAds = true
 	hopt.AdsRuleSetPath = abs
 

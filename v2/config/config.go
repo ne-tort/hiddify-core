@@ -38,7 +38,7 @@ func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, er
 	err = options.UnmarshalJSONContext(ctx, content)
 	return &options, err
 }
-func BuildConfigJson(ctx context.Context, configOpt *HiddifyOptions, input *ReadOptions) ([]byte, error) {
+func BuildConfigJson(ctx context.Context, configOpt *ClientOptions, input *ReadOptions) ([]byte, error) {
 	options, err := BuildConfig(ctx, configOpt, input)
 	if err != nil {
 		return nil, err
@@ -50,7 +50,7 @@ func BuildConfigJson(ctx context.Context, configOpt *HiddifyOptions, input *Read
 	return options.MarshalJSONContext(ctx)
 
 }
-func ParseBuildConfigBytes(ctx context.Context, hopts *HiddifyOptions, input *ReadOptions) ([]byte, error) {
+func ParseBuildConfigBytes(ctx context.Context, hopts *ClientOptions, input *ReadOptions) ([]byte, error) {
 
 	options, err := ParseBuildConfig(ctx, hopts, input)
 	if err != nil {
@@ -58,7 +58,7 @@ func ParseBuildConfigBytes(ctx context.Context, hopts *HiddifyOptions, input *Re
 	}
 	return options.MarshalJSONContext(ctx)
 }
-func ParseBuildConfig(ctx context.Context, hopts *HiddifyOptions, input *ReadOptions) (*option.Options, error) {
+func ParseBuildConfig(ctx context.Context, hopts *ClientOptions, input *ReadOptions) (*option.Options, error) {
 	options := input.Options
 	if options == nil {
 		var err error

@@ -4,9 +4,9 @@ import (
 	"strings"
 	"time"
 
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/hiddify/hiddify-core/compat/monitoring"
+	"github.com/ne-tort/pathology-core/compat/monitoring"
 	G "github.com/sagernet/sing-box/protocol/group"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
@@ -15,7 +15,7 @@ import (
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func (h *HiddifyInstance) historyForDetour(hismap map[string]*adapter.URLTestHistory, detour adapter.Outbound) *adapter.URLTestHistory {
+func (h *PathologyInstance) historyForDetour(hismap map[string]*adapter.URLTestHistory, detour adapter.Outbound) *adapter.URLTestHistory {
 	if hismap == nil || detour == nil {
 		return nil
 	}
@@ -58,7 +58,7 @@ func (h *HiddifyInstance) historyForDetour(hismap map[string]*adapter.URLTestHis
 	return hismap[detour.Tag()]
 }
 
-func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory, detour adapter.Outbound) *OutboundInfo {
+func (h *PathologyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory, detour adapter.Outbound) *OutboundInfo {
 	// historyStorage := h.UrlTestHistory()
 	// if historyStorage == nil {
 	// 	return nil
@@ -68,7 +68,7 @@ func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory,
 	// realTag := ""
 
 	out.Tag = detour.Tag()
-	// LX-STUB: adapter.Outbound.DisplayType() was Hiddify-only; lx has Type() only.
+	// LX-STUB: adapter.Outbound.DisplayType() was fork-only; lx has Type() only.
 	out.Type = detour.Type()
 	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
 		out.IsGroup = true
@@ -95,7 +95,7 @@ func (h *HiddifyInstance) GetProxyInfo(url_test_history *adapter.URLTestHistory,
 	return out
 }
 
-func (h *HiddifyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTestHistory, onlyGroupitems bool) *OutboundGroupList {
+func (h *PathologyInstance) GetAllProxiesInfo(hismap map[string]*adapter.URLTestHistory, onlyGroupitems bool) *OutboundGroupList {
 	ctx, box := h.Context(), h.Box()
 	if ctx == nil || box == nil {
 		return nil
@@ -189,7 +189,7 @@ func (s *CoreService) MainOutboundsInfo(req *hcommon.Empty, stream grpc.ServerSt
 	return static.AllProxiesInfoStream(stream, true)
 }
 
-func (h *HiddifyInstance) AllProxiesInfoStream(stream grpc.ServerStreamingServer[OutboundGroupList], onlyMain bool) error {
+func (h *PathologyInstance) AllProxiesInfoStream(stream grpc.ServerStreamingServer[OutboundGroupList], onlyMain bool) error {
 	// stream.Send(&OutboundGroupList{})
 	h.MakeSureContextIsNew(stream.Context())
 

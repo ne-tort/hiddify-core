@@ -7,7 +7,7 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/sagernet/sing-box/option"
 )
 

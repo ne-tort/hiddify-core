@@ -39,7 +39,7 @@ func stripUTF8BOM(b []byte) []byte {
 	return b
 }
 
-func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) (*option.Options, error) {
+func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *ClientOptions, fullConfig bool) (*option.Options, error) {
 	content, err := ReadContent(ctx, opt)
 	if err != nil {
 		return nil, err
@@ -47,7 +47,7 @@ func ParseConfig(ctx context.Context, opt *ReadOptions, debug bool, configOpt *H
 	return parseConfigContent(ctx, content, debug, configOpt, fullConfig)
 }
 
-func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configOpt *HiddifyOptions, fullConfig bool) ([]byte, error) {
+func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configOpt *ClientOptions, fullConfig bool) ([]byte, error) {
 	options, err := ParseConfig(ctx, opt, debug, configOpt, fullConfig)
 	if err != nil {
 		return nil, err
@@ -61,9 +61,9 @@ func ParseConfigBytes(ctx context.Context, opt *ReadOptions, debug bool, configO
 
 	return options.MarshalJSONContext(ctx)
 }
-func parseConfigContent(ctx context.Context, content []byte, debug bool, configOpt *HiddifyOptions, fullConfig bool) (*option.Options, error) {
+func parseConfigContent(ctx context.Context, content []byte, debug bool, configOpt *ClientOptions, fullConfig bool) (*option.Options, error) {
 	if configOpt == nil {
-		configOpt = DefaultHiddifyOptions()
+		configOpt = DefaultClientOptions()
 	}
 	content = stripUTF8BOM(content)
 
@@ -142,7 +142,7 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 	return nil, fmt.Errorf("unable to determine config format")
 }
 
-func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *HiddifyOptions) (*option.Options, error) {
+func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *ClientOptions) (*option.Options, error) {
 	options := option.Options{}
 	err := options.UnmarshalJSONContext(ctx, content)
 
@@ -152,7 +152,7 @@ func patchConfigStr(ctx context.Context, content []byte, name string, configOpt 
 
 	return patchConfigOptions(ctx, &options, name, configOpt)
 }
-func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *HiddifyOptions) (*option.Options, error) {
+func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *ClientOptions) (*option.Options, error) {
 	_ = ctx
 	_ = configOpt
 	return validateResult(ctx, options, name)

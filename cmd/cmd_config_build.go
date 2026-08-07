@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	"github.com/ne-tort/pathology-core/v2/config"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -17,9 +17,9 @@ import (
 )
 
 var (
-	hiddifySettingPath     string
+	clientSettingPath     string
 	configPath             string
-	defaultConfigs         config.HiddifyOptions = *config.DefaultHiddifyOptions()
+	defaultConfigs         config.ClientOptions = *config.DefaultClientOptions()
 	commandBuildOutputPath string
 )
 
@@ -27,7 +27,7 @@ var commandBuild = &cobra.Command{
 	Use:   "build",
 	Short: "Build configuration",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := build(configPath, hiddifySettingPath)
+		err := build(configPath, clientSettingPath)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -62,9 +62,9 @@ func build(path string, optionsPath string) error {
 	ctx := libbox.BaseContext(nil)
 	var err error
 
-	hiddifyOptions := &defaultConfigs // config.DefaultHiddifyOptions()
+	hiddifyOptions := &defaultConfigs // config.DefaultClientOptions()
 	if optionsPath != "" {
-		hiddifyOptions, err = readHiddifyOptionsAt(optionsPath)
+		hiddifyOptions, err = readClientOptionsAt(optionsPath)
 		if err != nil {
 			return err
 		}
@@ -110,12 +110,12 @@ func readConfigAt(ctx context.Context, path string) (*option.Options, error) {
 	return &options, nil
 }
 
-func readHiddifyOptionsAt(path string) (*config.HiddifyOptions, error) {
+func readClientOptionsAt(path string) (*config.ClientOptions, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var options config.HiddifyOptions
+	var options config.ClientOptions
 	err = json.Unmarshal(content, &options)
 	if err != nil {
 		return nil, err
@@ -127,7 +127,7 @@ func readHiddifyOptionsAt(path string) (*config.HiddifyOptions, error) {
 func addHConfigFlags(commandRun *cobra.Command) {
 	commandRun.Flags().StringVarP(&configPath, "config", "c", "", "proxy config path or url")
 	commandRun.MarkFlagRequired("config")
-	commandRun.Flags().StringVarP(&hiddifySettingPath, "hiddify", "d", "", "Hiddify Setting JSON Path")
+	commandRun.Flags().StringVarP(&clientSettingPath, "pathology", "d", "", "Client Setting JSON Path")
 	commandRun.Flags().BoolVar(&defaultConfigs.EnableFullConfig, "full-config", false, "allows including tags other than output")
 	commandRun.Flags().StringVar(&defaultConfigs.LogLevel, "log", "warn", "log level")
 	commandRun.Flags().BoolVar(&defaultConfigs.InboundOptions.EnableTun, "tun", false, "Enable Tun")

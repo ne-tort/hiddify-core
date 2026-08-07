@@ -4,7 +4,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/service_manager"
+	"github.com/ne-tort/pathology-core/v2/service_manager"
 	daemon "github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/log"
 	"google.golang.org/protobuf/types/known/timestamppb"

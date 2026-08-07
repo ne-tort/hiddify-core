@@ -406,17 +406,17 @@ Other
   updated to latest version.
   web-ui assets have been imported from release files.
   general polishing according to newly introduced changes.
-  commands and config files have been simplified for easier interaction. ( service hiddify restart. instead of typing down service hiddify-core restart.
-- Delete: openwrt old hiddify-core.init. [Kaveh Dadgar]
+  commands and config files have been simplified for easier interaction. ( service hiddify restart. instead of typing down service pathology-core restart.
+- Delete: openwrt old pathology-core.init. [Kaveh Dadgar]
 
   was not working
 - Add: Openwrt new hiddify.init. [Kaveh Dadgar]
-- Delete: old hiddify-core.conf. [Kaveh Dadgar]
+- Delete: old pathology-core.conf. [Kaveh Dadgar]
 
-  remove old hiddify-core.conf for the sake of new hiddify.conf
+  remove old pathology-core.conf for the sake of new hiddify.conf
 - Add: new openwrt configuration. [Kaveh Dadgar]
 
-  shortened hiddify-core to hiddify for simplicity.
+  shortened pathology-core to hiddify for simplicity.
   removed options workingdir and user as it is not being used at the
   moment also we need root privilege for tun.
   added new option "config" referring to config file or url after -c switch.
@@ -722,7 +722,7 @@ Other
 ~~~~~
 - Release: version 1.2.0. [hiddify]
 - Remove debug symbols for cli. [hiddify]
-- Change name of core to hiddify-core. [hiddify]
+- Change name of core to pathology-core. [hiddify]
 - Rename name to hiddify core. [Hiddify]
 
 
@@ -1071,7 +1071,7 @@ Changes
 - Change name of service to HiddifyService. [Hiddify]
 - Activate tunnel service only in windows and linux. [Hiddify]
 - Ubuntu image to 20.04 for better compatibility. [Hiddify]
-- Release format to hiddify-core-platfrom. [Hiddify]
+- Release format to pathology-core-platfrom. [Hiddify]
 
 Fix
 ~~~

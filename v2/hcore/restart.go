@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 )
@@ -30,7 +30,7 @@ func Restart(ctx context.Context, in *StartRequest) (coreResponse *CoreInfoRespo
 		return resp, err
 	}
 
-	if C.IsAndroid && static.HiddifyOptions.EnableTun {
+	if C.IsAndroid && static.ClientOptions.EnableTun {
 		select {
 		case <-ctx.Done():
 			return SetCoreStatus(CoreStates_STOPPED, MessageType_INSTANCE_NOT_STARTED, "restart cancelled"), nil

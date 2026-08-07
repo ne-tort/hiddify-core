@@ -1,17 +1,17 @@
 /**
- * This file defines various configuration options for the Hiddify application.
+ * This file defines various configuration options for the Pathology application.
  */
 
 syntax = "proto3";
 
-package hiddifyoptions;
-option go_package = "github.com/hiddify/hiddify-core/v2/hiddifyoptions";
-option java_package = "com.hiddify.core.api.v2.hiddifyoptions";
+package clientoptions;
+option go_package = "github.com/ne-tort/pathology-core/v2/clientoptions";
+option java_package = "com.pathology.core.api.v2.clientoptions";
 
 /**
- * HiddifyOptions defines the configuration options for the Hiddify application.
+ * ClientOptions defines the configuration options for the Pathology application.
  */
-message HiddifyOptions {
+message ClientOptions {
   bool enable_full_config = 1; // Enables full configuration options.
   string log_level = 2; // Specifies the logging level (e.g., INFO, DEBUG).
   string log_file = 3; // Path to the log file.

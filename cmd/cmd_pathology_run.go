@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
 	"github.com/sagernet/sing-box/experimental/libbox"
 
 	"github.com/spf13/cobra"
@@ -16,7 +16,7 @@ var hcommandRun = &cobra.Command{
 
 func init() {
 	// hcommandRun.PersistentFlags().BoolP("help", "", false, "help for this command")
-	// hcommandRun.Flags().StringVarP(&hiddifySettingPath, "hiddify", "d", "", "Hiddify Setting JSON Path")
+	// hcommandRun.Flags().StringVarP(&clientSettingPath, "pathology", "d", "", "Pathology Setting JSON Path")
 
 	addHConfigFlags(hcommandRun)
 
@@ -47,5 +47,5 @@ func runCommand(cmd *cobra.Command, args []string) {
 	// fmt.Println(res, err)
 	// <-time.After(10 * time.Second)
 	ctx := libbox.BaseContext(nil)
-	hcore.RunStandalone(ctx, hiddifySettingPath, configPath, defaultConfigs)
+	hcore.RunStandalone(ctx, clientSettingPath, configPath, defaultConfigs)
 }

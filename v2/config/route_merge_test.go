@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json/badoption"
@@ -45,7 +45,7 @@ func TestBuildMergesSubscriptionRuleSet(t *testing.T) {
     ]
   }
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = false
 
 	t.Run("failClosedWithoutFile", func(t *testing.T) {
@@ -131,7 +131,7 @@ func TestBuildIgnoresSubscriptionRouteWhenFlagged(t *testing.T) {
     "rules": [{"action":"route","outbound":"direct","rule_set":["geoip-ru"]}]
   }
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = true
 	built, err := config.BuildConfig(testCtx(), h, &config.ReadOptions{Content: profile})
 	if err != nil {
@@ -302,7 +302,7 @@ func TestBuildConfigFindProcessFromOwnerRules(t *testing.T) {
 	profile := `{
   "outbounds": [{"type":"direct","tag":"node-a"}]
 }`
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = true
 	h.RoutingProfiles = []*config.RoutingProfile{{
 		Name:           "p",
@@ -339,7 +339,7 @@ func TestBuildConfigGlobalProxyFinalWithProcessOwner(t *testing.T) {
   "outbounds": [{"type":"direct","tag":"node-a"}]
 }`
 	falseVal := false
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = true
 	h.RoutingGlobalProxy = &falseVal
 	h.RoutingProfiles = []*config.RoutingProfile{{
@@ -513,7 +513,7 @@ func TestLocalProfileWinsOverSubscriptionOrder(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(wd) })
 
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = false
 	h.RoutePriority = config.RoutePrioritySubscriptionFirst // must be ignored
 	h.GeoIPRuleSetURL = filepath.Join("rules", "geoip-{tag}.srs")

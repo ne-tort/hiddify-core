@@ -10,9 +10,9 @@ import (
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/option"
 
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
-	"github.com/hiddify/hiddify-core/v2/hcore"
-	hutils "github.com/hiddify/hiddify-core/v2/hutils"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/hcore"
+	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 )
 
 type TunnelService struct {
@@ -90,10 +90,14 @@ func makeTunnelConfig(in *TunnelStartRequest) option.Options {
 					DefaultOptions: option.DefaultRule{
 						RawDefaultRule: option.RawDefaultRule{
 							ProcessName: []string{
+								"Pathology.exe",
+								"Pathology",
+								"PathologyCli",
+								"PathologyCli.exe",
 								"Hiddify.exe",
 								"Hiddify",
-								"HiddifyCli",
-								"HiddifyCli.exe",
+								"PathologyCli",
+								"PathologyCli.exe",
 							},
 						},
 						RuleAction: option.RuleAction{

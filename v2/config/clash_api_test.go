@@ -7,7 +7,7 @@ import (
 )
 
 func TestClashApiSecretNotRandomized(t *testing.T) {
-	h := DefaultHiddifyOptions()
+	h := DefaultClientOptions()
 	h.EnableClashApi = true
 	h.ClashApiPort = 16756
 	h.ClashApiSecret = ""
@@ -25,7 +25,7 @@ func TestClashApiSecretNotRandomized(t *testing.T) {
 }
 
 func TestClashApiSecretPassthrough(t *testing.T) {
-	h := DefaultHiddifyOptions()
+	h := DefaultClientOptions()
 	h.EnableClashApi = true
 	h.ClashApiSecret = "fixed-secret-16"
 	var options option.Options

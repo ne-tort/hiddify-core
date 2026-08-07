@@ -1,21 +1,21 @@
 -s dir
---name hiddify-core
+--name pathology-core
 --category net
 --license GPL-3.0-or-later
 --description "The universal proxy platform."
 --url "https://hiddify.com/"
 --maintainer "hiddify <core@hiddify.com>"
---deb-field "Bug: https://github.com/hiddify/hiddify-core/issues"
+--deb-field "Bug: https://github.com/ne-tort/pathology-core/issues"
 --no-deb-generate-changes
---config-files /etc/hiddify-core/config.json
---after-install release/config/hiddify-core.postinst
+--config-files /etc/pathology-core/config.json
+--after-install release/config/pathology-core.postinst
 
-release/config/config.json=/etc/hiddify-core/config.json
+release/config/config.json=/etc/pathology-core/config.json
 
-release/config/hiddify-core.service=/usr/lib/systemd/system/hiddify-core.service
-release/config/hiddify-core@.service=/usr/lib/systemd/system/hiddify-core@.service
-release/config/hiddify-core.sysusers=/usr/lib/sysusers.d/hiddify-core.conf
-release/config/hiddify-core.rules=usr/share/polkit-1/rules.d/hiddify-core.rules
-release/config/hiddify-core-split-dns.xml=/usr/share/dbus-1/system.d/hiddify-core-split-dns.conf
+release/config/pathology-core.service=/usr/lib/systemd/system/pathology-core.service
+release/config/pathology-core@.service=/usr/lib/systemd/system/pathology-core@.service
+release/config/pathology-core.sysusers=/usr/lib/sysusers.d/pathology-core.conf
+release/config/pathology-core.rules=usr/share/polkit-1/rules.d/pathology-core.rules
+release/config/pathology-core-split-dns.xml=/usr/share/dbus-1/system.d/pathology-core-split-dns.conf
 
-LICENSE.md=/usr/share/licenses/hiddify-core/LICENSE.md
+LICENSE.md=/usr/share/licenses/pathology-core/LICENSE.md

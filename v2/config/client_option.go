@@ -10,7 +10,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-type HiddifyOptions struct {
+type ClientOptions struct {
 	EnableFullConfig        bool   `json:"enable-full-config,omitempty" overridable:"true"`
 	LogLevel                string `json:"log-level,omitempty"`
 	LogFile                 string `json:"log-file,omitempty"`
@@ -102,7 +102,7 @@ type RouteOptions struct {
 	RoutingProfile *RoutingProfile `json:"routing-profile,omitempty"`
 	GeoIPRuleSetURL   string `json:"geoip-ruleset-url,omitempty"`
 	GeoSiteRuleSetURL string `json:"geosite-ruleset-url,omitempty"`
-	// AdsRuleSetPath: absolute path to bundled/cached hiddify-ads.srs (local rule-set).
+	// AdsRuleSetPath: absolute path to bundled/cached pathology-ads.srs (local rule-set).
 	AdsRuleSetPath string `json:"ads-ruleset-path,omitempty"`
 }
 
@@ -126,8 +126,8 @@ type MuxOptions struct {
 }
 
 
-func DefaultHiddifyOptions() *HiddifyOptions {
-	return &HiddifyOptions{
+func DefaultClientOptions() *ClientOptions {
+	return &ClientOptions{
 		EnableNTP: true,
 		DNSOptions: DNSOptions{
 			RemoteDnsServers:        []string{"local"},
@@ -294,20 +294,20 @@ func parseUint(value interface{}) (uint64, error) {
 	return 0, fmt.Errorf("invalid uint value")
 }
 
-func GetOverridableHiddifyOptions(overrides map[string][]string) *HiddifyOptions {
-	overrideHiddify := HiddifyOptions{}
+func GetOverridableClientOptions(overrides map[string][]string) *ClientOptions {
+	overrideClient := ClientOptions{}
 
 	// Convert flat overrides to nested structure
 	nestedOverrides := convertFlatToNested(overrides)
 
-	// Use reflection to iterate over the fields of HiddifyOptions
-	v := reflect.ValueOf(&overrideHiddify).Elem()
-	t := reflect.TypeOf(overrideHiddify)
+	// Use reflection to iterate over the fields of ClientOptions
+	v := reflect.ValueOf(&overrideClient).Elem()
+	t := reflect.TypeOf(overrideClient)
 
 	// Recursively set the fields that are marked as overridable
 	setOverridableFields(v, t, nestedOverrides)
 
-	return &overrideHiddify
+	return &overrideClient
 }
 
 // Converts the flat overrides map to a nested structure without removing underscores

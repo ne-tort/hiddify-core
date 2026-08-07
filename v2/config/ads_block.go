@@ -5,7 +5,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 )
 
-const AdsRuleSetTag = "hiddify-ads"
+const AdsRuleSetTag = "pathology-ads"
 
 // appendAdsBlockRules prepends a local ads rule-set and reject rule (L4, before profile buckets).
 func appendAdsBlockRules(rulesets *[]option.RuleSet, rules *[]option.Rule, path string) {

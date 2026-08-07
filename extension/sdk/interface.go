@@ -8,18 +8,18 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	"github.com/ne-tort/pathology-core/v2/config"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
 	"github.com/sagernet/sing-box/option"
 )
 
-func RunInstance(ctx context.Context, hiddifySettings *config.HiddifyOptions, singconfig *option.Options) (*hcore.HiddifyInstance, error) {
-	return hcore.RunInstance(ctx, hiddifySettings, singconfig)
+func RunInstance(ctx context.Context, clientSettings *config.ClientOptions, singconfig *option.Options) (*hcore.PathologyInstance, error) {
+	return hcore.RunInstance(ctx, clientSettings, singconfig)
 }
 
-func ParseConfig(ctx context.Context, hiddifySettings *config.HiddifyOptions, configStr string) (*option.Options, error) {
-	if hiddifySettings == nil {
-		hiddifySettings = config.DefaultHiddifyOptions()
+func ParseConfig(ctx context.Context, clientSettings *config.ClientOptions, configStr string) (*option.Options, error) {
+	if clientSettings == nil {
+		clientSettings = config.DefaultClientOptions()
 	}
 	if strings.HasPrefix(configStr, "http://") || strings.HasPrefix(configStr, "https://") {
 		client := &http.Client{}
@@ -30,7 +30,7 @@ func ParseConfig(ctx context.Context, hiddifySettings *config.HiddifyOptions, co
 			fmt.Println("Error creating request:", err)
 			return nil, err
 		}
-		req.Header.Set("User-Agent", "HiddifyNext/2.3.1 ("+runtime.GOOS+") like ClashMeta v2ray sing-box")
+		req.Header.Set("User-Agent", "Pathology/2.3.1 ("+runtime.GOOS+") like ClashMeta v2ray sing-box")
 		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Println("Error making GET request:", err)
@@ -44,5 +44,5 @@ func ParseConfig(ctx context.Context, hiddifySettings *config.HiddifyOptions, co
 		}
 		configStr = string(body)
 	}
-	return config.ParseBuildConfig(ctx, hiddifySettings, &config.ReadOptions{Content: configStr})
+	return config.ParseBuildConfig(ctx, clientSettings, &config.ReadOptions{Content: configStr})
 }

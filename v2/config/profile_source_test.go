@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 )
 
 func TestProfileSourcePath(t *testing.T) {
@@ -30,7 +30,7 @@ func TestParseBuildFromSourceKeepsDetourToggleSurface(t *testing.T) {
 	if err := os.WriteFile(src, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h := config.DefaultHiddifyOptions()
+	h := config.DefaultClientOptions()
 	h.IgnoreSubscriptionDNS = true
 	built, err := config.ParseBuildConfig(testCtx(), h, &config.ReadOptions{Path: src})
 	if err != nil {

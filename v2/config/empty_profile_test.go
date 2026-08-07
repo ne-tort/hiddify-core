@@ -10,7 +10,7 @@ import (
 
 func TestEmptyProfileRoundTripAndWarpBuild(t *testing.T) {
 	ctx := context.Background()
-	hopts := DefaultHiddifyOptions()
+	hopts := DefaultClientOptions()
 	hopts.Warp.EnableMasque = true
 	hopts.Warp.MasqueConfig = WarpMasqueConfig{
 		PrivateKey: "dGVzdA==", PublicKey: "dGVzdA==", IPv4: "172.16.0.2",

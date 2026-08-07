@@ -18,9 +18,9 @@ func TestNormalizeLocalRulesetPath(t *testing.T) {
 		t.Fatalf("relative path should stay unchanged")
 	}
 
-	ads := `C:\data\hiddify_portable_data\rules\hiddify-ads.srs`
+	ads := `C:\data\hiddify_portable_data\rules\pathology-ads.srs`
 	gotAds := normalizeLocalRulesetPath(ads)
-	wantAds := filepath.FromSlash("rules/hiddify-ads.srs")
+	wantAds := filepath.FromSlash("rules/pathology-ads.srs")
 	if gotAds != wantAds {
 		t.Fatalf("ads path got %q want %q", gotAds, wantAds)
 	}

@@ -7,7 +7,7 @@
 package hcore
 
 import (
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -118,7 +118,7 @@ var file_v2_hcore_hcore_service_proto_goTypes = []any{
 	(*hcommon.Empty)(nil),                // 1: hcommon.Empty
 	(*SetupRequest)(nil),                 // 2: hcore.SetupRequest
 	(*ParseRequest)(nil),                 // 3: hcore.ParseRequest
-	(*ChangeHiddifySettingsRequest)(nil), // 4: hcore.ChangeHiddifySettingsRequest
+	(*ChangeClientSettingsRequest)(nil), // 4: hcore.ChangeClientSettingsRequest
 	(*SelectOutboundRequest)(nil),        // 5: hcore.SelectOutboundRequest
 	(*UrlTestRequest)(nil),               // 6: hcore.UrlTestRequest
 	(*GenerateWarpConfigRequest)(nil),    // 7: hcore.GenerateWarpConfigRequest
@@ -143,7 +143,7 @@ var file_v2_hcore_hcore_service_proto_depIdxs = []int32{
 	1,  // 5: hcore.Core.GetSystemInfoStream:input_type -> hcommon.Empty
 	2,  // 6: hcore.Core.Setup:input_type -> hcore.SetupRequest
 	3,  // 7: hcore.Core.Parse:input_type -> hcore.ParseRequest
-	4,  // 8: hcore.Core.ChangeHiddifySettings:input_type -> hcore.ChangeHiddifySettingsRequest
+	4,  // 8: hcore.Core.ChangeClientSettings:input_type -> hcore.ChangeClientSettingsRequest
 	0,  // 9: hcore.Core.StartService:input_type -> hcore.StartRequest
 	1,  // 10: hcore.Core.Stop:input_type -> hcommon.Empty
 	0,  // 11: hcore.Core.Restart:input_type -> hcore.StartRequest
@@ -163,7 +163,7 @@ var file_v2_hcore_hcore_service_proto_depIdxs = []int32{
 	13, // 25: hcore.Core.GetSystemInfoStream:output_type -> hcore.SystemInfo
 	14, // 26: hcore.Core.Setup:output_type -> hcommon.Response
 	15, // 27: hcore.Core.Parse:output_type -> hcore.ParseResponse
-	11, // 28: hcore.Core.ChangeHiddifySettings:output_type -> hcore.CoreInfoResponse
+	11, // 28: hcore.Core.ChangeClientSettings:output_type -> hcore.CoreInfoResponse
 	11, // 29: hcore.Core.StartService:output_type -> hcore.CoreInfoResponse
 	11, // 30: hcore.Core.Stop:output_type -> hcore.CoreInfoResponse
 	11, // 31: hcore.Core.Restart:output_type -> hcore.CoreInfoResponse

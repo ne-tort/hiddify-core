@@ -3,7 +3,7 @@ package hcore
 import (
 	"testing"
 
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/config"
 )
 
 func TestGenerateWarpConfigMasqueSentinel(t *testing.T) {

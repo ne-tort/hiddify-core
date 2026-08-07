@@ -31,7 +31,7 @@ const file_v2_ezytel_ezytel_service_proto_rawDesc = "" +
 	"\n" +
 	"ProxyImage\x12\x19.ezytel.ProxyImageRequest\x1a\x1a.ezytel.ProxyImageResponse\x12L\n" +
 	"\rParseChannels\x12\x1c.ezytel.ParseChannelsRequest\x1a\x1d.ezytel.ParseChannelsResponseBK\n" +
-	"\x1ecom.hiddify.core.api.v2.ezytelZ)github.com/hiddify/hiddify-core/v2/ezytelb\x06proto3"
+	"\x1ecom.pathology.core.api.v2.ezytelZ)github.com/ne-tort/pathology-core/v2/ezytelb\x06proto3"
 
 var file_v2_ezytel_ezytel_service_proto_goTypes = []any{
 	(*ChannelInfoRequest)(nil),      // 0: ezytel.ChannelInfoRequest

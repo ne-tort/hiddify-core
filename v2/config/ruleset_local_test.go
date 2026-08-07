@@ -81,7 +81,7 @@ func TestBuildConfigLocalSrsZeroRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile := `{"outbounds":[{"type":"direct","tag":"node-a"}]}`
-	h := DefaultHiddifyOptions()
+	h := DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = true
 	h.RoutingProfiles = []*RoutingProfile{{
 		Name:        "p",

@@ -7,12 +7,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/hiddify/hiddify-core/compat/monitoring"
-	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/hiddify/hiddify-core/v2/db"
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
-	"github.com/hiddify/hiddify-core/v2/hutils"
-	service_manager "github.com/hiddify/hiddify-core/v2/service_manager"
+	"github.com/ne-tort/pathology-core/compat/monitoring"
+	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/hutils"
+	service_manager "github.com/ne-tort/pathology-core/v2/service_manager"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
@@ -100,10 +100,10 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 
 	static.previousStartRequest = in
 
-	if static.HiddifyOptions == nil {
+	if static.ClientOptions == nil {
 		return errorWrapper(
 			MessageType_ERROR_BUILDING_CONFIG,
-			errors.New("HiddifyOptions not initialized"),
+			errors.New("ClientOptions not initialized"),
 		)
 	}
 
@@ -150,8 +150,8 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	}
 	static.StartedService = instance
 	monitoring.Activate(static.Context(), static.Box(), static.UrlTestHistory(), func() string {
-		if static.HiddifyOptions != nil {
-			return static.HiddifyOptions.ConnectionTestUrl
+		if static.ClientOptions != nil {
+			return static.ClientOptions.ConnectionTestUrl
 		}
 		return ""
 	})

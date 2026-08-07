@@ -15,11 +15,11 @@ RUN echo "architecture: $(apk --print-arch)" && \
             s390x) ARCH=s390x ;; \
             *) echo "Unsupported architecture: $(apk --print-arch) $(uname -m)" && exit 1 ;; \
         esac && \
-        echo "Downloading https://github.com/hiddify/hiddify-core/releases/download/${VERSION}/hiddify-core-linux-$ARCH.tar.gz" && \
-        curl -L -o hiddify-core.tar.gz https://github.com/hiddify/hiddify-core/releases/download/${VERSION}/hiddify-core-linux-$ARCH.tar.gz && \
-        tar -xzf hiddify-core.tar.gz && rm hiddify-core.tar.gz
-COPY hiddify.sh .
-RUN chmod +x hiddify.sh
+        echo "Downloading https://github.com/ne-tort/pathology-core/releases/download/${VERSION}/pathology-core-linux-$ARCH.tar.gz" && \
+        curl -L -o pathology-core.tar.gz https://github.com/ne-tort/pathology-core/releases/download/${VERSION}/pathology-core-linux-$ARCH.tar.gz && \
+        tar -xzf pathology-core.tar.gz && rm pathology-core.tar.gz
+COPY pathology.sh .
+RUN chmod +x pathology.sh
 
 EXPOSE 12334
 EXPOSE 12335
@@ -28,4 +28,4 @@ EXPOSE 12335
 EXPOSE 12337
 
 
-ENTRYPOINT [ "/hiddify/hiddify.sh" ]
+ENTRYPOINT [ "/hiddify/pathology.sh" ]

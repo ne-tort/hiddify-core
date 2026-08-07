@@ -76,7 +76,7 @@ func TestBuildConfigChainDetoursMap(t *testing.T) {
     {"type":"vless","tag":"leaf-b","server":"1.1.1.2","server_port":443,"uuid":"00000000-0000-0000-0000-000000000002"}
   ]
 }`
-	h := DefaultHiddifyOptions()
+	h := DefaultClientOptions()
 	h.IgnoreSubscriptionRoute = true
 	h.Chain = ChainOptions{
 		Detours: map[string]string{

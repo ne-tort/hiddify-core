@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/hcommon"
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	"github.com/ne-tort/pathology-core/v2/hcommon"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
@@ -21,7 +21,7 @@ var execCommand = &cobra.Command{
 
 func init() {
 	// commandRun.PersistentFlags().BoolP("help", "", false, "help for this command")
-	// commandRun.Flags().StringVarP(&hiddifySettingPath, "hiddify", "d", "", "Hiddify Setting JSON Path")
+	// commandRun.Flags().StringVarP(&clientSettingPath, "pathology", "d", "", "Client Setting JSON Path")
 
 	mainCommand.AddCommand(execCommand)
 }

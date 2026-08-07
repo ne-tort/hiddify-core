@@ -11,7 +11,7 @@ import (
 
 func TestPatchOutboundFragmentTLS(t *testing.T) {
 	t.Parallel()
-	opt := *DefaultHiddifyOptions()
+	opt := *DefaultClientOptions()
 	opt.TLSTricks.EnableFragment = true
 	opt.TLSTricks.EnableRecordFragment = true
 	opt.TLSTricks.FragmentFallbackDelay = "300ms"
@@ -45,7 +45,7 @@ func TestPatchOutboundFragmentTLS(t *testing.T) {
 
 func TestPatchOutboundFragmentSkipsReality(t *testing.T) {
 	t.Parallel()
-	opt := *DefaultHiddifyOptions()
+	opt := *DefaultClientOptions()
 	opt.TLSTricks.EnableFragment = true
 	opt.TLSTricks.EnableRecordFragment = true
 
@@ -73,7 +73,7 @@ func TestPatchOutboundFragmentSkipsReality(t *testing.T) {
 
 func TestPatchOutboundFragmentSkipsQUIC(t *testing.T) {
 	t.Parallel()
-	opt := *DefaultHiddifyOptions()
+	opt := *DefaultClientOptions()
 	opt.TLSTricks.EnableFragment = true
 	opt.TLSTricks.EnableRecordFragment = true
 

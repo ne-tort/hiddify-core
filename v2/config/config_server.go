@@ -6,7 +6,7 @@ import (
 	"log"
 	"net"
 
-	"github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"google.golang.org/grpc"
 )
@@ -46,7 +46,7 @@ func (s *server) GenerateFullConfig(ctx context.Context, in *GenerateConfigReque
 		err = nil
 	})
 	ctx = libbox.BaseContext(nil)
-	config, err := BuildConfigJson(ctx, DefaultHiddifyOptions(), &ReadOptions{Path: in.Path})
+	config, err := BuildConfigJson(ctx, DefaultClientOptions(), &ReadOptions{Path: in.Path})
 	if err != nil {
 		return nil, err
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 // cleanupNLAProfiles removes stale Network List profiles/signatures whose
-// Description/ProfileName match HiddifyTunnel* or legacy singbox-tun*.
+// Description/ProfileName match PathologyTunnel* or legacy singbox-tun*.
 // Best-effort: access-denied and missing keys are ignored.
 func cleanupNLAProfiles() {
 	cleanupNLATree(`SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\Profiles`,

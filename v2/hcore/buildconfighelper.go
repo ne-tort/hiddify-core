@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/hiddify/hiddify-core/v2/db"
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
-	hutils "github.com/hiddify/hiddify-core/v2/hutils"
+	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
+	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
@@ -32,18 +32,18 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 		return config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 	}
 
-	// Prefer uncut import source: re-parse each Start with current HiddifyOptions
+	// Prefer uncut import source: re-parse each Start with current ClientOptions
 	// so ignore-subscription-dns/route and similar knobs apply to the original body.
 	if in.ConfigPath != "" {
 		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
 			if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
 				Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", src)
-				return config.ParseBuildConfig(ctx, static.HiddifyOptions, &config.ReadOptions{Path: src})
+				return config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: src})
 			}
 		}
 	}
 
-	return config.BuildConfig(ctx, static.HiddifyOptions, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
+	return config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 }
 
 func (s *CoreService) Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
@@ -56,8 +56,8 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		StopAndAlert(MessageType_UNEXPECTED_ERROR, err.Error())
 	})
 
-  if static.HiddifyOptions == nil {
-		static.HiddifyOptions = config.DefaultHiddifyOptions()
+  if static.ClientOptions == nil {
+		static.ClientOptions = config.DefaultClientOptions()
 	}
 
 	// Client-side rule-set merge (routing profile compiler).
@@ -90,7 +90,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 					return &ParseResponse{ResponseCode: hcommon.ResponseCode_FAILED, Message: err.Error()}, nil
 				}
 				rawOpts, _ := json.Marshal(dnsReq.Options)
-				hopt := config.DefaultHiddifyOptions()
+				hopt := config.DefaultClientOptions()
 				_ = json.Unmarshal(rawOpts, hopt)
 				opts := option.Options{}
 				if err := config.BuildDnsFragment(&opts, hopt, dnsReq.RemoteDetour); err != nil {
@@ -106,7 +106,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	}
 
 	// Full config generation (debug/export): only config_path is set.
-	// Apply current HiddifyOptions (incl. WARP inject) and do not rewrite the profile file.
+	// Apply current ClientOptions (incl. WARP inject) and do not rewrite the profile file.
 	if in.TempPath == "" && in.Content == "" && in.ConfigPath != "" {
 		readPath := in.ConfigPath
 		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
@@ -114,10 +114,10 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 				readPath = src
 			}
 		}
-		built, err := config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: readPath})
+		built, err := config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: readPath})
 		if err != nil && readPath != in.ConfigPath {
 			// .src may contain comment headers; fall back to sliced .json
-			built, err = config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: in.ConfigPath})
+			built, err = config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: in.ConfigPath})
 		}
 		if err != nil {
 			return &ParseResponse{
@@ -145,7 +145,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 		}
 	}
 
-	parsed, err := config.ParseConfigBytes(ctx, readOpt, true, static.HiddifyOptions, false)
+	parsed, err := config.ParseConfigBytes(ctx, readOpt, true, static.ClientOptions, false)
 	if err != nil {
 		return &ParseResponse{
 			ResponseCode: hcommon.ResponseCode_FAILED,
@@ -168,14 +168,14 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	}, nil
 }
 
-func (s *CoreService) ChangeHiddifySettings(ctx context.Context, in *ChangeHiddifySettingsRequest) (*CoreInfoResponse, error) {
-	return ChangeHiddifySettings(in, true)
+func (s *CoreService) ChangeClientSettings(ctx context.Context, in *ChangeClientSettingsRequest) (*CoreInfoResponse, error) {
+	return ChangeClientSettings(in, true)
 }
 
-func ChangeHiddifySettings(in *ChangeHiddifySettingsRequest, insert bool) (*CoreInfoResponse, error) {
-	static.HiddifyOptions = config.DefaultHiddifyOptions()
+func ChangeClientSettings(in *ChangeClientSettingsRequest, insert bool) (*CoreInfoResponse, error) {
+	static.ClientOptions = config.DefaultClientOptions()
 	defer func() {
-		switch static.HiddifyOptions.LogLevel {
+		switch static.ClientOptions.LogLevel {
 		case "debug":
 			static.logLevel = LogLevel_DEBUG
 		case "info":
@@ -194,18 +194,18 @@ func ChangeHiddifySettings(in *ChangeHiddifySettingsRequest, insert bool) (*Core
 		static.debug = static.debug || static.logLevel <= LogLevel_DEBUG
 	}()
 
-	if in.HiddifySettingsJson == "" {
+	if in.ClientSettingsJson == "" {
 		return &CoreInfoResponse{}, nil
 	}
 	if insert {
 		settings := db.GetTable[hcommon.AppSettings]()
 		settings.UpdateInsert(&hcommon.AppSettings{
-			Id:    "HiddifySettingsJson",
-			Value: in.HiddifySettingsJson,
+			Id:    "ClientSettingsJson",
+			Value: in.ClientSettingsJson,
 		})
 	}
 
-	err := json.Unmarshal([]byte(in.HiddifySettingsJson), static.HiddifyOptions)
+	err := json.Unmarshal([]byte(in.ClientSettingsJson), static.ClientOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -222,10 +222,10 @@ func GenerateConfig(ctx context.Context, in *GenerateConfigRequest) (*GenerateCo
 		Log(LogLevel_FATAL, LogType_CONFIG, err.Error())
 		StopAndAlert(MessageType_UNEXPECTED_ERROR, err.Error())
 	})
-	if static.HiddifyOptions == nil {
-		static.HiddifyOptions = config.DefaultHiddifyOptions()
+	if static.ClientOptions == nil {
+		static.ClientOptions = config.DefaultClientOptions()
 	}
-	config, err := config.ParseBuildConfigBytes(ctx, static.HiddifyOptions, &config.ReadOptions{Path: in.Path})
+	config, err := config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: in.Path})
 	if err != nil {
 		return nil, err
 	}

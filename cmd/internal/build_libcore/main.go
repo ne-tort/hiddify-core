@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/hiddify/hiddify-core/cmd/internal/build_shared"
-	"github.com/hiddify/hiddify-core/internal/buildtags"
+	"github.com/ne-tort/pathology-core/cmd/internal/build_shared"
+	"github.com/ne-tort/pathology-core/internal/buildtags"
 	_ "github.com/sagernet/gomobile"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing/common/rw"
@@ -43,7 +43,7 @@ var (
 	iosTags     []string
 )
 
-const libName = "hiddify-core"
+const libName = "pathology-core"
 
 func init() {
 	sharedFlags = append(sharedFlags, "-trimpath")

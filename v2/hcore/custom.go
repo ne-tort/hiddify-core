@@ -1,8 +1,8 @@
 package hcore
 
 import (
-	"github.com/hiddify/hiddify-core/compat/monitoring"
-	"github.com/hiddify/hiddify-core/v2/config"
+	"github.com/ne-tort/pathology-core/compat/monitoring"
+	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/sagernet/sing-box/log"
 )
 

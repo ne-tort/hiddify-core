@@ -23,7 +23,7 @@ var (
 )
 
 var mainCommand = &cobra.Command{
-	Use:              "HiddifyCli",
+	Use:              "PathologyCli",
 	PersistentPreRun: preRun,
 }
 

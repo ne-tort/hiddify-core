@@ -1,4 +1,4 @@
-package hiddifyoptions
+package clientoptions
 
 import (
 	"fmt"
@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-func DefaultHiddifyOptions() *HiddifyOptions {
-	return &HiddifyOptions{
+func DefaultClientOptions() *ClientOptions {
+	return &ClientOptions{
 		DnsOptions: &DNSOptions{
 			RemoteDnsAddress:        "1.1.1.1",
 			RemoteDnsDomainStrategy: DomainStrategy_as_is,
@@ -158,20 +158,20 @@ func parseUint(value interface{}) (uint64, error) {
 	return 0, fmt.Errorf("invalid uint value")
 }
 
-func GetOverridableHiddifyOptions(overrides map[string][]string) *HiddifyOptions {
-	overrideHiddify := HiddifyOptions{}
+func GetOverridableClientOptions(overrides map[string][]string) *ClientOptions {
+	overrideClient := ClientOptions{}
 
 	// Convert flat overrides to nested structure
 	nestedOverrides := convertFlatToNested(overrides)
 
-	// Use reflection to iterate over the fields of HiddifyOptions
-	v := reflect.ValueOf(&overrideHiddify).Elem()
-	t := reflect.TypeOf(overrideHiddify)
+	// Use reflection to iterate over the fields of ClientOptions
+	v := reflect.ValueOf(&overrideClient).Elem()
+	t := reflect.TypeOf(overrideClient)
 
 	// Recursively set the fields that are marked as overridable
 	setOverridableFields(v, t, nestedOverrides)
 
-	return &overrideHiddify
+	return &overrideClient
 }
 
 // Converts the flat overrides map to a nested structure without removing underscores

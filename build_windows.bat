@@ -22,24 +22,24 @@ if not exist bin\libcronet.dll (
   if errorlevel 1 exit /b 1
 )
 
-echo Building hiddify-core.dll...
+echo Building pathology-core.dll...
 echo Tags: %TAGS%
-go build -trimpath -tags %TAGS%,with_purego -buildmode=c-shared -ldflags="-w -s -checklinkname=0" -o bin/hiddify-core.dll ./platform/desktop
+go build -trimpath -tags %TAGS%,with_purego -buildmode=c-shared -ldflags="-w -s -checklinkname=0" -o bin/pathology-core.dll ./platform/desktop
 if errorlevel 1 exit /b 1
 
-echo Building HiddifyCli.exe...
-copy /Y bin\hiddify-core.dll hiddify-core.dll >nul
-set CGO_LDFLAGS=hiddify-core.dll
-go build -trimpath -tags %TAGS%,with_purego -ldflags="-w -s -checklinkname=0" -o bin/HiddifyCli.exe ./cmd/bydll
+echo Building PathologyCli.exe...
+copy /Y bin\pathology-core.dll pathology-core.dll >nul
+set CGO_LDFLAGS=pathology-core.dll
+go build -trimpath -tags %TAGS%,with_purego -ldflags="-w -s -checklinkname=0" -o bin/PathologyCli.exe ./cmd/bydll
 set CGO_LDFLAGS=
-del hiddify-core.dll 2>nul
+del pathology-core.dll 2>nul
 
-if not exist bin\hiddify-core.dll (
-  echo Error: bin\hiddify-core.dll not built
+if not exist bin\pathology-core.dll (
+  echo Error: bin\pathology-core.dll not built
   exit /b 1
 )
-if not exist bin\HiddifyCli.exe (
-  echo Error: bin\HiddifyCli.exe not built
+if not exist bin\PathologyCli.exe (
+  echo Error: bin\PathologyCli.exe not built
   exit /b 1
 )
-echo OK: bin\hiddify-core.dll bin\HiddifyCli.exe bin\libcronet.dll
+echo OK: bin\pathology-core.dll bin\PathologyCli.exe bin\libcronet.dll

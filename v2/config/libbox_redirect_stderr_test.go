@@ -6,7 +6,7 @@ import (
 	"github.com/sagernet/sing-box/experimental/libbox"
 )
 
-// Ensures LX keeps RedirectStderr exported for hiddify-core (grpc_server mode logs).
+// Ensures LX keeps RedirectStderr exported for pathology-core (grpc_server mode logs).
 // Setup already redirects via unexported redirectStderr; the exported wrapper is
 // required so host apps can override the crash path after Setup.
 //

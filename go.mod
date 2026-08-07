@@ -1,4 +1,4 @@
-module github.com/hiddify/hiddify-core
+module github.com/ne-tort/pathology-core
 
 go 1.26.1
 

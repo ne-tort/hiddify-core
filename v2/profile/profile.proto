@@ -1,9 +1,9 @@
 syntax = "proto3";
 
 package profile;
-option go_package = "github.com/hiddify/hiddify-core/v2/profile";
-option java_package = "com.hiddify.core.api.v2.profile";
-import "v2/hiddifyoptions/hiddify_options.proto";
+option go_package = "github.com/ne-tort/pathology-core/v2/profile";
+option java_package = "com.pathology.core.api.v2.profile";
+import "v2/clientoptions/client_options.proto";
 
 // ProfileEntity defines a profile entity.
 message ProfileEntity {
@@ -14,7 +14,7 @@ message ProfileEntity {
   int64 last_update = 5; // Last update time in milliseconds of the profile.
   ProfileOptions options = 6; // Options associated with the profile.
   SubscriptionInfo sub_info = 7; // Subscription-related information.
-  hiddifyoptions.HiddifyOptions override_hiddify_options = 8; // Override Hiddify options.
+  clientoptions.ClientOptions override_client_options = 8; // Override client options.
 }
 
 // ProfileOptions defines options for a profile.

@@ -4,7 +4,7 @@ import "strings"
 
 // nlaNamePrefixes match NLA ProfileName/Description for our TUN leftovers.
 var nlaNamePrefixes = []string{
-	"HiddifyTunnel",
+	"PathologyTunnel",
 	"singbox-tun",
 	"singbox_tun",
 }

@@ -1,10 +1,10 @@
 #!/sbin/openrc-run
 
 name=$RC_SVCNAME
-description="hiddify-core service"
+description="pathology-core service"
 supervisor="supervise-daemon"
-command="/usr/bin/hiddify-core"
-command_args="-D /var/lib/hiddify-core -C /etc/hiddify-core run"
+command="/usr/bin/pathology-core"
+command_args="-D /var/lib/pathology-core -C /etc/pathology-core run"
 extra_started_commands="reload"
 
 depend() {

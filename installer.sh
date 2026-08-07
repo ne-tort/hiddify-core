@@ -63,11 +63,11 @@ fi
 # Determine artifact name
 # Note: For OpenWrt, we usually prefer generic or musl. 
 # For standard Linux, we use the specific libc variant if available, otherwise generic.
-ARTIFACT="hiddify-core-linux-${ARCH}${LIBC}.tar.gz"
+ARTIFACT="pathology-core-linux-${ARCH}${LIBC}.tar.gz"
 
 # Fetch latest version
 echo -e "Fetching latest version information..."
-REPO="hiddify/hiddify-core"
+REPO="hiddify/pathology-core"
 LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$LATEST_TAG" ]; then
@@ -83,25 +83,25 @@ curl -L "$DOWNLOAD_URL" -o "$WORKDIR/$ARTIFACT" || {
     # If specific libc variant fails, try generic
     if [ -n "$LIBC" ]; then
         echo -e "Libc-specific artifact not found, trying generic..."
-        ARTIFACT="hiddify-core-linux-${ARCH}.tar.gz"
+        ARTIFACT="pathology-core-linux-${ARCH}.tar.gz"
         DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$ARTIFACT"
         curl -L "$DOWNLOAD_URL" -o "$WORKDIR/$ARTIFACT"
     fi
 }
 
 # Install Binary
-echo -e "Installing binary to /usr/bin/hiddify-core..."
+echo -e "Installing binary to /usr/bin/pathology-core..."
 tar -zxf "$WORKDIR/$ARTIFACT" -C "$WORKDIR"
 # Find the binary in the tarball (it might be in a subdir or renamed)
 BIN_PATH=$(find "$WORKDIR" -type f -name "hiddify*" -executable | head -n 1)
-mv "$BIN_PATH" /usr/bin/hiddify-core
-chmod +x /usr/bin/hiddify-core
+mv "$BIN_PATH" /usr/bin/pathology-core
+chmod +x /usr/bin/pathology-core
 
 # Setup Config
-mkdir -p /etc/hiddify-core
-if [ ! -f /etc/hiddify-core/config.json ]; then
+mkdir -p /etc/pathology-core
+if [ ! -f /etc/pathology-core/config.json ]; then
     echo -e "Creating default configuration..."
-    cat <<EOF > /etc/hiddify-core/config.json
+    cat <<EOF > /etc/pathology-core/config.json
 {
   "log": { "level": "info" },
   "dns": { "servers": [{ "address": "tls://8.8.8.8" }] },
@@ -117,29 +117,29 @@ if [ "$OS" = "openwrt" ]; then
     echo -e "Configuring ${GREEN}OpenWrt procd${NC} service..."
     
     # UCI Config
-    if [ ! -f /etc/config/hiddify-core ]; then
-        cat <<EOF > /etc/config/hiddify-core
-config hiddify-core 'main'
+    if [ ! -f /etc/config/pathology-core ]; then
+        cat <<EOF > /etc/config/pathology-core
+config pathology-core 'main'
 	option enabled '1'
-	option conffile '/etc/hiddify-core/config.json'
-	option workdir '/usr/share/hiddify-core'
+	option conffile '/etc/pathology-core/config.json'
+	option workdir '/usr/share/pathology-core'
 	option log_stderr '1'
 EOF
     fi
 
     # Init Script
-    cat <<'EOF' > /etc/init.d/hiddify-core
+    cat <<'EOF' > /etc/init.d/pathology-core
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
 START=99
-PROG="/usr/bin/hiddify-core"
+PROG="/usr/bin/pathology-core"
 start_service() {
-  config_load "hiddify-core"
+  config_load "pathology-core"
   local enabled conffile workdir log_stderr
   config_get_bool enabled "main" "enabled" "0"
   [ "$enabled" -eq "1" ] || return 0
-  config_get conffile "main" "conffile" "/etc/hiddify-core/config.json"
-  config_get workdir "main" "workdir" "/usr/share/hiddify-core"
+  config_get conffile "main" "conffile" "/etc/pathology-core/config.json"
+  config_get workdir "main" "workdir" "/usr/share/pathology-core"
   config_get_bool log_stderr "main" "log_stderr" "1"
   mkdir -p "$workdir"
   procd_open_instance
@@ -150,22 +150,22 @@ start_service() {
   procd_close_instance
 }
 EOF
-    chmod +x /etc/init.d/hiddify-core
-    /etc/init.d/hiddify-core enable
-    /etc/init.d/hiddify-core restart
+    chmod +x /etc/init.d/pathology-core
+    /etc/init.d/pathology-core enable
+    /etc/init.d/pathology-core restart
 
 else
     echo -e "Configuring ${GREEN}systemd${NC} service..."
     
     # Systemd Service
-    cat <<EOF > /etc/systemd/system/hiddify-core.service
+    cat <<EOF > /etc/systemd/system/pathology-core.service
 [Unit]
-Description=hiddify-core service
+Description=pathology-core service
 After=network.target nss-lookup.target network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/hiddify-core -D /var/lib/hiddify-core run -c /etc/hiddify-core/config.json
+ExecStart=/usr/bin/pathology-core -D /var/lib/pathology-core run -c /etc/pathology-core/config.json
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=infinity
@@ -174,19 +174,19 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-    mkdir -p /var/lib/hiddify-core
+    mkdir -p /var/lib/pathology-core
     systemctl daemon-reload
-    systemctl enable hiddify-core
-    systemctl restart hiddify-core
+    systemctl enable pathology-core
+    systemctl restart pathology-core
 fi
 
 echo -e "${GREEN}Installation successful!${NC}"
-echo -e "Binary: /usr/bin/hiddify-core"
-echo -e "Config: /etc/hiddify-core/config.json"
+echo -e "Binary: /usr/bin/pathology-core"
+echo -e "Config: /etc/pathology-core/config.json"
 if [ "$OS" = "openwrt" ]; then
-    echo -e "Service: /etc/init.d/hiddify-core"
+    echo -e "Service: /etc/init.d/pathology-core"
 else
-    echo -e "Service: systemctl status hiddify-core"
+    echo -e "Service: systemctl status pathology-core"
 fi
 
 rm -rf "$WORKDIR"

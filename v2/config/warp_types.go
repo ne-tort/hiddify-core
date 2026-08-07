@@ -37,7 +37,7 @@ type ChainOptions struct {
 	Detours map[string]string `json:"detours,omitempty"`
 }
 
-// WarpOptions is injected via ChangeHiddifySettings JSON (kebab).
+// WarpOptions is injected via ChangeClientSettings JSON (kebab).
 type WarpOptions struct {
 	EnableWireguard bool                 `json:"enable-wireguard,omitempty"`
 	EnableMasque    bool                 `json:"enable-masque,omitempty"`

@@ -63,8 +63,8 @@ func main() {
 	writeJSON(filepath.Join(*assetsDir, "geoip.json"), geoip)
 	manifest := map[string]any{
 		"version":     time.Now().UTC().Format("2006.01.02"),
-		"geosite_url": "https://raw.githubusercontent.com/ne-tort/hiddify-app/main/rules/tags/geosite.json",
-		"geoip_url":   "https://raw.githubusercontent.com/ne-tort/hiddify-app/main/rules/tags/geoip.json",
+		"geosite_url": "https://raw.githubusercontent.com/ne-tort/pathology-app/main/rules/tags/geosite.json",
+		"geoip_url":   "https://raw.githubusercontent.com/ne-tort/pathology-app/main/rules/tags/geoip.json",
 	}
 	writeJSON(filepath.Join(*outDir, "manifest.json"), manifest)
 	fmt.Printf("geosite=%d geoip=%d\n", len(geosite), len(geoip))

@@ -1,8 +1,8 @@
 syntax = "proto3";
 
 package ezytel;
-option go_package = "github.com/hiddify/hiddify-core/v2/ezytel";
-option java_package = "com.hiddify.core.api.v2.ezytel";
+option go_package = "github.com/ne-tort/pathology-core/v2/ezytel";
+option java_package = "com.pathology.core.api.v2.ezytel";
 
 // Request the metadata card of a Telegram public channel
 // (name, description preview, avatar, last-post timestamp, unread badge).

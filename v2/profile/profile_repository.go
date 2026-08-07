@@ -6,11 +6,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/hiddify/hiddify-core/v2/config"
-	"github.com/hiddify/hiddify-core/v2/db"
-	"github.com/hiddify/hiddify-core/v2/hcommon"
-	"github.com/hiddify/hiddify-core/v2/hcommon/request"
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
+	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
+	"github.com/ne-tort/pathology-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/hcommon/request"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
 	"github.com/sagernet/sing-box/option"
 )
 
@@ -256,7 +256,7 @@ func downloadProfileContent(ctx context.Context, url string) (*request.Response,
 			Timeout: 5 * time.Second,
 		})
 		if resp == nil {
-			instance, err1 := hcore.RunInstance(ctx, config.DefaultHiddifyOptions(), &option.Options{})
+			instance, err1 := hcore.RunInstance(ctx, config.DefaultClientOptions(), &option.Options{})
 			if err1 != nil {
 				return nil, fmt.Errorf("%v,error running instance: %v", err, err1)
 			}

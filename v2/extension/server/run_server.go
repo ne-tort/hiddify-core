@@ -10,8 +10,8 @@ import (
 	"sync"
 	"syscall"
 
-	hcore "github.com/hiddify/hiddify-core/v2/hcore"
-	"github.com/hiddify/hiddify-core/v2/hutils"
+	hcore "github.com/ne-tort/pathology-core/v2/hcore"
+	"github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"google.golang.org/grpc"
 )

@@ -11,7 +11,7 @@ import (
 
 type outboundMap map[string]interface{}
 
-func patchOutboundMux(base option.Outbound, configOpt HiddifyOptions, obj outboundMap) outboundMap {
+func patchOutboundMux(base option.Outbound, configOpt ClientOptions, obj outboundMap) outboundMap {
 	if configOpt.Mux.Enable {
 		multiplex := option.OutboundMultiplexOptions{
 			Enabled:    true,
@@ -24,7 +24,7 @@ func patchOutboundMux(base option.Outbound, configOpt HiddifyOptions, obj outbou
 	return obj
 }
 
-func patchOutboundTLSTricks(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
+func patchOutboundTLSTricks(base option.Outbound, configOpt ClientOptions) option.Outbound {
 	switch base.Type {
 	case C.TypeSelector, C.TypeURLTest, C.TypeBlock, C.TypeDNS:
 		return base
@@ -55,7 +55,7 @@ func parseFragmentFallbackDelay(raw string) badoption.Duration {
 	return badoption.Duration(d)
 }
 
-func patchOutboundFragment(base option.Outbound, configOpt HiddifyOptions) option.Outbound {
+func patchOutboundFragment(base option.Outbound, configOpt ClientOptions) option.Outbound {
 	tricks := configOpt.TLSTricks
 	if !tlsFragmentEnabled(tricks) {
 		return base
@@ -98,14 +98,14 @@ func isOutboundReality(base option.Outbound) bool {
 	return tls.Reality.Enabled
 }
 
-func patchEndpoint(base *option.Endpoint, configOpt HiddifyOptions, staticIPs *map[string][]string) (*option.Endpoint, error) {
+func patchEndpoint(base *option.Endpoint, configOpt ClientOptions, staticIPs *map[string][]string) (*option.Endpoint, error) {
 	_ = configOpt
 	_ = staticIPs
 	ApplyDialerDetourRemap(base.Options)
 	return base, nil
 }
 
-func patchOutbound(base option.Outbound, configOpt HiddifyOptions, staticIPs *map[string][]string) (*option.Outbound, error) {
+func patchOutbound(base option.Outbound, configOpt ClientOptions, staticIPs *map[string][]string) (*option.Outbound, error) {
 	base = patchOutboundTLSTricks(base, configOpt)
 	ApplyDialerDetourRemap(base.Options)
 	_ = staticIPs

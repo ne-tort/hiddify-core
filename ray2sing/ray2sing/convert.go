@@ -20,7 +20,7 @@ import (
 //
 // Removed (Hiddify-only — not restored): psiphon://, dnstt://, warp://.
 // lx: mieru / carrier / derp / shadowquic / sudoku / trusttunnel / anytls / shadowtls / snell;
-// wireguard endpoint + Amnezia (wg://, awg://, vpn://, [Interface]) + pathology://.
+// wireguard endpoint + Amnezia (wg://, awg://, vpn://, [Interface]) + pathology-wg://.
 // inbound-only (no share parser): mixed, cloudflared.
 var configTypes = map[string]ParserFunc{
 	"vmess://":     VmessSingbox,
@@ -60,13 +60,14 @@ var configTypes = map[string]ParserFunc{
 	"xdirect://": DirectXray,
 }
 var endpointParsers = map[string]EndpointParserFunc{
-	"wg://":          WireguardEndpoint,
-	"wireguard://":   WireguardEndpoint,
-	"awg://":         AWGSingbox,
-	"vpn://":         AmneziaVpnEndpoint,
-	"pathology://":   PathologySingbox,
-	"patologiya://":  PathologySingbox,
-	"[Interface]":    AWGSingboxTxt,
+	"wg://":            WireguardEndpoint,
+	"wireguard://":     WireguardEndpoint,
+	"awg://":           AWGSingbox,
+	"vpn://":           AmneziaVpnEndpoint,
+	"pathology-wg://":  PathologySingbox,
+	"pathology://":     PathologySingbox, // legacy share; app deep links use pathology:// without VPN host:port
+	"patologiya://":    PathologySingbox,
+	"[Interface]":      AWGSingboxTxt,
 }
 var xrayConfigTypes = map[string]ParserFunc{
 	"vmess://":  VmessXray,

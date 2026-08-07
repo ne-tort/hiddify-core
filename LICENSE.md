@@ -1,9 +1,13 @@
 
 # GNU GENERAL PUBLIC LICENSE v3
 
+Pathology Core is part of [Pathology](https://github.com/ne-tort/pathology-app),
+a fork of [Hiddify Next / hiddify-app](https://github.com/hiddify/hiddify-app).
+See [NOTICE.md](../NOTICE.md) for upstream attribution.
+
 ## Summary:
 Additional Permissions and Restrictions Under GNU GPL Version 3 Section 7
-- If you use extends this code, you should directly fork it from github.
+- If you use or extend this code, you should directly fork it from GitHub.
 
 - The forks of the app are not allowed to be listed on F-Droid or other app stores under the original name or original design.
 

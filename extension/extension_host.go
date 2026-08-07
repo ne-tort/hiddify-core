@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/hiddify/hiddify-core/v2/db"
-	hcommon "github.com/hiddify/hiddify-core/v2/hcommon"
+	"github.com/ne-tort/pathology-core/v2/db"
+	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	"google.golang.org/grpc"
 )
 
