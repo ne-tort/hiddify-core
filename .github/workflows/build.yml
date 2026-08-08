@@ -25,14 +25,16 @@ jobs:
       singbox_version: ${{ steps.outputs.outputs.singbox_version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'recursive'
+          submodules: recursive
+      - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        run: bash .github/scripts/bootstrap_vendor.sh
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ^1.25.6
+          go-version: '1.26.x'
       - name: Check input version
         if: github.event_name == 'workflow_dispatch'
         run: |-
@@ -51,7 +53,7 @@ jobs:
           echo "hiddify_version=$(git describe --tags)" >> "$GITHUB_ENV"
       - name: Calculate singbox version
         run: |-
-          cd hiddify-sing-box
+          cd ../vendor/sing-box-lx
           go run -v ./cmd/internal/read_tag --ci --nightly
       - name: Set outputs
         id: outputs
@@ -89,14 +91,15 @@ jobs:
       fail-fast: false
       matrix:
         job:
-          - { name: 'hiddify-lib-android', os: 'ubuntu-latest', target: 'android'}
+          # Narrow matrix first (lx revive). Re-enable android/ios/arm64 after green.
+          # - { name: 'hiddify-lib-android', os: 'ubuntu-latest', target: 'android'}
           - { name: 'hiddify-lib-linux-amd64', os: 'ubuntu-22.04', target: 'linux-amd64',  arch: 'amd64', naive: true , corenet: 'linux/amd64', build_corenet: true }
-          - { name: 'hiddify-lib-linux-arm64', os: 'ubuntu-latest', target: 'linux-arm64', naive: true ,  arch: 'arm64', corenet: 'linux/arm64', build_corenet: true }
+          # - { name: 'hiddify-lib-linux-arm64', os: 'ubuntu-latest', target: 'linux-arm64', naive: true ,  arch: 'arm64', corenet: 'linux/arm64', build_corenet: true }
           # - { name: 'hiddify-lib-linux-amd64-musl', os: 'ubuntu-22.04', variant: 'musl', target: 'linux-amd64',  arch: 'amd64', naive: true , corenet: 'linux/amd64', build_corenet: true }
           # - { name: 'hiddify-lib-linux-arm64-musl', os: 'ubuntu-latest', variant: 'musl', target: 'linux-arm64', naive: true ,  arch: 'arm64', corenet: 'linux/arm64', build_corenet: true }
           - { name: "hiddify-lib-windows-amd64", os: 'ubuntu-latest', target: 'windows-amd64', aarch: 'x64', naive: true, corenet: 'windows/amd64' }
           - { name: "hiddify-lib-macos", os: 'macos-15', target: 'macos'  }
-          - { name: "hiddify-lib-ios", os: "macos-15", target: "ios" }
+          # - { name: "hiddify-lib-ios", os: "macos-15", target: "ios" }
           # # linux custom
           # - {name: pathology-core-linux-amd64, goos: linux, goarch: amd64, goamd64: v1, target: 'linux-custom', os: 'ubuntu-22.04', naive: true }
           # - {name: pathology-core-linux-amd64-v3, goos: linux, goarch: amd64, goamd64: v3, target: 'linux-custom', os: 'ubuntu-22.04', naive: true }
@@ -124,16 +127,19 @@ jobs:
       VARIANT: ${{ matrix.job.variant }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'recursive'
+          submodules: recursive
+
+      - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        run: bash .github/scripts/bootstrap_vendor.sh
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-          check-latest: false
+          go-version: '1.26.x'
+          cache-dependency-path: go.sum
 
       - name: Setup Java
         if: startsWith(matrix.job.target,'android')
@@ -167,7 +173,7 @@ jobs:
           path: |
             ./cronet-go/naiveproxy/src/third_party/llvm-build/Release+Asserts
             ./cronet-go/naiveproxy/src/out/sysroot-build
-          key: chromium-toolchain-${{ matrix.job.target }}-${{ matrix.job.arch }}-${{ matrix.job.variant }}-${{ hashFiles('hiddify-sing-box/.github/CRONET_GO_VERSION') }}
+          key: chromium-toolchain-${{ matrix.job.target }}-${{ matrix.job.arch }}-${{ matrix.job.variant }}-${{ hashFiles('../vendor/sing-box-lx/.github/CRONET_GO_VERSION') }}
       - name: install_cronet
         if: startsWith(matrix.job.target,'linux')
         run: |
@@ -271,15 +277,17 @@ jobs:
           # - { os: android, arch: "386", ndk: "i686-linux-android23" }
     steps:
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: 'recursive'
+          submodules: recursive
+      - name: Bootstrap vendor siblings (sing-box-lx + sing-vmess)
+        run: bash .github/scripts/bootstrap_vendor.sh
       - name: Setup Go
         if: ${{ ! (matrix.legacy_win7 || matrix.legacy_go124) }}
         uses: actions/setup-go@v5
         with:
-          go-version: ^1.25.6
+          go-version: '1.26.x'
       - name: Setup Go 1.24
         if: matrix.legacy_go124
         uses: actions/setup-go@v5
@@ -312,7 +320,7 @@ jobs:
         if: matrix.naive
         run: |
           set -xeuo pipefail
-          CRONET_GO_VERSION=$(cat hiddify-sing-box/.github/CRONET_GO_VERSION)
+          CRONET_GO_VERSION=$(cat ../vendor/sing-box-lx/.github/CRONET_GO_VERSION)
           git init ~/cronet-go
           git -C ~/cronet-go remote add origin https://github.com/sagernet/cronet-go.git
           git -C ~/cronet-go fetch --depth=1 origin "$CRONET_GO_VERSION"
@@ -326,7 +334,7 @@ jobs:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/Release+Asserts
             ~/cronet-go/naiveproxy/src/out/sysroot-build
-          key: chromium-toolchain-${{ matrix.arch }}-${{ matrix.variant }}-${{ hashFiles('hiddify-sing-box/.github/CRONET_GO_VERSION') }}
+          key: chromium-toolchain-${{ matrix.arch }}-${{ matrix.variant }}-${{ hashFiles('../vendor/sing-box-lx/.github/CRONET_GO_VERSION') }}
       - name: Download Chromium toolchain
         if: matrix.naive
         run: |
@@ -532,7 +540,7 @@ jobs:
             --architecture all \
             dist/pathology-core=/usr/bin/pathology-core
           for architecture in ${{ matrix.openwrt }}; do
-            hiddify-sing-box/.github/deb2ipk.sh "$architecture" "dist/openwrt.deb" "dist/pathology-core_openwrt_${architecture}.ipk"
+            ../vendor/sing-box-lx/.github/deb2ipk.sh "$architecture" "dist/openwrt.deb" "dist/pathology-core_openwrt_${architecture}.ipk"
           done
           rm "dist/openwrt.deb"
       - name: Archive

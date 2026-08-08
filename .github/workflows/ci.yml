@@ -12,11 +12,13 @@ on:
        - dev
        - v3
        - v4
+       - lx-engine
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - '.vscode/'
       - 'appcast.xml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -29,5 +31,4 @@ jobs:
     permissions: write-all
     if: "${{!contains(github.event.head_commit.message, 'release: version')}}"
     with:
-      upload-artifact: ${{ github.event_name == 'push' }}
-      
+      upload-artifact: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
