@@ -12,7 +12,8 @@ Not available for Windows! use bash in WSL
 endif
 CRONET_GO_VERSION := $(shell cat ../vendor/sing-box-lx/.github/CRONET_GO_VERSION)
 # Single source of truth: build_tags.txt (see that file for lx / Hiddify rationale).
-TAGS=$(shell grep -v '^[[:space:]]*#' build_tags.txt | grep -v '^[[:space:]]*$$' | tr -d '\r' | head -n1)
+# Escape \# so Make does not treat it as a comment inside $(shell ...) (BSD/GNU).
+TAGS=$(shell grep -v '^[[:space:]]*\#' build_tags.txt | grep -v '^[[:space:]]*$$' | tr -d '\r' | head -n1)
 IOS_ADD_TAGS=with_low_memory,with_purego
 MACOS_ADD_TAGS=
 WINDOWS_ADD_TAGS=with_purego
