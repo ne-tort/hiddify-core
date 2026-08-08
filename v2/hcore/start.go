@@ -145,7 +145,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	_ = (C.IsIos || !in.DisableMemoryLimit)
 	instance, err := NewService(ctx, *options)
 	if err != nil {
-		hutils.HealStickyTun()
+		hutils.HealStickyTunForce()
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance

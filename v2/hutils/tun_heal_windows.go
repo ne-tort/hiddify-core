@@ -22,8 +22,18 @@ var (
 // after a crash or aborted connect. Safe to call when the interface is absent.
 // Runs without flashing console windows (CREATE_NO_WINDOW).
 func HealStickyTun() {
+	healStickyTun(false)
+}
+
+// HealStickyTunForce bypasses the cooldown — use after a failed TUN create so a
+// rapid reconnect can reclaim a leftover Wintun adapter.
+func HealStickyTunForce() {
+	healStickyTun(true)
+}
+
+func healStickyTun(force bool) {
 	healMu.Lock()
-	if time.Since(lastHealAt) < healCooldown {
+	if !force && time.Since(lastHealAt) < healCooldown {
 		healMu.Unlock()
 		return
 	}

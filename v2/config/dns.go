@@ -29,6 +29,16 @@ var DnsRemoteTags = []string{
 var DEFAULT_DNS_TTL = uint32(60 * 60 * 24)
 
 func getDnsAddress(d string) string {
+	d = strings.TrimSpace(d)
+	lower := strings.ToLower(d)
+	// Preserve special schemes; never turn "local" into udp://local.
+	switch lower {
+	case "local", "fakeip":
+		return lower
+	}
+	if strings.HasPrefix(lower, "local://") || strings.HasPrefix(lower, "fakeip://") || strings.HasPrefix(lower, "dhcp://") {
+		return d
+	}
 	if !strings.Contains(d, "://") {
 		return "udp://" + d
 	}
@@ -320,7 +330,7 @@ func addForceDirect(options *option.Options, hopt *ClientOptions) ([]option.Defa
 			},
 			DNSRuleAction: option.DNSRuleAction{
 				Action:       C.RuleActionTypeRoute,
-				RouteOptions: dnsRouteAction(DNSRemoteTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
+				RouteOptions: dnsRouteWithOptionalStrategy(DNSRemoteTag, hopt.DirectDnsDomainStrategy, hopt.EnableFakeDNS, &DEFAULT_DNS_TTL, false),
 			},
 		},
 	)
@@ -346,7 +356,7 @@ func addForceDirect(options *option.Options, hopt *ClientOptions) ([]option.Defa
 				},
 				DNSRuleAction: option.DNSRuleAction{
 					Action:       C.RuleActionTypeRoute,
-					RouteOptions: dnsRouteAction(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
+					RouteOptions: dnsRouteWithOptionalStrategy(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, hopt.EnableFakeDNS, &DEFAULT_DNS_TTL, false),
 				},
 			},
 		)

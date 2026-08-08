@@ -650,7 +650,7 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 			},
 			DNSRuleAction: option.DNSRuleAction{
 				Action:       C.RuleActionTypeRoute,
-				RouteOptions: dnsRouteAction(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
+				RouteOptions: dnsRouteWithOptionalStrategy(DNSMultiDirectTag, hopt.DirectDnsDomainStrategy, hopt.EnableFakeDNS, &DEFAULT_DNS_TTL, false),
 			},
 		})
 		routeRules = append(routeRules, option.Rule{
@@ -793,7 +793,8 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 					},
 					DNSRuleAction: option.DNSRuleAction{
 						Action:       C.RuleActionTypeRoute,
-						RouteOptions: dnsRouteAction(DNSFakeTag, hopt.RemoteDnsDomainStrategy, &DEFAULT_DNS_TTL, true),
+						// No Legacy strategy: incompatible with query_type in sing-box 1.14.
+						RouteOptions: dnsRouteAction(DNSFakeTag, 0, &DEFAULT_DNS_TTL, true),
 					},
 				})
 		}
@@ -801,12 +802,16 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 			RawDefaultDNSRule: option.RawDefaultDNSRule{},
 			DNSRuleAction: option.DNSRuleAction{
 				Action:       C.RuleActionTypeRoute,
-				RouteOptions: dnsRouteAction(DNSRemoteTag, hopt.RemoteDnsDomainStrategy, &DEFAULT_DNS_TTL, false),
+				RouteOptions: dnsRouteWithOptionalStrategy(DNSRemoteTag, hopt.RemoteDnsDomainStrategy, hopt.EnableFakeDNS, &DEFAULT_DNS_TTL, false),
 			},
 		})
 	}
 
 	if !useSubDNS && options.DNS != nil {
+		if hopt.EnableFakeDNS {
+			// Move domain strategy off rule actions onto client-level dns.strategy.
+			options.DNS.Strategy = hopt.RemoteDnsDomainStrategy
+		}
 		for _, dnsRule := range dnsRules {
 			if dnsRule.IsValid() {
 				options.DNS.Rules = append(

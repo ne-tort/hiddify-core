@@ -9,6 +9,15 @@ import (
 
 // HealStickyTun removes leftover Hiddify TUN interfaces/routes after a crash.
 func HealStickyTun() {
+	healStickyTunLinux()
+}
+
+// HealStickyTunForce is the same as HealStickyTun on Linux (no cooldown).
+func HealStickyTunForce() {
+	healStickyTunLinux()
+}
+
+func healStickyTunLinux() {
 	name := TunInterfaceName
 	_ = exec.Command("ip", "link", "set", name, "down").Run()
 	time.Sleep(100 * time.Millisecond)

@@ -4,3 +4,6 @@ package hutils
 
 // HealStickyTun is a no-op on platforms without desktop TUN leftovers.
 func HealStickyTun() {}
+
+// HealStickyTunForce is a no-op on platforms without desktop TUN leftovers.
+func HealStickyTunForce() {}
