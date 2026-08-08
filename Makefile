@@ -7,9 +7,7 @@ CLINAME=PathologyCli
 
 BRANCH=$(shell git branch --show-current)
 VERSION=$(shell git describe --tags || echo "unknown version")
-ifeq ($(OS),Windows_NT)
-Not available for Windows! use bash in WSL
-endif
+# Windows CI uses MinGW make; do not put bare text inside ifeq (missing separator).
 CRONET_GO_VERSION := $(shell cat ../vendor/sing-box-lx/.github/CRONET_GO_VERSION)
 # Single source of truth: build_tags.txt (see that file for lx / Hiddify rationale).
 # Escape \# so Make does not treat it as a comment inside $(shell ...) (BSD/GNU).
@@ -163,9 +161,9 @@ linux-custom: prepare  install_cronet
 	make webui
 
 macos-amd64:
-	env GOOS=darwin GOARCH=amd64 CGO_CFLAGS="-mmacosx-version-min=10.11 -O2" CGO_LDFLAGS="-mmacosx-version-min=10.11 -O2 -lpthread" CGO_ENABLED=1 go build -trimpath -tags $(TAGS),$(MACOS_ADD_TAGS) -buildmode=c-shared -o $(BINDIR)/$(LIBNAME)-amd64.dylib ./platform/desktop
+	env GOOS=darwin GOARCH=amd64 CGO_CFLAGS="-mmacosx-version-min=10.15 -O2" CGO_LDFLAGS="-mmacosx-version-min=10.15 -O2 -lpthread" CGO_ENABLED=1 go build -trimpath -ldflags="$(LDFLAGS)" -tags $(TAGS),$(MACOS_ADD_TAGS) -buildmode=c-shared -o $(BINDIR)/$(LIBNAME)-amd64.dylib ./platform/desktop
 macos-arm64:
-	env GOOS=darwin GOARCH=arm64 CGO_CFLAGS="-mmacosx-version-min=10.11 -O2" CGO_LDFLAGS="-mmacosx-version-min=10.11 -O2 -lpthread" CGO_ENABLED=1 go build -trimpath -tags $(TAGS),$(MACOS_ADD_TAGS) -buildmode=c-shared -o $(BINDIR)/$(LIBNAME)-arm64.dylib ./platform/desktop
+	env GOOS=darwin GOARCH=arm64 CGO_CFLAGS="-mmacosx-version-min=10.15 -O2" CGO_LDFLAGS="-mmacosx-version-min=10.15 -O2 -lpthread" CGO_ENABLED=1 go build -trimpath -ldflags="$(LDFLAGS)" -tags $(TAGS),$(MACOS_ADD_TAGS) -buildmode=c-shared -o $(BINDIR)/$(LIBNAME)-arm64.dylib ./platform/desktop
 	
 macos: prepare macos-amd64 macos-arm64 
 	
