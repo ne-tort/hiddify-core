@@ -485,7 +485,7 @@ func setInbound(options *option.Options, hopt *ClientOptions) {
 			}
 			if pw := strings.TrimSpace(hopt.LanSharingPassword); pw != "" && !hopt.SetSystemProxy {
 				mixedOpts.Users = []auth.User{{
-					Username: "hiddify",
+					Username: "pathology",
 					Password: pw,
 				}}
 			}
