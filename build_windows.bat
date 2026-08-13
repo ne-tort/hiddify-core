@@ -28,6 +28,17 @@ go build -trimpath -tags %TAGS%,with_purego -buildmode=c-shared -ldflags="-w -s 
 if errorlevel 1 exit /b 1
 
 echo Building PathologyCli.exe...
+go install -mod=readonly github.com/akavel/rsrc@latest
+if errorlevel 1 (
+  echo Error: could not install rsrc
+  exit /b 1
+)
+for /f "delims=" %%G in ('go env GOPATH') do set "GOPATH=%%G"
+"%GOPATH%\bin\rsrc.exe" -ico "%~dp0assets\hiddify-cli.ico" -o "%~dp0cmd\bydll\cli.syso"
+if errorlevel 1 (
+  echo Error: rsrc failed to embed assets\hiddify-cli.ico into cmd\bydll\cli.syso
+  exit /b 1
+)
 copy /Y bin\pathology-core.dll pathology-core.dll >nul
 set CGO_LDFLAGS=pathology-core.dll
 go build -trimpath -tags %TAGS%,with_purego -ldflags="-w -s -checklinkname=0" -o bin/PathologyCli.exe ./cmd/bydll

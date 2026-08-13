@@ -113,7 +113,7 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 			return nil, fmt.Errorf("[SingboxParser] marshal error: %w", err)
 		}
 
-		return patchConfigStr(ctx, newContent, "SingboxParser", configOpt)
+		return patchConfigStr(ctx, newContent, "SingboxParser", configOpt, fullConfig)
 	}
 
 	fmt.Printf("Convert using clash\n")
@@ -131,30 +131,36 @@ func parseConfigContent(ctx context.Context, content []byte, debug bool, configO
 		if err != nil {
 			return nil, fmt.Errorf("[ClashParser] patching clash config error: %w", err)
 		}
-		return patchConfigStr(ctx, output, "ClashParser", configOpt)
+		return patchConfigStr(ctx, output, "ClashParser", configOpt, fullConfig)
 	}
 
 	v2ray, err := ray2sing.Ray2SingboxOptions(ctx, string(content), false)
 	if err == nil {
-		return patchConfigOptions(ctx, v2ray, "V2rayParser", configOpt)
+		return patchConfigOptions(ctx, v2ray, "V2rayParser", configOpt, fullConfig)
 	}
 
 	return nil, fmt.Errorf("unable to determine config format")
 }
 
-func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *ClientOptions) (*option.Options, error) {
-	options := option.Options{}
-	err := options.UnmarshalJSONContext(ctx, content)
+func patchConfigStr(ctx context.Context, content []byte, name string, configOpt *ClientOptions, fullConfig bool) (*option.Options, error) {
+	filterInbounds := fullConfig || (configOpt != nil && configOpt.EnableFullConfig)
+	filtered, err := filterValidLeavesJSON(ctx, content, filterInbounds)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] filter leaves: %w", name, err)
+	}
 
+	options := option.Options{}
+	err = options.UnmarshalJSONContext(ctx, filtered)
 	if err != nil {
 		return nil, fmt.Errorf("[SingboxParser] unmarshal error: %w", err)
 	}
 
-	return patchConfigOptions(ctx, &options, name, configOpt)
+	return patchConfigOptions(ctx, &options, name, configOpt, fullConfig)
 }
-func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *ClientOptions) (*option.Options, error) {
+func patchConfigOptions(ctx context.Context, options *option.Options, name string, configOpt *ClientOptions, fullConfig bool) (*option.Options, error) {
 	_ = ctx
 	_ = configOpt
+	_ = fullConfig
 	return validateResult(ctx, options, name)
 }
 
