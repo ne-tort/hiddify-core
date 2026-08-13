@@ -39,13 +39,15 @@ protos:
 lib_install: prepare
 	go install -v github.com/sagernet/gomobile/cmd/gomobile@v0.1.11
 	go install -v github.com/sagernet/gomobile/cmd/gobind@v0.1.11
-	npm install
+	# Optional: webui/extension protobuf tooling. Android CI sets SKIP_CORE_NPM=1.
+	if [ "$${SKIP_CORE_NPM}" != "1" ]; then npm install; fi
 
 headers:
 	go build -buildmode=c-archive -o $(BINDIR)/ ./platform/desktop2
 
 android: lib_install
-	CGO_LDFLAGS="-O2 -g -s -w -Wl,-z,max-page-size=16384" gomobile bind -v -androidapi=21 -javapkg=com.pathology.core -libname=pathology-core -tags=$(TAGS) -trimpath -ldflags="$(LDFLAGS)" -target=android -gcflags "all=-N -l" -o $(BINDIR)/$(LIBNAME).aar github.com/sagernet/sing-box/experimental/libbox ./platform/mobile
+	# Do not pass -gcflags "all=-N -l" here: disables opts and makes CI gomobile hang for hours.
+	CGO_LDFLAGS="-O2 -g -s -w -Wl,-z,max-page-size=16384" gomobile bind -androidapi=21 -javapkg=com.pathology.core -libname=pathology-core -tags=$(TAGS) -trimpath -ldflags="$(LDFLAGS)" -target=android -o $(BINDIR)/$(LIBNAME).aar github.com/sagernet/sing-box/experimental/libbox ./platform/mobile
 
 ios-full: lib_install
 	gomobile bind -v  -target ios,iossimulator,tvos,tvossimulator,macos -libname=pathology-core -tags=$(TAGS),$(IOS_ADD_TAGS) -trimpath -ldflags="$(LDFLAGS)" -o $(BINDIR)/$(PRODUCT_NAME).xcframework github.com/sagernet/sing-box/experimental/libbox ./platform/mobile 
