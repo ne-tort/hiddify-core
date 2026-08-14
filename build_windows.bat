@@ -16,10 +16,16 @@ if not defined TAGS (
 
 if not exist bin mkdir bin
 if not exist bin\libcronet.dll (
-  echo Extracting libcronet.dll...
-  for /f %%V in (..\vendor\sing-box-lx\.github\CRONET_GO_VERSION) do set CRONET=%%V
-  go run -v "github.com/sagernet/cronet-go/cmd/build-naive@%CRONET%" extract-lib --target windows/amd64 -o bin/
+  echo Extracting libcronet.dll from go.mod-pinned module...
+  go mod download github.com/sagernet/cronet-go/lib/windows_amd64
   if errorlevel 1 exit /b 1
+  for /f "delims=" %%D in ('go list -m -f "{{.Dir}}" github.com/sagernet/cronet-go/lib/windows_amd64') do (
+    copy /Y "%%D\libcronet.dll" bin\libcronet.dll >nul
+  )
+  if not exist bin\libcronet.dll (
+    echo Error: libcronet.dll not found after go mod download
+    exit /b 1
+  )
 )
 
 echo Building pathology-core.dll...

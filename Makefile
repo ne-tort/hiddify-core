@@ -68,21 +68,27 @@ webui:
 
 .PHONY: build
 windows-amd64: prepare
+	set -e
 	rm -rf $(BINDIR)/*
-	go run -v "github.com/sagernet/cronet-go/cmd/build-naive@$(CRONET_GO_VERSION)" extract-lib --target windows/amd64 -o $(BINDIR)/
+	mkdir -p $(BINDIR)
+	# Prefer go.mod-pinned lib module (sum-verified). build-naive extract-lib was
+	# removed upstream and left CI without libcronet.dll → Flutter cmake install fails.
+	go mod download github.com/sagernet/cronet-go/lib/windows_amd64
+	CRONET_DIR=$$(go list -m -f '{{.Dir}}' github.com/sagernet/cronet-go/lib/windows_amd64)
+	test -n "$$CRONET_DIR"
+	test -f "$$CRONET_DIR/libcronet.dll"
+	cp "$$CRONET_DIR/libcronet.dll" $(BINDIR)/libcronet.dll
 	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc  $(GOBUILDLIB) -tags $(TAGS),$(WINDOWS_ADD_TAGS)   -o $(BINDIR)/$(LIBNAME).dll ./platform/desktop
 	echo "core built, now building cli" 
 	ls -R $(BINDIR)/
-	go install -mod=readonly github.com/akavel/rsrc@latest ||echo "rsrc error in installation"
-	go run ./cli tunnel exit
+	go install -mod=readonly github.com/akavel/rsrc@latest
 	cp $(BINDIR)/$(LIBNAME).dll ./$(LIBNAME).dll
-	$$(go env GOPATH)/bin/rsrc -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso ||echo "rsrc error in syso"
+	$$(go env GOPATH)/bin/rsrc -ico ./assets/hiddify-cli.ico -o ./cmd/bydll/cli.syso
 	env GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc CGO_LDFLAGS="$(LIBNAME).dll" $(GOBUILDSRV) -o $(BINDIR)/$(CLINAME).exe ./cmd/bydll
-	rm ./*.dll
-	if [ ! -f $(BINDIR)/$(LIBNAME).dll -o ! -f $(BINDIR)/$(CLINAME).exe ]; then \
-		echo "Error: $(LIBNAME).dll or $(CLINAME).exe not built"; \
-		exit 1; \
-	fi
+	rm -f ./*.dll
+	test -f $(BINDIR)/$(LIBNAME).dll
+	test -f $(BINDIR)/$(CLINAME).exe
+	test -f $(BINDIR)/libcronet.dll
 
 # 	make webui
 	
