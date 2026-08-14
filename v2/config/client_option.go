@@ -30,6 +30,8 @@ type ClientOptions struct {
 	Warp                 WarpOptions `json:"warp,omitempty"`
 	Chain                ChainOptions `json:"chain,omitempty"`
 	DisabledOutboundTags []string    `json:"disabled-outbound-tags,omitempty"`
+	// SubscriptionIPv6 is profile-ipv6 from the active subscription (explicit true required).
+	SubscriptionIPv6 bool `json:"subscription-ipv6,omitempty"`
 
 	DNSOptions
 	InboundOptions
@@ -86,9 +88,11 @@ type RouteOptions struct {
 	ResolveDestination     bool                  `json:"resolve-destination,omitempty"`
 	IPv6Mode               option.DomainStrategy `json:"ipv6-mode,omitempty"`
 	BypassLAN              bool                  `json:"bypass-lan,omitempty"`
-	AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
+  AllowConnectionFromLAN bool                  `json:"allow-connection-from-lan,omitempty"`
 	// LanSharingPassword authenticates local mixed inbound (HTTP/SOCKS users).
 	LanSharingPassword string `json:"lan-sharing-password,omitempty"`
+	// MixedProxyUsername is the login for mixed inbound auth (default pathology).
+	MixedProxyUsername string `json:"mixed-proxy-username,omitempty"`
 	BlockQuic          bool   `json:"block-quic,omitempty"`
 	// IgnoreSubscriptionRoute skips merging subscription route.rule_set/rules (raw connect-time overlay).
 	IgnoreSubscriptionRoute bool `json:"ignore-subscription-route,omitempty"`

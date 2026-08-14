@@ -266,6 +266,11 @@ replace github.com/sagernet/wireguard-go => ../../vendor/sing-box-lx/submodules/
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — keep in sync with pathology-core/go.mod.
 replace github.com/sagernet/sing-tun => ../../vendor/sing-box-lx/patches/sing-tun
 
+// lx:begin quic-grease-auth / jls chrome parrot (SPECS 093/099) — replace does not inherit from sing-box-lx.
+replace github.com/sagernet/quic-go => ../../vendor/sing-box-lx/patches/quic-go
+replace github.com/sagernet/sing-quic => ../../vendor/sing-box-lx/patches/sing-quic
+replace github.com/metacubex/jls-quic-go => ../../vendor/sing-box-lx/patches/jls-quic-go
+
 replace github.com/ameshkov/dnscrypt/v2 => github.com/shtorm-7/dnscrypt/v2 v2.4.0-extended-1.0.0
 
 replace github.com/Psiphon-Labs/quic-go => github.com/hiddify/psiphon-quic-go v0.0.0-20260205155832-2164d1653824

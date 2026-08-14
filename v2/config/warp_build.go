@@ -101,6 +101,7 @@ func buildWarpMasqueOutbound(cfg WarpMasqueConfig) (*option.Outbound, error) {
 	if ip == "" && ipv6 == "" {
 		return nil, fmt.Errorf("warp masque: missing tunnel addresses")
 	}
+	sni := resolveWarpMasqueSNI(cfg)
 	return &option.Outbound{
 		Type: C.TypeMASQUE,
 		Tag:  WarpMasqueTag,
@@ -109,16 +110,30 @@ func buildWarpMasqueOutbound(cfg WarpMasqueConfig) (*option.Outbound, error) {
 				Server:     server,
 				ServerPort: port,
 			},
+			OutboundTLSOptionsContainer: option.OutboundTLSOptionsContainer{
+				TLS: &option.OutboundTLSOptions{
+					ServerName: sni,
+				},
+			},
 			Profile:    "cloudflare",
-			Network:    "h3",
+			VHTTP:      "h3",
 			PrivateKey: cfg.PrivateKey,
 			PublicKey:  publicKey,
 			IP:         ip,
 			IPv6:       ipv6,
 			MTU:        1280,
-			SNI:        "www.cloudflare.com",
 		},
 	}, nil
+}
+
+const warpMasqueDefaultSNI = "www.cloudflare.com"
+
+func resolveWarpMasqueSNI(cfg WarpMasqueConfig) string {
+	s := strings.TrimSpace(cfg.SNI)
+	if s != "" {
+		return s
+	}
+	return warpMasqueDefaultSNI
 }
 
 func normalizeMasquePublicKey(raw string) (string, error) {

@@ -19,11 +19,27 @@ import (
 )
 
 func normalizeBalancerStrategy(strategy string) string {
-	switch strategy {
-	case "roundRobin":
+	switch strings.TrimSpace(strategy) {
+	case "", "roundRobin":
 		return "round-robin"
-	default:
+	case "lowestDelay":
+		return "lowest-delay"
+	case "leastLoad":
+		return "least-load"
+	case "stickySession":
+		return "sticky-sessions"
+	case "consistentHash":
+		return "consistent-hashing"
+	case "leastConnections":
+		return "least-connections"
+	case "sourceHash":
+		return "source-hash"
+	case "round-robin", "lowest-delay", "least-load", "sticky-sessions",
+		"consistent-hashing", "least-connections", "source-hash":
 		return strategy
+	default:
+		// Unknown → engine-safe default for the balance outbound (distinct from `lowest`).
+		return "round-robin"
 	}
 }
 
@@ -145,9 +161,13 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	OutboundMainDetour = OutboundSelectTag
 	detours := resolvedChainDetours(opt.Chain)
 	knownExits := chainKnownExitSet(input)
+	keepIPv6 := KeepIPv6Leaves(isIPv6Supported(), opt.SubscriptionIPv6)
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
+			continue
+		}
+		if !keepIPv6 && IsIPv6Leaf(out.Tag, outboundServerHost(out)) {
 			continue
 		}
 		outbound, err := patchOutbound(out, *opt, staticIPs)
@@ -180,6 +200,9 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 
 	for _, end := range input.Endpoints {
 		if contains(PredefinedOutboundTags, end.Tag) {
+			continue
+		}
+		if !keepIPv6 && IsIPv6Leaf(end.Tag, "") {
 			continue
 		}
 
@@ -227,8 +250,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	}
 
 	// Two balancers as selectable modes under `select` (not route.final):
-	//   lowest  — auto best latency (urltest replacement)
-	//   balance — load strategy from settings (round-robin / …)
+	//   lowest  — lowest-delay (latency)
+	//   balance — user strategy (round-robin / least-load / sticky / …); SPEC 102
 	// lx balancer.default: pin while Alive; Dead → strategy among the rest.
 	lowestOpts := &option.BalancerOutboundOptions{
 		Outbounds:                 tags,
@@ -388,11 +411,42 @@ func setLog(options *option.Options, opt *ClientOptions) {
 	}
 }
 func isIPv6Supported() bool {
-	if C.IsIos || C.IsDarwin {
+	// Prefer a real IPv6 UDP bind — no IPv4 fallback.
+	c, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err == nil {
+		_ = c.Close()
 		return true
 	}
-	_, err := net.ResolveIPAddr("ip6", "::1")
-	return err == nil
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() != nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				continue
+			}
+			return true
+		}
+	}
+	return false
 }
 
 func tunAddressesForIPv6Mode(mode option.DomainStrategy, ipv6Supported bool) []netip.Prefix {
@@ -484,8 +538,12 @@ func setInbound(options *option.Options, hopt *ClientOptions) {
 				SetSystemProxy: hopt.SetSystemProxy,
 			}
 			if pw := strings.TrimSpace(hopt.LanSharingPassword); pw != "" && !hopt.SetSystemProxy {
+				user := strings.TrimSpace(hopt.MixedProxyUsername)
+				if user == "" {
+					user = "pathology"
+				}
 				mixedOpts.Users = []auth.User{{
-					Username: "pathology",
+					Username: user,
 					Password: pw,
 				}}
 			}

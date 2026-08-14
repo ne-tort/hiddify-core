@@ -17,15 +17,17 @@ type WarpWireguardConfig struct {
 
 // WarpMasqueConfig holds MASQUE (CONNECT-IP) WARP credentials for sing-box type: masque.
 type WarpMasqueConfig struct {
-	PrivateKey    string `json:"private-key,omitempty"` // base64 DER EC private
-	PublicKey     string `json:"public-key,omitempty"`  // base64 DER PKIX endpoint public
-	IPv4          string `json:"ipv4,omitempty"`
-	IPv6          string `json:"ipv6,omitempty"`
-	Server        string `json:"server,omitempty"`
-	ServerPort    uint16 `json:"server-port,omitempty"`
-	ClientID      string `json:"client-id,omitempty"`
-	AccountID     string `json:"account-id,omitempty"`
-	AccessToken   string `json:"access-token,omitempty"`
+	PrivateKey  string `json:"private-key,omitempty"` // base64 DER EC private
+	PublicKey   string `json:"public-key,omitempty"`  // base64 DER PKIX endpoint public
+	IPv4        string `json:"ipv4,omitempty"`
+	IPv6        string `json:"ipv6,omitempty"`
+	Server      string `json:"server,omitempty"`
+	ServerPort  uint16 `json:"server-port,omitempty"`
+	ClientID    string `json:"client-id,omitempty"`
+	AccountID   string `json:"account-id,omitempty"`
+	AccessToken string `json:"access-token,omitempty"`
+	// SNI is tls.server_name (SPEC 062). Empty → www.cloudflare.com.
+	SNI string `json:"sni,omitempty"`
 }
 
 // ChainOptions maps leaf/endpoint tags to an exit outbound (DialerOptions.detour).

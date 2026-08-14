@@ -311,6 +311,11 @@ replace github.com/sagernet/wireguard-go => ../vendor/sing-box-lx/submodules/wir
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — required after lx merge.
 replace github.com/sagernet/sing-tun => ../vendor/sing-box-lx/patches/sing-tun
 
+// lx:begin quic-grease-auth / jls chrome parrot (SPECS 093/099) — replace does not inherit from sing-box-lx.
+replace github.com/sagernet/quic-go => ../vendor/sing-box-lx/patches/quic-go
+replace github.com/sagernet/sing-quic => ../vendor/sing-box-lx/patches/sing-quic
+replace github.com/metacubex/jls-quic-go => ../vendor/sing-box-lx/patches/jls-quic-go
+
 replace github.com/net2share/vaydns => github.com/hiddify/vaydns v0.0.0-20260401180616-890dc987a6a9
 
 replace github.com/kianmhz/GooseRelayVPN => github.com/hiddify/GooseRelayVPN v0.0.0-20260429125124-0e68c2a3ae4c

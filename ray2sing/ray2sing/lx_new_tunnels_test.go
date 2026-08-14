@@ -1,6 +1,10 @@
 package ray2sing
 
-import "testing"
+import (
+	"testing"
+
+	T "github.com/sagernet/sing-box/option"
+)
 
 func TestShadowQUICSingbox(t *testing.T) {
 	out, err := ShadowQUICSingbox("shadowquic://user:pass@sq.example.com:443/?sni=www.example.com&alpn=h3#sq")
@@ -12,6 +16,31 @@ func TestShadowQUICSingbox(t *testing.T) {
 	}
 	if out.Tag != "sq" {
 		t.Fatalf("tag=%s", out.Tag)
+	}
+	opts, ok := out.Options.(*T.ShadowQUICOutboundOptions)
+	if !ok {
+		t.Fatalf("options type %T", out.Options)
+	}
+	if opts.ZeroRTTHandshake {
+		t.Fatal("expected zero_rtt_handshake false by default")
+	}
+
+	out0, err := ShadowQUICSingbox("shadowquic://user:pass@sq.example.com:443/?zero_rtt=1#sq0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts0 := out0.Options.(*T.ShadowQUICOutboundOptions)
+	if !opts0.ZeroRTTHandshake {
+		t.Fatal("legacy zero_rtt=1 should set ZeroRTTHandshake")
+	}
+
+	out1, err := ShadowQUICSingbox("shadowquic://user:pass@sq.example.com:443/?zero_rtt_handshake=1#sq1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts1 := out1.Options.(*T.ShadowQUICOutboundOptions)
+	if !opts1.ZeroRTTHandshake {
+		t.Fatal("zero_rtt_handshake=1 should set ZeroRTTHandshake")
 	}
 }
 

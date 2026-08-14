@@ -80,8 +80,32 @@ func TestBuildWarpMasqueOutbound(t *testing.T) {
 		t.Fatalf("unexpected outbound %#v", out)
 	}
 	opts := out.Options.(*option.MASQUEOutboundOptions)
-	if opts.Profile != "cloudflare" || opts.Network != "h3" {
+	if opts.Profile != "cloudflare" || opts.VHTTP != "h3" {
 		t.Fatalf("opts=%+v", opts)
+	}
+	if opts.Network != "" || opts.SNI != "" {
+		t.Fatalf("legacy fields must be empty: network=%q sni=%q", opts.Network, opts.SNI)
+	}
+	if opts.TLS == nil || opts.TLS.ServerName != "www.cloudflare.com" {
+		t.Fatalf("tls.server_name want www.cloudflare.com, got %#v", opts.TLS)
+	}
+}
+
+func TestBuildWarpMasqueOutboundCustomSNI(t *testing.T) {
+	out, err := buildWarpMasqueOutbound(WarpMasqueConfig{
+		PrivateKey: "priv",
+		PublicKey:  "cHVi",
+		IPv4:       "172.16.0.2",
+		Server:     "162.159.198.1",
+		ServerPort: 443,
+		SNI:        "www.microsoft.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := out.Options.(*option.MASQUEOutboundOptions)
+	if opts.TLS == nil || opts.TLS.ServerName != "www.microsoft.com" {
+		t.Fatalf("tls=%#v", opts.TLS)
 	}
 }
 
