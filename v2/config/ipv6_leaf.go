@@ -7,7 +7,7 @@ import (
 )
 
 // KeepIPv6Leaves reports whether IPv6 server leaves should stay in the build.
-// Requires both OS IPv6 support and an explicit subscription-ipv6=true flag.
+// Requires usable global OS IPv6 (see hasUsableGlobalIPv6) and subscription-ipv6=true.
 func KeepIPv6Leaves(osIPv6OK, subscriptionIPv6 bool) bool {
 	return osIPv6OK && subscriptionIPv6
 }

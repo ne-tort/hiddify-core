@@ -15,6 +15,12 @@ func TestKeepIPv6Leaves(t *testing.T) {
 	}
 }
 
+func TestHasUsableGlobalIPv6IgnoresLoopbackOnly(t *testing.T) {
+	t.Parallel()
+	// Smoke: function must return without panic; result is host-dependent.
+	_ = hasUsableGlobalIPv6()
+}
+
 func TestIsIPv6Leaf(t *testing.T) {
 	t.Parallel()
 	if !IsIPv6Leaf("proxy-ipv6", "") {

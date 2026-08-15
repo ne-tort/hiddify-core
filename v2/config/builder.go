@@ -161,7 +161,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	OutboundMainDetour = OutboundSelectTag
 	detours := resolvedChainDetours(opt.Chain)
 	knownExits := chainKnownExitSet(input)
-	keepIPv6 := KeepIPv6Leaves(isIPv6Supported(), opt.SubscriptionIPv6)
+	keepIPv6 := KeepIPv6Leaves(hasUsableGlobalIPv6(), opt.SubscriptionIPv6)
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
@@ -410,13 +410,9 @@ func setLog(options *option.Options, opt *ClientOptions) {
 		DisableColor: true,
 	}
 }
-func isIPv6Supported() bool {
-	// Prefer a real IPv6 UDP bind — no IPv4 fallback.
-	c, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
-	if err == nil {
-		_ = c.Close()
-		return true
-	}
+// hasUsableGlobalIPv6 reports a non-loopback, non-link-local IPv6 on an UP iface.
+// Used for IPv6 leaf filtering so UI and connect stay aligned (loopback alone is not enough).
+func hasUsableGlobalIPv6() bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return false
@@ -447,6 +443,16 @@ func isIPv6Supported() bool {
 		}
 	}
 	return false
+}
+
+func isIPv6Supported() bool {
+	// Soft probe for TUN addressing: loopback bind OR usable global IPv6.
+	c, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	if err == nil {
+		_ = c.Close()
+		return true
+	}
+	return hasUsableGlobalIPv6()
 }
 
 func tunAddressesForIPv6Mode(mode option.DomainStrategy, ipv6Supported bool) []netip.Prefix {
