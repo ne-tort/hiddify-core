@@ -412,6 +412,7 @@ func setLog(options *option.Options, opt *ClientOptions) {
 }
 // hasUsableGlobalIPv6 reports a non-loopback, non-link-local IPv6 on an UP iface.
 // Used for IPv6 leaf filtering so UI and connect stay aligned (loopback alone is not enough).
+// Excludes Teredo / 6to4 / ULA — same policy as Flutter OsIpv6 (Windows Teredo ≠ WAN IPv6).
 func hasUsableGlobalIPv6() bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -419,6 +420,12 @@ func hasUsableGlobalIPv6() bool {
 	}
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		name := strings.ToLower(iface.Name)
+		if strings.Contains(name, "teredo") ||
+			strings.Contains(name, "6to4") ||
+			strings.Contains(name, "isatap") {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -433,14 +440,42 @@ func hasUsableGlobalIPv6() bool {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip == nil || ip.To4() != nil {
-				continue
-			}
-			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			if !isUsableGlobalIPv6Addr(ip) {
 				continue
 			}
 			return true
 		}
+	}
+	return false
+}
+
+func isUsableGlobalIPv6Addr(ip net.IP) bool {
+	if ip == nil || ip.To4() != nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	// ULA fc00::/7 (Go IsPrivate covers IPv6 ULA).
+	if ip.IsPrivate() {
+		return false
+	}
+	return !isIPv6TransitionTunnel(ip)
+}
+
+// Teredo 2001:0::/32 and 6to4 2002::/16 are not real ISP IPv6.
+func isIPv6TransitionTunnel(ip net.IP) bool {
+	v6 := ip.To16()
+	if v6 == nil {
+		return false
+	}
+	// Teredo 2001:0000::/32
+	if v6[0] == 0x20 && v6[1] == 0x01 && v6[2] == 0x00 && v6[3] == 0x00 {
+		return true
+	}
+	// 6to4 2002::/16
+	if v6[0] == 0x20 && v6[1] == 0x02 {
+		return true
 	}
 	return false
 }

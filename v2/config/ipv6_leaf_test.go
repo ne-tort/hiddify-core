@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"net"
+	"testing"
+)
 
 func TestKeepIPv6Leaves(t *testing.T) {
 	t.Parallel()
@@ -19,6 +22,28 @@ func TestHasUsableGlobalIPv6IgnoresLoopbackOnly(t *testing.T) {
 	t.Parallel()
 	// Smoke: function must return without panic; result is host-dependent.
 	_ = hasUsableGlobalIPv6()
+}
+
+func TestIsUsableGlobalIPv6Addr(t *testing.T) {
+	t.Parallel()
+	if isUsableGlobalIPv6Addr(net.ParseIP("2001:db8::1")) != true {
+		t.Fatal("global unicast should keep")
+	}
+	if isUsableGlobalIPv6Addr(net.ParseIP("2001:0:14c9:d804:38b9:2d6b:a118:78e1")) {
+		t.Fatal("teredo must drop")
+	}
+	if isUsableGlobalIPv6Addr(net.ParseIP("2002:c000:0201::1")) {
+		t.Fatal("6to4 must drop")
+	}
+	if isUsableGlobalIPv6Addr(net.ParseIP("fd10:8:a::1")) {
+		t.Fatal("ula must drop")
+	}
+	if isUsableGlobalIPv6Addr(net.ParseIP("fe80::1")) {
+		t.Fatal("link-local must drop")
+	}
+	if isUsableGlobalIPv6Addr(net.ParseIP("::1")) {
+		t.Fatal("loopback must drop")
+	}
 }
 
 func TestIsIPv6Leaf(t *testing.T) {
