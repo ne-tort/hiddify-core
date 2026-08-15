@@ -266,6 +266,9 @@ replace github.com/sagernet/wireguard-go => ../../vendor/sing-box-lx/submodules/
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — keep in sync with pathology-core/go.mod.
 replace github.com/sagernet/sing-tun => ../../vendor/sing-box-lx/patches/sing-tun
 
+// lx patches/sing-cloudflared — bridgeReturn.WriteReturnPackets for patched tun.Return.
+replace github.com/sagernet/sing-cloudflared => ../../vendor/sing-box-lx/patches/sing-cloudflared
+
 // lx:begin quic-grease-auth / jls chrome parrot (SPECS 093/099) — replace does not inherit from sing-box-lx.
 replace github.com/sagernet/quic-go => ../../vendor/sing-box-lx/patches/quic-go
 
