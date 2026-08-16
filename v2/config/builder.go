@@ -162,6 +162,11 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	detours := resolvedChainDetours(opt.Chain)
 	knownExits := chainKnownExitSet(input)
 	keepIPv6 := KeepIPv6Leaves(hasUsableGlobalIPv6(), opt.SubscriptionIPv6)
+	// TestEngine must probe the same leaf set the UI shows; do not drop IPv6 leaves
+	// based on the main core's SubscriptionIPv6 / OS probe.
+	if opt.TestMode {
+		keepIPv6 = true
+	}
 	for _, out := range input.Outbounds {
 
 		if contains(PredefinedOutboundTags, out.Tag) {
@@ -247,6 +252,71 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			preferred = tag
 			break
 		}
+	}
+
+	// TestMode (side TestEngine): omit balancers; select = leaves only.
+	if opt.TestMode {
+		selectTags := tags
+		if slim := strings.TrimSpace(opt.TestOutboundTag); slim != "" {
+			found := false
+			for _, t := range tags {
+				if t == slim {
+					found = true
+					break
+				}
+			}
+			if found {
+				selectTags = []string{slim}
+			}
+		}
+		defaultSelect := ""
+		if len(selectTags) > 0 {
+			defaultSelect = selectTags[0]
+		}
+		if preferred != "" {
+			for _, t := range selectTags {
+				if t == preferred {
+					defaultSelect = preferred
+					break
+				}
+			}
+		}
+		if len(selectTags) == 0 {
+			selectTags = []string{OutboundDirectTag}
+			defaultSelect = OutboundDirectTag
+		}
+		selector := option.Outbound{
+			Type: C.TypeSelector,
+			Tag:  OutboundSelectTag,
+			Options: &option.SelectorOutboundOptions{
+				Outbounds:                 selectTags,
+				Default:                   defaultSelect,
+				InterruptExistConnections: true,
+			},
+		}
+		options.Endpoints = endpoints
+		options.Outbounds = append(
+			[]option.Outbound{selector},
+			append(outbounds,
+				option.Outbound{
+					Tag:     OutboundDirectTag,
+					Type:    C.TypeDirect,
+					Options: &option.DirectOutboundOptions{},
+				},
+				option.Outbound{
+					Tag:  OutboundDirectFragmentTag,
+					Type: C.TypeDirect,
+					Options: &option.DirectOutboundOptions{
+						DialerOptions: option.DialerOptions{
+							AbstractDialerOptions: option.AbstractDialerOptions{
+								TCPFastOpen: false,
+							},
+						},
+					},
+				},
+			)...,
+		)
+		return nil
 	}
 
 	// Two balancers as selectable modes under `select` (not route.final):
@@ -380,10 +450,14 @@ func setExperimental(options *option.Options, hopt *ClientOptions) {
 	if len(hopt.ConnectionTestUrls) == 0 {
 		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
 	}
+	cachePath := "data/clash.db"
+	if p := strings.TrimSpace(hopt.CacheFilePath); p != "" {
+		cachePath = p
+	}
 	exp := &option.ExperimentalOptions{
 		CacheFile: &option.CacheFileOptions{
 			Enabled:     true,
-			Path:        "data/clash.db",
+			Path:        cachePath,
 			StoreFakeIP: hopt.EnableFakeDNS,
 		},
 		// LX-STUB: MonitoringOptions (URL-test monitor) absent in sing-box-lx ExperimentalOptions
@@ -570,7 +644,8 @@ func setInbound(options *option.Options, hopt *ClientOptions) {
 
 		// Always expose mixed-port when configured: required for system-proxy, app IP
 		// probes, and TUN-side localhost checks. Without it, configs had zero inbounds.
-		if hopt.MixedPort > 0 {
+		// MixedPort == 0 with EnableMixedPort (TestMode): ListenPort 0 → kernel assign.
+		if hopt.MixedPort > 0 || (hopt.EnableMixedPort && hopt.TestMode) {
 			mixedOpts := &option.HTTPMixedInboundOptions{
 				ListenOptions: option.ListenOptions{
 					Listen:     &addr,
@@ -845,7 +920,12 @@ func setRoutingOptions(options *option.Options, input *option.Options, hopt *Cli
 
 	strategy := defaultNetworkStrategyForIPv6Mode(hopt.IPv6Mode)
 	// sing-box requires auto_detect_interface whenever default_network_strategy is set.
+	// Android/iOS normally skip this for main TUN (platform owns routing); TestMode side
+	// box must enable it so ProtectFunc / auto_detect_interface_control runs under VPN.
 	autoDetect := (!C.IsAndroid && !C.IsIos) && (hopt.EnableTun || hopt.EnableTunService || strategy != nil)
+	if hopt.TestMode && (C.IsAndroid || C.IsIos) {
+		autoDetect = true
+	}
 
 	findProcess := false
 	for _, rp := range profiles {

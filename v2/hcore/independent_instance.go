@@ -15,13 +15,46 @@ import (
 )
 
 func getRandomAvailblePort() uint16 {
-	// TODO: implement it
-	listener, err := net.Listen("tcp", ":0")
+	port, release, err := acquireEphemeralPort(nil)
 	if err != nil {
 		panic(err)
 	}
-	defer listener.Close()
-	return uint16(listener.Addr().(*net.TCPAddr).Port)
+	release()
+	return port
+}
+
+// reservedPorts must not be handed to TestEngine / RunInstance mixed inbound.
+var reservedPorts = map[uint16]struct{}{
+	12334: {}, // default mixed
+	16756: {}, // clash api
+	17078: {}, // common app ports
+	17079: {},
+	18020: {},
+}
+
+// acquireEphemeralPort binds :0 (or retries) and returns the port plus a release
+// func that closes the hold listener. Call release immediately before Start binds.
+func acquireEphemeralPort(extraExclude map[uint16]struct{}) (uint16, func(), error) {
+	const maxAttempts = 32
+	for i := 0; i < maxAttempts; i++ {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, nil, err
+		}
+		port := uint16(listener.Addr().(*net.TCPAddr).Port)
+		if _, bad := reservedPorts[port]; bad {
+			_ = listener.Close()
+			continue
+		}
+		if extraExclude != nil {
+			if _, bad := extraExclude[port]; bad {
+				_ = listener.Close()
+				continue
+			}
+		}
+		return port, func() { _ = listener.Close() }, nil
+	}
+	return 0, nil, fmt.Errorf("no ephemeral port available after %d attempts", maxAttempts)
 }
 
 func RunInstanceString(ctx context.Context, clientSettings *config.ClientOptions, proxiesInput string) (*PathologyInstance, error) {

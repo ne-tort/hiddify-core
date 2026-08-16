@@ -129,14 +129,6 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		Log(LogLevel_INFO, LogType_CORE, "Current Config is:\n", string(pout))
 	}
 	ctx = libbox.FromContext(ctx, static.globalPlatformInterface)
-	if static.globalPlatformInterface != nil {
-		// LX-STUB: libbox.WrapPlatformInterface exists in hiddify-sing-box but was not
-		// exported from sing-box-lx service.go (wrapper type is unexported-only).
-		// Platform registration deferred; TUN/platform path may be incomplete until restored.
-		_ = static.globalPlatformInterface
-		// platformWrapper := libbox.WrapPlatformInterface(static.globalPlatformInterface)
-		// service.MustRegister[adapter.PlatformInterface](ctx, platformWrapper)
-	}
 	Log(LogLevel_DEBUG, LogType_CORE, "Stating Service with delay ?", in.DelayStart)
 	if in.DelayStart {
 		<-time.After(1000 * time.Millisecond)

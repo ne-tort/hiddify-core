@@ -54,7 +54,6 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 		Log(LogLevel_WARNING, LogType_CORE, "grpcServer already started")
 		return nil
 	}
-	static.BaseContext = libbox.BaseContext(platformInterface)
 	static.debug = params.Debug
 	static.globalPlatformInterface = platformInterface
 	tcpConn := true // runtime.GOOS == "windows" // TODO add TVOS
@@ -69,6 +68,11 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 			Debug:           params.Debug,
 		})
 
+	// BaseContext must be built AFTER libbox.Setup so filemanager gets real
+	// working/temp paths and uid/gid. Creating it earlier leaves chown=true with
+	// uid 0 on Windows (Getuid()==-1) → "chown ... not supported by windows".
+	static.BaseContext = libbox.BaseContext(platformInterface)
+
 	// Setup() already pointed crash output at CrashReport-*.log; override with a
 	// mode-specific path under data/ (uses LX libbox.RedirectStderr + archive).
 	_ = libbox.RedirectStderr(fmt.Sprint(params.WorkingDir, "/data/stderr", params.Mode, ".log"))
@@ -80,6 +84,7 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	sTempPath = params.TempDir
 	sUserID = os.Getuid()
 	sGroupID = os.Getgid()
+	configureTestEngine()
 
 	var defaultWriter io.Writer
 	if !params.Debug {

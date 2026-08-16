@@ -35,11 +35,10 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 	// Prefer uncut import source: re-parse each Start with current ClientOptions
 	// so ignore-subscription-dns/route and similar knobs apply to the original body.
 	if in.ConfigPath != "" {
-		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
-			if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
-				Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", src)
-				return config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: src})
-			}
+		readPath := config.ResolveConfigReadPath(in.ConfigPath)
+		if readPath != in.ConfigPath {
+			Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", readPath)
+			return config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: readPath})
 		}
 	}
 

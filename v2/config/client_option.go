@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	reflect "reflect"
 	"strconv"
@@ -32,6 +33,15 @@ type ClientOptions struct {
 	DisabledOutboundTags []string    `json:"disabled-outbound-tags,omitempty"`
 	// SubscriptionIPv6 is profile-ipv6 from the active subscription (explicit true required).
 	SubscriptionIPv6 bool `json:"subscription-ipv6,omitempty"`
+
+	// TestMode: side TestEngine BuildConfig — omit lowest/balance balancers;
+	// select.outbounds = leaf tags only (or TestOutboundTag when set).
+	TestMode bool `json:"test-mode,omitempty"`
+	// TestOutboundTag optionally restricts select to a single leaf in TestMode.
+	TestOutboundTag string `json:"test-outbound-tag,omitempty"`
+	// CacheFilePath overrides experimental cache_file path (default data/clash.db).
+	// TestEngine must use a separate path so it does not share clash.db with main.
+	CacheFilePath string `json:"cache-file-path,omitempty"`
 
 	DNSOptions
 	InboundOptions
@@ -200,6 +210,23 @@ func DefaultClientOptions() *ClientOptions {
 		},
 		UseXrayCoreWhenPossible: false,
 	}
+}
+
+// CloneClientOptions deep-copies options via JSON so TestEngine mutations
+// cannot alter the live main ClientOptions.
+func CloneClientOptions(src *ClientOptions) (*ClientOptions, error) {
+	if src == nil {
+		return DefaultClientOptions(), nil
+	}
+	raw, err := json.Marshal(src)
+	if err != nil {
+		return nil, err
+	}
+	dst := &ClientOptions{}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return nil, err
+	}
+	return dst, nil
 }
 
 // Recursively set the fields marked as overridable

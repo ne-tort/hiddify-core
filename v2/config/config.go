@@ -2,6 +2,7 @@ package config
 
 import (
 	context "context"
+	"os"
 	"strings"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -24,6 +25,20 @@ func ProfileSourcePath(configPath string) string {
 		return configPath[:len(configPath)-len(".json")] + ".src"
 	}
 	return configPath + ".src"
+}
+
+// ResolveConfigReadPath prefers a non-empty .src next to the profile JSON
+// (same policy as Core.Start BuildConfig).
+func ResolveConfigReadPath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	if src := ProfileSourcePath(configPath); src != "" {
+		if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
+			return src
+		}
+	}
+	return configPath
 }
 
 func ReadSingOptions(ctx context.Context, opt *ReadOptions) (*option.Options, error) {

@@ -15,6 +15,16 @@ import (
 )
 
 func NewService(ctx context.Context, options option.Options) (*daemon.StartedService, error) {
+	return newService(ctx, options, true)
+}
+
+// NewSideService starts a secondary sing-box instance (TestEngine) without
+// invoking main-service extension lifecycle hooks or writing static.StartedService.
+func NewSideService(ctx context.Context, options option.Options) (*daemon.StartedService, error) {
+	return newService(ctx, options, false)
+}
+
+func newService(ctx context.Context, options option.Options, invokeMainHooks bool) (*daemon.StartedService, error) {
 	logInterface := LogInterface{}
 	bopts := daemon.ServiceOptions{
 		Context:     ctx,
@@ -33,10 +43,13 @@ func NewService(ctx context.Context, options option.Options) (*daemon.StartedSer
 		return nil, err
 	}
 	if err := instance.StartOrReloadService(ctx, string(configJSON), nil); err != nil {
+		_ = instance.CloseService()
 		return nil, err
 	}
-	// ExtraServices/AddService is hiddify-sing-box-specific; invoke lifecycle hooks directly.
-	_ = service_manager.OnMainServiceStart()
+	if invokeMainHooks {
+		// ExtraServices/AddService is hiddify-sing-box-specific; invoke lifecycle hooks directly.
+		_ = service_manager.OnMainServiceStart()
+	}
 
 	return instance, nil
 }

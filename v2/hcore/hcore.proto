@@ -230,6 +230,46 @@ message LogRequest {
 message StopRequest{
 }
 
+message LANIPResponse {
+  string ip = 1;
+}
 
+message TestEngineEnsureRequest {
+  string profile_id = 1;
+  string profile_config_path = 2;
+  // UI-visible / testable leaf tags (IPv6 + disabled filters applied on client).
+  // Engine intersects with built leaves; this is the membership source of truth.
+  repeated string outbound_tags = 3;
+}
+
+message TestEngineEnsureResponse {
+  uint32 mixed_port = 1;
+  string profile_id = 2;
+}
+
+message TestEngineStopRequest {}
+
+message TestEngineStopResponse {}
+
+message TestEnginePingRequest {
+  string profile_id = 1;
+  string outbound_tag = 2;
+  string strategy = 3;
+  string test_url = 4;
+}
+
+message TestEnginePingResult {
+  string tag = 1;
+  int32 delay_ms = 2;
+  bool failed = 3;
+  double fail_rate = 4;
+  int32 samples = 5;
+  int32 samples_ok = 6;
+  string error_message = 7;
+}
+
+message TestEnginePingResponse {
+  repeated TestEnginePingResult results = 1;
+}
 
 
