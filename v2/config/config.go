@@ -3,6 +3,7 @@ package config
 import (
 	context "context"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sagernet/sing-box/experimental/libbox"
@@ -13,6 +14,20 @@ type ReadOptions struct {
 	Path    string
 	Content string
 	Options *option.Options
+}
+
+// IsScratchConfigPath reports validate-only / temporary profile paths that must not
+// receive persistent .json or .src sidecars on disk.
+func IsScratchConfigPath(configPath string) bool {
+	if configPath == "" {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(configPath))
+	if strings.Contains(base, ".tmp.") || strings.HasSuffix(base, ".tmp.json") {
+		return true
+	}
+	normalized := filepath.ToSlash(configPath)
+	return strings.Contains(normalized, "/tmp/") || strings.Contains(normalized, "\\tmp\\")
 }
 
 // ProfileSourcePath is the uncut import body next to the sliced profile JSON.

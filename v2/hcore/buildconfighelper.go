@@ -146,9 +146,10 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	}
 
 	readOpt := &config.ReadOptions{Content: in.Content, Path: path}
+	persistConfig := in.ConfigPath != "" && !config.IsScratchConfigPath(in.ConfigPath)
 	// Preserve import source uncut: Build/Start re-parse this with current hopts
 	// (DNS/route subscription toggles, etc.). Sliced .json remains for editor/legacy.
-	if in.ConfigPath != "" {
+	if persistConfig {
 		if raw, err := config.ReadContent(ctx, readOpt); err == nil && len(raw) > 0 {
 			_ = hutils.WriteFileAtomic(config.ProfileSourcePath(in.ConfigPath), raw, 0o644)
 		}
@@ -161,7 +162,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 			Message:      err.Error(),
 		}, nil
 	}
-	if in.ConfigPath != "" {
+	if persistConfig {
 		err = hutils.WriteFileAtomic(in.ConfigPath, parsed, 0o644)
 		if err != nil {
 			return &ParseResponse{
