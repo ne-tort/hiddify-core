@@ -13,17 +13,25 @@ import (
 
 // filterValidLeavesJSON drops invalid or unknown outbounds/endpoints (and optionally
 // inbounds) so one bad leaf does not fail an entire subscription import.
+//
+// If the input had outbounds/endpoints and the filter removes every one, returns
+// an error so callers (Flutter compile fallback / validate soft-fail) can keep
+// the raw body instead of persisting {"outbounds":[]}.
 func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds bool) ([]byte, error) {
 	var root map[string]interface{}
 	if err := json.Unmarshal(content, &root); err != nil {
 		return content, nil
 	}
 
+	inOut, _ := root["outbounds"].([]interface{})
+	inEp, _ := root["endpoints"].([]interface{})
+	inLeafCount := countProtocolLeaves(inOut) + len(inEp)
+
 	changed := false
 
-	if raw, ok := root["outbounds"].([]interface{}); ok && len(raw) > 0 {
-		filtered := filterOutboundLeaves(ctx, raw)
-		if len(filtered) != len(raw) {
+	if len(inOut) > 0 {
+		filtered := filterOutboundLeaves(ctx, inOut)
+		if len(filtered) != len(inOut) {
 			changed = true
 		}
 		if len(filtered) == 0 {
@@ -33,9 +41,9 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 		}
 	}
 
-	if raw, ok := root["endpoints"].([]interface{}); ok && len(raw) > 0 {
-		filtered := filterEndpointLeaves(ctx, raw)
-		if len(filtered) != len(raw) {
+	if len(inEp) > 0 {
+		filtered := filterEndpointLeaves(ctx, inEp)
+		if len(filtered) != len(inEp) {
 			changed = true
 		}
 		if len(filtered) == 0 {
@@ -59,6 +67,13 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 		}
 	}
 
+	outOut, _ := root["outbounds"].([]interface{})
+	outEp, _ := root["endpoints"].([]interface{})
+	outLeafCount := countProtocolLeaves(outOut) + len(outEp)
+	if inLeafCount > 0 && outLeafCount == 0 {
+		return nil, fmt.Errorf("[SingboxParser] soft parse dropped all %d leaves", inLeafCount)
+	}
+
 	if !changed {
 		return content, nil
 	}
@@ -68,6 +83,25 @@ func filterValidLeavesJSON(ctx context.Context, content []byte, filterInbounds b
 		return nil, err
 	}
 	return out, nil
+}
+
+// countProtocolLeaves counts outbounds that are meant as user proxies (not
+// direct/block/dns stubs used only for routing).
+func countProtocolLeaves(items []interface{}) int {
+	n := 0
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		switch leafType(m) {
+		case "", "direct", "block", "dns":
+			continue
+		default:
+			n++
+		}
+	}
+	return n
 }
 
 func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{} {
@@ -91,10 +125,10 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 			fmt.Printf("[SingboxParser] skip unknown outbound type %q tag=%q\n", typ, leafTag(m))
 			continue
 		}
-		if checkOutboundLeaf(ctx, m) {
+		if ok, reason := checkOutboundLeaf(ctx, m); ok {
 			leaves = append(leaves, item)
 		} else {
-			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q\n", typ, leafTag(m))
+			fmt.Printf("[SingboxParser] skip invalid outbound type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 		}
 	}
 
@@ -117,12 +151,12 @@ func filterOutboundLeaves(ctx context.Context, items []interface{}) []interface{
 			fmt.Printf("[SingboxParser] skip unknown outbound group type %q tag=%q\n", typ, leafTag(m))
 			continue
 		}
-		if checkOutboundGroup(ctx, m, pool, tagSet) {
+		if ok, reason := checkOutboundGroup(ctx, m, pool, tagSet); ok {
 			leaves = append(leaves, item)
 			pool = append(pool, item)
 			tagSet = leafTagSet(pool)
 		} else {
-			fmt.Printf("[SingboxParser] skip invalid outbound group type=%q tag=%q\n", typ, leafTag(m))
+			fmt.Printf("[SingboxParser] skip invalid outbound group type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 		}
 	}
 
@@ -144,10 +178,10 @@ func filterEndpointLeaves(ctx context.Context, items []interface{}) []interface{
 			fmt.Printf("[SingboxParser] skip unknown endpoint type %q tag=%q\n", typ, leafTag(m))
 			continue
 		}
-		if checkEndpointLeaf(ctx, m) {
+		if ok, reason := checkEndpointLeaf(ctx, m); ok {
 			out = append(out, item)
 		} else {
-			fmt.Printf("[SingboxParser] skip invalid endpoint type=%q tag=%q\n", typ, leafTag(m))
+			fmt.Printf("[SingboxParser] skip invalid endpoint type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 		}
 	}
 	return out
@@ -168,30 +202,37 @@ func filterInboundLeaves(ctx context.Context, items []interface{}) []interface{}
 			fmt.Printf("[SingboxParser] skip unknown inbound type %q tag=%q\n", typ, leafTag(m))
 			continue
 		}
-		if checkInboundLeaf(ctx, m) {
+		if ok, reason := checkInboundLeaf(ctx, m); ok {
 			out = append(out, item)
 		} else {
-			fmt.Printf("[SingboxParser] skip invalid inbound type=%q tag=%q\n", typ, leafTag(m))
+			fmt.Printf("[SingboxParser] skip invalid inbound type=%q tag=%q: %v\n", typ, leafTag(m), reason)
 		}
 	}
 	return out
 }
 
-func checkOutboundLeaf(ctx context.Context, leaf map[string]interface{}) bool {
+func checkOutboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
+	stub := stubDirectOutbound()
+	routeFinal := stubTag
+	// Avoid duplicate tag when the leaf itself is already tagged "direct".
+	if leafTag(leaf) == stubTag {
+		stub = map[string]interface{}{"type": "direct", "tag": stubTagAlt}
+		routeFinal = stubTagAlt
+	}
 	cfg := map[string]interface{}{
-		"outbounds": []interface{}{leaf, stubDirectOutbound()},
-		"route":     map[string]interface{}{"final": "direct"},
+		"outbounds": []interface{}{leaf, stub},
+		"route":     map[string]interface{}{"final": routeFinal},
 	}
 	return checkConfigMap(ctx, cfg)
 }
 
-func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool []interface{}, tagSet map[string]bool) bool {
+func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool []interface{}, tagSet map[string]bool) (bool, error) {
 	if !groupReferencesKnownTags(group, tagSet) {
-		return false
+		return false, fmt.Errorf("group references unknown outbound tags")
 	}
 	out := append([]interface{}{}, pool...)
 	out = append(out, group)
-	if _, ok := tagSet["direct"]; !ok {
+	if _, ok := tagSet[stubTag]; !ok {
 		out = append(out, stubDirectOutbound())
 	}
 	cfg := map[string]interface{}{
@@ -201,50 +242,61 @@ func checkOutboundGroup(ctx context.Context, group map[string]interface{}, pool 
 	return checkConfigMap(ctx, cfg)
 }
 
-func checkEndpointLeaf(ctx context.Context, leaf map[string]interface{}) bool {
+func checkEndpointLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
 	cfg := map[string]interface{}{
 		"endpoints": []interface{}{leaf},
 		"outbounds": []interface{}{stubDirectOutbound()},
-		"route":     map[string]interface{}{"final": "direct"},
+		"route":     map[string]interface{}{"final": stubTag},
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
-		return false
+		return false, err
 	}
 	opts := option.Options{}
 	if err := opts.UnmarshalJSONContext(ctx, raw); err != nil {
-		return false
+		return false, err
 	}
 	// User WG endpoints often fail libbox.CheckConfigOptions in isolation (no dial/runtime).
 	if leafType(leaf) == "wireguard" {
-		return true
+		return true, nil
 	}
-	return libbox.CheckConfigOptions(&opts) == nil
+	if err := libbox.CheckConfigOptions(&opts); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func checkInboundLeaf(ctx context.Context, leaf map[string]interface{}) bool {
+func checkInboundLeaf(ctx context.Context, leaf map[string]interface{}) (bool, error) {
 	cfg := map[string]interface{}{
 		"inbounds":  []interface{}{leaf},
 		"outbounds": []interface{}{stubDirectOutbound()},
-		"route":     map[string]interface{}{"final": "direct"},
+		"route":     map[string]interface{}{"final": stubTag},
 	}
 	return checkConfigMap(ctx, cfg)
 }
 
-func checkConfigMap(ctx context.Context, cfg map[string]interface{}) bool {
+func checkConfigMap(ctx context.Context, cfg map[string]interface{}) (bool, error) {
 	raw, err := json.Marshal(cfg)
 	if err != nil {
-		return false
+		return false, err
 	}
 	opts := option.Options{}
 	if err := opts.UnmarshalJSONContext(ctx, raw); err != nil {
-		return false
+		return false, err
 	}
-	return libbox.CheckConfigOptions(&opts) == nil
+	if err := libbox.CheckConfigOptions(&opts); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
+const (
+	stubTag    = "direct"
+	stubTagAlt = "__soft_parse_direct__"
+)
+
 func stubDirectOutbound() map[string]interface{} {
-	return map[string]interface{}{"type": "direct", "tag": "direct"}
+	return map[string]interface{}{"type": "direct", "tag": stubTag}
 }
 
 func isOutboundGroupType(typ string) bool {

@@ -780,6 +780,12 @@ func probeTag(parent context.Context, b *box.Box, tag, testURL string, samples i
 		return res
 	}
 
+	urls := splitProbeURLs(testURL)
+	if len(urls) == 0 {
+		res.ErrorMessage = "test_url required"
+		return res
+	}
+
 	var sum int64
 	var okCount int
 	var lastErr error
@@ -792,9 +798,7 @@ func probeTag(parent context.Context, b *box.Box, tag, testURL string, samples i
 			break
 		}
 		attempted++
-		testCtx, cancel := context.WithTimeout(parent, monitoring.ProbeTimeout)
-		delay, perr := urltest.URLTest(testCtx, testURL, dialer)
-		cancel()
+		delay, perr := raceProbeURLs(parent, dialer, urls)
 		if perr != nil || delay > monitoring.MaxSuccessDelay || delay == 0 {
 			lastErr = perr
 			if lastErr == nil {
@@ -837,6 +841,70 @@ func probeTag(parent context.Context, b *box.Box, tag, testURL string, samples i
 	res.DelayMs = avg
 	res.Failed = false
 	return res
+}
+
+func splitProbeURLs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return []string{raw}
+	}
+	return out
+}
+
+func raceProbeURLs(parent context.Context, dialer N.Dialer, urls []string) (uint16, error) {
+	if len(urls) == 1 {
+		testCtx, cancel := context.WithTimeout(parent, monitoring.ProbeTimeout)
+		defer cancel()
+		return urltest.URLTest(testCtx, urls[0], dialer)
+	}
+	type result struct {
+		delay uint16
+		err   error
+	}
+	ch := make(chan result, len(urls))
+	raceCtx, cancel := context.WithTimeout(parent, monitoring.ProbeTimeout)
+	defer cancel()
+	for _, u := range urls {
+		link := u
+		go func() {
+			d, err := urltest.URLTest(raceCtx, link, dialer)
+			ch <- result{delay: d, err: err}
+		}()
+	}
+	var lastErr error
+	remaining := len(urls)
+	for remaining > 0 {
+		select {
+		case <-raceCtx.Done():
+			if lastErr == nil {
+				lastErr = raceCtx.Err()
+			}
+			return 0, lastErr
+		case r := <-ch:
+			remaining--
+			if r.err == nil && r.delay > 0 && r.delay <= monitoring.MaxSuccessDelay {
+				cancel()
+				return r.delay, nil
+			}
+			if r.err != nil {
+				lastErr = r.err
+			}
+		}
+	}
+	return 0, lastErr
 }
 
 func resolveDialer(b *box.Box, tag string) (N.Dialer, error) {

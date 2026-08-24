@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 
 	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/ne-tort/pathology-core/v2/db"
@@ -32,17 +33,91 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 		return config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 	}
 
-	// Prefer uncut import source: re-parse each Start with current ClientOptions
-	// so ignore-subscription-dns/route and similar knobs apply to the original body.
+	// Prefer uncut import source (.src) so ignore-subscription-dns/route knobs re-apply,
+	// but fall back to sliced .json when .src soft-parse yields no proxy leaves.
+	// TestEngine already does this; Start used to stick to a Direct-only .src build
+	// while the UI/ping still saw VLESS leaves in .json.
 	if in.ConfigPath != "" {
-		readPath := config.ResolveConfigReadPath(in.ConfigPath)
-		if readPath != in.ConfigPath {
-			Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", readPath)
-			return config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: readPath})
-		}
+		return buildConfigFromProfilePath(ctx, in.ConfigPath, in.ConfigContent)
 	}
 
 	return config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
+}
+
+func buildConfigFromProfilePath(ctx context.Context, configPath, configContent string) (*option.Options, error) {
+	candidates := make([]string, 0, 2)
+	if alt := config.ResolveConfigReadPath(configPath); alt != "" && alt != configPath {
+		candidates = append(candidates, alt)
+	}
+	candidates = append(candidates, configPath)
+
+	var (
+		best       *option.Options
+		bestLeaves int
+		lastErr    error
+	)
+	for _, path := range candidates {
+		built, err := config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: path})
+		if err != nil {
+			lastErr = err
+			Log(LogLevel_DEBUG, LogType_CORE, "profile build failed for ", path, ": ", err.Error())
+			continue
+		}
+		n := countBuiltProxyLeaves(built)
+		Log(LogLevel_DEBUG, LogType_CORE, "profile build ", path, " proxy leaves=", n)
+		if n > bestLeaves {
+			best = built
+			bestLeaves = n
+		}
+		if n > 0 {
+			if path != configPath {
+				Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", path)
+			}
+			return built, nil
+		}
+		if best == nil {
+			best = built
+		}
+	}
+	if best != nil {
+		// Direct-only / empty leaf pool — still start (same as empty select→direct).
+		return best, nil
+	}
+	if lastErr != nil {
+		// Last resort: raw BuildConfig on the Flutter path (may skip soft-parse via Options).
+		if fallback, err := config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: configContent, Path: configPath}); err == nil {
+			return fallback, nil
+		}
+		return nil, lastErr
+	}
+	return config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: configContent, Path: configPath})
+}
+
+// countBuiltProxyLeaves counts selectable proxy outbounds/endpoints in a built config
+// (excludes select/urltest/balancer/direct/block/dns and §hide§ tags).
+func countBuiltProxyLeaves(opts *option.Options) int {
+	if opts == nil {
+		return 0
+	}
+	n := 0
+	for _, ob := range opts.Outbounds {
+		switch ob.Type {
+		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect:
+			continue
+		default:
+			if ob.Tag == "" || ob.Tag == config.OutboundDirectTag || strings.Contains(ob.Tag, "§hide§") {
+				continue
+			}
+			n++
+		}
+	}
+	for _, ep := range opts.Endpoints {
+		if ep.Tag == "" || strings.Contains(ep.Tag, "§hide§") {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func (s *CoreService) Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {

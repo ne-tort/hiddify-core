@@ -228,9 +228,8 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 
 	// WARP nodes live in a dedicated local profile (Flutter WarpAutoProfileSync).
 	// Do not mix them into other profiles — multi-select merge covers composition.
-	if len(opt.ConnectionTestUrls) == 0 {
-		opt.ConnectionTestUrls = []string{opt.ConnectionTestUrl}
-	}
+	// Empty ConnectionTestUrls means latency checks are disabled — do not backfill
+	// from ConnectionTestUrl (that singular is DNS/compat only).
 	// urlTest := option.Outbound{
 	// 	Type: C.TypeURLTest,
 	// 	Tag:  OutboundURLTestTag,
@@ -447,29 +446,28 @@ func contains(slice []string, item string) bool {
 }
 
 func setExperimental(options *option.Options, hopt *ClientOptions) {
-	if len(hopt.ConnectionTestUrls) == 0 {
-		hopt.ConnectionTestUrls = []string{hopt.ConnectionTestUrl}
-	}
 	cachePath := "data/clash.db"
 	if p := strings.TrimSpace(hopt.CacheFilePath); p != "" {
 		cachePath = p
 	}
+	enableCache := hopt.EnableCacheFile
+	if hopt.TestMode {
+		// Side TestEngine always needs its own cache file (separate path).
+		enableCache = true
+	}
 	exp := &option.ExperimentalOptions{
 		CacheFile: &option.CacheFileOptions{
-			Enabled:     true,
+			Enabled:     enableCache,
 			Path:        cachePath,
-			StoreFakeIP: hopt.EnableFakeDNS,
+			StoreFakeIP: enableCache && hopt.CacheFileStoreFakeIP,
+			StoreDNS:    enableCache && hopt.CacheFileStoreDNS,
 		},
 		// LX-STUB: MonitoringOptions (URL-test monitor) absent in sing-box-lx ExperimentalOptions
 	}
-	if hopt.EnableClashApi {
-		// Secret must come from the client (persisted web-secret). Do not randomize
-		// here — a generated value would desync Dart Bearer auth for Connections.
-		exp.ClashAPI = &option.ClashAPIOptions{
-			ExternalController: fmt.Sprintf("%s:%d", "127.0.0.1", hopt.ClashApiPort),
-			Secret:             hopt.ClashApiSecret,
-		}
-	}
+	// Clash API retired: builds omit with_clash_api; never emit experimental.clash_api.
+	_ = hopt.EnableClashApi
+	_ = hopt.ClashApiPort
+	_ = hopt.ClashApiSecret
 	options.Experimental = exp
 }
 

@@ -42,6 +42,13 @@ type ClientOptions struct {
 	// CacheFilePath overrides experimental cache_file path (default data/clash.db).
 	// TestEngine must use a separate path so it does not share clash.db with main.
 	CacheFilePath string `json:"cache-file-path,omitempty"`
+	// EnableCacheFile maps to experimental.cache_file.enabled (default true).
+	// Omitted from omitempty so false survives round-trips.
+	EnableCacheFile bool `json:"enable-cache-file"`
+	// CacheFileStoreFakeIP persists FakeIP mappings in the cache file.
+	CacheFileStoreFakeIP bool `json:"cache-file-store-fakeip"`
+	// CacheFileStoreDNS persists DNS responses in the cache file.
+	CacheFileStoreDNS bool `json:"cache-file-store-dns,omitempty"`
 
 	DNSOptions
 	InboundOptions
@@ -91,7 +98,26 @@ type URLTestOptions struct {
 	ConnectionTestUrl  string            `json:"connection-test-url,omitempty" overridable:"true"`
 	ConnectionTestUrls []string          `json:"connection-test-urls,omitempty" overridable:"true"`
 	URLTestInterval    DurationInSeconds `json:"url-test-interval,omitempty" overridable:"true"`
+	// URLTestStrategy: single | fastAverage | stress (home UrlTest sample count).
+	URLTestStrategy string `json:"url-test-strategy,omitempty"`
+	// URLTestProbeTimeoutMs bounds a single URL probe attempt (home UrlTest / monitoring).
+	URLTestProbeTimeoutMs int `json:"url-test-probe-timeout-ms,omitempty"`
 	// URLTestIdleTimeout DurationInSeconds `json:"url-test-idle-timeout"`
+}
+
+// connectionTestURLsForDNS returns probe URLs for DNS pinning only.
+// Empty ConnectionTestUrls means latency checks are off; fall back to singular URL without mutating options.
+func connectionTestURLsForDNS(hopt *ClientOptions) []string {
+	if hopt == nil {
+		return nil
+	}
+	if len(hopt.ConnectionTestUrls) > 0 {
+		return hopt.ConnectionTestUrls
+	}
+	if u := strings.TrimSpace(hopt.ConnectionTestUrl); u != "" {
+		return []string{u}
+	}
+	return nil
 }
 
 type RouteOptions struct {
@@ -183,9 +209,12 @@ func DefaultClientOptions() *ClientOptions {
 			AllowConnectionFromLAN: false,
 		},		LogLevel: "error",
 		// LogFile:        "/dev/null",
-		LogFile:        "box.log",
-		Region:         "other",
-		EnableClashApi: false,
+		LogFile:              "box.log",
+		Region:               "other",
+		EnableClashApi:       false,
+		EnableCacheFile:      true,
+		CacheFileStoreFakeIP: true,
+		CacheFileStoreDNS:    false,
 
 		ClashApiPort:   16756,
 		ClashApiSecret: "",

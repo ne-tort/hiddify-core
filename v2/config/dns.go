@@ -336,7 +336,7 @@ func addForceDirect(options *option.Options, hopt *ClientOptions) ([]option.Defa
 	)
 
 	dnsMap["api.cloudflareclient.com"] = ""
-	for _, url := range hopt.ConnectionTestUrls { //To avoid dns bug when using urltest
+	for _, url := range connectionTestURLsForDNS(hopt) { //To avoid dns bug when using urltest
 		if host, err := getHostnameIfNotIP(url); err == nil {
 			dnsMap[host] = ""
 		}

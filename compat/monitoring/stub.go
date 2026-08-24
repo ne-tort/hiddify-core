@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,8 +21,11 @@ const FailDelay uint16 = 65535
 // MaxSuccessDelay: anything slower is treated as a failed probe.
 const MaxSuccessDelay uint16 = 3000
 
-// ProbeTimeout bounds a single URL test (no long TCPTimeout waits).
-const ProbeTimeout = 3 * time.Second
+// DefaultProbeTimeout bounds a single URL test when the client omits a timeout.
+const DefaultProbeTimeout = 3 * time.Second
+
+// ProbeTimeout is kept as an alias for callers that still reference the old name.
+const ProbeTimeout = DefaultProbeTimeout
 
 // GroupEvent is emitted when URL-test history changes.
 type GroupEvent struct{}
@@ -29,38 +33,60 @@ type GroupEvent struct{}
 // OutboundMonitoring runs URL tests against live outbounds and mirrors
 // results into sing-box HistoryStorage so proxy streams see delay updates.
 type OutboundMonitoring struct {
-	ctx     context.Context
-	box     *box.Box
-	history *urltest.HistoryStorage
-	testURL func() string
-	events  *Broadcaster[GroupEvent]
-	hook    *observable.Subscriber[struct{}]
+	ctx      context.Context
+	box      *box.Box
+	history  *urltest.HistoryStorage
+	testURLs func() []string
+	strategy func() string
+	timeout  func() time.Duration
+	events   *Broadcaster[GroupEvent]
+	hook     *observable.Subscriber[struct{}]
 }
 
 var active atomic.Pointer[OutboundMonitoring]
 
 // Activate binds monitoring to the running core instance.
-func Activate(ctx context.Context, b *box.Box, history *urltest.HistoryStorage, testURL func() string) {
+// testURLs returns the selected probe endpoints (empty → skip).
+// strategy is single | fastAverage | stress (sample counts 1/3/10).
+// timeout bounds each URL probe attempt (nil → DefaultProbeTimeout).
+func Activate(ctx context.Context, b *box.Box, history *urltest.HistoryStorage, testURLs func() []string, strategy func() string, timeout func() time.Duration) {
 	if ctx == nil || b == nil || history == nil {
 		return
 	}
-	if testURL == nil {
-		testURL = func() string { return "" }
+	if testURLs == nil {
+		testURLs = func() []string { return nil }
+	}
+	if strategy == nil {
+		strategy = func() string { return "single" }
+	}
+	if timeout == nil {
+		timeout = func() time.Duration { return DefaultProbeTimeout }
 	}
 
 	Deactivate()
 
 	m := &OutboundMonitoring{
-		ctx:     ctx,
-		box:     b,
-		history: history,
-		testURL: testURL,
-		events:  NewBroadcaster[GroupEvent](ctx),
-		hook:    observable.NewSubscriber[struct{}](4),
+		ctx:      ctx,
+		box:      b,
+		history:  history,
+		testURLs: testURLs,
+		strategy: strategy,
+		timeout:  timeout,
+		events:   NewBroadcaster[GroupEvent](ctx),
+		hook:     observable.NewSubscriber[struct{}](4),
 	}
 	history.AddUpdateHook(m.hook)
 	go m.relayHistoryUpdates()
 	active.Store(m)
+}
+
+func (m *OutboundMonitoring) probeTimeout() time.Duration {
+	if m != nil && m.timeout != nil {
+		if d := m.timeout(); d > 0 {
+			return d
+		}
+	}
+	return DefaultProbeTimeout
 }
 
 // Deactivate drops the active monitor (service stop / reload).
@@ -156,7 +182,6 @@ func (m *OutboundMonitoring) testGroupLeaves(group adapter.OutboundGroup) error 
 		}
 	}
 	if len(leaves) == 0 {
-		// Group with no resolveable leaves — probe current selection path.
 		if now := group.Now(); now != "" {
 			return m.TestNow(now)
 		}
@@ -188,44 +213,138 @@ func (m *OutboundMonitoring) testGroupLeaves(group adapter.OutboundGroup) error 
 	return firstErr
 }
 
+func strategySamples(strategy string) int {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "fastaverage", "fast_average", "fast-average":
+		return 3
+	case "stress":
+		return 10
+	default:
+		return 1
+	}
+}
+
+func (m *OutboundMonitoring) resolveURLs() []string {
+	var urls []string
+	if m.testURLs != nil {
+		for _, u := range m.testURLs() {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
+	}
+	return urls
+}
+
 func (m *OutboundMonitoring) testDialer(dialer N.Dialer, source adapter.Outbound) error {
 	parent := m.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
 
-	link := ""
-	if m.testURL != nil {
-		link = m.testURL()
-	}
-
-	testCtx, cancel := context.WithTimeout(parent, ProbeTimeout)
-	defer cancel()
-
-	delay, err := urltest.URLTest(testCtx, link, dialer)
+	urls := m.resolveURLs()
 	tag := RealTag(source)
 	if tag == "" && source != nil {
 		tag = source.Tag()
 	}
 	if tag == "" {
-		return err
+		return nil
 	}
-
-	if err != nil || delay > MaxSuccessDelay {
+	if len(urls) == 0 {
 		m.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{
 			Time:  time.Now(),
 			Delay: FailDelay,
 		})
-		return err
+		return nil
 	}
-	if delay == 0 {
-		delay = 1
+
+	strat := "single"
+	if m.strategy != nil {
+		strat = m.strategy()
+	}
+	samples := strategySamples(strat)
+	if samples < 1 {
+		samples = 1
+	}
+
+	var sum uint32
+	var okCount int
+	var lastErr error
+	for i := 0; i < samples; i++ {
+		delay, err := m.raceURLs(parent, dialer, urls)
+		if err != nil || delay == 0 || delay > MaxSuccessDelay {
+			lastErr = err
+			continue
+		}
+		sum += uint32(delay)
+		okCount++
+	}
+
+	if okCount == 0 {
+		m.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{
+			Time:  time.Now(),
+			Delay: FailDelay,
+		})
+		return lastErr
+	}
+	avg := uint16(sum / uint32(okCount))
+	if avg == 0 {
+		avg = 1
 	}
 	m.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{
 		Time:  time.Now(),
-		Delay: delay,
+		Delay: avg,
 	})
 	return nil
+}
+
+// raceURLs probes all URLs in parallel; first success within probeTimeout wins.
+func (m *OutboundMonitoring) raceURLs(parent context.Context, dialer N.Dialer, urls []string) (uint16, error) {
+	timeout := m.probeTimeout()
+	if len(urls) == 1 {
+		testCtx, cancel := context.WithTimeout(parent, timeout)
+		defer cancel()
+		return urltest.URLTest(testCtx, urls[0], dialer)
+	}
+
+	type result struct {
+		delay uint16
+		err   error
+	}
+	ch := make(chan result, len(urls))
+	raceCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	for _, u := range urls {
+		link := u
+		go func() {
+			d, err := urltest.URLTest(raceCtx, link, dialer)
+			ch <- result{delay: d, err: err}
+		}()
+	}
+
+	var lastErr error
+	remaining := len(urls)
+	for remaining > 0 {
+		select {
+		case <-raceCtx.Done():
+			if lastErr == nil {
+				lastErr = raceCtx.Err()
+			}
+			return 0, lastErr
+		case r := <-ch:
+			remaining--
+			if r.err == nil && r.delay > 0 && r.delay <= MaxSuccessDelay {
+				cancel()
+				return r.delay, nil
+			}
+			if r.err != nil {
+				lastErr = r.err
+			}
+		}
+	}
+	return 0, lastErr
 }
 
 func (m *OutboundMonitoring) OutboundsHistory(groupTag string) map[string]*adapter.URLTestHistory {

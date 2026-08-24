@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/ne-tort/pathology-core/v2/config"
-
-	"github.com/sagernet/sing-box/option"
 )
 
 func RunStandalone(ctx context.Context, clientSettingPath string, configPath string, defaultConfig config.ClientOptions) error {
@@ -162,19 +160,7 @@ func buildStandaloneConfig(ctx context.Context, ropt *config.ReadOptions, hopts 
 	}
 
 	finalconfig.Log.Output = ""
-	finalconfig.Experimental = &option.ExperimentalOptions{
-		ClashAPI: &option.ClashAPIOptions{
-			ExternalUI: "webui",
-		},
-	}
-	// finalconfig.Experimental.ClashAPI.ExternalUI = "webui"
-	if hopts.AllowConnectionFromLAN {
-		finalconfig.Experimental.ClashAPI.ExternalController = "0.0.0.0:16756"
-	} else {
-		finalconfig.Experimental.ClashAPI.ExternalController = "127.0.0.1:16756"
-	}
-
-	fmt.Printf("Open http://localhost:6756/ui/?secret=%s in your browser\n", finalconfig.Experimental.ClashAPI.Secret)
+	// Clash API is not included in client builds (no with_clash_api).
 
 	if err := Setup(
 		&SetupRequest{

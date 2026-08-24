@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ne-tort/pathology-core/compat/monitoring"
@@ -141,11 +142,30 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance
-	monitoring.Activate(static.Context(), static.Box(), static.UrlTestHistory(), func() string {
-		if static.ClientOptions != nil {
-			return static.ClientOptions.ConnectionTestUrl
+	monitoring.Activate(static.Context(), static.Box(), static.UrlTestHistory(), func() []string {
+		// Empty ConnectionTestUrls = latency checks disabled (do not fall back to ConnectionTestUrl).
+		if static.ClientOptions == nil {
+			return nil
 		}
-		return ""
+		return static.ClientOptions.ConnectionTestUrls
+	}, func() string {
+		if static.ClientOptions == nil {
+			return "single"
+		}
+		s := strings.TrimSpace(static.ClientOptions.URLTestStrategy)
+		if s == "" {
+			return "single"
+		}
+		return s
+	}, func() time.Duration {
+		if static.ClientOptions == nil {
+			return monitoring.DefaultProbeTimeout
+		}
+		ms := static.ClientOptions.URLTestProbeTimeoutMs
+		if ms <= 0 {
+			return monitoring.DefaultProbeTimeout
+		}
+		return time.Duration(ms) * time.Millisecond
 	})
 	if static.debug {
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-start.log"))
