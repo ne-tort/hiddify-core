@@ -3,8 +3,6 @@ package hcore
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"strings"
 
 	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/ne-tort/pathology-core/v2/db"
@@ -33,91 +31,10 @@ func BuildConfig(ctx context.Context, in *StartRequest) (*option.Options, error)
 		return config.ReadSingOptions(ctx, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
 	}
 
-	// Prefer uncut import source (.src) so ignore-subscription-dns/route knobs re-apply,
-	// but fall back to sliced .json when .src soft-parse yields no proxy leaves.
-	// TestEngine already does this; Start used to stick to a Direct-only .src build
-	// while the UI/ping still saw VLESS leaves in .json.
-	if in.ConfigPath != "" {
-		return buildConfigFromProfilePath(ctx, in.ConfigPath, in.ConfigContent)
-	}
-
+	// Always build from the path Flutter passes (profile .json pool / _direct.json).
+	// Never prefer a sidecar .src — that file was overwritten with Direct stubs by
+	// Parse/empty compile and silently replaced working VLESS on reconnect/Start.
 	return config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: in.ConfigContent, Path: in.ConfigPath})
-}
-
-func buildConfigFromProfilePath(ctx context.Context, configPath, configContent string) (*option.Options, error) {
-	candidates := make([]string, 0, 2)
-	if alt := config.ResolveConfigReadPath(configPath); alt != "" && alt != configPath {
-		candidates = append(candidates, alt)
-	}
-	candidates = append(candidates, configPath)
-
-	var (
-		best       *option.Options
-		bestLeaves int
-		lastErr    error
-	)
-	for _, path := range candidates {
-		built, err := config.ParseBuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Path: path})
-		if err != nil {
-			lastErr = err
-			Log(LogLevel_DEBUG, LogType_CORE, "profile build failed for ", path, ": ", err.Error())
-			continue
-		}
-		n := countBuiltProxyLeaves(built)
-		Log(LogLevel_DEBUG, LogType_CORE, "profile build ", path, " proxy leaves=", n)
-		if n > bestLeaves {
-			best = built
-			bestLeaves = n
-		}
-		if n > 0 {
-			if path != configPath {
-				Log(LogLevel_DEBUG, LogType_CORE, "Building from profile source ", path)
-			}
-			return built, nil
-		}
-		if best == nil {
-			best = built
-		}
-	}
-	if best != nil {
-		// Direct-only / empty leaf pool — still start (same as empty select→direct).
-		return best, nil
-	}
-	if lastErr != nil {
-		// Last resort: raw BuildConfig on the Flutter path (may skip soft-parse via Options).
-		if fallback, err := config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: configContent, Path: configPath}); err == nil {
-			return fallback, nil
-		}
-		return nil, lastErr
-	}
-	return config.BuildConfig(ctx, static.ClientOptions, &config.ReadOptions{Content: configContent, Path: configPath})
-}
-
-// countBuiltProxyLeaves counts selectable proxy outbounds/endpoints in a built config
-// (excludes select/urltest/balancer/direct/block/dns and §hide§ tags).
-func countBuiltProxyLeaves(opts *option.Options) int {
-	if opts == nil {
-		return 0
-	}
-	n := 0
-	for _, ob := range opts.Outbounds {
-		switch ob.Type {
-		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect:
-			continue
-		default:
-			if ob.Tag == "" || ob.Tag == config.OutboundDirectTag || strings.Contains(ob.Tag, "§hide§") {
-				continue
-			}
-			n++
-		}
-	}
-	for _, ep := range opts.Endpoints {
-		if ep.Tag == "" || strings.Contains(ep.Tag, "§hide§") {
-			continue
-		}
-		n++
-	}
-	return n
 }
 
 func (s *CoreService) Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
@@ -192,17 +109,7 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 	// Full config generation (debug/export): only config_path is set.
 	// Apply current ClientOptions (incl. WARP inject) and do not rewrite the profile file.
 	if in.TempPath == "" && in.Content == "" && in.ConfigPath != "" {
-		readPath := in.ConfigPath
-		if src := config.ProfileSourcePath(in.ConfigPath); src != "" {
-			if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
-				readPath = src
-			}
-		}
-		built, err := config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: readPath})
-		if err != nil && readPath != in.ConfigPath {
-			// .src may contain comment headers; fall back to sliced .json
-			built, err = config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: in.ConfigPath})
-		}
+		built, err := config.ParseBuildConfigBytes(ctx, static.ClientOptions, &config.ReadOptions{Path: in.ConfigPath})
 		if err != nil {
 			return &ParseResponse{
 				ResponseCode: hcommon.ResponseCode_FAILED,
@@ -222,13 +129,9 @@ func Parse(ctx context.Context, in *ParseRequest) (*ParseResponse, error) {
 
 	readOpt := &config.ReadOptions{Content: in.Content, Path: path}
 	persistConfig := in.ConfigPath != "" && !config.IsScratchConfigPath(in.ConfigPath)
-	// Preserve import source uncut: Build/Start re-parse this with current hopts
-	// (DNS/route subscription toggles, etc.). Sliced .json remains for editor/legacy.
-	if persistConfig {
-		if raw, err := config.ReadContent(ctx, readOpt); err == nil && len(raw) > 0 {
-			_ = hutils.WriteFileAtomic(config.ProfileSourcePath(in.ConfigPath), raw, 0o644)
-		}
-	}
+	// Do NOT write a .src sidecar from temp/raw. That path overwrote working VPN
+	// pools with Direct stubs (empty compile / validate leftovers) while .json
+	// still showed VLESS — Start then preferred .src and "connected" as Direct.
 
 	parsed, err := config.ParseConfigBytes(ctx, readOpt, true, static.ClientOptions, false)
 	if err != nil {

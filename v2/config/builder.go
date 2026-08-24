@@ -281,8 +281,7 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 			}
 		}
 		if len(selectTags) == 0 {
-			selectTags = []string{OutboundDirectTag}
-			defaultSelect = OutboundDirectTag
+			return fmt.Errorf("test mode: no probe outbounds (refusing Direct fallback)")
 		}
 		selector := option.Outbound{
 			Type: C.TypeSelector,
@@ -352,7 +351,11 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	// Traffic path: route.final → select → (balance|lowest|node) → nodes.
 	// Keep final on select so UI/SelectOutbound can switch modes and nodes.
 	if len(tags) == 0 {
-		// Direct-only / empty leaf pool: select → direct (no empty balancers).
+		// Never silently turn a VPN profile into Direct. Only allow Direct-only
+		// when the input itself had no proxy leaves (explicit Direct / empty stub).
+		if n := countInputProxyLeaves(input); n > 0 {
+			return fmt.Errorf("refusing Direct fallback: %d proxy leaf(ves) were dropped (IPv6 filter, disabled tags, or parse)", n)
+		}
 		selector := option.Outbound{
 			Type: C.TypeSelector,
 			Tag:  OutboundSelectTag,
@@ -434,6 +437,41 @@ func setOutbounds(options *option.Options, input *option.Options, opt *ClientOpt
 	)
 
 	return nil
+}
+
+// countInputProxyLeaves counts user proxy outbounds/endpoints in the profile pool
+// before setOutbounds filtering (IPv6 / disabled / groups).
+func countInputProxyLeaves(input *option.Options) int {
+	if input == nil {
+		return 0
+	}
+	n := 0
+	for _, out := range input.Outbounds {
+		switch out.Type {
+		case C.TypeBlock, C.TypeDNS, C.TypeSelector, C.TypeURLTest, C.TypeBalancer:
+			continue
+		case C.TypeDirect:
+			if contains([]string{"direct", "bypass", "block"}, out.Tag) || strings.Contains(out.Tag, "§hide§") {
+				continue
+			}
+			n++
+		default:
+			if contains([]string{"direct", "bypass", "block"}, out.Tag) || strings.Contains(out.Tag, "§hide§") {
+				continue
+			}
+			if contains(PredefinedOutboundTags, out.Tag) {
+				continue
+			}
+			n++
+		}
+	}
+	for _, end := range input.Endpoints {
+		if contains(PredefinedOutboundTags, end.Tag) || strings.Contains(end.Tag, "§hide§") {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func contains(slice []string, item string) bool {

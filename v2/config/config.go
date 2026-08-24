@@ -2,7 +2,6 @@ package config
 
 import (
 	context "context"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -42,17 +41,11 @@ func ProfileSourcePath(configPath string) string {
 	return configPath + ".src"
 }
 
-// ResolveConfigReadPath prefers a non-empty .src next to the profile JSON
-// (same policy as Core.Start BuildConfig).
+// ResolveConfigReadPath returns the profile path Flutter/Start should build from.
+// Historically this preferred a sidecar .src "uncut import"; that sidecar was
+// frequently overwritten with Direct stubs while .json still held VLESS, so Start
+// silently connected as Direct. Import bodies live under sources/ now — use .json.
 func ResolveConfigReadPath(configPath string) string {
-	if configPath == "" {
-		return ""
-	}
-	if src := ProfileSourcePath(configPath); src != "" {
-		if st, err := os.Stat(src); err == nil && !st.IsDir() && st.Size() > 0 {
-			return src
-		}
-	}
 	return configPath
 }
 
