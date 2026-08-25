@@ -29,6 +29,7 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	defer static.lock.Unlock()
 
 	SetCoreStatus(CoreStates_STOPPING, MessageType_EMPTY, "")
+	stopWindowsMemoryScavenge()
 	ss := static.StartedService
 	if ss == nil {
 		monitoring.Deactivate()

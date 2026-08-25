@@ -27,10 +27,13 @@ func NewSideService(ctx context.Context, options option.Options) (*daemon.Starte
 func newService(ctx context.Context, options option.Options, invokeMainHooks bool) (*daemon.StartedService, error) {
 	logInterface := LogInterface{}
 	bopts := daemon.ServiceOptions{
-		Context:     ctx,
-		Debug:       static.debug,
-		LogMaxLines: 100,
-		Handler:     &logInterface,
+		Context:           ctx,
+		Debug:             static.debug,
+		LogMaxLines:       100,
+		Handler:           &logInterface,
+		OOMKillerEnabled:  oomKillerEnabled,
+		OOMKillerDisabled: oomKillerDisabled,
+		OOMMemoryLimit:    oomMemoryLimit,
 	}
 	err := libbox.CheckConfigOptions(&options)
 	if err != nil {

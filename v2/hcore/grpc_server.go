@@ -59,13 +59,17 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 	tcpConn := true // runtime.GOOS == "windows" // TODO add TVOS
 	libbox.Setup(
 		&libbox.SetupOptions{
-			BasePath:    params.BasePath,
-			WorkingPath: params.WorkingDir,
-			TempPath:    params.TempDir,
+			BasePath:          params.BasePath,
+			WorkingPath:       params.WorkingDir,
+			TempPath:          params.TempDir,
 			// IsTVOS:          !tcpConn,
-			FixAndroidStack: params.FixAndroidStack,
-			LogMaxLines:     100,
-			Debug:           params.Debug,
+			FixAndroidStack:   params.FixAndroidStack,
+			LogMaxLines:       100,
+			Debug:             params.Debug,
+			// OOM fields are applied per-Start via configureMemoryLimit (DisableMemoryLimit).
+			OomKillerEnabled:  false,
+			OomKillerDisabled: true,
+			OomMemoryLimit:    0,
 		})
 
 	// BaseContext must be built AFTER libbox.Setup so filemanager gets real

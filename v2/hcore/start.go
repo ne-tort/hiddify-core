@@ -14,7 +14,6 @@ import (
 	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	"github.com/ne-tort/pathology-core/v2/hutils"
 	service_manager "github.com/ne-tort/pathology-core/v2/service_manager"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
 )
@@ -134,14 +133,18 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	if in.DelayStart {
 		<-time.After(1000 * time.Millisecond)
 	}
-	// LX-STUB: libbox.SetMemoryLimit absent in sing-box-lx; skip iOS/low-memory GC tune.
-	_ = (C.IsIos || !in.DisableMemoryLimit)
+	// LX memory limit: soft GOMEMLIMIT + OOM killer service (FreeOSMemory on pressure).
+	configureMemoryLimit(in.DisableMemoryLimit)
 	instance, err := NewService(ctx, *options)
 	if err != nil {
 		hutils.HealStickyTunForce()
 		return errorWrapper(MessageType_START_SERVICE, err)
 	}
 	static.StartedService = instance
+	startWindowsMemoryScavenge()
+	if static.debug {
+		logMemoryStats("after Start")
+	}
 	monitoring.Activate(static.Context(), static.Box(), static.UrlTestHistory(), func() []string {
 		// Empty ConnectionTestUrls = latency checks disabled (do not fall back to ConnectionTestUrl).
 		if static.ClientOptions == nil {
