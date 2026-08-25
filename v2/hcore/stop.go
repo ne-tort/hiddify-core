@@ -39,12 +39,14 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	monitoring.Deactivate()
 	if err := ss.CloseService(); err != nil {
 		static.StartedService = nil
+		configureMemoryLimit(true) // drop soft GOMEMLIMIT after failed stop
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-stop.log"))
 		hutils.HealStickyTun()
 		return errorWrapper(MessageType_UNEXPECTED_ERROR, err)
 	}
 	// err = common.Close(static.StartedService)
 	static.StartedService = nil
+	configureMemoryLimit(true) // clear soft limit while VPN is down
 
 	hutils.HealStickyTun()
 	return SetCoreStatus(CoreStates_STOPPED, MessageType_EMPTY, ""), nil
