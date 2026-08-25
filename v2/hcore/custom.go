@@ -3,6 +3,7 @@ package hcore
 import (
 	"github.com/ne-tort/pathology-core/compat/monitoring"
 	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
 	"github.com/sagernet/sing-box/log"
 )
 
@@ -20,6 +21,7 @@ func StopAndAlert(msgType MessageType, message string) {
 		ss.CloseService()
 		static.StartedService = nil
 	}
+	_ = db.CloseAll()
 }
 
 func Close(mode SetupMode) error {
@@ -31,6 +33,7 @@ func Close(mode SetupMode) error {
 
 	_, err := Stop()
 	CloseGrpcServer(mode)
+	_ = db.CloseAll()
 
 	return err
 }

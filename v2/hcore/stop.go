@@ -6,6 +6,7 @@ import (
 
 	"github.com/ne-tort/pathology-core/compat/monitoring"
 	"github.com/ne-tort/pathology-core/v2/config"
+	"github.com/ne-tort/pathology-core/v2/db"
 	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 )
@@ -33,6 +34,7 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	ss := static.StartedService
 	if ss == nil {
 		monitoring.Deactivate()
+		_ = db.CloseAll()
 		return SetCoreStatus(CoreStates_STOPPED, MessageType_ALREADY_STOPPED, ""), nil
 	}
 
@@ -40,6 +42,7 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	if err := ss.CloseService(); err != nil {
 		static.StartedService = nil
 		configureMemoryLimit(true) // drop soft GOMEMLIMIT after failed stop
+		_ = db.CloseAll()
 		dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-stop.log"))
 		hutils.HealStickyTun()
 		return errorWrapper(MessageType_UNEXPECTED_ERROR, err)
@@ -47,6 +50,7 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	// err = common.Close(static.StartedService)
 	static.StartedService = nil
 	configureMemoryLimit(true) // clear soft limit while VPN is down
+	_ = db.CloseAll()
 
 	hutils.HealStickyTun()
 	return SetCoreStatus(CoreStates_STOPPED, MessageType_EMPTY, ""), nil
