@@ -67,9 +67,9 @@ func onHostTrayReady() {
 }
 
 func onHostTrayExit() {
-	_, _ = hcore.Stop()
-	hcore.CloseGrpcServer(hcore.SetupMode_GRPC_NORMAL_INSECURE)
-	os.Exit(0)
+	if hostTrayDone != nil {
+		close(hostTrayDone)
+	}
 }
 
 func spawnUiReconnect() {

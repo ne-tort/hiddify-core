@@ -26,6 +26,8 @@ var (
 	hostTray       bool
 )
 
+var hostTrayDone chan struct{}
+
 type coreHostLock struct {
 	PID       int    `json:"pid"`
 	Listen    string `json:"listen"`
@@ -86,14 +88,18 @@ func runHostServe(cmd *cobra.Command, args []string) {
 	fmt.Printf("Core Host listening on %s (Ctrl+C to stop)\n", hostListen)
 
 	if hostTray {
+		hostTrayDone = make(chan struct{})
 		startHostTray(hostUiExe)
 	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
-
-	fmt.Println("Core Host shutting down")
+	select {
+	case <-sigChan:
+		fmt.Println("Core Host shutting down (signal)")
+	case <-hostTrayDone:
+		fmt.Println("Core Host shutting down (tray quit)")
+	}
 	if _, err := hcore.Stop(); err != nil {
 		log.Warn("host serve stop:", err)
 	}
