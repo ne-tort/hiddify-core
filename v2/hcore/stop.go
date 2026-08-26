@@ -3,12 +3,15 @@ package hcore
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"runtime/debug"
 
 	"github.com/ne-tort/pathology-core/compat/monitoring"
 	"github.com/ne-tort/pathology-core/v2/config"
 	"github.com/ne-tort/pathology-core/v2/db"
 	hcommon "github.com/ne-tort/pathology-core/v2/hcommon"
 	hutils "github.com/ne-tort/pathology-core/v2/hutils"
+	"github.com/sagernet/sing-tun"
 )
 
 func (s *CoreService) Stop(ctx context.Context, empty *hcommon.Empty) (*CoreInfoResponse, error) {
@@ -38,6 +41,13 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 		return SetCoreStatus(CoreStates_STOPPED, MessageType_ALREADY_STOPPED, ""), nil
 	}
 
+	goroutinesBefore := runtime.NumGoroutine()
+	liveStacksBefore := tun.LiveGVisorStackCount()
+	Log(LogLevel_INFO, LogType_CORE, fmt.Sprintf(
+		"Stop: before CloseService goroutines=%d liveGVisorStacks=%d",
+		goroutinesBefore, liveStacksBefore,
+	))
+
 	monitoring.Deactivate()
 	if err := ss.CloseService(); err != nil {
 		static.StartedService = nil
@@ -51,6 +61,23 @@ func Stop() (coreResponse *CoreInfoResponse, err error) {
 	static.StartedService = nil
 	configureMemoryLimit(true) // clear soft limit while VPN is down
 	_ = db.CloseAll()
+
+	goroutinesAfter := runtime.NumGoroutine()
+	liveStacksAfter := tun.LiveGVisorStackCount()
+	Log(LogLevel_INFO, LogType_CORE, fmt.Sprintf(
+		"Stop: after CloseService goroutines=%d liveGVisorStacks=%d",
+		goroutinesAfter, liveStacksAfter,
+	))
+	// Residual live stacks or a large goroutine floor after teardown → leak dump.
+	if liveStacksAfter > 0 || goroutinesAfter > 1500 {
+		_ = dumpGoroutinesToFile(fmt.Sprint(sWorkingPath, "/data/goroutine-stop-leak.log"))
+		Log(LogLevel_WARNING, LogType_CORE, fmt.Sprintf(
+			"Stop: residual after teardown liveGVisorStacks=%d goroutines=%d (dumped goroutine-stop-leak.log)",
+			liveStacksAfter, goroutinesAfter,
+		))
+	}
+	debug.FreeOSMemory()
+	logMemoryStats("after Stop FreeOSMemory")
 
 	hutils.HealStickyTun()
 	return SetCoreStatus(CoreStates_STOPPED, MessageType_EMPTY, ""), nil

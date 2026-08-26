@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	service_manager "github.com/ne-tort/pathology-core/v2/service_manager"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
 )
 
 func (s *CoreService) Start(ctx context.Context, in *StartRequest) (*CoreInfoResponse, error) {
@@ -153,6 +155,10 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	}
 	static.StartedService = instance
 	startWindowsMemoryScavenge()
+	Log(LogLevel_INFO, LogType_CORE, fmt.Sprintf(
+		"Start: after NewService goroutines=%d liveGVisorStacks=%d",
+		runtime.NumGoroutine(), tun.LiveGVisorStackCount(),
+	))
 	if static.debug {
 		logMemoryStats("after Start")
 	}

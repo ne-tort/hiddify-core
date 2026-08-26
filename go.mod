@@ -309,6 +309,10 @@ replace github.com/sagernet/sing-vmess => ../vendor/sing-vmess
 
 replace github.com/sagernet/wireguard-go => ../vendor/sing-box-lx/submodules/wireguard-go
 
+// lx gvisor (NewProtocolLocal processor cap + dispatcher double-start guard).
+// Replace does not inherit from sing-box-lx / sing-tun.
+replace github.com/sagernet/gvisor => ../vendor/sing-box-lx/submodules/gvisor
+
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — required after lx merge.
 replace github.com/sagernet/sing-tun => ../vendor/sing-box-lx/patches/sing-tun
 
