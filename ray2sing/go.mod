@@ -263,6 +263,9 @@ replace github.com/sagernet/sing-box => ../../vendor/sing-box-lx
 // replace github.com/xtls/xray-core => github.com/hiddify/xray-core v0.0.0-20260124181826-59e6569c13e9
 replace github.com/sagernet/wireguard-go => ../../vendor/sing-box-lx/submodules/wireguard-go
 
+// lx gvisor (NewProtocolLocal) — keep in sync with pathology-core/go.mod.
+replace github.com/sagernet/gvisor => ../../vendor/sing-box-lx/submodules/gvisor
+
 // lx patches/sing-tun (FlowPortWarmer / l3router TCP reply) — keep in sync with pathology-core/go.mod.
 replace github.com/sagernet/sing-tun => ../../vendor/sing-box-lx/patches/sing-tun
 
