@@ -135,7 +135,18 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 	}
 	// LX memory limit: soft GOMEMLIMIT + OOM killer service (FreeOSMemory on pressure).
 	configureMemoryLimit(in.DisableMemoryLimit)
+	// Pre-start smoke: clear leftover Wintun/PathologyTunnel before create so the
+	// first Connect after a crash does not pay a full adapter timeout.
+	if hutils.StickyTunLikelyPresent() {
+		Log(LogLevel_INFO, LogType_CORE, "sticky TUN present — HealStickyTunForce before NewService")
+		hutils.HealStickyTunForce()
+	}
 	instance, err := NewService(ctx, *options)
+	if err != nil && hutils.IsStickyTunStartError(err) {
+		Log(LogLevel_INFO, LogType_CORE, "sticky TUN start error — heal + one silent NewService retry: ", err.Error())
+		hutils.HealStickyTunForce()
+		instance, err = NewService(ctx, *options)
+	}
 	if err != nil {
 		hutils.HealStickyTunForce()
 		return errorWrapper(MessageType_START_SERVICE, err)

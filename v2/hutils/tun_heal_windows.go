@@ -31,6 +31,25 @@ func HealStickyTunForce() {
 	healStickyTun(true)
 }
 
+// StickyTunLikelyPresent is a fast smoke check for a leftover PathologyTunnel
+// adapter (post-crash ghost). True → caller should HealStickyTunForce before Start.
+func StickyTunLikelyPresent() bool {
+	name := TunInterfaceName
+	out, ok := runHiddenOutput(500*time.Millisecond, "netsh", "interface", "show", "interface", "name="+name)
+	if !ok {
+		// Timed out or failed to spawn — do not force heal on every Connect.
+		// Sticky NewService failure path still heals + retries once.
+		return false
+	}
+	low := strings.ToLower(out)
+	if strings.Contains(low, "no interface") || strings.Contains(low, "not found") ||
+		strings.Contains(low, "element not found") || strings.TrimSpace(out) == "" {
+		return false
+	}
+	// netsh prints a table with Admin State / State / Type / Interface Name when present.
+	return strings.Contains(out, name) || strings.Contains(low, strings.ToLower(name))
+}
+
 func healStickyTun(force bool) {
 	healMu.Lock()
 	if !force && time.Since(lastHealAt) < healCooldown {
@@ -60,27 +79,36 @@ func healStickyTun(force bool) {
 }
 
 func runHidden(timeout time.Duration, name string, args ...string) {
+	_, _ = runHiddenOutput(timeout, name, args...)
+}
+
+// runHiddenOutput runs a command with CREATE_NO_WINDOW and returns combined
+// stdout+stderr. ok is false if the process could not be started or was killed
+// by timeout.
+func runHiddenOutput(timeout time.Duration, name string, args ...string) (string, bool) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: createNoWindow,
 	}
 	if timeout <= 0 {
-		_ = cmd.Run()
-		return
+		out, err := cmd.CombinedOutput()
+		return string(out), err == nil || len(out) > 0
 	}
+	var buf strings.Builder
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
 	if err := cmd.Start(); err != nil {
-		return
+		return "", false
 	}
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
+		return buf.String(), true
 	case <-time.After(timeout):
 		_ = cmd.Process.Kill()
 		<-done
+		return buf.String(), false
 	}
 }
