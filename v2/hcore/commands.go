@@ -251,15 +251,14 @@ func (h *PathologyInstance) SelectOutbound(in *SelectOutboundRequest) (*hcommon.
 }
 
 func (s *CoreService) UrlTest(ctx context.Context, in *UrlTestRequest) (*hcommon.Response, error) {
-	return static.UrlTest(in)
+	return static.UrlTest(ctx, in)
 }
 
 func (s *CoreService) UrlTestActive(ctx context.Context, in *hcommon.Empty) (*hcommon.Response, error) {
-
-	return static.UrlTestActive()
+	return static.UrlTestActive(ctx)
 }
 
-func (h *PathologyInstance) UrlTestActive() (*hcommon.Response, error) {
+func (h *PathologyInstance) UrlTestActive(ctx context.Context) (*hcommon.Response, error) {
 	if box := h.Box(); box != nil {
 		outboundGroup, isLoaded := box.Outbound().Outbound(config.OutboundSelectTag)
 		if !isLoaded {
@@ -303,7 +302,7 @@ func (h *PathologyInstance) UrlTestActive() (*hcommon.Response, error) {
 			seen[n2] = struct{}{}
 			now = n2
 		}
-		return h.UrlTest(&UrlTestRequest{
+		return h.UrlTest(ctx, &UrlTestRequest{
 			Tag: now,
 		})
 
@@ -314,31 +313,16 @@ func (h *PathologyInstance) UrlTestActive() (*hcommon.Response, error) {
 	}, nil
 }
 
-func (h *PathologyInstance) UrlTest(in *UrlTestRequest) (*hcommon.Response, error) {
+func (h *PathologyInstance) UrlTest(ctx context.Context, in *UrlTestRequest) (*hcommon.Response, error) {
 	if in.Tag == "" {
-		return h.UrlTestActive()
+		return h.UrlTestActive(ctx)
 	}
-	// err := libbox.NewStandaloneCommandClient().URLTest(in.GroupTag)
-	// if err != nil {
-	// 	return &hcommon.Response{
-	// 		Code:    hcommon.ResponseCode_FAILED,
-	// 		Message: err.Error(),
-	// 	}, err
-	// }
-
-	// return &hcommon.Response{
-	// 	Code:    hcommon.ResponseCode_OK,
-	// 	Message: "",
-	// }, nil
-
-	// groupTag := in.GroupTag
 	box := h.Box()
 	if box == nil {
 		return nil, E.New("service not ready")
 	}
-	// Run probe synchronously (bounded by monitoring.ProbeTimeout = 3s).
-	// Results are stored in HistoryStorage and pushed via MainOutboundsInfo stream.
-	_ = monitoring.Get(h.Context()).TestNow(in.Tag)
+	// Honour gRPC cancel; Deactivate cancels monitor ctx on Stop.
+	_ = monitoring.Get(h.Context()).TestNowContext(ctx, in.Tag)
 
 	return &hcommon.Response{
 		Code:    hcommon.ResponseCode_OK,

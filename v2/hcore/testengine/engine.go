@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,9 @@ const (
 	samplesAverage  = 3
 	samplesStress   = 10
 	maxStartTries    = 2
+	// closeWaitBudget: cancel probes first, then wait for in-flight Ping to exit
+	// before CloseService (stress wall ≈ ProbeTimeout*10 + margin).
+	closeWaitBudget = 45 * time.Second
 )
 
 // SideStarter starts a side box from built options.
@@ -58,6 +62,10 @@ type Engine struct {
 	pingsInFlight sync.WaitGroup
 
 	idleCancel context.CancelFunc
+
+	// probeCtx is cancelled on Stop / idle teardown so in-flight Ping dials abort.
+	probeCtx    context.Context
+	probeCancel context.CancelFunc
 }
 
 // Deps wires Engine to the main PathologyInstance without importing hcore (cycle).
@@ -139,7 +147,8 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 	old := e.takeServiceLocked()
 	e.mu.Unlock()
 
-	if err := closeSideService(old, &e.pingsInFlight); err != nil {
+	if err := closeSideService(old, &e.pingsInFlight, closeWaitBudget); err != nil {
+		log.Printf("testengine: stop previous side box: %v", err)
 		return nil, status.Errorf(codes.Aborted, "stop previous: %v", err)
 	}
 
@@ -174,6 +183,7 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 		)
 	}
 	narrowSelectOutbounds(built, leaves)
+	pruneToAllowlist(built, leaves)
 
 	var lastErr error
 	for try := 0; try < maxStartTries; try++ {
@@ -191,7 +201,9 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 		}
 		port, perr := readMixedListenPort(svc)
 		if perr != nil {
-			_ = closeSideService(svc, nil)
+			if cerr := closeSideService(svc, nil, closeWaitBudget); cerr != nil {
+				log.Printf("testengine: close after mixed-port read fail: %v", cerr)
+			}
 			lastErr = perr
 			continue
 		}
@@ -199,7 +211,9 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 		e.mu.Lock()
 		if e.service != nil {
 			e.mu.Unlock()
-			_ = closeSideService(svc, nil)
+			if cerr := closeSideService(svc, nil, closeWaitBudget); cerr != nil {
+				log.Printf("testengine: close raced side box: %v", cerr)
+			}
 			e.mu.Lock()
 			if e.canReuseLocked(profileID, configPath, stamp) && e.allowlistKey == allowKey {
 				resp := &EnsureResponse{
@@ -213,6 +227,7 @@ func (e *Engine) Ensure(ctx context.Context, profileID, configPath string, allow
 			e.mu.Unlock()
 			return nil, status.Error(codes.Aborted, "test engine slot taken")
 		}
+		e.resetProbeCtxLocked()
 		e.service = svc
 		e.profileID = profileID
 		e.configPath = configPath
@@ -238,7 +253,13 @@ func (e *Engine) Stop(ctx context.Context) error {
 	e.mu.Lock()
 	old := e.takeServiceLocked()
 	e.mu.Unlock()
-	return closeSideService(old, &e.pingsInFlight)
+	err := closeSideService(old, &e.pingsInFlight, closeWaitBudget)
+	if err != nil {
+		log.Printf("testengine: Stop CloseService: %v", err)
+	} else if old != nil {
+		log.Printf("testengine: side stop done")
+	}
+	return err
 }
 
 // Ping runs a strategy probe for one outbound tag (outboundTag required).
@@ -263,6 +284,7 @@ func (e *Engine) Ping(ctx context.Context, profileID, outboundTag, strategy, tes
 	}
 	svc := e.service
 	leaves := append([]string{}, e.leafTags...)
+	probeCtx := e.probeCtx
 	e.pingsInFlight.Add(1)
 	e.touchLocked()
 	e.mu.Unlock()
@@ -288,14 +310,9 @@ func (e *Engine) Ping(ctx context.Context, profileID, outboundTag, strategy, tes
 	}
 	b := boxInst.Box()
 
-	// Bound the whole fan-out. Detach from gRPC cancel so a client timeout does not
-	// leave probes half-cancelled; hard wall + per-leaf caps still apply.
-	parent := ctx
-	if parent == nil {
-		parent = context.Background()
-	}
+	// Honour gRPC cancel and engine Stop (probeCtx). Hard wall still bounds dials.
 	wall := probeWallClock(len(tags), samples, concurrency)
-	parent, cancel := context.WithTimeout(context.WithoutCancel(parent), wall)
+	parent, cancel := pingContext(ctx, probeCtx, wall)
 	defer cancel()
 
 	results := make([]PingResult, len(tags))
@@ -347,12 +364,28 @@ func (e *Engine) canReuseLocked(profileID, configPath, stamp string) bool {
 		e.configStamp == stamp
 }
 
+// resetProbeCtxLocked installs a fresh probe cancel scope for the new side box.
+// Caller must hold e.mu.
+func (e *Engine) resetProbeCtxLocked() {
+	if e.probeCancel != nil {
+		e.probeCancel()
+		e.probeCancel = nil
+	}
+	e.probeCtx, e.probeCancel = context.WithCancel(context.Background())
+}
+
 // takeServiceLocked detaches the running service and clears the slot. Caller must hold e.mu.
+// Cancels idle watch and in-flight probes before returning the service for Close.
 func (e *Engine) takeServiceLocked() *daemon.StartedService {
 	if e.idleCancel != nil {
 		e.idleCancel()
 		e.idleCancel = nil
 	}
+	if e.probeCancel != nil {
+		e.probeCancel()
+		e.probeCancel = nil
+	}
+	e.probeCtx = nil
 	svc := e.service
 	e.service = nil
 	e.profileID = ""
@@ -364,11 +397,33 @@ func (e *Engine) takeServiceLocked() *daemon.StartedService {
 	return svc
 }
 
-func closeSideService(svc *daemon.StartedService, pings *sync.WaitGroup) error {
+// pingContext bounds a Ping by wall clock and cancels when gRPC ctx or probeCtx ends.
+func pingContext(grpcCtx, probeCtx context.Context, wall time.Duration) (context.Context, context.CancelFunc) {
+	if grpcCtx == nil {
+		grpcCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(grpcCtx, wall)
+	if probeCtx == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-probeCtx.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func closeSideService(svc *daemon.StartedService, pings *sync.WaitGroup, wait time.Duration) error {
 	if svc == nil {
 		return nil
 	}
 	if pings != nil {
+		if wait <= 0 {
+			wait = closeWaitBudget
+		}
 		done := make(chan struct{})
 		go func() {
 			pings.Wait()
@@ -376,8 +431,8 @@ func closeSideService(svc *daemon.StartedService, pings *sync.WaitGroup) error {
 		}()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			// A hung probe must not block Ensure/Stop forever.
+		case <-time.After(wait):
+			log.Printf("testengine: wait for in-flight probes timed out after %v", wait)
 		}
 	}
 	err := svc.CloseService()
@@ -530,6 +585,44 @@ func narrowSelectOutbounds(opts *option.Options, leaves []string) {
 	}
 }
 
+// pruneToAllowlist drops leaf outbounds/endpoints not in the Ensure allowlist so
+// side-box start does not spin up N Reality/XHTTP clients before the first probe.
+// Keeps select/group/direct and other predefined service tags.
+func pruneToAllowlist(opts *option.Options, leaves []string) {
+	if opts == nil {
+		return
+	}
+	keep := make(map[string]struct{}, len(leaves)+len(config.PredefinedOutboundTags)+1)
+	for _, t := range leaves {
+		keep[t] = struct{}{}
+	}
+	for _, t := range config.PredefinedOutboundTags {
+		keep[t] = struct{}{}
+	}
+	keep[config.OutboundRoundRobinTag] = struct{}{}
+
+	keptOb := opts.Outbounds[:0]
+	for _, ob := range opts.Outbounds {
+		if _, ok := keep[ob.Tag]; ok {
+			keptOb = append(keptOb, ob)
+			continue
+		}
+		switch ob.Type {
+		case C.TypeSelector, C.TypeURLTest, C.TypeBalancer, C.TypeBlock, C.TypeDNS, C.TypeDirect:
+			keptOb = append(keptOb, ob)
+		}
+	}
+	opts.Outbounds = keptOb
+
+	keptEp := opts.Endpoints[:0]
+	for _, ep := range opts.Endpoints {
+		if _, ok := keep[ep.Tag]; ok {
+			keptEp = append(keptEp, ep)
+		}
+	}
+	opts.Endpoints = keptEp
+}
+
 func readMixedListenPort(svc *daemon.StartedService) (uint16, error) {
 	if svc == nil {
 		return 0, fmt.Errorf("nil service")
@@ -586,7 +679,11 @@ func (e *Engine) startIdleWatchLocked() {
 			}
 			old := e.takeServiceLocked()
 			e.mu.Unlock()
-			_ = closeSideService(old, &e.pingsInFlight)
+			if err := closeSideService(old, &e.pingsInFlight, closeWaitBudget); err != nil {
+				log.Printf("testengine: idle CloseService: %v", err)
+			} else if old != nil {
+				log.Printf("testengine: side idle stop done")
+			}
 		}
 	}()
 }

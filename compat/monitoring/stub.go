@@ -1,7 +1,10 @@
+// Package monitoring runs URL tests against live outbounds and mirrors
+// results into sing-box HistoryStorage so proxy streams see delay updates.
 package monitoring
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +30,10 @@ const DefaultProbeTimeout = 3 * time.Second
 // ProbeTimeout is kept as an alias for callers that still reference the old name.
 const ProbeTimeout = DefaultProbeTimeout
 
+// deactivateWaitBudget: cancel probes on Stop, then wait before CloseService
+// (covers fastAverage; stress may still time out — better than hanging Disconnect).
+const deactivateWaitBudget = 15 * time.Second
+
 // GroupEvent is emitted when URL-test history changes.
 type GroupEvent struct{}
 
@@ -34,6 +41,7 @@ type GroupEvent struct{}
 // results into sing-box HistoryStorage so proxy streams see delay updates.
 type OutboundMonitoring struct {
 	ctx      context.Context
+	cancel   context.CancelFunc
 	box      *box.Box
 	history  *urltest.HistoryStorage
 	testURLs func() []string
@@ -41,6 +49,8 @@ type OutboundMonitoring struct {
 	timeout  func() time.Duration
 	events   *Broadcaster[GroupEvent]
 	hook     *observable.Subscriber[struct{}]
+
+	probesInFlight sync.WaitGroup
 }
 
 var active atomic.Pointer[OutboundMonitoring]
@@ -65,14 +75,16 @@ func Activate(ctx context.Context, b *box.Box, history *urltest.HistoryStorage, 
 
 	Deactivate()
 
+	probeCtx, cancel := context.WithCancel(ctx)
 	m := &OutboundMonitoring{
-		ctx:      ctx,
+		ctx:      probeCtx,
+		cancel:   cancel,
 		box:      b,
 		history:  history,
 		testURLs: testURLs,
 		strategy: strategy,
 		timeout:  timeout,
-		events:   NewBroadcaster[GroupEvent](ctx),
+		events:   NewBroadcaster[GroupEvent](probeCtx),
 		hook:     observable.NewSubscriber[struct{}](4),
 	}
 	history.AddUpdateHook(m.hook)
@@ -90,8 +102,23 @@ func (m *OutboundMonitoring) probeTimeout() time.Duration {
 }
 
 // Deactivate drops the active monitor (service stop / reload).
+// Cancels in-flight probes and waits briefly so Disconnect does not Close
+// the box under live Reality/XHTTP dials (Connect analogue of TestEngine H-N6).
 func Deactivate() {
 	if m := active.Swap(nil); m != nil {
+		if m.cancel != nil {
+			m.cancel()
+		}
+		done := make(chan struct{})
+		go func() {
+			m.probesInFlight.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(deactivateWaitBudget):
+			log.Printf("monitoring: wait for in-flight urltest probes timed out after %v", deactivateWaitBudget)
+		}
 		if m.hook != nil {
 			m.hook.Close()
 		}
@@ -146,23 +173,57 @@ func RealTag(detour adapter.Outbound) string {
 
 // TestNow probes a single outbound/endpoint tag, or every leaf if tag is a group.
 func (m *OutboundMonitoring) TestNow(outboundTag string) error {
+	return m.TestNowContext(nil, outboundTag)
+}
+
+// TestNowContext is like TestNow but also cancels when caller (e.g. gRPC) ends.
+func (m *OutboundMonitoring) TestNowContext(caller context.Context, outboundTag string) error {
 	if m == nil || m.box == nil || m.history == nil || outboundTag == "" {
 		return nil
 	}
 
+	m.probesInFlight.Add(1)
+	defer m.probesInFlight.Done()
+
+	parent, cancel := mergeProbeParent(m.ctx, caller)
+	defer cancel()
+	if err := parent.Err(); err != nil {
+		return err
+	}
+
 	if ob, ok := m.box.Outbound().Outbound(outboundTag); ok {
 		if group, isGroup := ob.(adapter.OutboundGroup); isGroup {
-			return m.testGroupLeaves(group)
+			return m.testGroupLeaves(parent, group)
 		}
-		return m.testDialer(ob, ob)
+		return m.testDialer(parent, ob, ob)
 	}
 	if ep, ok := m.box.Endpoint().Get(outboundTag); ok {
-		return m.testDialer(ep, ep)
+		return m.testDialer(parent, ep, ep)
 	}
 	return nil
 }
 
-func (m *OutboundMonitoring) testGroupLeaves(group adapter.OutboundGroup) error {
+// mergeProbeParent cancels when either the monitor lifetime or the caller ends.
+func mergeProbeParent(monitor, caller context.Context) (context.Context, context.CancelFunc) {
+	if monitor == nil {
+		monitor = context.Background()
+	}
+	if caller == nil {
+		// Still return a cancelable child so callers can defer cancel safely.
+		return context.WithCancel(monitor)
+	}
+	ctx, cancel := context.WithCancel(monitor)
+	go func() {
+		select {
+		case <-caller.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func (m *OutboundMonitoring) testGroupLeaves(parent context.Context, group adapter.OutboundGroup) error {
 	type leaf struct {
 		dialer N.Dialer
 		source adapter.Outbound
@@ -183,12 +244,19 @@ func (m *OutboundMonitoring) testGroupLeaves(group adapter.OutboundGroup) error 
 	}
 	if len(leaves) == 0 {
 		if now := group.Now(); now != "" {
-			return m.TestNow(now)
+			// Nested TestNowContext would double-count probesInFlight; probe inline.
+			if ob, ok := m.box.Outbound().Outbound(now); ok {
+				if _, isGroup := ob.(adapter.OutboundGroup); !isGroup {
+					return m.testDialer(parent, ob, ob)
+				}
+			}
+			if ep, ok := m.box.Endpoint().Get(now); ok {
+				return m.testDialer(parent, ep, ep)
+			}
 		}
 		return nil
 	}
 
-	parent := m.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -198,7 +266,7 @@ func (m *OutboundMonitoring) testGroupLeaves(group adapter.OutboundGroup) error 
 	for _, l := range leaves {
 		leaf := l
 		b.Go(leaf.tag, func() (any, error) {
-			err := m.testDialer(leaf.dialer, leaf.source)
+			err := m.testDialer(parent, leaf.dialer, leaf.source)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -237,8 +305,7 @@ func (m *OutboundMonitoring) resolveURLs() []string {
 	return urls
 }
 
-func (m *OutboundMonitoring) testDialer(dialer N.Dialer, source adapter.Outbound) error {
-	parent := m.ctx
+func (m *OutboundMonitoring) testDialer(parent context.Context, dialer N.Dialer, source adapter.Outbound) error {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -272,6 +339,10 @@ func (m *OutboundMonitoring) testDialer(dialer N.Dialer, source adapter.Outbound
 	var okCount int
 	var lastErr error
 	for i := 0; i < samples; i++ {
+		if err := parent.Err(); err != nil {
+			lastErr = err
+			break
+		}
 		delay, err := m.raceURLs(parent, dialer, urls)
 		if err != nil || delay == 0 || delay > MaxSuccessDelay {
 			lastErr = err
