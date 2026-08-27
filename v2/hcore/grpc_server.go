@@ -15,6 +15,7 @@ import (
 	"net"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	sync "sync"
@@ -157,7 +158,7 @@ func StartGrpcServer(listenAddressG string, service string) (*grpc.Server, error
 	} else if service == "hello" {
 		// RegisterHelloServer(s, &hello.HelloService{})
 	} else if service == "ezytel" {
-		ezytel.RegisterEzytelServer(s, ezytel.NewEzytelService(""))
+		ezytel.RegisterEzytelServer(s, ezytel.NewEzytelService(ezytelCacheDir()))
 	} else if service == "tunnel" {
 		// RegisterTunnelServiceServer(s, &TunnelService{})
 	}
@@ -255,7 +256,7 @@ func StartGrpcServerByMode(listenAddressG string, mode SetupMode) (*grpc.Server,
 	// Register your gRPC service here
 	RegisterCoreServer(grpcServer[mode], &CoreService{})
 	hello.RegisterHelloServer(grpcServer[mode], &hello.HelloService{})
-	ezytel.RegisterEzytelServer(grpcServer[mode], ezytel.NewEzytelService(""))
+	ezytel.RegisterEzytelServer(grpcServer[mode], ezytel.NewEzytelService(ezytelCacheDir()))
 	// Listen on the provided address
 	lis, err := net.Listen("tcp", listenAddressG)
 	if err != nil {
@@ -313,4 +314,12 @@ func CloseGrpcServer(mode SetupMode) {
 		server.Stop()
 		delete(grpcServer, mode)
 	}
+}
+
+// ezytelCacheDir keeps ezytel under Setup TempDir (portable_data/tmp) instead of os.TempDir.
+func ezytelCacheDir() string {
+	if sTempPath != "" {
+		return filepath.Join(sTempPath, "ezytel-cache")
+	}
+	return filepath.Join(os.TempDir(), "ezytel-cache")
 }
