@@ -24,6 +24,11 @@ func SetCoreStatus(state CoreStates, msgType MessageType, message string) *CoreI
 	return &info
 }
 
+// CurrentCoreState returns the in-process core state (Host tray status poll).
+func CurrentCoreState() CoreStates {
+	return static.CoreState
+}
+
 func (s *CoreService) CoreInfoListener(req *hcommon.Empty, stream grpc.ServerStreamingServer[CoreInfoResponse]) error {
 	coreSub := static.coreInfoObserver.Subscribe(1)
 	defer static.coreInfoObserver.Unsubscribe(coreSub)

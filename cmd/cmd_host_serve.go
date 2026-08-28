@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -24,15 +25,16 @@ var (
 	hostAppVersion string
 	hostUiExe      string
 	hostTray       bool
+	hostAutostart  bool
+	hostLang       string
 )
-
-var hostTrayDone chan struct{}
 
 type coreHostLock struct {
 	PID       int    `json:"pid"`
 	Listen    string `json:"listen"`
 	Version   string `json:"version"`
 	StartedAt string `json:"started_at"`
+	Tray      bool   `json:"tray"`
 }
 
 var commandHostServe = &cobra.Command{
@@ -56,6 +58,8 @@ func init() {
 	commandHostServe.Flags().StringVar(&hostAppVersion, "app-version", "", "app version for lock-file handshake")
 	commandHostServe.Flags().StringVar(&hostUiExe, "ui-exe", "", "Pathology UI executable for tray Open")
 	commandHostServe.Flags().BoolVar(&hostTray, "tray", false, "show system tray (Phase 2)")
+	commandHostServe.Flags().BoolVar(&hostAutostart, "autostart", false, "OS login autostart (auto-connect, lightweight)")
+	commandHostServe.Flags().StringVar(&hostLang, "lang", "en", "fallback tray language (en|ru)")
 	commandHostServe.MarkFlagRequired("base")
 	commandHostServe.MarkFlagRequired("working")
 	commandHostServe.MarkFlagRequired("temp")
@@ -80,6 +84,9 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		log.Fatal(err)
 	}
 
+	hostTrayBase = hostBasePath
+	hostTrayLang = hostLang
+
 	if err := writeCoreHostLock(); err != nil {
 		log.Warn("core host lock:", err)
 	}
@@ -91,6 +98,8 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		hostTrayDone = make(chan struct{})
 		startHostTray(hostUiExe)
 	}
+
+	maybeAutoConnectOnHostAutostart()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -106,12 +115,26 @@ func runHostServe(cmd *cobra.Command, args []string) {
 	hcore.CloseGrpcServer(hcore.SetupMode_GRPC_NORMAL_INSECURE)
 }
 
+func maybeAutoConnectOnHostAutostart() {
+	if !hostAutostart {
+		return
+	}
+	prefs := loadHostTrayPrefs(hostBasePath)
+	if !prefs.AutoConnectOnLogin {
+		return
+	}
+	if _, err := hcore.Start(context.Background(), &hcore.StartRequest{}); err != nil {
+		log.Warn("auto_connect_on_login start:", err)
+	}
+}
+
 func writeCoreHostLock() error {
 	lock := coreHostLock{
 		PID:       os.Getpid(),
 		Listen:    hostListen,
 		Version:   hostAppVersion,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		Tray:      hostTray,
 	}
 	raw, err := json.Marshal(lock)
 	if err != nil {
