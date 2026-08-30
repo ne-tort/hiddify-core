@@ -40,7 +40,14 @@ func (s *CoreService) SetServiceMode(ctx context.Context, in *SetServiceModeRequ
 }
 
 func (s *CoreService) SyncSessionState(ctx context.Context, in *SyncSessionStateRequest) (*SessionState, error) {
-	if in == nil || in.GetState() == nil {
+	if in == nil {
+		return toProtoSessionState(session.LoadState()), nil
+	}
+	if in.GetClearUiPid() {
+		_ = session.ClearUiPid()
+	}
+	if in.GetState() == nil {
+		notifyTrayDisplaySync()
 		return toProtoSessionState(session.LoadState()), nil
 	}
 	st, err := session.SyncState(fromProtoSessionState(in.GetState()))

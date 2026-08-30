@@ -308,5 +308,7 @@ message SetServiceModeRequest {
 
 message SyncSessionStateRequest {
   SessionState state = 1;
+  // When true, drop stored ui_pid so Host tray spawns a fresh UI instead of signaling a dead pid.
+  bool clear_ui_pid = 2;
 }
 

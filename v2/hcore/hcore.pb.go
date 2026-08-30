@@ -2774,8 +2774,10 @@ func (x *SetServiceModeRequest) GetServiceMode() string {
 }
 
 type SyncSessionStateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	State         *SessionState          `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	State *SessionState          `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	// When true, drop stored ui_pid so Host tray spawns a fresh UI instead of signaling a dead pid.
+	ClearUiPid    bool `protobuf:"varint,2,opt,name=clear_ui_pid,json=clearUiPid,proto3" json:"clear_ui_pid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2815,6 +2817,13 @@ func (x *SyncSessionStateRequest) GetState() *SessionState {
 		return x.State
 	}
 	return nil
+}
+
+func (x *SyncSessionStateRequest) GetClearUiPid() bool {
+	if x != nil {
+		return x.ClearUiPid
+	}
+	return false
 }
 
 var File_v2_hcore_hcore_proto protoreflect.FileDescriptor
@@ -3029,9 +3038,11 @@ const file_v2_hcore_hcore_proto_rawDesc = "" +
 	"\vprofile_ids\x18\x01 \x03(\tR\n" +
 	"profileIds\":\n" +
 	"\x15SetServiceModeRequest\x12!\n" +
-	"\fservice_mode\x18\x01 \x01(\tR\vserviceMode\"D\n" +
+	"\fservice_mode\x18\x01 \x01(\tR\vserviceMode\"f\n" +
 	"\x17SyncSessionStateRequest\x12)\n" +
-	"\x05state\x18\x01 \x01(\v2\x13.hcore.SessionStateR\x05state*B\n" +
+	"\x05state\x18\x01 \x01(\v2\x13.hcore.SessionStateR\x05state\x12 \n" +
+	"\fclear_ui_pid\x18\x02 \x01(\bR\n" +
+	"clearUiPid*B\n" +
 	"\n" +
 	"CoreStates\x12\v\n" +
 	"\aSTOPPED\x10\x00\x12\f\n" +
