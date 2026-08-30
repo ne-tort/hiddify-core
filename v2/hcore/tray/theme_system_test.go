@@ -6,11 +6,12 @@ import "testing"
 
 func TestPrefersDarkSetting(t *testing.T) {
 	cases := map[string]bool{
-		"'prefer-dark'":   true,
-		"'default'":       false,
-		"'Adwaita-dark'":  true,
-		"'Adwaita'":       false,
-		"  'Yaru-dark'  ": true,
+		"'prefer-dark'":    true,
+		"'prefer-light'":   false,
+		"'default'":        false,
+		"'Adwaita-dark'":   true,
+		"'Adwaita'":        false,
+		"  'Yaru-dark'  ":  true,
 	}
 	for raw, want := range cases {
 		if got := prefersDarkSetting(raw); got != want {

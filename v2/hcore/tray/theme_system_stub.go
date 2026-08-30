@@ -57,5 +57,5 @@ func linuxPrefersDarkMenu() bool {
 func prefersDarkSetting(raw string) bool {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	s = strings.Trim(s, "'\"")
-	return strings.Contains(s, "dark")
+	return strings.Contains(s, "dark") && !strings.Contains(s, "light")
 }
