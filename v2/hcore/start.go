@@ -109,6 +109,7 @@ func StartService(ctx context.Context, in *StartRequest) (coreResponse *CoreInfo
 		)
 	}
 
+	ctx = libbox.FromContext(ctx, static.globalPlatformInterface)
 	options, err := BuildConfig(ctx, in)
 	if err != nil {
 		return errorWrapper(MessageType_ERROR_BUILDING_CONFIG, err)

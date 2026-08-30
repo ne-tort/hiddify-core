@@ -25,7 +25,7 @@ var File_v2_hcore_hcore_service_proto protoreflect.FileDescriptor
 
 const file_v2_hcore_hcore_service_proto_rawDesc = "" +
 	"\n" +
-	"\x1cv2/hcore/hcore_service.proto\x12\x05hcore\x1a\x17v2/hcommon/common.proto\x1a\x14v2/hcore/hcore.proto2\xec\v\n" +
+	"\x1cv2/hcore/hcore_service.proto\x12\x05hcore\x1a\x17v2/hcommon/common.proto\x1a\x14v2/hcore/hcore.proto2\xb3\x0f\n" +
 	"\x04Core\x125\n" +
 	"\x05Start\x12\x13.hcore.StartRequest\x1a\x17.hcore.CoreInfoResponse\x12=\n" +
 	"\x10CoreInfoListener\x12\x0e.hcommon.Empty\x1a\x17.hcore.CoreInfoResponse0\x01\x12;\n" +
@@ -50,7 +50,14 @@ const file_v2_hcore_hcore_service_proto_rawDesc = "" +
 	"\bGetLANIP\x12\x0e.hcommon.Empty\x1a\x14.hcore.LANIPResponse\x12S\n" +
 	"\x10TestEngineEnsure\x12\x1e.hcore.TestEngineEnsureRequest\x1a\x1f.hcore.TestEngineEnsureResponse\x12M\n" +
 	"\x0eTestEngineStop\x12\x1c.hcore.TestEngineStopRequest\x1a\x1d.hcore.TestEngineStopResponse\x12M\n" +
-	"\x0eTestEnginePing\x12\x1c.hcore.TestEnginePingRequest\x1a\x1d.hcore.TestEnginePingResponseBM\n" +
+	"\x0eTestEnginePing\x12\x1c.hcore.TestEnginePingRequest\x1a\x1d.hcore.TestEnginePingResponse\x129\n" +
+	"\x0eSessionConnect\x12\x0e.hcommon.Empty\x1a\x17.hcore.CoreInfoResponse\x12<\n" +
+	"\x11SessionDisconnect\x12\x0e.hcommon.Empty\x1a\x17.hcore.CoreInfoResponse\x12;\n" +
+	"\x10SessionReconnect\x12\x0e.hcommon.Empty\x1a\x17.hcore.CoreInfoResponse\x126\n" +
+	"\x0fGetSessionState\x12\x0e.hcommon.Empty\x1a\x13.hcore.SessionState\x12I\n" +
+	"\x11SetActiveProfiles\x12\x1f.hcore.SetActiveProfilesRequest\x1a\x13.hcore.SessionState\x12C\n" +
+	"\x0eSetServiceMode\x12\x1c.hcore.SetServiceModeRequest\x1a\x13.hcore.SessionState\x12G\n" +
+	"\x10SyncSessionState\x12\x1e.hcore.SyncSessionStateRequest\x1a\x13.hcore.SessionStateBM\n" +
 	"\x1fcom.pathology.core.api.v2.hcoreZ*github.com/ne-tort/pathology-core/v2/hcoreb\x06proto3"
 
 var file_v2_hcore_hcore_service_proto_goTypes = []any{
@@ -68,18 +75,22 @@ var file_v2_hcore_hcore_service_proto_goTypes = []any{
 	(*TestEngineEnsureRequest)(nil),      // 11: hcore.TestEngineEnsureRequest
 	(*TestEngineStopRequest)(nil),        // 12: hcore.TestEngineStopRequest
 	(*TestEnginePingRequest)(nil),        // 13: hcore.TestEnginePingRequest
-	(*CoreInfoResponse)(nil),             // 14: hcore.CoreInfoResponse
-	(*OutboundGroupList)(nil),            // 15: hcore.OutboundGroupList
-	(*SystemInfo)(nil),                   // 16: hcore.SystemInfo
-	(*hcommon.Response)(nil),             // 17: hcommon.Response
-	(*ParseResponse)(nil),                // 18: hcore.ParseResponse
-	(*WarpGenerationResponse)(nil),       // 19: hcore.WarpGenerationResponse
-	(*SystemProxyStatus)(nil),            // 20: hcore.SystemProxyStatus
-	(*LogMessage)(nil),                   // 21: hcore.LogMessage
-	(*LANIPResponse)(nil),                // 22: hcore.LANIPResponse
-	(*TestEngineEnsureResponse)(nil),     // 23: hcore.TestEngineEnsureResponse
-	(*TestEngineStopResponse)(nil),       // 24: hcore.TestEngineStopResponse
-	(*TestEnginePingResponse)(nil),       // 25: hcore.TestEnginePingResponse
+	(*SetActiveProfilesRequest)(nil),     // 14: hcore.SetActiveProfilesRequest
+	(*SetServiceModeRequest)(nil),        // 15: hcore.SetServiceModeRequest
+	(*SyncSessionStateRequest)(nil),      // 16: hcore.SyncSessionStateRequest
+	(*CoreInfoResponse)(nil),             // 17: hcore.CoreInfoResponse
+	(*OutboundGroupList)(nil),            // 18: hcore.OutboundGroupList
+	(*SystemInfo)(nil),                   // 19: hcore.SystemInfo
+	(*hcommon.Response)(nil),             // 20: hcommon.Response
+	(*ParseResponse)(nil),                // 21: hcore.ParseResponse
+	(*WarpGenerationResponse)(nil),       // 22: hcore.WarpGenerationResponse
+	(*SystemProxyStatus)(nil),            // 23: hcore.SystemProxyStatus
+	(*LogMessage)(nil),                   // 24: hcore.LogMessage
+	(*LANIPResponse)(nil),                // 25: hcore.LANIPResponse
+	(*TestEngineEnsureResponse)(nil),     // 26: hcore.TestEngineEnsureResponse
+	(*TestEngineStopResponse)(nil),       // 27: hcore.TestEngineStopResponse
+	(*TestEnginePingResponse)(nil),       // 28: hcore.TestEnginePingResponse
+	(*SessionState)(nil),                 // 29: hcore.SessionState
 }
 var file_v2_hcore_hcore_service_proto_depIdxs = []int32{
 	0,  // 0: hcore.Core.Start:input_type -> hcore.StartRequest
@@ -106,32 +117,46 @@ var file_v2_hcore_hcore_service_proto_depIdxs = []int32{
 	11, // 21: hcore.Core.TestEngineEnsure:input_type -> hcore.TestEngineEnsureRequest
 	12, // 22: hcore.Core.TestEngineStop:input_type -> hcore.TestEngineStopRequest
 	13, // 23: hcore.Core.TestEnginePing:input_type -> hcore.TestEnginePingRequest
-	14, // 24: hcore.Core.Start:output_type -> hcore.CoreInfoResponse
-	14, // 25: hcore.Core.CoreInfoListener:output_type -> hcore.CoreInfoResponse
-	15, // 26: hcore.Core.OutboundsInfo:output_type -> hcore.OutboundGroupList
-	15, // 27: hcore.Core.MainOutboundsInfo:output_type -> hcore.OutboundGroupList
-	16, // 28: hcore.Core.GetSystemInfo:output_type -> hcore.SystemInfo
-	16, // 29: hcore.Core.GetSystemInfoStream:output_type -> hcore.SystemInfo
-	17, // 30: hcore.Core.Setup:output_type -> hcommon.Response
-	18, // 31: hcore.Core.Parse:output_type -> hcore.ParseResponse
-	14, // 32: hcore.Core.ChangeClientSettings:output_type -> hcore.CoreInfoResponse
-	14, // 33: hcore.Core.StartService:output_type -> hcore.CoreInfoResponse
-	14, // 34: hcore.Core.Stop:output_type -> hcore.CoreInfoResponse
-	14, // 35: hcore.Core.Restart:output_type -> hcore.CoreInfoResponse
-	17, // 36: hcore.Core.SelectOutbound:output_type -> hcommon.Response
-	17, // 37: hcore.Core.UrlTest:output_type -> hcommon.Response
-	17, // 38: hcore.Core.UrlTestActive:output_type -> hcommon.Response
-	19, // 39: hcore.Core.GenerateWarpConfig:output_type -> hcore.WarpGenerationResponse
-	20, // 40: hcore.Core.GetSystemProxyStatus:output_type -> hcore.SystemProxyStatus
-	17, // 41: hcore.Core.SetSystemProxyEnabled:output_type -> hcommon.Response
-	21, // 42: hcore.Core.LogListener:output_type -> hcore.LogMessage
-	1,  // 43: hcore.Core.Close:output_type -> hcommon.Empty
-	22, // 44: hcore.Core.GetLANIP:output_type -> hcore.LANIPResponse
-	23, // 45: hcore.Core.TestEngineEnsure:output_type -> hcore.TestEngineEnsureResponse
-	24, // 46: hcore.Core.TestEngineStop:output_type -> hcore.TestEngineStopResponse
-	25, // 47: hcore.Core.TestEnginePing:output_type -> hcore.TestEnginePingResponse
-	24, // [24:48] is the sub-list for method output_type
-	0,  // [0:24] is the sub-list for method input_type
+	1,  // 24: hcore.Core.SessionConnect:input_type -> hcommon.Empty
+	1,  // 25: hcore.Core.SessionDisconnect:input_type -> hcommon.Empty
+	1,  // 26: hcore.Core.SessionReconnect:input_type -> hcommon.Empty
+	1,  // 27: hcore.Core.GetSessionState:input_type -> hcommon.Empty
+	14, // 28: hcore.Core.SetActiveProfiles:input_type -> hcore.SetActiveProfilesRequest
+	15, // 29: hcore.Core.SetServiceMode:input_type -> hcore.SetServiceModeRequest
+	16, // 30: hcore.Core.SyncSessionState:input_type -> hcore.SyncSessionStateRequest
+	17, // 31: hcore.Core.Start:output_type -> hcore.CoreInfoResponse
+	17, // 32: hcore.Core.CoreInfoListener:output_type -> hcore.CoreInfoResponse
+	18, // 33: hcore.Core.OutboundsInfo:output_type -> hcore.OutboundGroupList
+	18, // 34: hcore.Core.MainOutboundsInfo:output_type -> hcore.OutboundGroupList
+	19, // 35: hcore.Core.GetSystemInfo:output_type -> hcore.SystemInfo
+	19, // 36: hcore.Core.GetSystemInfoStream:output_type -> hcore.SystemInfo
+	20, // 37: hcore.Core.Setup:output_type -> hcommon.Response
+	21, // 38: hcore.Core.Parse:output_type -> hcore.ParseResponse
+	17, // 39: hcore.Core.ChangeClientSettings:output_type -> hcore.CoreInfoResponse
+	17, // 40: hcore.Core.StartService:output_type -> hcore.CoreInfoResponse
+	17, // 41: hcore.Core.Stop:output_type -> hcore.CoreInfoResponse
+	17, // 42: hcore.Core.Restart:output_type -> hcore.CoreInfoResponse
+	20, // 43: hcore.Core.SelectOutbound:output_type -> hcommon.Response
+	20, // 44: hcore.Core.UrlTest:output_type -> hcommon.Response
+	20, // 45: hcore.Core.UrlTestActive:output_type -> hcommon.Response
+	22, // 46: hcore.Core.GenerateWarpConfig:output_type -> hcore.WarpGenerationResponse
+	23, // 47: hcore.Core.GetSystemProxyStatus:output_type -> hcore.SystemProxyStatus
+	20, // 48: hcore.Core.SetSystemProxyEnabled:output_type -> hcommon.Response
+	24, // 49: hcore.Core.LogListener:output_type -> hcore.LogMessage
+	1,  // 50: hcore.Core.Close:output_type -> hcommon.Empty
+	25, // 51: hcore.Core.GetLANIP:output_type -> hcore.LANIPResponse
+	26, // 52: hcore.Core.TestEngineEnsure:output_type -> hcore.TestEngineEnsureResponse
+	27, // 53: hcore.Core.TestEngineStop:output_type -> hcore.TestEngineStopResponse
+	28, // 54: hcore.Core.TestEnginePing:output_type -> hcore.TestEnginePingResponse
+	17, // 55: hcore.Core.SessionConnect:output_type -> hcore.CoreInfoResponse
+	17, // 56: hcore.Core.SessionDisconnect:output_type -> hcore.CoreInfoResponse
+	17, // 57: hcore.Core.SessionReconnect:output_type -> hcore.CoreInfoResponse
+	29, // 58: hcore.Core.GetSessionState:output_type -> hcore.SessionState
+	29, // 59: hcore.Core.SetActiveProfiles:output_type -> hcore.SessionState
+	29, // 60: hcore.Core.SetServiceMode:output_type -> hcore.SessionState
+	29, // 61: hcore.Core.SyncSessionState:output_type -> hcore.SessionState
+	31, // [31:62] is the sub-list for method output_type
+	0,  // [0:31] is the sub-list for method input_type
 	0,  // [0:0] is the sub-list for extension type_name
 	0,  // [0:0] is the sub-list for extension extendee
 	0,  // [0:0] is the sub-list for field type_name

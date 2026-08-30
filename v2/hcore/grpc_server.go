@@ -141,6 +141,7 @@ func Setup(params *SetupRequest, platformInterface libbox.PlatformInterface) err
 
 	}
 	hutils.HealStickyTun()
+	SessionInit(params.WorkingDir)
 	return InitPathologyService()
 }
 

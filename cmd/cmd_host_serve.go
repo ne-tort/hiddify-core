@@ -11,6 +11,7 @@ import (
 	"time"
 
 	hcore "github.com/ne-tort/pathology-core/v2/hcore"
+	coretray "github.com/ne-tort/pathology-core/v2/hcore/tray"
 	"github.com/sagernet/sing-box/log"
 
 	"github.com/spf13/cobra"
@@ -69,6 +70,13 @@ func init() {
 }
 
 func runHostServe(cmd *cobra.Command, args []string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("host serve panic: ", r)
+			os.Exit(1)
+		}
+	}()
+
 	if err := hcore.Setup(
 		&hcore.SetupRequest{
 			BasePath:          hostBasePath,
@@ -81,11 +89,9 @@ func runHostServe(cmd *cobra.Command, args []string) {
 		},
 		nil,
 	); err != nil {
-		log.Fatal(err)
+		log.Error("host serve setup failed: ", err)
+		os.Exit(1)
 	}
-
-	hostTrayBase = hostBasePath
-	hostTrayLang = hostLang
 
 	if err := writeCoreHostLock(); err != nil {
 		log.Warn("core host lock:", err)
@@ -95,8 +101,11 @@ func runHostServe(cmd *cobra.Command, args []string) {
 	fmt.Printf("Core Host listening on %s (Ctrl+C to stop)\n", hostListen)
 
 	if hostTray {
-		hostTrayDone = make(chan struct{})
-		startHostTray(hostUiExe)
+		coretray.StartTray(coretray.Options{
+			UIExe:    hostUiExe,
+			BasePath: hostBasePath,
+			Lang:     hostLang,
+		})
 	}
 
 	maybeAutoConnectOnHostAutostart()
@@ -106,7 +115,7 @@ func runHostServe(cmd *cobra.Command, args []string) {
 	select {
 	case <-sigChan:
 		fmt.Println("Core Host shutting down (signal)")
-	case <-hostTrayDone:
+	case <-coretray.Done():
 		fmt.Println("Core Host shutting down (tray quit)")
 	}
 	if _, err := hcore.Stop(); err != nil {
@@ -119,11 +128,11 @@ func maybeAutoConnectOnHostAutostart() {
 	if !hostAutostart {
 		return
 	}
-	prefs := loadHostTrayPrefs(hostBasePath)
-	if !prefs.AutoConnectOnLogin {
+	_, autoConnect := coretray.LoadPrefs(hostBasePath, hostLang)
+	if !autoConnect {
 		return
 	}
-	if _, err := hcore.Start(context.Background(), &hcore.StartRequest{}); err != nil {
+	if _, err := hcore.SessionConnect(context.Background()); err != nil {
 		log.Warn("auto_connect_on_login start:", err)
 	}
 }

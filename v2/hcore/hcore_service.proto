@@ -32,6 +32,13 @@ service Core {
   rpc TestEngineEnsure (TestEngineEnsureRequest) returns (TestEngineEnsureResponse);
   rpc TestEngineStop (TestEngineStopRequest) returns (TestEngineStopResponse);
   rpc TestEnginePing (TestEnginePingRequest) returns (TestEnginePingResponse);
+  rpc SessionConnect (hcommon.Empty) returns (CoreInfoResponse);
+  rpc SessionDisconnect (hcommon.Empty) returns (CoreInfoResponse);
+  rpc SessionReconnect (hcommon.Empty) returns (CoreInfoResponse);
+  rpc GetSessionState (hcommon.Empty) returns (SessionState);
+  rpc SetActiveProfiles (SetActiveProfilesRequest) returns (SessionState);
+  rpc SetServiceMode (SetServiceModeRequest) returns (SessionState);
+  rpc SyncSessionState (SyncSessionStateRequest) returns (SessionState);
 }
 
 

@@ -2457,6 +2457,366 @@ func (x *TestEnginePingResponse) GetResults() []*TestEnginePingResult {
 	return nil
 }
 
+type SessionProfileMeta struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Active        bool                   `protobuf:"varint,3,opt,name=active,proto3" json:"active,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionProfileMeta) Reset() {
+	*x = SessionProfileMeta{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionProfileMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionProfileMeta) ProtoMessage() {}
+
+func (x *SessionProfileMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionProfileMeta.ProtoReflect.Descriptor instead.
+func (*SessionProfileMeta) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SessionProfileMeta) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SessionProfileMeta) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *SessionProfileMeta) GetActive() bool {
+	if x != nil {
+		return x.Active
+	}
+	return false
+}
+
+type SessionStartTarget struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionStartTarget) Reset() {
+	*x = SessionStartTarget{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionStartTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionStartTarget) ProtoMessage() {}
+
+func (x *SessionStartTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionStartTarget.ProtoReflect.Descriptor instead.
+func (*SessionStartTarget) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *SessionStartTarget) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *SessionStartTarget) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+type SessionState struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	ActiveProfileIds   []string               `protobuf:"bytes,1,rep,name=active_profile_ids,json=activeProfileIds,proto3" json:"active_profile_ids,omitempty"`
+	DirectMode         bool                   `protobuf:"varint,2,opt,name=direct_mode,json=directMode,proto3" json:"direct_mode,omitempty"`
+	ServiceMode        string                 `protobuf:"bytes,3,opt,name=service_mode,json=serviceMode,proto3" json:"service_mode,omitempty"`
+	Profiles           []*SessionProfileMeta  `protobuf:"bytes,4,rep,name=profiles,proto3" json:"profiles,omitempty"`
+	StartTarget        *SessionStartTarget    `protobuf:"bytes,5,opt,name=start_target,json=startTarget,proto3" json:"start_target,omitempty"`
+	DisableMemoryLimit bool                   `protobuf:"varint,6,opt,name=disable_memory_limit,json=disableMemoryLimit,proto3" json:"disable_memory_limit,omitempty"`
+	CoreState          CoreStates             `protobuf:"varint,7,opt,name=core_state,json=coreState,proto3,enum=hcore.CoreStates" json:"core_state,omitempty"`
+	Locale             string                 `protobuf:"bytes,8,opt,name=locale,proto3" json:"locale,omitempty"`
+	ThemeMode          string                 `protobuf:"bytes,9,opt,name=theme_mode,json=themeMode,proto3" json:"theme_mode,omitempty"`
+	UiPid              int32                  `protobuf:"varint,10,opt,name=ui_pid,json=uiPid,proto3" json:"ui_pid,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *SessionState) Reset() {
+	*x = SessionState{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionState) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionState) ProtoMessage() {}
+
+func (x *SessionState) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionState.ProtoReflect.Descriptor instead.
+func (*SessionState) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *SessionState) GetActiveProfileIds() []string {
+	if x != nil {
+		return x.ActiveProfileIds
+	}
+	return nil
+}
+
+func (x *SessionState) GetDirectMode() bool {
+	if x != nil {
+		return x.DirectMode
+	}
+	return false
+}
+
+func (x *SessionState) GetServiceMode() string {
+	if x != nil {
+		return x.ServiceMode
+	}
+	return ""
+}
+
+func (x *SessionState) GetProfiles() []*SessionProfileMeta {
+	if x != nil {
+		return x.Profiles
+	}
+	return nil
+}
+
+func (x *SessionState) GetStartTarget() *SessionStartTarget {
+	if x != nil {
+		return x.StartTarget
+	}
+	return nil
+}
+
+func (x *SessionState) GetDisableMemoryLimit() bool {
+	if x != nil {
+		return x.DisableMemoryLimit
+	}
+	return false
+}
+
+func (x *SessionState) GetCoreState() CoreStates {
+	if x != nil {
+		return x.CoreState
+	}
+	return CoreStates_STOPPED
+}
+
+func (x *SessionState) GetLocale() string {
+	if x != nil {
+		return x.Locale
+	}
+	return ""
+}
+
+func (x *SessionState) GetThemeMode() string {
+	if x != nil {
+		return x.ThemeMode
+	}
+	return ""
+}
+
+func (x *SessionState) GetUiPid() int32 {
+	if x != nil {
+		return x.UiPid
+	}
+	return 0
+}
+
+type SetActiveProfilesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ProfileIds    []string               `protobuf:"bytes,1,rep,name=profile_ids,json=profileIds,proto3" json:"profile_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetActiveProfilesRequest) Reset() {
+	*x = SetActiveProfilesRequest{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetActiveProfilesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetActiveProfilesRequest) ProtoMessage() {}
+
+func (x *SetActiveProfilesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetActiveProfilesRequest.ProtoReflect.Descriptor instead.
+func (*SetActiveProfilesRequest) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *SetActiveProfilesRequest) GetProfileIds() []string {
+	if x != nil {
+		return x.ProfileIds
+	}
+	return nil
+}
+
+type SetServiceModeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ServiceMode   string                 `protobuf:"bytes,1,opt,name=service_mode,json=serviceMode,proto3" json:"service_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetServiceModeRequest) Reset() {
+	*x = SetServiceModeRequest{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetServiceModeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetServiceModeRequest) ProtoMessage() {}
+
+func (x *SetServiceModeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetServiceModeRequest.ProtoReflect.Descriptor instead.
+func (*SetServiceModeRequest) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *SetServiceModeRequest) GetServiceMode() string {
+	if x != nil {
+		return x.ServiceMode
+	}
+	return ""
+}
+
+type SyncSessionStateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	State         *SessionState          `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SyncSessionStateRequest) Reset() {
+	*x = SyncSessionStateRequest{}
+	mi := &file_v2_hcore_hcore_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SyncSessionStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SyncSessionStateRequest) ProtoMessage() {}
+
+func (x *SyncSessionStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v2_hcore_hcore_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SyncSessionStateRequest.ProtoReflect.Descriptor instead.
+func (*SyncSessionStateRequest) Descriptor() ([]byte, []int) {
+	return file_v2_hcore_hcore_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *SyncSessionStateRequest) GetState() *SessionState {
+	if x != nil {
+		return x.State
+	}
+	return nil
+}
+
 var File_v2_hcore_hcore_proto protoreflect.FileDescriptor
 
 const file_v2_hcore_hcore_proto_rawDesc = "" +
@@ -2642,7 +3002,36 @@ const file_v2_hcore_hcore_proto_rawDesc = "" +
 	"samples_ok\x18\x06 \x01(\x05R\tsamplesOk\x12#\n" +
 	"\rerror_message\x18\a \x01(\tR\ferrorMessage\"O\n" +
 	"\x16TestEnginePingResponse\x125\n" +
-	"\aresults\x18\x01 \x03(\v2\x1b.hcore.TestEnginePingResultR\aresults*B\n" +
+	"\aresults\x18\x01 \x03(\v2\x1b.hcore.TestEnginePingResultR\aresults\"P\n" +
+	"\x12SessionProfileMeta\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
+	"\x06active\x18\x03 \x01(\bR\x06active\"<\n" +
+	"\x12SessionStartTarget\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\"\xa7\x03\n" +
+	"\fSessionState\x12,\n" +
+	"\x12active_profile_ids\x18\x01 \x03(\tR\x10activeProfileIds\x12\x1f\n" +
+	"\vdirect_mode\x18\x02 \x01(\bR\n" +
+	"directMode\x12!\n" +
+	"\fservice_mode\x18\x03 \x01(\tR\vserviceMode\x125\n" +
+	"\bprofiles\x18\x04 \x03(\v2\x19.hcore.SessionProfileMetaR\bprofiles\x12<\n" +
+	"\fstart_target\x18\x05 \x01(\v2\x19.hcore.SessionStartTargetR\vstartTarget\x120\n" +
+	"\x14disable_memory_limit\x18\x06 \x01(\bR\x12disableMemoryLimit\x120\n" +
+	"\n" +
+	"core_state\x18\a \x01(\x0e2\x11.hcore.CoreStatesR\tcoreState\x12\x16\n" +
+	"\x06locale\x18\b \x01(\tR\x06locale\x12\x1d\n" +
+	"\n" +
+	"theme_mode\x18\t \x01(\tR\tthemeMode\x12\x15\n" +
+	"\x06ui_pid\x18\n" +
+	" \x01(\x05R\x05uiPid\";\n" +
+	"\x18SetActiveProfilesRequest\x12\x1f\n" +
+	"\vprofile_ids\x18\x01 \x03(\tR\n" +
+	"profileIds\":\n" +
+	"\x15SetServiceModeRequest\x12!\n" +
+	"\fservice_mode\x18\x01 \x01(\tR\vserviceMode\"D\n" +
+	"\x17SyncSessionStateRequest\x12)\n" +
+	"\x05state\x18\x01 \x01(\v2\x13.hcore.SessionStateR\x05state*B\n" +
 	"\n" +
 	"CoreStates\x12\v\n" +
 	"\aSTOPPED\x10\x00\x12\f\n" +
@@ -2699,7 +3088,7 @@ func file_v2_hcore_hcore_proto_rawDescGZIP() []byte {
 }
 
 var file_v2_hcore_hcore_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_v2_hcore_hcore_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_v2_hcore_hcore_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_v2_hcore_hcore_proto_goTypes = []any{
 	(CoreStates)(0),                      // 0: hcore.CoreStates
 	(MessageType)(0),                     // 1: hcore.MessageType
@@ -2739,31 +3128,41 @@ var file_v2_hcore_hcore_proto_goTypes = []any{
 	(*TestEnginePingRequest)(nil),        // 35: hcore.TestEnginePingRequest
 	(*TestEnginePingResult)(nil),         // 36: hcore.TestEnginePingResult
 	(*TestEnginePingResponse)(nil),       // 37: hcore.TestEnginePingResponse
-	(*timestamppb.Timestamp)(nil),        // 38: google.protobuf.Timestamp
-	(hcommon.ResponseCode)(0),            // 39: hcommon.ResponseCode
+	(*SessionProfileMeta)(nil),           // 38: hcore.SessionProfileMeta
+	(*SessionStartTarget)(nil),           // 39: hcore.SessionStartTarget
+	(*SessionState)(nil),                 // 40: hcore.SessionState
+	(*SetActiveProfilesRequest)(nil),     // 41: hcore.SetActiveProfilesRequest
+	(*SetServiceModeRequest)(nil),        // 42: hcore.SetServiceModeRequest
+	(*SyncSessionStateRequest)(nil),      // 43: hcore.SyncSessionStateRequest
+	(*timestamppb.Timestamp)(nil),        // 44: google.protobuf.Timestamp
+	(hcommon.ResponseCode)(0),            // 45: hcommon.ResponseCode
 }
 var file_v2_hcore_hcore_proto_depIdxs = []int32{
 	0,  // 0: hcore.CoreInfoResponse.core_state:type_name -> hcore.CoreStates
 	1,  // 1: hcore.CoreInfoResponse.message_type:type_name -> hcore.MessageType
 	2,  // 2: hcore.CloseRequest.mode:type_name -> hcore.SetupMode
 	2,  // 3: hcore.SetupRequest.mode:type_name -> hcore.SetupMode
-	38, // 4: hcore.OutboundInfo.url_test_time:type_name -> google.protobuf.Timestamp
+	44, // 4: hcore.OutboundInfo.url_test_time:type_name -> google.protobuf.Timestamp
 	11, // 5: hcore.OutboundInfo.ipinfo:type_name -> hcore.IpInfo
 	10, // 6: hcore.OutboundGroup.items:type_name -> hcore.OutboundInfo
 	12, // 7: hcore.OutboundGroupList.items:type_name -> hcore.OutboundGroup
 	14, // 8: hcore.WarpGenerationResponse.account:type_name -> hcore.WarpAccount
 	15, // 9: hcore.WarpGenerationResponse.config:type_name -> hcore.WarpWireguardConfig
-	39, // 10: hcore.ParseResponse.response_code:type_name -> hcommon.ResponseCode
+	45, // 10: hcore.ParseResponse.response_code:type_name -> hcommon.ResponseCode
 	3,  // 11: hcore.LogMessage.level:type_name -> hcore.LogLevel
 	4,  // 12: hcore.LogMessage.type:type_name -> hcore.LogType
-	38, // 13: hcore.LogMessage.time:type_name -> google.protobuf.Timestamp
+	44, // 13: hcore.LogMessage.time:type_name -> google.protobuf.Timestamp
 	3,  // 14: hcore.LogRequest.level:type_name -> hcore.LogLevel
 	36, // 15: hcore.TestEnginePingResponse.results:type_name -> hcore.TestEnginePingResult
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	38, // 16: hcore.SessionState.profiles:type_name -> hcore.SessionProfileMeta
+	39, // 17: hcore.SessionState.start_target:type_name -> hcore.SessionStartTarget
+	0,  // 18: hcore.SessionState.core_state:type_name -> hcore.CoreStates
+	40, // 19: hcore.SyncSessionStateRequest.state:type_name -> hcore.SessionState
+	20, // [20:20] is the sub-list for method output_type
+	20, // [20:20] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_v2_hcore_hcore_proto_init() }
@@ -2778,7 +3177,7 @@ func file_v2_hcore_hcore_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v2_hcore_hcore_proto_rawDesc), len(file_v2_hcore_hcore_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   33,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

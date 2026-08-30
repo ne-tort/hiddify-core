@@ -272,4 +272,41 @@ message TestEnginePingResponse {
   repeated TestEnginePingResult results = 1;
 }
 
+// --- Unified headless session (tray + UI) ---
+
+message SessionProfileMeta {
+  string id = 1;
+  string name = 2;
+  bool active = 3;
+}
+
+message SessionStartTarget {
+  string path = 1;
+  string name = 2;
+}
+
+message SessionState {
+  repeated string active_profile_ids = 1;
+  bool direct_mode = 2;
+  string service_mode = 3;
+  repeated SessionProfileMeta profiles = 4;
+  SessionStartTarget start_target = 5;
+  bool disable_memory_limit = 6;
+  CoreStates core_state = 7;
+  string locale = 8;
+  string theme_mode = 9;
+  int32 ui_pid = 10;
+}
+
+message SetActiveProfilesRequest {
+  repeated string profile_ids = 1;
+}
+
+message SetServiceModeRequest {
+  string service_mode = 1;
+}
+
+message SyncSessionStateRequest {
+  SessionState state = 1;
+}
 

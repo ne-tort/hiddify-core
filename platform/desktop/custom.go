@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	hcore "github.com/ne-tort/pathology-core/v2/hcore"
+	coretray "github.com/ne-tort/pathology-core/v2/hcore/tray"
 	hutils "github.com/ne-tort/pathology-core/v2/hutils"
 	"github.com/sagernet/sing-box/experimental/libbox"
 	"github.com/sagernet/sing-box/log"
@@ -164,6 +165,16 @@ func AddGrpcClientPublicKey(clientPublicKey *C.char) *C.char {
 	clientKey := C.GoBytes(unsafe.Pointer(clientPublicKey), C.int(len(C.GoString(clientPublicKey))))
 	err := hcore.AddGrpcClientPublicKey(clientKey)
 	return emptyOrErrorC(err)
+}
+
+//export startTray
+func startTray(uiExe *C.char, basePath *C.char, lang *C.char) *C.char {
+	coretray.StartTray(coretray.Options{
+		UIExe:    C.GoString(uiExe),
+		BasePath: C.GoString(basePath),
+		Lang:     C.GoString(lang),
+	})
+	return emptyOrErrorC(nil)
 }
 
 //export closeGrpc

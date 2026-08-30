@@ -44,6 +44,13 @@ const (
 	Core_TestEngineEnsure_FullMethodName      = "/hcore.Core/TestEngineEnsure"
 	Core_TestEngineStop_FullMethodName        = "/hcore.Core/TestEngineStop"
 	Core_TestEnginePing_FullMethodName        = "/hcore.Core/TestEnginePing"
+	Core_SessionConnect_FullMethodName        = "/hcore.Core/SessionConnect"
+	Core_SessionDisconnect_FullMethodName     = "/hcore.Core/SessionDisconnect"
+	Core_SessionReconnect_FullMethodName      = "/hcore.Core/SessionReconnect"
+	Core_GetSessionState_FullMethodName       = "/hcore.Core/GetSessionState"
+	Core_SetActiveProfiles_FullMethodName     = "/hcore.Core/SetActiveProfiles"
+	Core_SetServiceMode_FullMethodName        = "/hcore.Core/SetServiceMode"
+	Core_SyncSessionState_FullMethodName      = "/hcore.Core/SyncSessionState"
 )
 
 // CoreClient is the client API for Core service.
@@ -75,6 +82,13 @@ type CoreClient interface {
 	TestEngineEnsure(ctx context.Context, in *TestEngineEnsureRequest, opts ...grpc.CallOption) (*TestEngineEnsureResponse, error)
 	TestEngineStop(ctx context.Context, in *TestEngineStopRequest, opts ...grpc.CallOption) (*TestEngineStopResponse, error)
 	TestEnginePing(ctx context.Context, in *TestEnginePingRequest, opts ...grpc.CallOption) (*TestEnginePingResponse, error)
+	SessionConnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error)
+	SessionDisconnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error)
+	SessionReconnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error)
+	GetSessionState(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*SessionState, error)
+	SetActiveProfiles(ctx context.Context, in *SetActiveProfilesRequest, opts ...grpc.CallOption) (*SessionState, error)
+	SetServiceMode(ctx context.Context, in *SetServiceModeRequest, opts ...grpc.CallOption) (*SessionState, error)
+	SyncSessionState(ctx context.Context, in *SyncSessionStateRequest, opts ...grpc.CallOption) (*SessionState, error)
 }
 
 type coreClient struct {
@@ -370,6 +384,76 @@ func (c *coreClient) TestEnginePing(ctx context.Context, in *TestEnginePingReque
 	return out, nil
 }
 
+func (c *coreClient) SessionConnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CoreInfoResponse)
+	err := c.cc.Invoke(ctx, Core_SessionConnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) SessionDisconnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CoreInfoResponse)
+	err := c.cc.Invoke(ctx, Core_SessionDisconnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) SessionReconnect(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*CoreInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CoreInfoResponse)
+	err := c.cc.Invoke(ctx, Core_SessionReconnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) GetSessionState(ctx context.Context, in *hcommon.Empty, opts ...grpc.CallOption) (*SessionState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionState)
+	err := c.cc.Invoke(ctx, Core_GetSessionState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) SetActiveProfiles(ctx context.Context, in *SetActiveProfilesRequest, opts ...grpc.CallOption) (*SessionState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionState)
+	err := c.cc.Invoke(ctx, Core_SetActiveProfiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) SetServiceMode(ctx context.Context, in *SetServiceModeRequest, opts ...grpc.CallOption) (*SessionState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionState)
+	err := c.cc.Invoke(ctx, Core_SetServiceMode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *coreClient) SyncSessionState(ctx context.Context, in *SyncSessionStateRequest, opts ...grpc.CallOption) (*SessionState, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SessionState)
+	err := c.cc.Invoke(ctx, Core_SyncSessionState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CoreServer is the server API for Core service.
 // All implementations must embed UnimplementedCoreServer
 // for forward compatibility.
@@ -399,6 +483,13 @@ type CoreServer interface {
 	TestEngineEnsure(context.Context, *TestEngineEnsureRequest) (*TestEngineEnsureResponse, error)
 	TestEngineStop(context.Context, *TestEngineStopRequest) (*TestEngineStopResponse, error)
 	TestEnginePing(context.Context, *TestEnginePingRequest) (*TestEnginePingResponse, error)
+	SessionConnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error)
+	SessionDisconnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error)
+	SessionReconnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error)
+	GetSessionState(context.Context, *hcommon.Empty) (*SessionState, error)
+	SetActiveProfiles(context.Context, *SetActiveProfilesRequest) (*SessionState, error)
+	SetServiceMode(context.Context, *SetServiceModeRequest) (*SessionState, error)
+	SyncSessionState(context.Context, *SyncSessionStateRequest) (*SessionState, error)
 	mustEmbedUnimplementedCoreServer()
 }
 
@@ -480,6 +571,27 @@ func (UnimplementedCoreServer) TestEngineStop(context.Context, *TestEngineStopRe
 }
 func (UnimplementedCoreServer) TestEnginePing(context.Context, *TestEnginePingRequest) (*TestEnginePingResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TestEnginePing not implemented")
+}
+func (UnimplementedCoreServer) SessionConnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SessionConnect not implemented")
+}
+func (UnimplementedCoreServer) SessionDisconnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SessionDisconnect not implemented")
+}
+func (UnimplementedCoreServer) SessionReconnect(context.Context, *hcommon.Empty) (*CoreInfoResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SessionReconnect not implemented")
+}
+func (UnimplementedCoreServer) GetSessionState(context.Context, *hcommon.Empty) (*SessionState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSessionState not implemented")
+}
+func (UnimplementedCoreServer) SetActiveProfiles(context.Context, *SetActiveProfilesRequest) (*SessionState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetActiveProfiles not implemented")
+}
+func (UnimplementedCoreServer) SetServiceMode(context.Context, *SetServiceModeRequest) (*SessionState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetServiceMode not implemented")
+}
+func (UnimplementedCoreServer) SyncSessionState(context.Context, *SyncSessionStateRequest) (*SessionState, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SyncSessionState not implemented")
 }
 func (UnimplementedCoreServer) mustEmbedUnimplementedCoreServer() {}
 func (UnimplementedCoreServer) testEmbeddedByValue()              {}
@@ -899,6 +1011,132 @@ func _Core_TestEnginePing_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Core_SessionConnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(hcommon.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SessionConnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SessionConnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SessionConnect(ctx, req.(*hcommon.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_SessionDisconnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(hcommon.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SessionDisconnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SessionDisconnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SessionDisconnect(ctx, req.(*hcommon.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_SessionReconnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(hcommon.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SessionReconnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SessionReconnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SessionReconnect(ctx, req.(*hcommon.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_GetSessionState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(hcommon.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).GetSessionState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_GetSessionState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).GetSessionState(ctx, req.(*hcommon.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_SetActiveProfiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetActiveProfilesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SetActiveProfiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SetActiveProfiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SetActiveProfiles(ctx, req.(*SetActiveProfilesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_SetServiceMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetServiceModeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SetServiceMode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SetServiceMode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SetServiceMode(ctx, req.(*SetServiceModeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Core_SyncSessionState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncSessionStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CoreServer).SyncSessionState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Core_SyncSessionState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CoreServer).SyncSessionState(ctx, req.(*SyncSessionStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Core_ServiceDesc is the grpc.ServiceDesc for Core service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -981,6 +1219,34 @@ var Core_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TestEnginePing",
 			Handler:    _Core_TestEnginePing_Handler,
+		},
+		{
+			MethodName: "SessionConnect",
+			Handler:    _Core_SessionConnect_Handler,
+		},
+		{
+			MethodName: "SessionDisconnect",
+			Handler:    _Core_SessionDisconnect_Handler,
+		},
+		{
+			MethodName: "SessionReconnect",
+			Handler:    _Core_SessionReconnect_Handler,
+		},
+		{
+			MethodName: "GetSessionState",
+			Handler:    _Core_GetSessionState_Handler,
+		},
+		{
+			MethodName: "SetActiveProfiles",
+			Handler:    _Core_SetActiveProfiles_Handler,
+		},
+		{
+			MethodName: "SetServiceMode",
+			Handler:    _Core_SetServiceMode_Handler,
+		},
+		{
+			MethodName: "SyncSessionState",
+			Handler:    _Core_SyncSessionState_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
