@@ -49,4 +49,7 @@ func startPrefsWatcher(ctx context.Context, basePath string) {
 
 func registerDisplaySyncHandler() {
 	hcore.SetTrayDisplaySyncHandler(refreshTrayDisplay)
+	hcore.SetTrayConnectionSyncHandler(func() {
+		refreshConnectionUI(hcore.CurrentCoreState())
+	})
 }

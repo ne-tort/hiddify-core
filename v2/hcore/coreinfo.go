@@ -21,7 +21,7 @@ func SetCoreStatus(state CoreStates, msgType MessageType, message string) *CoreI
 	}
 	static.coreInfoObserver.Publish(&info)
 
-	notifyTrayDisplaySync()
+	notifyTrayConnectionSync()
 
 	return &info
 }
