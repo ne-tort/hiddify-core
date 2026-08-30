@@ -31,13 +31,18 @@ func requestUiShowOrSpawn() {
 	st := hcore.SessionGetState()
 	pid := int(st.UiPid)
 	if pid > 0 && processAlive(pid) {
-		// Windows directory watchers often miss overwrites of the same file.
-		for i := 0; i < 3; i++ {
-			signalUiControl("show")
-			if i < 2 {
-				time.Sleep(80 * time.Millisecond)
-			}
-		}
+		signalUiControl("show")
+		return
+	}
+	spawnUiReconnect()
+}
+
+// ToggleUiOnTrayDoubleClick exits a running UI process or spawns a fresh one.
+func ToggleUiOnTrayDoubleClick() {
+	st := hcore.SessionGetState()
+	pid := int(st.UiPid)
+	if pid > 0 && processAlive(pid) {
+		requestUiQuit()
 		return
 	}
 	spawnUiReconnect()

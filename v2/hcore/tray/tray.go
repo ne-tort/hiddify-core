@@ -82,7 +82,7 @@ func StartTray(opts Options) {
 		initialPrefs := loadPrefs(basePath, fallbackLang)
 		initLabels(initialPrefs)
 		registerDisplaySyncHandler()
-		setupClickHandlers(SpawnUIReconnect)
+		setupClickHandlers(ToggleUiOnTrayDoubleClick)
 		go systray.Run(onReady, onExit)
 	})
 }
