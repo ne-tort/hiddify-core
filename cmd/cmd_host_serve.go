@@ -102,9 +102,10 @@ func runHostServe(cmd *cobra.Command, args []string) {
 
 	if hostTray {
 		coretray.StartTray(coretray.Options{
-			UIExe:    hostUiExe,
-			BasePath: hostBasePath,
-			Lang:     hostLang,
+			UIExe:       hostUiExe,
+			BasePath:    hostBasePath,
+			Lang:        hostLang,
+			UiLifecycle: coretray.UiLifecycleDetached,
 		})
 	}
 

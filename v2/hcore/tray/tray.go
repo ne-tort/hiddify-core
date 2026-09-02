@@ -19,9 +19,10 @@ import (
 
 // Options configures the unified core-owned system tray.
 type Options struct {
-	UIExe    string
-	BasePath string
-	Lang     string
+	UIExe       string
+	BasePath    string
+	Lang        string
+	UiLifecycle UiLifecycle
 }
 
 var (
@@ -31,6 +32,7 @@ var (
 
 	uiExe        string
 	basePath     string
+	uiLifecycle  UiLifecycle
 	fallbackLang = "en"
 	locale       localeStrings
 	darkMenu     bool
@@ -76,13 +78,14 @@ func StartTray(opts Options) {
 			uiExe = defaultUIExePath()
 		}
 		basePath = opts.BasePath
+		uiLifecycle = opts.UiLifecycle
 		if opts.Lang != "" {
 			fallbackLang = opts.Lang
 		}
 		initialPrefs := loadPrefs(basePath, fallbackLang)
 		initLabels(initialPrefs)
 		registerDisplaySyncHandler()
-		setupClickHandlers(ToggleUiOnTrayDoubleClick)
+		setupClickHandlers(onTrayDoubleClick)
 		go systray.Run(onReady, onExit)
 	})
 }
@@ -145,7 +148,9 @@ func onReady() {
 			case <-modeTunItem.ClickedCh:
 				handleSetServiceMode("vpn")
 			case <-quitItem.ClickedCh:
-				requestUiQuit()
+				if pid, alive := resolveUiPid(); alive {
+					requestUiQuit(pid)
+				}
 				_, _ = hcore.SessionDisconnect(context.Background())
 				systray.Quit()
 				return

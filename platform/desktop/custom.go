@@ -170,9 +170,10 @@ func AddGrpcClientPublicKey(clientPublicKey *C.char) *C.char {
 //export startTray
 func startTray(uiExe *C.char, basePath *C.char, lang *C.char) *C.char {
 	coretray.StartTray(coretray.Options{
-		UIExe:    C.GoString(uiExe),
-		BasePath: C.GoString(basePath),
-		Lang:     C.GoString(lang),
+		UIExe:       C.GoString(uiExe),
+		BasePath:    C.GoString(basePath),
+		Lang:        C.GoString(lang),
+		UiLifecycle: coretray.UiLifecycleEmbedded,
 	})
 	return emptyOrErrorC(nil)
 }

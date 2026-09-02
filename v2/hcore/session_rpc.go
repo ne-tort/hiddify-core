@@ -44,7 +44,11 @@ func (s *CoreService) SyncSessionState(ctx context.Context, in *SyncSessionState
 		return toProtoSessionState(session.LoadState()), nil
 	}
 	if in.GetClearUiPid() {
-		_ = session.ClearUiPid()
+		if in.GetState() != nil && in.GetState().GetUiPid() > 0 {
+			_ = session.ClearUiPidIf(in.GetState().GetUiPid())
+		} else {
+			_ = session.ClearUiPid()
+		}
 	}
 	if in.GetState() == nil {
 		notifyTrayDisplaySync()

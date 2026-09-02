@@ -82,6 +82,11 @@ func SessionClearUiPid() error {
 	return session.ClearUiPid()
 }
 
+// SessionClearUiPidIf drops ui_pid only when it still matches the exiting UI process.
+func SessionClearUiPidIf(expected int32) error {
+	return session.ClearUiPidIf(expected)
+}
+
 func sessionApplyClientSettings() error {
 	settings := db.GetTable[hcommon.AppSettings]()
 	val, err := settings.Get("ClientSettingsJson")

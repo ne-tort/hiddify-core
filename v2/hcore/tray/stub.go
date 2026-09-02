@@ -2,11 +2,20 @@
 
 package tray
 
+// UiLifecycle selects how tray double-click interacts with the Flutter process.
+type UiLifecycle int
+
+const (
+	UiLifecycleDetached UiLifecycle = iota
+	UiLifecycleEmbedded
+)
+
 // Options configures the unified core-owned system tray.
 type Options struct {
-	UIExe    string
-	BasePath string
-	Lang     string
+	UIExe       string
+	BasePath    string
+	Lang        string
+	UiLifecycle UiLifecycle
 }
 
 // StartTray is a no-op on unsupported platforms.

@@ -220,6 +220,18 @@ func ClearUiPid() error {
 	return settingsTable().Delete(keyUiPid)
 }
 
+// ClearUiPidIf removes ui_pid only when it matches expected (avoids clearing a newer UI).
+func ClearUiPidIf(expected int32) error {
+	if expected <= 0 {
+		return ClearUiPid()
+	}
+	cur := LoadState()
+	if cur.UiPid != expected {
+		return nil
+	}
+	return ClearUiPid()
+}
+
 // SetActiveProfiles updates active profile ids and profile meta active flags.
 func SetActiveProfiles(ids []string) (State, error) {
 	if len(ids) == 0 {

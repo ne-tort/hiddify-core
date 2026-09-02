@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+cd /d "%~dp0"
 set GOOS=windows
 set GOARCH=amd64
 set CGO_ENABLED=1
